@@ -321,6 +321,7 @@ export default function Page() {
 
               if (collab?.role === 'editor') isEditorFlag = true;
             }
+            if (cancelled) return;
             setIsOwner(isOwnerFlag);
             setIsEditor(isEditorFlag);
             setShowId(data.show_id);
