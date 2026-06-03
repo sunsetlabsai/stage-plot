@@ -132,7 +132,7 @@ body {
   }
 
   .cue-sheet-col {
-    break-inside: avoid;
+    /* No break-inside constraint — allow columns to flow across pages */
   }
 
   .cue-sheet-item {
@@ -163,6 +163,24 @@ body {
     font-weight: bold;
     color: #444;
     flex-shrink: 0;
+  }
+
+  /* Compact density for 17+ songs */
+  .cue-sheet-compact .cue-sheet-item { padding: 1.5pt 0; }
+  .cue-sheet-compact .cue-sheet-title { font-size: 13pt; }
+  .cue-sheet-compact .cue-sheet-num { font-size: 11pt; }
+  .cue-sheet-compact .cue-sheet-key { font-size: 11pt; }
+
+  /* CSS columns flow layout for 29+ songs — sequential reading order across pages */
+  .cue-sheet-flow {
+    columns: 2;
+    column-gap: 24pt;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .cue-sheet-flow .cue-sheet-item {
+    break-inside: avoid;
   }
 
   /* Compact header for print */
