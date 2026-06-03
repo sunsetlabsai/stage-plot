@@ -224,8 +224,9 @@ export default function Page() {
   const [isOwner, setIsOwner] = useState(false);
   const [isEditor, setIsEditor] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [showLoaded, setShowLoaded] = useState(false);
 
-  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor, owner);
+  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
@@ -251,17 +252,21 @@ export default function Page() {
   useEffect(() => {
     if (!owner || !slug) return;
 
-    fetch(`/api/shows/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}`)
-      .then(async (res) => {
+    let cancelled = false;
+
+    async function loadShow() {
+      try {
+        const res = await fetch(`/api/shows/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}`);
+        if (cancelled) return;
+
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: 'Load failed' }));
           setLoadError(err.error || `Show "${owner}/${slug}" not found`);
           return;
         }
-        return res.json();
-      })
-      .then(async (data) => {
-        if (!data?.config) return;
+
+        const data = await res.json();
+        if (cancelled || !data?.config) return;
 
         const cfg = withStableIds(data.config);
 
@@ -284,43 +289,54 @@ export default function Page() {
         }
 
         setConfig(cfg);
+        setLoadError('');
+        setShowLoaded(true);
 
         // Check ownership/editor status using IDs from API response
-        const supabase = getSupabaseBrowser();
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user && data.show_id) {
-          let isOwnerFlag = false;
-          let isEditorFlag = false;
-          if (data.owner_id === user.id) {
-            isOwnerFlag = true;
-            isEditorFlag = true;
-          } else {
-            const { data: collab } = await supabase
-              .from('show_collaborators')
-              .select('role')
-              .eq('show_id', data.show_id)
-              .eq('user_id', user.id)
-              .single();
+        // Wrapped separately so auth failures don't hide already-loaded show content
+        try {
+          const supabase = getSupabaseBrowser();
+          const { data: { user } } = await supabase.auth.getUser();
+          if (!cancelled && user && data.show_id) {
+            let isOwnerFlag = false;
+            let isEditorFlag = false;
+            if (data.owner_id === user.id) {
+              isOwnerFlag = true;
+              isEditorFlag = true;
+            } else {
+              const { data: collab } = await supabase
+                .from('show_collaborators')
+                .select('role')
+                .eq('show_id', data.show_id)
+                .eq('user_id', user.id)
+                .single();
 
-            if (collab?.role === 'editor') isEditorFlag = true;
+              if (collab?.role === 'editor') isEditorFlag = true;
+            }
+            setIsOwner(isOwnerFlag);
+            setIsEditor(isEditorFlag);
+            setShowId(data.show_id);
           }
-          // Set all three together to avoid isReadOnly flash
-          setIsOwner(isOwnerFlag);
-          setIsEditor(isEditorFlag);
-          setShowId(data.show_id);
+        } catch {
+          // Auth check failed — show content is already loaded, continue as anonymous
         }
-      })
-      .catch(() => {
-        setLoadError(`Could not load show "${owner}/${slug}" — network error`);
-      });
+      } catch {
+        if (!cancelled) {
+          setLoadError(`Could not load show "${owner}/${slug}" — network error`);
+        }
+      }
+    }
+
+    loadShow();
+    return () => { cancelled = true; };
   }, [owner, slug]);
 
   // ── Remember last-viewed show for offline PWA launch ────────────────
   useEffect(() => {
-    if (owner && slug) {
+    if (owner && slug && showLoaded) {
       localStorage.setItem('showrunr-last-show', `/${owner}/${slug}`);
     }
-  }, [owner, slug]);
+  }, [owner, slug, showLoaded]);
 
   // ── Persist to localStorage + Supabase on change ─────────────────────
   useEffect(() => {
@@ -359,6 +375,35 @@ export default function Page() {
 
   const band = configToBand(config);
   const isReadOnly = !isOwner && !isEditor;
+
+  if (loadError) {
+    const isNetworkError = loadError.includes('network');
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-950 text-white">
+        <div className="text-center max-w-md px-6">
+          <h1 className="text-2xl font-bold mb-4">
+            {isNetworkError ? 'Connection error' : 'Show not found'}
+          </h1>
+          <p className="text-gray-400 mb-6">
+            {isNetworkError
+              ? 'Could not reach ShowRunr. Check your connection and try again.'
+              : 'This show may have been renamed or removed. If you received this link from someone, ask them for an updated link.'}
+          </p>
+          {isNetworkError && (
+            <button
+              onClick={() => window.location.reload()}
+              className="text-blue-400 hover:text-blue-300 underline mr-4"
+            >
+              Retry
+            </button>
+          )}
+          <Link href="/" className="text-blue-400 hover:text-blue-300 underline">
+            Go to ShowRunr home
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans text-gray-900">
@@ -471,10 +516,10 @@ export default function Page() {
       </div>
 
       {/* ── Errors ────────────────────────────────────────────────────── */}
-      {(loadError || publishError) && (
+      {publishError && (
         <div className="max-w-4xl mx-auto px-4 pt-4">
           <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-4 py-3">
-            {loadError || publishError}
+            {publishError}
           </div>
         </div>
       )}
@@ -1168,15 +1213,35 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
               </div>
             )}
 
-            {/* Print-only cue sheet: compact two-column layout */}
+            {/* Print-only cue sheet: two-column layout with density + overflow handling */}
             <div className="hidden print:block">
-              <div className="cue-sheet">
-                {(() => {
-                  const songs = band.setlist;
-                  const half = Math.ceil(songs.length / 2);
-                  const col1 = songs.slice(0, half);
-                  const col2 = songs.slice(half);
+              {(() => {
+                const songs = band.setlist ?? [];
+                const densityClass = songs.length > 16 ? 'cue-sheet-compact' : '';
+
+                if (songs.length >= 29) {
+                  // CSS columns: sequential flow across columns and pages
                   return (
+                    <div className={`cue-sheet ${densityClass}`}>
+                      <ol className="cue-sheet-flow">
+                        {songs.map((song) => (
+                          <li key={song.id ?? song.position} className="cue-sheet-item">
+                            <span className="cue-sheet-num">{song.position}.</span>
+                            <span className="cue-sheet-title">{song.title}</span>
+                            {song.key && <span className="cue-sheet-key">{song.key}</span>}
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  );
+                }
+
+                // Manual two-column grid for <= 28 songs (proven single-page layout)
+                const half = Math.ceil(songs.length / 2);
+                const col1 = songs.slice(0, half);
+                const col2 = songs.slice(half);
+                return (
+                  <div className={`cue-sheet ${densityClass}`}>
                     <div className="cue-sheet-grid">
                       <div className="cue-sheet-col">
                         {col1.map((song) => (
@@ -1197,9 +1262,9 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
                         ))}
                       </div>
                     </div>
-                  );
-                })()}
-              </div>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Chart Navigator Overlay */}

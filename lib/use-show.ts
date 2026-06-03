@@ -23,7 +23,6 @@ export function useShow(
   slug: string | null,
   isOwner: boolean,
   isEditor: boolean,
-  ownerSlug?: string | null,
 ): UseShowReturn {
   const [saving, setSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
@@ -52,22 +51,17 @@ export function useShow(
       });
 
       if (res.ok) {
-        const { updated_at, slug: newSlug } = await res.json();
+        const { updated_at } = await res.json();
         setLastSavedAt(updated_at);
         // Cache server timestamp for offline conflict detection
         localStorage.setItem(`showrunr-last-saved-${showId}`, updated_at);
-        // If slug changed (name was updated), update URL without full reload
-        if (newSlug && slug && newSlug !== slug && typeof window !== 'undefined') {
-          const prefix = ownerSlug ? `/${ownerSlug}` : '';
-          window.history.replaceState(null, '', `${prefix}/${newSlug}`);
-        }
       }
     } catch {
       // Network error — config remains in localStorage as fallback
     } finally {
       setSaving(false);
     }
-  }, [showId, slug, isReadOnly, ownerSlug]);
+  }, [showId, isReadOnly]);
 
   const saveConfig = useCallback((config: Record<string, unknown>) => {
     if (!showId || isReadOnly) return;
