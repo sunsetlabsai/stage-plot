@@ -224,7 +224,7 @@ export default function Page() {
   const [isOwner, setIsOwner] = useState(false);
   const [isEditor, setIsEditor] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [showLoaded, setShowLoaded] = useState(false);
+  const [loadedPath, setLoadedPath] = useState<string | null>(null);
 
   const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -255,6 +255,13 @@ export default function Page() {
     let cancelled = false;
 
     async function loadShow() {
+      // Reset state from any previous show on route change
+      setLoadedPath(null);
+      setShowId(null);
+      setIsOwner(false);
+      setIsEditor(false);
+      setLoadError('');
+
       try {
         const res = await fetch(`/api/shows/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}`);
         if (cancelled) return;
@@ -290,14 +297,15 @@ export default function Page() {
 
         setConfig(cfg);
         setLoadError('');
-        setShowLoaded(true);
+        setLoadedPath(`/${owner}/${slug}`);
 
         // Check ownership/editor status using IDs from API response
         // Wrapped separately so auth failures don't hide already-loaded show content
         try {
           const supabase = getSupabaseBrowser();
           const { data: { user } } = await supabase.auth.getUser();
-          if (!cancelled && user && data.show_id) {
+          if (cancelled) return;
+          if (user && data.show_id) {
             let isOwnerFlag = false;
             let isEditorFlag = false;
             if (data.owner_id === user.id) {
@@ -333,10 +341,10 @@ export default function Page() {
 
   // ── Remember last-viewed show for offline PWA launch ────────────────
   useEffect(() => {
-    if (owner && slug && showLoaded) {
-      localStorage.setItem('showrunr-last-show', `/${owner}/${slug}`);
+    if (loadedPath) {
+      localStorage.setItem('showrunr-last-show', loadedPath);
     }
-  }, [owner, slug, showLoaded]);
+  }, [loadedPath]);
 
   // ── Persist to localStorage + Supabase on change ─────────────────────
   useEffect(() => {
