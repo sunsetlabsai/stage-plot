@@ -102,9 +102,19 @@ self.addEventListener('fetch', (event) => {
           return res;
         })
         .catch(() =>
-          caches
-            .open(APP_CACHE)
-            .then((cache) => cache.match(event.request))
+          caches.open(APP_CACHE).then((cache) =>
+            cache.match(event.request).then((exact) => {
+              if (exact) return exact;
+              // Fall back to cached start_url (SPA shell)
+              return cache.match('/').then((root) =>
+                root ||
+                new Response('Offline — page not cached', {
+                  status: 503,
+                  headers: { 'Content-Type': 'text/plain' },
+                })
+              );
+            })
+          )
         )
     );
     return;

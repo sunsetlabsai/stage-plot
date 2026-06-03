@@ -393,7 +393,7 @@ export default function Page() {
   // ── Remember last-viewed show for offline PWA launch ────────────────
   useEffect(() => {
     if (loadedPath) {
-      localStorage.setItem('showrunr-last-show', loadedPath);
+      try { localStorage.setItem('showrunr-last-show', loadedPath); } catch { /* quota */ }
     }
   }, [loadedPath]);
 
@@ -714,7 +714,12 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, ch
               )}
               {chartCacheProgress && chartCacheProgress.done === chartCacheProgress.total && chartCacheProgress.failed.length === 0 && chartCacheProgress.total > 0 && (
                 <span className="text-[10px] text-green-400 bg-green-950/50 px-2 py-0.5 rounded">
-                  Charts cached
+                  {chartCacheProgress.total} charts cached
+                </span>
+              )}
+              {chartCacheProgress && chartCacheProgress.done === chartCacheProgress.total && chartCacheProgress.failed.length > 0 && (
+                <span className="text-[10px] text-amber-400 bg-amber-950/50 px-2 py-0.5 rounded">
+                  {chartCacheProgress.done - chartCacheProgress.failed.length} of {chartCacheProgress.total} cached
                 </span>
               )}
               <p className="text-sm text-zinc-500">{setlist.length} songs</p>
