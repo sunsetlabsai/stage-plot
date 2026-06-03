@@ -69,7 +69,7 @@ export function useShow(
     pendingConfig.current = config;
 
     // Also write to localStorage as offline cache
-    localStorage.setItem(`showrunr-cache-${showId}`, JSON.stringify(config));
+    try { localStorage.setItem(`showrunr-cache-${showId}`, JSON.stringify(config)); } catch { /* quota */ }
 
     // Debounce: save to Supabase after 2s of no changes
     if (saveTimer.current) clearTimeout(saveTimer.current);

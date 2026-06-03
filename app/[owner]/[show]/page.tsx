@@ -35,6 +35,7 @@ import { ensureSetlistSongIds, moveSetlistSong, ensureInputIds, moveInput, ensur
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
+  chartCacheKey,
   downloadAllCharts,
   getCacheStats,
   clearChartCache,
@@ -225,6 +226,7 @@ export default function Page() {
   const [isEditor, setIsEditor] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
+  const [chartCacheProgress, setChartCacheProgress] = useState<DownloadProgress | null>(null);
 
   const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -254,6 +256,21 @@ export default function Page() {
 
     let cancelled = false;
 
+    function tryOfflineFallback(): boolean {
+      try {
+        const showIds = JSON.parse(localStorage.getItem('showrunr-show-ids') || '{}');
+        const showId = showIds[`${owner}/${slug}`];
+        if (!showId) return false;
+        const cached = localStorage.getItem(`showrunr-cache-${showId}`);
+        if (!cached) return false;
+        setConfig(withStableIds(JSON.parse(cached)));
+        setLoadedPath(`/${owner}/${slug}`);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
     async function loadShow() {
       // Reset state from any previous show on route change
       setLoadedPath(null);
@@ -261,12 +278,18 @@ export default function Page() {
       setIsOwner(false);
       setIsEditor(false);
       setLoadError('');
+      setChartCacheProgress(null);
 
       try {
         const res = await fetch(`/api/shows/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}`);
         if (cancelled) return;
 
         if (!res.ok) {
+          // 5xx — try offline fallback
+          if (res.status >= 500) {
+            if (tryOfflineFallback()) return;
+          }
+          // Client errors (400-499) — hard fail, no fallback
           const err = await res.json().catch(() => ({ error: 'Load failed' }));
           setLoadError(err.error || `Show "${owner}/${slug}" not found`);
           return;
@@ -298,6 +321,31 @@ export default function Page() {
         setConfig(cfg);
         setLoadError('');
         setLoadedPath(`/${owner}/${slug}`);
+
+        // Cache config for all viewers (offline fallback)
+        try {
+          if (data.show_id) {
+            localStorage.setItem(`showrunr-cache-${data.show_id}`, JSON.stringify(cfg));
+            const showIds = JSON.parse(localStorage.getItem('showrunr-show-ids') || '{}');
+            showIds[`${owner}/${slug}`] = data.show_id;
+            localStorage.setItem('showrunr-show-ids', JSON.stringify(showIds));
+          }
+        } catch {
+          // Non-fatal — offline fallback won't be available
+        }
+
+        // Register SW + warm app cache (best-effort, fire-and-forget)
+        registerServiceWorker().catch(() => {});
+
+        // Auto-cache Supabase charts for all viewers (fire-and-forget)
+        const supabaseCharts = (cfg.setlist ?? [])
+          .flatMap(s => s.charts ?? [])
+          .filter(c => c.url?.includes('/storage/v1/object/public/') && chartCacheKey(c));
+        if (supabaseCharts.length > 0) {
+          downloadAllCharts(supabaseCharts, null, (p) => {
+            if (!cancelled) setChartCacheProgress({ ...p });
+          }).catch(() => {});
+        }
 
         // Check ownership/editor status using IDs from API response
         // Wrapped separately so auth failures don't hide already-loaded show content
@@ -331,6 +379,8 @@ export default function Page() {
         }
       } catch {
         if (!cancelled) {
+          // Network error — try offline fallback
+          if (tryOfflineFallback()) return;
           setLoadError(`Could not load show "${owner}/${slug}" — network error`);
         }
       }
@@ -343,7 +393,7 @@ export default function Page() {
   // ── Remember last-viewed show for offline PWA launch ────────────────
   useEffect(() => {
     if (loadedPath) {
-      localStorage.setItem('showrunr-last-show', loadedPath);
+      try { localStorage.setItem('showrunr-last-show', loadedPath); } catch { /* quota */ }
     }
   }, [loadedPath]);
 
@@ -535,7 +585,7 @@ export default function Page() {
 
       {/* ── Content ────────────────────────────────────────────────────── */}
       {tab === 'perform' && (
-        <PerformTab setlist={config.setlist} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} />
+        <PerformTab setlist={config.setlist} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} chartCacheProgress={chartCacheProgress} />
       )}
       {tab === 'mix' && (
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
@@ -606,13 +656,14 @@ export default function Page() {
 // PERFORM TAB — musician's gig-day view
 // ════════════════════════════════════════════════════════════════════════════
 
-function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner }: {
+function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, chartCacheProgress }: {
   setlist: SetlistSong[];
   showInfo: { bandName: string; eventDate: string; venue: string; showName?: string };
   isOffline: boolean;
   accessToken?: string;
   slug: string;
   owner: string;
+  chartCacheProgress?: DownloadProgress | null;
 }) {
   // Role filter (per-show, owner-scoped to avoid cross-owner collisions)
   const roleKey = `showrunr-role-filter-${owner}/${slug}`;
@@ -655,7 +706,24 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner }: 
                   : showInfo.venue || showInfo.eventDate || ''}
               </p>
             )}
-            <p className="text-sm text-zinc-500 ml-auto">{setlist.length} songs</p>
+            <div className="flex items-center gap-2 ml-auto">
+              {chartCacheProgress && chartCacheProgress.done < chartCacheProgress.total && (
+                <span className="text-[10px] text-amber-400 bg-amber-950/50 px-2 py-0.5 rounded">
+                  Caching {chartCacheProgress.done}/{chartCacheProgress.total}
+                </span>
+              )}
+              {chartCacheProgress && chartCacheProgress.done === chartCacheProgress.total && chartCacheProgress.failed.length === 0 && chartCacheProgress.total > 0 && (
+                <span className="text-[10px] text-green-400 bg-green-950/50 px-2 py-0.5 rounded">
+                  {chartCacheProgress.total} charts cached
+                </span>
+              )}
+              {chartCacheProgress && chartCacheProgress.done === chartCacheProgress.total && chartCacheProgress.failed.length > 0 && (
+                <span className="text-[10px] text-amber-400 bg-amber-950/50 px-2 py-0.5 rounded">
+                  {chartCacheProgress.done - chartCacheProgress.failed.length} of {chartCacheProgress.total} cached
+                </span>
+              )}
+              <p className="text-sm text-zinc-500">{setlist.length} songs</p>
+            </div>
           </div>
           {/* Role selector */}
           {allRoles.length > 0 && (
@@ -3433,12 +3501,10 @@ function ConfigTab({
         )}
 
         {/* ── 8. Offline Access ──────────────────────────────────────────── */}
-        {canResolveCharts && (
-          <OfflineSection
-            charts={config.setlist.flatMap((s) => s.charts ?? [])}
-            googleToken={googleToken}
-          />
-        )}
+        <OfflineSection
+          charts={config.setlist.flatMap((s) => s.charts ?? [])}
+          googleToken={googleToken}
+        />
 
         {/* ── 8. Export / Import ───────────────────────────────────────────── */}
         <section className={sectionCls}>
@@ -3547,8 +3613,10 @@ function OfflineSection({
     refreshStats();
   }, [refreshStats]);
 
+  const cacheableCharts = charts.filter(c => !!chartCacheKey(c));
+
   const handleDownload = async () => {
-    if (!googleToken || charts.length === 0) return;
+    if (cacheableCharts.length === 0) return;
     setDownloading(true);
     setProgress(null);
 
@@ -3561,7 +3629,7 @@ function OfflineSection({
 
       const result = await downloadAllCharts(
         charts,
-        googleToken.access_token,
+        googleToken?.access_token ?? null,
         (p) => setProgress({ ...p }),
         controller.signal,
       );
