@@ -1,6 +1,7 @@
 import type { Chart } from './types';
 
 const CACHE_NAME = 'stageplot-charts-v1';
+const SW_TIMEOUT = 5000;
 
 /** Synthetic cache key for a chart file. Not a real URL — only used as Cache API key. */
 export function chartCacheKey(chart: Chart): string | null {
@@ -55,10 +56,10 @@ export interface DownloadProgress {
   aborted: boolean;
 }
 
-/** Download all charts and cache them. Calls onProgress for each file. Returns final state. */
+/** Download all charts and cache them. Supports Supabase Storage (direct) and Google Drive (proxy). */
 export async function downloadAllCharts(
   charts: Chart[],
-  accessToken: string,
+  accessToken: string | null,
   onProgress: (progress: DownloadProgress) => void,
   signal?: AbortSignal,
 ): Promise<DownloadProgress> {
@@ -105,15 +106,29 @@ export async function downloadAllCharts(
     }
 
     try {
-      const res = await fetch('/api/drive/download', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ fileId: chart.fileId, mimeType: chart.mimeType }),
-        signal,
-      });
+      let res: Response;
+
+      if (chart.url?.includes('/storage/v1/object/public/')) {
+        // Supabase Storage — public URL, no auth needed
+        res = await fetch(chart.url, { signal });
+      } else if (accessToken) {
+        // Google Drive — proxy through /api/drive/download
+        res = await fetch('/api/drive/download', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ fileId: chart.fileId, mimeType: chart.mimeType }),
+          signal,
+        });
+      } else {
+        // Drive chart but no token — skip
+        progress.failed.push(chart.fileId!);
+        progress.done++;
+        onProgress(progress);
+        continue;
+      }
 
       if (!res.ok) {
         progress.failed.push(chart.fileId!);
@@ -164,10 +179,35 @@ export async function clearChartCache(): Promise<void> {
   await caches.delete(CACHE_NAME);
 }
 
-/** Register the service worker (idempotent). */
+/** Register the service worker and warm the app cache with current page assets. */
 export async function registerServiceWorker(): Promise<void> {
-  if ('serviceWorker' in navigator) {
+  if (!('serviceWorker' in navigator)) return;
+
+  try {
     await navigator.serviceWorker.register('/sw.js');
+  } catch {
+    return;
+  }
+
+  // Wait for SW to control this page, with timeout
+  await Promise.race([
+    new Promise<void>((resolve) => {
+      if (navigator.serviceWorker.controller) resolve();
+      else navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true });
+    }),
+    new Promise<void>((resolve) => setTimeout(resolve, SW_TIMEOUT)),
+  ]);
+
+  // Best-effort cache warming: current page + loaded static assets
+  if (navigator.serviceWorker.controller) {
+    const urls = [location.href];
+    document.querySelectorAll('script[src*="/_next/static/"]').forEach(el =>
+      urls.push((el as HTMLScriptElement).src)
+    );
+    document.querySelectorAll('link[href*="/_next/static/"]').forEach(el =>
+      urls.push((el as HTMLLinkElement).href)
+    );
+    navigator.serviceWorker.controller.postMessage({ type: 'WARM_CACHE', urls });
   }
 }
 
