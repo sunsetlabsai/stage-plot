@@ -1,6 +1,6 @@
 # Design: Owner Onboarding Polish + Admin Visibility
 
-**Status:** Draft v1.3 (addresses Codex rounds 1-2)
+**Status:** v1.4 — build-ready (Codex rounds 1-3, all HIGH/MEDIUM resolved)
 **Date:** 2026-06-04
 **Depends on:** Owner namespacing (PR #57, migration 005)
 
@@ -35,6 +35,8 @@ Three small, targeted fixes. No migration. No new auth model. Collaborator permi
 2. **404 (no profile):** Show the claim form (current behavior).
 3. **401 (not authenticated):** Redirect to `/sign-in?redirect=/claim`.
 4. **Network error:** Show the claim form as fallback (don't block on check failure).
+
+**409 handling on submit:** If the user somehow reaches the claim form despite having a profile (network error on mount check) and submits, `/api/profiles` returns 409 "Profile already exists." Handle this gracefully: show "Already claimed" with a link to `/dashboard` instead of a generic error.
 
 **After successful claim:** Show a brief success state: "Claimed **{handle}**! Redirecting..." with a manual link to `/dashboard` as fallback. Then `router.push('/dashboard')` as today.
 
@@ -78,7 +80,7 @@ The current `/admin` page authenticates by calling `GET /api/admin/settings` —
 **`GET /api/admin/owners`**
 
 - Auth: `Authorization: Bearer {ADMIN_SECRET}` — validated against `process.env.ADMIN_SECRET` (no KV dependency)
-- Rate limit: reuse the same in-memory rate limiter pattern from `/api/admin/settings` (5 req/min/IP). Extract the helper into a shared module or inline the same pattern.
+- Rate limit: extract the rate limiter from `/api/admin/settings` into a shared `lib/admin-rate-limit.ts` helper. Both `/api/admin/settings` and `/api/admin/owners` import the same helper. Single map, consistent limits, no drift.
 - **Multi-query implementation** (not a single join — `auth.users` is not a PostgREST table, and `profiles` has no FK to `shows`):
 
 ```typescript
@@ -146,7 +148,8 @@ Supabase `listUsers()` defaults to 50/page (not 1000). Explicit `perPage: 1000` 
 | File | Change |
 |------|--------|
 | `app/api/admin/owners/route.ts` | New — multi-query owner list with rate limiting (admin-only) |
-| `app/admin/page.tsx` | Add "Registered Owners" section; split auth so owner list works even if KV is down |
+| `app/admin/page.tsx` | Add "Registered Owners" section; split auth so owner list works even if KV is down. If API returns `warning`, show yellow banner above owner table: "Email lookup unavailable — emails may be blank." |
+| `lib/admin-rate-limit.ts` | New — shared rate limiter extracted from `/api/admin/settings` |
 
 ---
 
@@ -184,6 +187,7 @@ Where `{handle}` is the user's actual `ownerSlug` (already loaded into state bef
 - [ ] Revisit /claim after already claiming — see "Already claimed as {handle}" with dashboard link (no form)
 - [ ] Unauthenticated visit to /claim — redirect to /sign-in
 - [ ] Profile check failure (network error) — show claim form as fallback (don't block)
+- [ ] Already-claimed user submits form (network error on mount check) — 409 shows "Already claimed" + dashboard link
 
 ### Owner admin list
 - [ ] /admin shows registered owners with handle, name, email, show count, join date
@@ -193,6 +197,7 @@ Where `{handle}` is the user's actual `ownerSlug` (already loaded into state bef
 - [ ] Multiple owners with varying show counts — counts are accurate
 - [ ] KV disconnected — settings section shows error, but owner list still loads
 - [ ] Email mapping works (listUsers response matched by user ID)
+- [ ] Email lookup failure — owner list loads, emails show blank, yellow warning banner visible
 
 ### Dashboard guidance
 - [ ] New user with zero shows sees personalized welcome with their handle
