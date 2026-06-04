@@ -1,6 +1,6 @@
 # Design: New Show Modal + Duplicate Show
 
-**Status:** v1.2 — addresses Codex rounds 1-2
+**Status:** v1.3 — addresses Codex rounds 1-3
 **Date:** 2026-06-04
 
 ---
@@ -95,7 +95,8 @@ Dashboard → [Duplicate] on "Friday at Roxy"
 
 **Config cleaning on duplicate:**
 - `showInfo.showName`: set to the new name from the modal.
-- `showInfo.bandName`: **preserved from the original.** Same band, different show — the common case. The modal pre-fills "Copy of {showName}" not "Copy of {bandName}".
+- `showInfo.bandName`: **preserved from the original.** Same band, different show — the common case.
+- Modal pre-fill: `"Copy of " + (sourceConfig.showInfo.showName || show.name || sourceConfig.showInfo.bandName || 'Untitled')`. Falls back through all possible name sources — older configs may lack `showName`.
 - `showInfo.venue` and `showInfo.eventDate`: preserved from the original.
 - `setlist[].charts`: **stripped from copied setlist items.** Charts are resolved at load time from `chart_library` by `song_key` + `owner_id`. Persisted `charts` arrays in the config are stale snapshots from the last save. Copying them creates stale embedded references. By stripping them, the duplicate relies on the same chart resolution path as any other show load — fresh, correct, no stale references.
 
@@ -155,7 +156,10 @@ function slugify(name: string): string {
 }
 
 // In POST handler, before slug generation:
-const trimmed = (name || '').trim().slice(0, 100);
+if (typeof name !== 'string') {
+  return Response.json({ error: 'Name must be a string' }, { status: 400 });
+}
+const trimmed = name.trim().slice(0, 100);
 if (!trimmed) {
   return Response.json({ error: 'Name is required' }, { status: 400 });
 }
@@ -166,6 +170,15 @@ if (!baseSlug) {
 ```
 
 Note: `slugify()` is also used in `lib/show-file.ts:154` for YAML export. That usage is unaffected — export names always have content from real show data.
+
+**Client-side slug validation:** The dashboard uses a local `slugBase()` helper (not the `show-file.ts` `slugify` which has the `|| 'show'` fallback). This is a no-fallback version used only for the modal preview and create-button gate:
+
+```typescript
+function slugBase(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+}
+// Create button disabled when: !slugBase(name.trim())
+```
 
 ### GET /api/shows/{owner}/{slug} — No changes needed
 
@@ -209,6 +222,7 @@ Already returns the full show config. Used by Duplicate to fetch source config.
 - [ ] Charts stripped from copied setlist — verify no stale chart references in config
 - [ ] Charts resolve correctly on first load (chart_library resolution)
 - [ ] New slug is independent
+- [ ] Duplicate of show with no showName — prefill falls back to show.name or bandName
 - [ ] Duplicate fetch failure — error shown
 
 ### API Hardening
