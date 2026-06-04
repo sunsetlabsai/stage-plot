@@ -53,10 +53,18 @@ export default function DashboardPage() {
       try {
         const config = JSON.parse(decodeURIComponent(atob(pending)));
         const name = config.showInfo?.showName || config.showInfo?.bandName || 'Imported Show';
+        const legacySetlist = Array.isArray(config.setlist)
+          ? config.setlist.filter((s: { title?: string }) => s.title?.trim()).map((s: { title: string; key?: string; lead?: string; notes?: string; sceneNote?: string }) => ({
+              title: s.title, key: s.key ?? null, lead: s.lead ?? '', notes: s.notes ?? '', sceneNote: s.sceneNote ?? null,
+            }))
+          : [];
         fetch('/api/shows', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ config, name, venue: config.showInfo?.venue }),
+          body: JSON.stringify({
+            config, name, venue: config.showInfo?.venue,
+            setlist_songs: legacySetlist.length > 0 ? legacySetlist : undefined,
+          }),
         }).then(async (res) => {
           if (res.ok) {
             const { slug } = await res.json();
@@ -89,6 +97,17 @@ export default function DashboardPage() {
 
       const name = config.showInfo.showName || config.showInfo.bandName || 'Imported Show';
 
+      // Extract setlist songs for rpc_create_show_with_setlist
+      const setlistSongs = config.setlist
+        .filter((s) => s.title?.trim())
+        .map((s) => ({
+          title: s.title,
+          key: s.key ?? null,
+          lead: s.lead ?? '',
+          notes: s.notes ?? '',
+          sceneNote: s.sceneNote ?? null,
+        }));
+
       const res = await fetch('/api/shows', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -97,6 +116,7 @@ export default function DashboardPage() {
           name,
           venue: config.showInfo.venue,
           show_date: config.showInfo.eventDate,
+          setlist_songs: setlistSongs.length > 0 ? setlistSongs : undefined,
         }),
       });
 
@@ -415,10 +435,30 @@ function CreateShowModal({
         };
       }
 
+      // Extract setlist songs for rpc_create_show_with_setlist
+      const rawSetlistForSongs = (config.setlist || []) as Array<{
+        title?: string; key?: string; lead?: string; notes?: string; sceneNote?: string;
+      }>;
+      const setlistSongs = rawSetlistForSongs
+        .filter((s) => s.title?.trim())
+        .map((s) => ({
+          title: s.title!,
+          key: s.key ?? null,
+          lead: s.lead ?? '',
+          notes: s.notes ?? '',
+          sceneNote: s.sceneNote ?? null,
+        }));
+
       const res = await fetch('/api/shows', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config, name: trimmed, venue, show_date: showDate }),
+        body: JSON.stringify({
+          config,
+          name: trimmed,
+          venue,
+          show_date: showDate,
+          setlist_songs: setlistSongs.length > 0 ? setlistSongs : undefined,
+        }),
       });
 
       if (res.ok) {

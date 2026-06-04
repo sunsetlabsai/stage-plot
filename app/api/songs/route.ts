@@ -17,53 +17,58 @@ export async function GET(request: NextRequest) {
   const ownerParam = request.nextUrl.searchParams.get('owner_id');
   const ownerId = ownerParam || user.id;
 
-  // If not the owner, verify collaborator access
+  // If not the owner, verify collaborator access (must collaborate on a show owned by this owner)
   if (ownerId !== user.id) {
     const admin = getSupabaseAdmin();
-    const { data: collab } = await admin
+    // Direct join: find any show where this user is a collaborator AND the show is owned by ownerId
+    const { data: collabCheck } = await admin
       .from('show_collaborators')
-      .select('show_id')
+      .select('show_id, shows!inner(owner_id)')
       .eq('user_id', user.id)
+      .eq('shows.owner_id', ownerId)
       .limit(1);
 
-    // Check if any of those shows belong to this owner
-    if (collab && collab.length > 0) {
-      const showIds = collab.map((c) => c.show_id);
-      const { data: ownerShow } = await admin
-        .from('shows')
-        .select('id')
-        .eq('owner_id', ownerId)
-        .in('id', showIds)
-        .limit(1);
-
-      if (!ownerShow || ownerShow.length === 0) {
-        return Response.json({ error: 'Not authorized' }, { status: 403 });
-      }
-    } else {
+    if (!collabCheck || collabCheck.length === 0) {
       return Response.json({ error: 'Not authorized' }, { status: 403 });
     }
   }
 
   const admin = getSupabaseAdmin();
-  const { data: songs, error } = await admin.rpc('get_songs_with_counts', {
-    p_owner_id: ownerId,
-  });
+
+  // Query songs with chart_count and show_count via subqueries
+  const { data: songs, error } = await admin
+    .from('songs')
+    .select('*')
+    .eq('owner_id', ownerId)
+    .order('title');
 
   if (error) {
-    // Fallback: RPC may not exist yet, query directly
-    const { data: fallbackSongs, error: fbError } = await admin
-      .from('songs')
-      .select('*')
-      .eq('owner_id', ownerId)
-      .order('title');
-
-    if (fbError) {
-      return Response.json({ error: fbError.message }, { status: 500 });
-    }
-    return Response.json({ songs: fallbackSongs || [], is_owner: ownerId === user.id });
+    return Response.json({ error: error.message }, { status: 500 });
   }
 
-  return Response.json({ songs: songs || [], is_owner: ownerId === user.id });
+  // Enrich with counts (setlist_entries has no client RLS, so admin client is required)
+  const enriched = await Promise.all(
+    (songs || []).map(async (song) => {
+      const [chartRes, showRes] = await Promise.all([
+        admin
+          .from('chart_library')
+          .select('id', { count: 'exact', head: true })
+          .eq('owner_id', ownerId)
+          .eq('song_key', song.song_key),
+        admin
+          .from('setlist_entries')
+          .select('show_id', { count: 'exact', head: true })
+          .eq('song_id', song.id),
+      ]);
+      return {
+        ...song,
+        chart_count: chartRes.count ?? 0,
+        show_count: showRes.count ?? 0,
+      };
+    }),
+  );
+
+  return Response.json({ songs: enriched, is_owner: ownerId === user.id });
 }
 
 // POST /api/songs — create a song (owner-only)

@@ -117,18 +117,26 @@ export async function POST(request: NextRequest) {
 
   // If setlist_songs provided, use RPC for atomic create with song resolution
   if (Array.isArray(setlist_songs) && setlist_songs.length > 0) {
-    // Compute song_key server-side for each song
+    // Compute song_key server-side for each song — reject if any title can't be normalized
     const enrichedSongs = [];
-    for (const song of setlist_songs) {
-      if (!song.title || typeof song.title !== 'string') continue;
+    for (let i = 0; i < setlist_songs.length; i++) {
+      const song = setlist_songs[i];
+      if (!song.title || typeof song.title !== 'string' || !song.title.trim()) {
+        return Response.json(
+          { error: `Setlist song at position ${i + 1} has an empty title` },
+          { status: 400 },
+        );
+      }
       const trimmedTitle = song.title.trim();
-      if (!trimmedTitle) continue;
 
       let songKey: string;
       try {
         songKey = normalizeSongKey(trimmedTitle);
       } catch {
-        continue; // skip songs that can't be normalized
+        return Response.json(
+          { error: `Setlist song "${trimmedTitle}" cannot be normalized (must contain at least one letter or number)` },
+          { status: 400 },
+        );
       }
 
       enrichedSongs.push({

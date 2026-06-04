@@ -36,6 +36,24 @@ export function useShow(
 
     setSaving(true);
     try {
+      // Build entries array from setlist if songs have songId (reference-based)
+      const setlist = config.setlist as Array<{
+        songId?: string; position: number;
+        key?: string; lead?: string; notes?: string; sceneNote?: string;
+      }> | undefined;
+
+      const hasSongRefs = setlist?.some((s) => s.songId);
+      const entries = hasSongRefs
+        ? setlist?.filter((s) => s.songId).map((s) => ({
+            song_id: s.songId,
+            position: s.position,
+            key_override: s.key !== undefined ? s.key : null,
+            lead_override: s.lead !== undefined ? s.lead : null,
+            notes_override: s.notes !== undefined ? s.notes : null,
+            scene_note: s.sceneNote ?? null,
+          }))
+        : undefined;
+
       const res = await fetch('/api/shows/update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -47,6 +65,7 @@ export function useShow(
             || 'Untitled',
           venue: (config.showInfo as { venue?: string })?.venue,
           show_date: (config.showInfo as { eventDate?: string })?.eventDate,
+          entries,
         }),
       });
 
