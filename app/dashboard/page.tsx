@@ -374,11 +374,14 @@ function CreateShowModal({
         const sourceData = await sourceRes.json();
         const sourceConfig = sourceData.config;
 
-        // Strip stale chart snapshots from setlist
-        const cleanedSetlist = (sourceConfig.setlist || []).map(
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          ({ charts, ...rest }: { charts?: unknown; [key: string]: unknown }) => rest,
-        );
+        // Strip stale chart snapshots from setlist, filtering out malformed entries
+        const rawSetlist = Array.isArray(sourceConfig?.setlist) ? sourceConfig.setlist : [];
+        const cleanedSetlist = rawSetlist
+          .filter((item: unknown) => item != null && typeof item === 'object' && !Array.isArray(item))
+          .map(
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            ({ charts, ...rest }: { charts?: unknown; [key: string]: unknown }) => rest,
+          );
 
         config = {
           ...sourceConfig,
