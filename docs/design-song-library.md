@@ -1,6 +1,6 @@
 # Design: Song Library Manager
 
-**Status:** Draft v1.7 (addresses Codex round 6: 1 HIGH, 3 MEDIUM, 1 LOW)
+**Status:** Draft v1.8 (addresses Codex round 7: 1 HIGH — single keyspace)
 **Date:** 2025-06-04
 **Depends on:** Supabase backend (migration 003 chart_library)
 
@@ -300,17 +300,11 @@ The API route calls this RPC, then deletes storage blobs using the returned `sto
 
 Atomically creates a show, resolves/creates songs, inserts setlist_entries, dual-writes inline config, and sets `setlist_migrated = true`. Used by both import and duplicate flows.
 
-**Requires:** A `normalize_song_key(text)` SQL function (same logic as the JS `slugify` used elsewhere: lowercase, strip non-alphanumeric, collapse spaces to hyphens). Defined in migration 006.
+**Single keyspace:** Song key normalization uses `normalizeSongKey()` from `lib/normalize.ts` — the same function used by chart upload and show chart resolution. The API route computes `song_key` from title before calling the RPC. The RPC receives pre-computed `song_key` values and does **not** recompute them, avoiding a second normalization implementation. This guarantees chart_library, songs, and all resolution paths use identical keys.
+
+**API route responsibility:** `POST /api/shows` (when `setlist_songs[]` is present) iterates the array, calls `normalizeSongKey(title)` for each entry, injects the computed `song_key`, validates it is non-empty (400 if empty after normalization), and passes the enriched array to the RPC.
 
 ```sql
--- Helper: normalize title to song_key (server-side, not client-trusted)
-CREATE OR REPLACE FUNCTION normalize_song_key(p_title text)
-RETURNS text AS $$
-BEGIN
-  RETURN lower(regexp_replace(trim(p_title), '[^a-zA-Z0-9 ]', '', 'g'));
-END;
-$$ LANGUAGE plpgsql IMMUTABLE;
-
 CREATE OR REPLACE FUNCTION rpc_create_show_with_setlist(
   p_owner_id uuid,
   p_name text,
@@ -318,8 +312,8 @@ CREATE OR REPLACE FUNCTION rpc_create_show_with_setlist(
   p_venue text,
   p_show_date text,
   p_config jsonb,
-  p_setlist_songs jsonb  -- array of { title, key, lead, notes, scene_note }
-                         -- song_key is computed server-side from title
+  p_setlist_songs jsonb  -- array of { title, song_key, key, lead, notes, scene_note }
+                         -- song_key computed by API route via normalizeSongKey()
 ) RETURNS jsonb AS $$
 DECLARE
   v_show_id uuid;
@@ -339,8 +333,13 @@ BEGIN
   LOOP
     v_position := v_position + 1;
 
-    -- Compute song_key server-side from title (never trust client-supplied song_key)
-    v_song_key := normalize_song_key(v_song.value->>'title');
+    -- Use pre-computed song_key from API route (normalized via shared JS normalizeSongKey())
+    v_song_key := v_song.value->>'song_key';
+
+    -- Validate: reject empty song_key (should not happen if API route validated)
+    IF v_song_key IS NULL OR v_song_key = '' THEN
+      RAISE EXCEPTION 'Empty song_key at position %', v_position;
+    END IF;
 
     -- Upsert: insert if new, get id if existing. Handles concurrent imports safely.
     INSERT INTO songs (owner_id, song_key, title, key, lead, notes)
@@ -423,6 +422,8 @@ GRANT EXECUTE ON FUNCTION rpc_create_show_with_setlist TO service_role;
 - This preserves the imported arrangement without polluting the canonical library record
 
 **Concurrency:** `INSERT ... ON CONFLICT DO NOTHING` + `SELECT` handles concurrent imports of the same new song safely — no unique constraint violation, both imports resolve to the same library song.
+
+**Key normalization chain:** `POST /api/songs` and `POST /api/shows` (with setlist) both call `normalizeSongKey()` from `lib/normalize.ts` before writing. This is the same function used by `POST /api/charts/upload` and show resolution in `GET /api/shows/[owner]/[show]`. One function, one keyspace, no drift.
 
 ---
 
@@ -590,7 +591,7 @@ Add "Library" link.
 | `app/api/songs/update/route.ts` | PUT (admin, owner-only, song_key cascade) |
 | `app/api/songs/delete/route.ts` | DELETE (admin, rpc_delete_song + blob cleanup) |
 | `app/api/shows/[owner]/[show]/route.ts` | Hydrate setlist via adapter (entries or inline) |
-| `app/api/shows/route.ts` | Create via rpc_create_show_with_setlist (import + duplicate) |
+| `app/api/shows/route.ts` | Create via rpc_create_show_with_setlist (import + duplicate), uses `normalizeSongKey()` from `lib/normalize.ts` |
 | `app/api/shows/update/route.ts` | Save via rpc_save_show (atomic config + entries + inline) |
 | `lib/show-file.ts` | Strip songId on export (all formats), strip on import (all formats) |
 | `app/library/page.tsx` | New song library page |
@@ -663,7 +664,9 @@ Add "Library" link.
 - [ ] Import — matched song with identical metadata → no overrides (null)
 - [ ] Import — matched song, imported has no key but library has key → '' override (blank)
 - [ ] Import — sceneNote preserved through import/duplicate
-- [ ] Import — song_key computed server-side from title (client value ignored)
+- [ ] Import — song_key computed by API route via normalizeSongKey() (same as chart upload)
+- [ ] Import — song_key matches existing chart_library keys (single keyspace verified)
+- [ ] Import — empty title after normalization → 400 rejected
 - [ ] Import — concurrent import of same new song → no constraint violation
 - [ ] Duplicate show — uses rpc_create_show_with_setlist, songs resolved/created atomically
 - [ ] Duplicate show — setlist_migrated = true on new show
