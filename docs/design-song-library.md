@@ -1,6 +1,6 @@
 # Design: Song Library Manager
 
-**Status:** Draft v1.5 (addresses Codex round 4: 3 MEDIUM, 1 LOW)
+**Status:** Draft v1.6 (addresses Codex round 5: 2 MEDIUM, 1 LOW)
 **Date:** 2025-06-04
 **Depends on:** Supabase backend (migration 003 chart_library)
 
@@ -286,6 +286,96 @@ GRANT EXECUTE ON FUNCTION rpc_delete_song TO service_role;
 
 The API route calls this RPC, then deletes storage blobs using the returned `storage_paths`.
 
+### `rpc_create_show_with_setlist(...)` — Import & Duplicate
+
+Atomically creates a show, resolves/creates songs, inserts setlist_entries, dual-writes inline config, and sets `setlist_migrated = true`. Used by both import and duplicate flows.
+
+```sql
+CREATE OR REPLACE FUNCTION rpc_create_show_with_setlist(
+  p_owner_id uuid,
+  p_name text,
+  p_slug text,
+  p_venue text,
+  p_show_date text,
+  p_config jsonb,
+  p_setlist_songs jsonb  -- array of { title, song_key, key, lead, notes }
+) RETURNS jsonb AS $$
+DECLARE
+  v_show_id uuid;
+  v_song record;
+  v_song_id uuid;
+  v_position integer := 0;
+  v_entries jsonb := '[]'::jsonb;
+  v_inline_setlist jsonb := '[]'::jsonb;
+BEGIN
+  -- Create the show
+  INSERT INTO shows (owner_id, name, slug, venue, show_date, config, setlist_migrated)
+  VALUES (p_owner_id, p_name, p_slug, NULLIF(p_venue, ''), NULLIF(p_show_date, ''), p_config, true)
+  RETURNING id INTO v_show_id;
+
+  -- Resolve or create each song, then insert setlist entry
+  FOR v_song IN SELECT * FROM jsonb_array_elements(COALESCE(p_setlist_songs, '[]'::jsonb))
+  LOOP
+    v_position := v_position + 1;
+
+    -- Try to find existing song by song_key
+    SELECT id INTO v_song_id FROM songs
+    WHERE owner_id = p_owner_id AND song_key = v_song.value->>'song_key';
+
+    -- Create if not found
+    IF NOT FOUND THEN
+      INSERT INTO songs (owner_id, song_key, title, key, lead, notes)
+      VALUES (
+        p_owner_id,
+        v_song.value->>'song_key',
+        v_song.value->>'title',
+        NULLIF(v_song.value->>'key', ''),
+        COALESCE(v_song.value->>'lead', ''),
+        COALESCE(v_song.value->>'notes', '')
+      )
+      RETURNING id INTO v_song_id;
+    END IF;
+
+    -- Compute overrides: if song existed and imported metadata differs, store as overrides
+    INSERT INTO setlist_entries (show_id, song_id, position, key_override, lead_override, notes_override)
+    SELECT
+      v_show_id, v_song_id, v_position,
+      CASE WHEN s.key IS DISTINCT FROM NULLIF(v_song.value->>'key', '') THEN v_song.value->>'key' END,
+      CASE WHEN s.lead IS DISTINCT FROM COALESCE(v_song.value->>'lead', '') THEN v_song.value->>'lead' END,
+      CASE WHEN s.notes IS DISTINCT FROM COALESCE(v_song.value->>'notes', '') THEN v_song.value->>'notes' END
+    FROM songs s WHERE s.id = v_song_id;
+  END LOOP;
+
+  -- Dual-write: build inline setlist for config.setlist
+  SELECT jsonb_agg(jsonb_build_object(
+    'title', s.title,
+    'key', COALESCE(se.key_override, s.key),
+    'lead', COALESCE(se.lead_override, s.lead),
+    'notes', COALESCE(se.notes_override, s.notes),
+    'position', se.position
+  ) ORDER BY se.position)
+  INTO v_inline_setlist
+  FROM setlist_entries se
+  JOIN songs s ON s.id = se.song_id
+  WHERE se.show_id = v_show_id;
+
+  -- Update config with inline setlist
+  UPDATE shows SET config = jsonb_set(config, '{setlist}', COALESCE(v_inline_setlist, '[]'::jsonb))
+  WHERE id = v_show_id;
+
+  RETURN jsonb_build_object('show_id', v_show_id);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+REVOKE EXECUTE ON FUNCTION rpc_create_show_with_setlist FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION rpc_create_show_with_setlist TO service_role;
+```
+
+**Override rules on import/duplicate:** When an imported song matches an existing library song by `song_key`:
+- If the imported `key`, `lead`, or `notes` differ from the library defaults, they become per-show overrides
+- If they match, no override is stored (null = use library default)
+- This preserves the imported arrangement without polluting the canonical library record
+
 ---
 
 ## Show Resolution + PR A Compatibility
@@ -313,7 +403,10 @@ const setlist: SetlistSong[] = hydratedRows.map(row => ({
 
 **Type change:** Add `songId?: string` to the `SetlistSong` interface in `lib/types.ts`.
 
-**Export/import contract:** YAML export (`show-file.ts`) must explicitly strip `songId` from setlist entries to avoid leaking internal DB UUIDs into show files. On import, `songId` is discarded — songs are resolved by `song_key` (normalized title) against the importing owner's library. If no match, the song is created as a new library entry.
+**Export/import contract:**
+- **Export (all formats):** `serializeShow` in `show-file.ts` strips `songId` from setlist entries before serialization. No internal DB UUIDs leak into show files.
+- **Import (all formats):** `deserializeShow` strips `songId` from parsed setlist entries regardless of format (YAML or JSON). The client sends the sanitized config to `POST /api/shows`, which calls `rpc_create_show_with_setlist` to resolve songs by `song_key` and create missing ones atomically.
+- **Duplicate:** Dashboard duplicate flow extracts setlist songs from source config and calls `rpc_create_show_with_setlist` (same path as import).
 
 This is injected into `config.setlist` before returning. The client receives the exact same `AppConfig` shape it always has. AI (`agent.ts`), offline cache, rendering — all unchanged. Export/import strips/resolves `songId` at boundaries.
 
@@ -365,6 +458,10 @@ If title changes, recomputes `song_key`. Cascades to `chart_library`. Returns 40
 ### `DELETE /api/songs` — Delete a song (owner-only)
 
 Calls `rpc_delete_song` via admin client. Deletes storage blobs from returned `storage_paths`. Confirms with user if `show_count > 0`.
+
+### `POST /api/shows` — Create show (updated for import + duplicate)
+
+Admin client, after verifying caller is owner. If request body includes `setlist_songs[]`, calls `rpc_create_show_with_setlist` to atomically create the show, resolve/create songs, insert setlist_entries, dual-write inline config, and set `setlist_migrated = true`. If no `setlist_songs`, falls back to current behavior (insert show with config blob, `setlist_migrated = false`).
 
 ### `PUT /api/shows/update` — Save show (updated)
 
@@ -427,13 +524,15 @@ Add "Library" link.
 
 | File | Change |
 |------|--------|
-| `supabase/migrations/006_songs.sql` | `songs`, `setlist_entries`, 2 RPCs (`rpc_save_show`, `rpc_delete_song`) with REVOKE/GRANT, `shows.setlist_migrated` |
+| `supabase/migrations/006_songs.sql` | `songs`, `setlist_entries`, 3 RPCs (`rpc_save_show`, `rpc_delete_song`, `rpc_create_show_with_setlist`) with REVOKE/GRANT, `shows.setlist_migrated` |
 | `lib/types.ts` | `Song`, `SetlistEntry` types (internal). `SetlistSong` unchanged (adapter handles). |
 | `app/api/songs/route.ts` | GET (admin, owner-or-collaborator auth check, subquery counts) + POST (admin, owner-only) |
 | `app/api/songs/update/route.ts` | PUT (admin, owner-only, song_key cascade) |
 | `app/api/songs/delete/route.ts` | DELETE (admin, rpc_delete_song + blob cleanup) |
 | `app/api/shows/[owner]/[show]/route.ts` | Hydrate setlist via adapter (entries or inline) |
+| `app/api/shows/route.ts` | Create via rpc_create_show_with_setlist (import + duplicate) |
 | `app/api/shows/update/route.ts` | Save via rpc_save_show (atomic config + entries + inline) |
+| `lib/show-file.ts` | Strip songId on export (all formats), strip on import (all formats) |
 | `app/library/page.tsx` | New song library page |
 | `app/dashboard/page.tsx` | Add "Library" nav link |
 | `app/[owner]/[show]/page.tsx` | Config tab autocomplete, override UI, owner-vs-editor gate |
@@ -493,13 +592,21 @@ Add "Library" link.
 - [ ] Empty migrated setlist — returns `[]` (not legacy fallback)
 - [ ] Verify `id`, `sceneNote` (camelCase), `charts` all present in hydrated output
 - [ ] Offline fallback — cached hydrated data works
-- [ ] YAML export — songId stripped from exported setlist entries
-- [ ] YAML import — songId discarded, songs resolved by song_key against owner's library
-- [ ] YAML import — unmatched songs created as new library entries
+- [ ] Export (YAML + JSON) — songId stripped from setlist entries
+- [ ] Import (YAML) — songId discarded, songs resolved by song_key
+- [ ] Import (JSON) — songId discarded, songs resolved by song_key
+- [ ] Import — unmatched songs created as new library entries
+- [ ] Import — matched songs with differing key/lead/notes become per-show overrides
+- [ ] Import — matched songs with identical metadata get no overrides (null)
+- [ ] Duplicate show — uses rpc_create_show_with_setlist, songs resolved/created atomically
+- [ ] Duplicate show — setlist_migrated = true on new show
 
 ### Atomic operations
 - [ ] rpc_save_show — verify config + entries + inline all written or none
 - [ ] rpc_save_show — verify owner invariant rejects cross-owner song_id
+- [ ] rpc_create_show_with_setlist — verify show + songs + entries created atomically
+- [ ] rpc_create_show_with_setlist — verify matched songs get overrides, unmatched get created
+- [ ] rpc_create_show_with_setlist — verify setlist_migrated = true, inline config dual-written
 - [ ] rpc_delete_song — verify entries removed, renumbered, charts deleted, paths returned
 - [ ] rpc_delete_song — verify deferrable unique constraint allows renumbering without collision
 
