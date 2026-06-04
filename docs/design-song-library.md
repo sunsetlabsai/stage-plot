@@ -1,7 +1,7 @@
 # Design: Song Library Manager
 
-**Status:** Draft v1.3 (addresses Codex rounds 1-2)
-**Date:** 2025-06-03
+**Status:** Draft v1.4 (addresses Codex round 3: 3 HIGH, 3 MEDIUM, 1 LOW)
+**Date:** 2025-06-04
 **Depends on:** Supabase backend (migration 003 chart_library)
 
 ---
@@ -30,7 +30,7 @@ Show setlists **reference** songs by ID from the owner's library. The `songs` ta
 
 **Songs:**
 - **Owner:** Full CRUD (create, read, update, delete).
-- **Editor collaborators:** Read-only. Can browse the owner's song library for autocomplete when adding songs to setlists. Cannot create, edit, or delete songs. If an editor needs a song that doesn't exist, they ask the owner to create it (or they type a title inline, which the *owner's* next save will persist — see "Add from Library" below).
+- **All collaborators (editor + viewer):** Read-only. Can browse the owner's song library for autocomplete when adding songs to setlists. Cannot create, edit, or delete songs. If an editor needs a song that doesn't exist, they ask the owner to create it (or they type a title inline, which the *owner's* next save will persist — see "Add from Library" below). Viewer access is intentional — if you can see the show, you can see the song catalog.
 
 **Setlist entries:**
 - **Owner + editors:** Can add/remove/reorder songs in a show's setlist and set per-show overrides. Matches existing `shows` editor permissions.
@@ -49,8 +49,8 @@ Show setlists **reference** songs by ID from the owner's library. The `songs` ta
 CREATE TABLE songs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  song_key text NOT NULL,
-  title text NOT NULL,
+  song_key text NOT NULL CHECK (song_key <> ''),
+  title text NOT NULL CHECK (title <> ''),
   key text,
   lead text DEFAULT '',
   notes text DEFAULT '',
@@ -90,12 +90,12 @@ CREATE TABLE setlist_entries (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   show_id uuid NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
   song_id uuid NOT NULL REFERENCES songs(id) ON DELETE RESTRICT,
-  position integer NOT NULL,
+  position integer NOT NULL CHECK (position > 0),
   key_override text,
   lead_override text,
   notes_override text,
   scene_note text,
-  UNIQUE(show_id, position)
+  UNIQUE(show_id, position) DEFERRABLE INITIALLY DEFERRED
 );
 
 ALTER TABLE setlist_entries ENABLE ROW LEVEL SECURITY;
@@ -154,7 +154,20 @@ CREATE OR REPLACE FUNCTION rpc_save_show(
 DECLARE
   v_final_config jsonb;
   v_result jsonb;
+  v_owner_id uuid;
 BEGIN
+  -- Verify owner invariant: all song_ids must belong to the show's owner
+  SELECT owner_id INTO v_owner_id FROM shows WHERE id = p_show_id;
+  IF p_entries IS NOT NULL AND jsonb_array_length(p_entries) > 0 THEN
+    IF EXISTS (
+      SELECT 1 FROM jsonb_array_elements(p_entries) AS e
+      JOIN songs s ON s.id = (e->>'song_id')::uuid
+      WHERE s.owner_id != v_owner_id
+    ) THEN
+      RAISE EXCEPTION 'Song does not belong to show owner';
+    END IF;
+  END IF;
+
   -- Merge inline setlist into config for dual-write
   IF p_inline_setlist IS NOT NULL THEN
     v_final_config := jsonb_set(p_config, '{setlist}', p_inline_setlist);
@@ -199,38 +212,9 @@ REVOKE EXECUTE ON FUNCTION rpc_save_show FROM public, anon, authenticated;
 GRANT EXECUTE ON FUNCTION rpc_save_show TO service_role;
 ```
 
-### `rpc_create_song_and_add_to_setlist(...)`
+### Song creation + setlist add (no dedicated RPC)
 
-Creates a new song + setlist entry atomically. Owner-only (verified by API route).
-
-```sql
-CREATE OR REPLACE FUNCTION rpc_create_song_and_add_to_setlist(
-  p_owner_id uuid,
-  p_title text,
-  p_song_key text,
-  p_key text,
-  p_lead text,
-  p_notes text,
-  p_show_id uuid,
-  p_position integer
-) RETURNS uuid AS $$
-DECLARE
-  v_song_id uuid;
-BEGIN
-  INSERT INTO songs (owner_id, song_key, title, key, lead, notes)
-  VALUES (p_owner_id, p_song_key, p_title, NULLIF(p_key, ''), p_lead, p_notes)
-  RETURNING id INTO v_song_id;
-
-  INSERT INTO setlist_entries (show_id, song_id, position)
-  VALUES (p_show_id, v_song_id, p_position);
-
-  RETURN v_song_id;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
-
-REVOKE EXECUTE ON FUNCTION rpc_create_song_and_add_to_setlist FROM public, anon, authenticated;
-GRANT EXECUTE ON FUNCTION rpc_create_song_and_add_to_setlist TO service_role;
-```
+**Simplified flow:** `POST /api/songs` creates the song (returns `id`). The client adds the new `song_id` to its local setlist state. The normal save flow calls `rpc_save_show`, which writes both entries and inline JSON atomically. This eliminates a dedicated RPC and ensures all setlist mutations go through a single atomic path with dual-write.
 
 ### `rpc_delete_song(song_id, owner_id)`
 
@@ -306,6 +290,7 @@ The hydrated result must match the existing `SetlistSong` interface exactly so a
 // In the show resolution API, after hydration query:
 const setlist: SetlistSong[] = hydratedRows.map(row => ({
   id: row.entry_id,                                    // maps to SetlistSong.id
+  songId: row.song_id,                                 // round-trips for save — client includes in entries
   position: row.position,
   title: row.title,
   key: row.key_override ?? row.default_key ?? undefined,
@@ -315,6 +300,8 @@ const setlist: SetlistSong[] = hydratedRows.map(row => ({
   // charts hydrated separately (same as today)
 }));
 ```
+
+**`songId` round-trip (H2 fix):** The adapter includes `songId` in the hydrated output. Existing client code ignores unknown fields, so this is backwards-compatible. On save, the client passes `songId` back in the entries array, which `rpc_save_show` uses to reconstruct `setlist_entries`. Without this, the save path cannot map client setlist items back to canonical songs.
 
 This is injected into `config.setlist` before returning. The client receives the exact same `AppConfig` shape it always has. Export/import (`show-file.ts`), AI (`agent.ts`), offline cache, rendering — all unchanged.
 
@@ -340,7 +327,7 @@ const config = { ...showData.config, setlist };
 
 ### `GET /api/songs` — List owner's song library
 
-Uses authenticated client (RLS allows owner + collaborator read):
+Uses **admin client** with explicit auth check (verifies caller is owner or collaborator). Admin client is required because `setlist_entries` has no client-facing RLS policies — the `show_count` subquery would return 0 under authenticated client.
 
 ```sql
 SELECT s.*,
@@ -352,6 +339,8 @@ FROM songs s
 WHERE s.owner_id = $1
 ORDER BY s.title;
 ```
+
+**Auth check:** API route verifies the caller is either the owner (`user.id === owner_id`) or has at least one `show_collaborators` row for a show owned by `owner_id`. Non-owners get a read-only response (no action buttons).
 
 ### `POST /api/songs` — Create a song (owner-only)
 
@@ -401,9 +390,9 @@ New top-level route, authenticated only.
 
 ### Config tab: "Add from Library" autocomplete
 
-- "+ Add Song" opens a text input with typeahead against the owner's song library (via `GET /api/songs`, available to editors via collaborator-read RLS)
-- Selecting a library song adds a `setlist_entries` reference with no overrides
-- Typing a new title that doesn't match any library song: **owner sees "Create & Add"** button (creates song via `rpc_create_song_and_add_to_setlist`). **Editors cannot create** — they see "Song not found. Ask the show owner to add it to the library."
+- "+ Add Song" opens a text input with typeahead against the owner's song library (via `GET /api/songs`, available to collaborators via admin client with auth check)
+- Selecting a library song adds the `songId` to local setlist state (persisted on next save via `rpc_save_show`)
+- Typing a new title that doesn't match any library song: **owner sees "Create & Add"** button (calls `POST /api/songs` to create the song, then adds the returned `songId` to local setlist state — persisted on next save). **Editors cannot create** — they see "Song not found. Ask the show owner to add it to the library."
 - Inline editing of key/lead/notes in the setlist sets per-show overrides
 - "Reset to default" clears overrides
 
@@ -416,7 +405,7 @@ Add "Library" link.
 ## Middleware / Auth
 
 - `/library`: redirect to `/sign-in` if not authenticated.
-- `/api/songs` GET: authenticated client with RLS (owner + collaborator read).
+- `/api/songs` GET: admin client, explicit owner-or-collaborator verification.
 - `/api/songs` POST/PUT/DELETE: admin client, owner-only verification.
 - `/api/shows/update`: admin client, owner-or-editor verification.
 
@@ -426,9 +415,9 @@ Add "Library" link.
 
 | File | Change |
 |------|--------|
-| `supabase/migrations/006_songs.sql` | `songs`, `setlist_entries`, 3 RPCs with REVOKE/GRANT, `shows.setlist_migrated` |
+| `supabase/migrations/006_songs.sql` | `songs`, `setlist_entries`, 2 RPCs (`rpc_save_show`, `rpc_delete_song`) with REVOKE/GRANT, `shows.setlist_migrated` |
 | `lib/types.ts` | `Song`, `SetlistEntry` types (internal). `SetlistSong` unchanged (adapter handles). |
-| `app/api/songs/route.ts` | GET (authenticated, subquery counts) + POST (admin, owner-only) |
+| `app/api/songs/route.ts` | GET (admin, owner-or-collaborator auth check, subquery counts) + POST (admin, owner-only) |
 | `app/api/songs/update/route.ts` | PUT (admin, owner-only, song_key cascade) |
 | `app/api/songs/delete/route.ts` | DELETE (admin, rpc_delete_song + blob cleanup) |
 | `app/api/shows/[owner]/[show]/route.ts` | Hydrate setlist via adapter (entries or inline) |
@@ -477,9 +466,9 @@ Add "Library" link.
 - [ ] Upload/delete chart from library
 
 ### Setlist (reference-based)
-- [ ] Add library song (owner) — verify entry created
-- [ ] Add library song (editor) — verify entry created
-- [ ] Add new song (owner) — verify song + entry created atomically
+- [ ] Add library song (owner) — verify songId in local state, persisted on save
+- [ ] Add library song (editor) — verify songId in local state, persisted on save
+- [ ] Add new song (owner) — POST /api/songs creates song, songId added to state, persisted on save
 - [ ] Add new song (editor) — verify blocked with guidance message
 - [ ] Reorder — verify positions updated
 - [ ] Set override — verify stored, library default unchanged
@@ -496,13 +485,16 @@ Add "Library" link.
 
 ### Atomic operations
 - [ ] rpc_save_show — verify config + entries + inline all written or none
-- [ ] rpc_create_song_and_add_to_setlist — verify both rows or neither
+- [ ] rpc_save_show — verify owner invariant rejects cross-owner song_id
 - [ ] rpc_delete_song — verify entries removed, renumbered, charts deleted, paths returned
+- [ ] rpc_delete_song — verify deferrable unique constraint allows renumbering without collision
 
 ### Security
 - [ ] RPCs not callable by authenticated/anon clients (REVOKE verified)
 - [ ] setlist_entries not readable/writable by authenticated client (RLS enabled, no policies)
-- [ ] songs readable by collaborators, writable only by owner
+- [ ] songs readable by collaborators (any role), writable only by owner
+- [ ] GET /api/songs — admin client, rejects unauthenticated, returns correct counts
+- [ ] rpc_save_show — rejects entry with song_id from different owner
 - [ ] /library unauthenticated — redirect to sign-in
 
 ### Migration
