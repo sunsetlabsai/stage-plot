@@ -1,6 +1,6 @@
 # Design: Song Library Manager
 
-**Status:** Draft v1.6 (addresses Codex round 5: 2 MEDIUM, 1 LOW)
+**Status:** Draft v1.7 (addresses Codex round 6: 1 HIGH, 3 MEDIUM, 1 LOW)
 **Date:** 2025-06-04
 **Depends on:** Supabase backend (migration 003 chart_library)
 
@@ -22,7 +22,14 @@ Show setlists **reference** songs by ID from the owner's library. The `songs` ta
 - No data drift between shows
 - Natural foundation for "used in X shows" and cross-show reporting
 
-**Per-show overrides:** A setlist entry can override `key`, `lead`, and `notes` for a specific show (e.g., "Rachel sings lead tonight" or "key change for this venue"). Null override = use library default. This preserves show-level flexibility without polluting the canonical record.
+**Per-show overrides:** A setlist entry can override `key`, `lead`, and `notes` for a specific show (e.g., "Rachel sings lead tonight" or "key change for this venue"). This preserves show-level flexibility without polluting the canonical record.
+
+**Override semantics (three states):**
+- `null` → use library default (no override set)
+- `''` (empty string) → explicitly blank ("clear this field for this show")
+- `'value'` → use this value instead of library default
+
+This distinction matters for import: if an imported song has no key but the library song has key `C`, the import must store `''` (explicitly blank) not `null` (which would render `C`). The adapter resolves: `key_override ?? default_key ?? undefined`.
 
 ---
 
@@ -181,27 +188,30 @@ BEGIN
     v_final_config := p_config;
   END IF;
 
-  -- Update show metadata + config
+  -- Update show metadata + config + flip setlist_migrated
   UPDATE shows SET
     config = v_final_config,
     name = p_name,
     venue = NULLIF(p_venue, ''),
-    show_date = NULLIF(p_show_date, '')
+    show_date = NULLIF(p_show_date, ''),
+    setlist_migrated = true
   WHERE id = p_show_id;
 
   -- Replace setlist entries
   DELETE FROM setlist_entries WHERE show_id = p_show_id;
 
+  -- Override semantics: null = use library default, '' = explicitly blank.
+  -- No NULLIF on override columns — empty string is a valid "clear this field" override.
   IF p_entries IS NOT NULL AND jsonb_array_length(p_entries) > 0 THEN
     INSERT INTO setlist_entries (show_id, song_id, position, key_override, lead_override, notes_override, scene_note)
     SELECT
       p_show_id,
       (e->>'song_id')::uuid,
       (e->>'position')::integer,
-      NULLIF(e->>'key_override', ''),
-      NULLIF(e->>'lead_override', ''),
-      NULLIF(e->>'notes_override', ''),
-      NULLIF(e->>'scene_note', '')
+      e->>'key_override',
+      e->>'lead_override',
+      e->>'notes_override',
+      e->>'scene_note'
     FROM jsonb_array_elements(p_entries) AS e;
   END IF;
 
@@ -290,7 +300,17 @@ The API route calls this RPC, then deletes storage blobs using the returned `sto
 
 Atomically creates a show, resolves/creates songs, inserts setlist_entries, dual-writes inline config, and sets `setlist_migrated = true`. Used by both import and duplicate flows.
 
+**Requires:** A `normalize_song_key(text)` SQL function (same logic as the JS `slugify` used elsewhere: lowercase, strip non-alphanumeric, collapse spaces to hyphens). Defined in migration 006.
+
 ```sql
+-- Helper: normalize title to song_key (server-side, not client-trusted)
+CREATE OR REPLACE FUNCTION normalize_song_key(p_title text)
+RETURNS text AS $$
+BEGIN
+  RETURN lower(regexp_replace(trim(p_title), '[^a-zA-Z0-9 ]', '', 'g'));
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
 CREATE OR REPLACE FUNCTION rpc_create_show_with_setlist(
   p_owner_id uuid,
   p_name text,
@@ -298,14 +318,15 @@ CREATE OR REPLACE FUNCTION rpc_create_show_with_setlist(
   p_venue text,
   p_show_date text,
   p_config jsonb,
-  p_setlist_songs jsonb  -- array of { title, song_key, key, lead, notes }
+  p_setlist_songs jsonb  -- array of { title, key, lead, notes, scene_note }
+                         -- song_key is computed server-side from title
 ) RETURNS jsonb AS $$
 DECLARE
   v_show_id uuid;
   v_song record;
   v_song_id uuid;
+  v_song_key text;
   v_position integer := 0;
-  v_entries jsonb := '[]'::jsonb;
   v_inline_setlist jsonb := '[]'::jsonb;
 BEGIN
   -- Create the show
@@ -318,40 +339,60 @@ BEGIN
   LOOP
     v_position := v_position + 1;
 
-    -- Try to find existing song by song_key
+    -- Compute song_key server-side from title (never trust client-supplied song_key)
+    v_song_key := normalize_song_key(v_song.value->>'title');
+
+    -- Upsert: insert if new, get id if existing. Handles concurrent imports safely.
+    INSERT INTO songs (owner_id, song_key, title, key, lead, notes)
+    VALUES (
+      p_owner_id,
+      v_song_key,
+      v_song.value->>'title',
+      NULLIF(v_song.value->>'key', ''),
+      COALESCE(v_song.value->>'lead', ''),
+      COALESCE(v_song.value->>'notes', '')
+    )
+    ON CONFLICT (owner_id, song_key) DO NOTHING;
+
     SELECT id INTO v_song_id FROM songs
-    WHERE owner_id = p_owner_id AND song_key = v_song.value->>'song_key';
+    WHERE owner_id = p_owner_id AND song_key = v_song_key;
 
-    -- Create if not found
-    IF NOT FOUND THEN
-      INSERT INTO songs (owner_id, song_key, title, key, lead, notes)
-      VALUES (
-        p_owner_id,
-        v_song.value->>'song_key',
-        v_song.value->>'title',
-        NULLIF(v_song.value->>'key', ''),
-        COALESCE(v_song.value->>'lead', ''),
-        COALESCE(v_song.value->>'notes', '')
-      )
-      RETURNING id INTO v_song_id;
-    END IF;
-
-    -- Compute overrides: if song existed and imported metadata differs, store as overrides
-    INSERT INTO setlist_entries (show_id, song_id, position, key_override, lead_override, notes_override)
+    -- Compute overrides using three-state semantics:
+    --   null  = use library default (imported value matches or is absent)
+    --   ''    = explicitly blank (imported has no value but library does)
+    --   value = override (imported differs from library)
+    INSERT INTO setlist_entries (
+      show_id, song_id, position,
+      key_override, lead_override, notes_override, scene_note
+    )
     SELECT
       v_show_id, v_song_id, v_position,
-      CASE WHEN s.key IS DISTINCT FROM NULLIF(v_song.value->>'key', '') THEN v_song.value->>'key' END,
-      CASE WHEN s.lead IS DISTINCT FROM COALESCE(v_song.value->>'lead', '') THEN v_song.value->>'lead' END,
-      CASE WHEN s.notes IS DISTINCT FROM COALESCE(v_song.value->>'notes', '') THEN v_song.value->>'notes' END
+      CASE
+        WHEN v_song.value->>'key' IS NULL THEN
+          CASE WHEN s.key IS NOT NULL THEN '' ELSE NULL END  -- imported absent, library has value → blank override
+        WHEN v_song.value->>'key' = COALESCE(s.key, '') THEN NULL  -- same → no override
+        ELSE v_song.value->>'key'  -- different → override
+      END,
+      CASE
+        WHEN COALESCE(v_song.value->>'lead', '') = s.lead THEN NULL
+        ELSE COALESCE(v_song.value->>'lead', '')
+      END,
+      CASE
+        WHEN COALESCE(v_song.value->>'notes', '') = s.notes THEN NULL
+        ELSE COALESCE(v_song.value->>'notes', '')
+      END,
+      NULLIF(v_song.value->>'scene_note', '')
     FROM songs s WHERE s.id = v_song_id;
   END LOOP;
 
   -- Dual-write: build inline setlist for config.setlist
   SELECT jsonb_agg(jsonb_build_object(
     'title', s.title,
-    'key', COALESCE(se.key_override, s.key),
+    'key', CASE WHEN se.key_override = '' THEN null
+                ELSE COALESCE(se.key_override, s.key) END,
     'lead', COALESCE(se.lead_override, s.lead),
     'notes', COALESCE(se.notes_override, s.notes),
+    'sceneNote', se.scene_note,
     'position', se.position
   ) ORDER BY se.position)
   INTO v_inline_setlist
@@ -363,7 +404,10 @@ BEGIN
   UPDATE shows SET config = jsonb_set(config, '{setlist}', COALESCE(v_inline_setlist, '[]'::jsonb))
   WHERE id = v_show_id;
 
-  RETURN jsonb_build_object('show_id', v_show_id);
+  RETURN jsonb_build_object(
+    'show_id', v_show_id,
+    'slug', (SELECT slug FROM shows WHERE id = v_show_id)
+  );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
@@ -371,10 +415,14 @@ REVOKE EXECUTE ON FUNCTION rpc_create_show_with_setlist FROM public, anon, authe
 GRANT EXECUTE ON FUNCTION rpc_create_show_with_setlist TO service_role;
 ```
 
-**Override rules on import/duplicate:** When an imported song matches an existing library song by `song_key`:
-- If the imported `key`, `lead`, or `notes` differ from the library defaults, they become per-show overrides
-- If they match, no override is stored (null = use library default)
+**Override rules on import/duplicate:** When an imported song matches an existing library song by `song_key` (computed server-side from title):
+- Imported value matches library default → `null` (no override)
+- Imported value differs from library default → stored as override
+- Imported value absent but library has a value → `''` (explicitly blank override)
+- `scene_note` is always stored as-is (not a library field)
 - This preserves the imported arrangement without polluting the canonical library record
+
+**Concurrency:** `INSERT ... ON CONFLICT DO NOTHING` + `SELECT` handles concurrent imports of the same new song safely — no unique constraint violation, both imports resolve to the same library song.
 
 ---
 
@@ -385,15 +433,27 @@ GRANT EXECUTE ON FUNCTION rpc_create_show_with_setlist TO service_role;
 The hydrated result must match the existing `SetlistSong` interface exactly so all client code works unchanged:
 
 ```typescript
+// Three-state override resolution:
+//   null       → use library default
+//   ''         → explicitly blank (override to empty)
+//   'value'    → use this override
+function resolveOverride(
+  override: string | null, fallback: string | null | undefined, emptyAs?: string
+): string | undefined {
+  if (override === '') return emptyAs;        // explicitly blank
+  if (override != null) return override;      // has override value
+  return fallback ?? undefined;               // use library default
+}
+
 // In the show resolution API, after hydration query:
 const setlist: SetlistSong[] = hydratedRows.map(row => ({
   id: row.entry_id,                                    // maps to SetlistSong.id
   songId: row.song_id,                                 // round-trips for save — client includes in entries
   position: row.position,
   title: row.title,
-  key: row.key_override ?? row.default_key ?? undefined,
-  lead: row.lead_override ?? row.default_lead ?? '',
-  notes: row.notes_override ?? row.default_notes ?? '',
+  key: resolveOverride(row.key_override, row.default_key),
+  lead: resolveOverride(row.lead_override, row.default_lead, '') ?? '',
+  notes: resolveOverride(row.notes_override, row.default_notes, '') ?? '',
   sceneNote: row.scene_note ?? undefined,              // camelCase, not snake_case
   // charts hydrated separately (same as today)
 }));
@@ -583,26 +643,34 @@ Add "Library" link.
 - [ ] Add new song (editor) — verify blocked with guidance message
 - [ ] Reorder — verify positions updated
 - [ ] Set override — verify stored, library default unchanged
-- [ ] Reset override — verify reverts
+- [ ] Set override to blank — verify '' stored (not null), renders as empty
+- [ ] Reset override — verify reverts to library default (null stored)
 - [ ] Remove song from setlist — verify entry deleted, song stays in library
 
 ### Show resolution (adapter)
 - [ ] Migrated show — hydrated from entries, emits `SetlistSong[]` shape
 - [ ] Non-migrated show — hydrated from `config.setlist`
 - [ ] Empty migrated setlist — returns `[]` (not legacy fallback)
-- [ ] Verify `id`, `sceneNote` (camelCase), `charts` all present in hydrated output
+- [ ] Verify `id`, `songId`, `sceneNote` (camelCase), `charts` all present in hydrated output
+- [ ] Three-state override resolution: null→default, ''→blank, 'val'→override
+- [ ] New show created empty (no setlist) → setlist_migrated = false, then first save flips to true
 - [ ] Offline fallback — cached hydrated data works
 - [ ] Export (YAML + JSON) — songId stripped from setlist entries
 - [ ] Import (YAML) — songId discarded, songs resolved by song_key
 - [ ] Import (JSON) — songId discarded, songs resolved by song_key
 - [ ] Import — unmatched songs created as new library entries
-- [ ] Import — matched songs with differing key/lead/notes become per-show overrides
-- [ ] Import — matched songs with identical metadata get no overrides (null)
+- [ ] Import — matched song with differing key/lead/notes → per-show overrides
+- [ ] Import — matched song with identical metadata → no overrides (null)
+- [ ] Import — matched song, imported has no key but library has key → '' override (blank)
+- [ ] Import — sceneNote preserved through import/duplicate
+- [ ] Import — song_key computed server-side from title (client value ignored)
+- [ ] Import — concurrent import of same new song → no constraint violation
 - [ ] Duplicate show — uses rpc_create_show_with_setlist, songs resolved/created atomically
 - [ ] Duplicate show — setlist_migrated = true on new show
 
 ### Atomic operations
 - [ ] rpc_save_show — verify config + entries + inline all written or none
+- [ ] rpc_save_show — verify setlist_migrated flipped to true on save
 - [ ] rpc_save_show — verify owner invariant rejects cross-owner song_id
 - [ ] rpc_create_show_with_setlist — verify show + songs + entries created atomically
 - [ ] rpc_create_show_with_setlist — verify matched songs get overrides, unmatched get created
