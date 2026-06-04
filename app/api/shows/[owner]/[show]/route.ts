@@ -1,20 +1,10 @@
 import { NextRequest } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { normalizeSongKeySafe } from '@/lib/normalize';
+import { resolveOverride } from '@/lib/overrides';
 import type { SetlistSong } from '@/lib/types';
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
-
-// Three-state override resolution
-function resolveOverride(
-  override: string | null | undefined,
-  fallback: string | null | undefined,
-  emptyAs?: string,
-): string | undefined {
-  if (override === '') return emptyAs;
-  if (override != null) return override;
-  return fallback ?? undefined;
-}
 
 // Hydrate setlist from setlist_entries + songs tables
 async function hydrateFromEntries(

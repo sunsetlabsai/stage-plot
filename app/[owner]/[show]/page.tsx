@@ -1749,6 +1749,7 @@ function AddSongFromLibrary({
   const [songs, setSongs] = useState<Array<{ id: string; title: string; key: string | null; lead: string; notes: string }>>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -1804,22 +1805,30 @@ function AddSongFromLibrary({
   async function handleCreateAndAdd() {
     if (!trimmed || creating) return;
     setCreating(true);
-    const res = await fetch('/api/songs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: trimmed }),
-    });
-    if (res.ok) {
-      const newSong = await res.json();
-      onAddSong({
-        songId: newSong.id,
-        title: newSong.title,
-        key: newSong.key ?? undefined,
-        lead: newSong.lead || '',
-        notes: newSong.notes || '',
+    setCreateError('');
+    try {
+      const res = await fetch('/api/songs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: trimmed }),
       });
-      setQuery('');
-      setOpen(false);
+      if (res.ok) {
+        const newSong = await res.json();
+        onAddSong({
+          songId: newSong.id,
+          title: newSong.title,
+          key: newSong.key ?? undefined,
+          lead: newSong.lead || '',
+          notes: newSong.notes || '',
+        });
+        setQuery('');
+        setOpen(false);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setCreateError(data.error || 'Failed to create song');
+      }
+    } catch {
+      setCreateError('Network error');
     }
     setCreating(false);
   }
@@ -1864,13 +1873,18 @@ function AddSongFromLibrary({
           ))}
           {!exactMatch && trimmed && (
             isOwner ? (
-              <button
-                className="w-full text-left px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 border-t border-gray-100 font-medium transition-colors"
-                onClick={handleCreateAndAdd}
-                disabled={creating}
-              >
-                {creating ? 'Creating...' : `Create & Add "${trimmed}"`}
-              </button>
+              <>
+                <button
+                  className="w-full text-left px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 border-t border-gray-100 font-medium transition-colors"
+                  onClick={handleCreateAndAdd}
+                  disabled={creating}
+                >
+                  {creating ? 'Creating...' : `Create & Add "${trimmed}"`}
+                </button>
+                {createError && (
+                  <div className="px-3 py-1.5 text-xs text-red-500 border-t border-gray-100">{createError}</div>
+                )}
+              </>
             ) : isEditor ? (
               <div className="px-3 py-2 text-sm text-gray-400 border-t border-gray-100">
                 Song not found. Ask the show owner to add it to the library.

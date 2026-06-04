@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeSongKey, normalizeSongKeySafe } from '../lib/normalize';
 import { serializeShow, deserializeShow } from '../lib/show-file';
+import { resolveOverride, diffOverride } from '../lib/overrides';
 
 describe('Song library: normalization single keyspace', () => {
   it('normalizes basic titles', () => {
@@ -102,16 +103,6 @@ setlist:
 });
 
 describe('Song library: override resolution', () => {
-  // Test the three-state semantics that the adapter uses
-  function resolveOverride(
-    override: string | null | undefined,
-    fallback: string | null | undefined,
-    emptyAs?: string,
-  ): string | undefined {
-    if (override === '') return emptyAs;
-    if (override != null) return override;
-    return fallback ?? undefined;
-  }
 
   it('null override uses library default', () => {
     expect(resolveOverride(null, 'C')).toBe('C');
@@ -132,5 +123,40 @@ describe('Song library: override resolution', () => {
 
   it('undefined override uses fallback', () => {
     expect(resolveOverride(undefined, 'Am')).toBe('Am');
+  });
+});
+
+describe('Song library: diffOverride (server-side)', () => {
+
+  it('matching values return null (no override)', () => {
+    expect(diffOverride('C', 'C')).toBe(null);
+  });
+
+  it('different values return the effective value', () => {
+    expect(diffOverride('D', 'C')).toBe('D');
+  });
+
+  it('blank effective vs non-blank default returns empty string', () => {
+    expect(diffOverride('', 'C')).toBe('');
+  });
+
+  it('both blank returns null', () => {
+    expect(diffOverride('', '')).toBe(null);
+  });
+
+  it('undefined effective treated as blank', () => {
+    expect(diffOverride(undefined, 'C')).toBe('');
+  });
+
+  it('null effective treated as blank', () => {
+    expect(diffOverride(null, 'C')).toBe('');
+  });
+
+  it('null default treated as blank', () => {
+    expect(diffOverride('D', null)).toBe('D');
+  });
+
+  it('both null returns null', () => {
+    expect(diffOverride(null, null)).toBe(null);
   });
 });

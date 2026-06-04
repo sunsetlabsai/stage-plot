@@ -2,18 +2,8 @@ import { NextRequest } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { normalizeSongKey, normalizeSongKeySafe } from '@/lib/normalize';
+import { resolveOverride, diffOverride } from '@/lib/overrides';
 import type { SetlistSong } from '@/lib/types';
-
-// Three-state override resolution for hydrating inline setlist
-function resolveOverride(
-  override: string | null | undefined,
-  fallback: string | null | undefined,
-  emptyAs?: string,
-): string | undefined {
-  if (override === '') return emptyAs;
-  if (override != null) return override;
-  return fallback ?? undefined;
-}
 
 interface EntryInput {
   song_id: string | null;
@@ -257,18 +247,3 @@ export async function PUT(request: NextRequest) {
   return Response.json({ updated_at: data.updated_at, slug: data.slug });
 }
 
-// Compare an effective value against a library default.
-// Returns: null (matches default), '' (explicitly blank), or the override value.
-function diffOverride(effective: string | undefined | null, libraryDefault: string | null): string | null {
-  const eff = effective ?? '';
-  const def = libraryDefault ?? '';
-
-  // If effective matches library default, no override needed
-  if (eff === def) return null;
-
-  // If effective is empty but library has a value, store '' (explicitly blank)
-  if (eff === '' && def !== '') return '';
-
-  // Otherwise, store the effective value as override
-  return eff;
-}

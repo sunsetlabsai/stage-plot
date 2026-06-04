@@ -30,6 +30,9 @@ export function useShow(
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingConfig = useRef<Record<string, unknown> | null>(null);
+  // Once entries have been sent successfully, treat show as migrated for the rest of the session.
+  // Prevents stale setlistMigrated=false from reverting to legacy path after removing all songs.
+  const hasSentEntries = useRef(false);
 
   const isReadOnly = !isOwner && !isEditor;
 
@@ -56,7 +59,7 @@ export function useShow(
         key?: string; lead?: string; notes?: string; sceneNote?: string;
       }> | undefined;
 
-      if (setlistMigrated || setlist?.some((s) => s.songId)) {
+      if (setlistMigrated || hasSentEntries.current || setlist?.some((s) => s.songId)) {
         // Send entries with effective values — server will diff against song defaults
         payload.entries = (setlist || []).map((s) => ({
           song_id: s.songId || null,
@@ -80,6 +83,10 @@ export function useShow(
         setLastSavedAt(updated_at);
         // Cache server timestamp for offline conflict detection
         localStorage.setItem(`showrunr-last-saved-${showId}`, updated_at);
+        // Once entries have been sent successfully, lock into entries path
+        if (payload.entries !== undefined) {
+          hasSentEntries.current = true;
+        }
       }
     } catch {
       // Network error — config remains in localStorage as fallback
