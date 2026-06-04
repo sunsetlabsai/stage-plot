@@ -9,6 +9,14 @@ interface ConfigEntry {
 
 type AdminConfig = Record<string, ConfigEntry>;
 
+interface Owner {
+  owner_slug: string;
+  display_name: string | null;
+  email: string | null;
+  show_count: number;
+  created_at: string;
+}
+
 export default function AdminPage() {
   const [secret, setSecret] = useState('');
   const [authenticated, setAuthenticated] = useState(false);
@@ -17,6 +25,9 @@ export default function AdminPage() {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState('');
+  const [owners, setOwners] = useState<Owner[]>([]);
+  const [ownersWarning, setOwnersWarning] = useState('');
+  const [ownersError, setOwnersError] = useState('');
 
   // Form fields
   const [googleClientId, setGoogleClientId] = useState('');
@@ -27,27 +38,38 @@ export default function AdminPage() {
     e.preventDefault();
     setError('');
 
-    const res = await fetch('/api/admin/settings', {
-      headers: { Authorization: `Bearer ${secret}` },
-    });
+    const authHeader = { Authorization: `Bearer ${secret}` };
 
-    if (res.status === 401) {
+    // Fetch settings and owners in parallel — either can fail independently
+    const [settingsRes, ownersRes] = await Promise.all([
+      fetch('/api/admin/settings', { headers: authHeader }),
+      fetch('/api/admin/owners', { headers: authHeader }),
+    ]);
+
+    // Check auth on either response (both use same secret)
+    if (settingsRes.status === 401 || ownersRes.status === 401) {
       setError('Invalid admin secret.');
       return;
     }
-    if (res.status === 503) {
-      const data = await res.json();
-      setError(data.error);
-      return;
-    }
-    if (!res.ok) {
-      setError('Unexpected error.');
-      return;
+
+    // Settings may be 503 (KV down) — still authenticate and show owners
+    if (settingsRes.ok) {
+      const settingsData = await settingsRes.json();
+      setConfig(settingsData.config);
+      setKvConnected(settingsData.kvConnected);
+    } else if (settingsRes.status === 503) {
+      setKvConnected(false);
     }
 
-    const data = await res.json();
-    setConfig(data.config);
-    setKvConnected(data.kvConnected);
+    // Owners
+    if (ownersRes.ok) {
+      const ownersData = await ownersRes.json();
+      setOwners(ownersData.owners || []);
+      if (ownersData.warning) setOwnersWarning(ownersData.warning);
+    } else {
+      setOwnersError('Failed to load owners');
+    }
+
     setAuthenticated(true);
   }
 
@@ -173,6 +195,55 @@ export default function AdminPage() {
             </div>
           </div>
         )}
+
+        {/* Registered Owners */}
+        <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500 mb-3">Registered Owners</h2>
+          {ownersError ? (
+            <p className="text-sm text-red-600">{ownersError}</p>
+          ) : (
+            <>
+              {ownersWarning && (
+                <p className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded mb-3">
+                  {ownersWarning}
+                </p>
+              )}
+              {owners.length === 0 ? (
+                <p className="text-sm text-gray-400">No owners registered yet.</p>
+              ) : (
+                <>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-xs text-gray-500 uppercase tracking-wide border-b">
+                          <th className="pb-2 pr-4">Handle</th>
+                          <th className="pb-2 pr-4">Name</th>
+                          <th className="pb-2 pr-4">Email</th>
+                          <th className="pb-2 pr-4 text-right">Shows</th>
+                          <th className="pb-2">Joined</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {owners.map((o) => (
+                          <tr key={o.owner_slug} className="border-b border-gray-100">
+                            <td className="py-2 pr-4 font-mono text-gray-800">{o.owner_slug}</td>
+                            <td className="py-2 pr-4 text-gray-600">{o.display_name || '—'}</td>
+                            <td className="py-2 pr-4 text-gray-600">{o.email || '—'}</td>
+                            <td className="py-2 pr-4 text-right text-gray-600">{o.show_count}</td>
+                            <td className="py-2 text-gray-400">
+                              {o.created_at ? new Date(o.created_at).toLocaleDateString() : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-3">{owners.length} owner{owners.length !== 1 ? 's' : ''} registered</p>
+                </>
+              )}
+            </>
+          )}
+        </div>
 
         {/* Update form */}
         <form onSubmit={handleSave} className="bg-white rounded-xl shadow-sm p-6">

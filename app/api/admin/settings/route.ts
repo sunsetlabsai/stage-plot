@@ -1,31 +1,6 @@
 import { NextRequest } from 'next/server';
 import { getAllAdminConfig, setAdminConfig, isKvConnected } from '@/lib/admin-config';
-
-const RATE_LIMIT_WINDOW = 60_000; // 1 minute
-const RATE_LIMIT_MAX = 5;
-const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  let entry = rateLimitMap.get(ip);
-  if (!entry || now > entry.resetAt) {
-    entry = { count: 0, resetAt: now + RATE_LIMIT_WINDOW };
-    rateLimitMap.set(ip, entry);
-  }
-  entry.count++;
-  return entry.count <= RATE_LIMIT_MAX;
-}
-
-function getIp(request: NextRequest): string {
-  return request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
-}
-
-function authenticate(request: NextRequest): boolean {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) return false;
-  const provided = request.headers.get('authorization')?.replace('Bearer ', '');
-  return !!provided && provided === secret;
-}
+import { checkRateLimit, getIp, authenticate } from '@/lib/admin-rate-limit';
 
 export async function GET(request: NextRequest) {
   const ip = getIp(request);

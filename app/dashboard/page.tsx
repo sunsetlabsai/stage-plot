@@ -201,8 +201,13 @@ export default function DashboardPage() {
 
       {owned.length === 0 && collaborating.length === 0 ? (
         <div className="text-center py-16 text-zinc-500">
-          <p className="text-lg">No shows yet.</p>
-          <p className="mt-2">Create a new show or import a .showrunr.yaml file.</p>
+          <p className="text-lg">Welcome to ShowRunr.</p>
+          <p className="mt-2">Create your first show, or import an existing .showrunr.yaml file.</p>
+          {ownerSlug && (
+            <p className="mt-1 text-xs text-zinc-600">
+              Your shows will live at showrunr.ai/{ownerSlug}/...
+            </p>
+          )}
         </div>
       ) : (
         <>
