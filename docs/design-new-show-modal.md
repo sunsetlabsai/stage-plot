@@ -1,6 +1,6 @@
 # Design: New Show Modal + Duplicate Show
 
-**Status:** Draft v1.0
+**Status:** Draft v1.1 (addresses Codex round 1 — 5 findings)
 **Date:** 2026-06-04
 
 ---
@@ -39,17 +39,27 @@ Dashboard → [+ New Show] → Modal opens
 
 **Details:**
 - Modal is a simple overlay div (no external dependency). Escape or Cancel dismisses.
-- Show name is required. Create button disabled until non-empty.
+- Show name is required. Create button disabled until the trimmed name produces a non-empty slug.
 - Slug preview shown below the input, live-updating as you type: `/{ownerSlug}/{slugify(name)}`.
 - Slug preview is informational only — the server generates the actual slug (with collision handling). If the server appends a suffix, the redirect uses the server's slug.
-- The `showInfo.bandName` is left blank in the initial config — the user sets it in Config tab. `shows.name` (the DB field used in dashboard + slug) comes from the modal input.
-- `showInfo.showName` is populated from the modal input so it shows on Perform/Mix tabs immediately.
+- Both `showInfo.bandName` and `showInfo.showName` are initialized to the modal name. This ensures exports (YAML serializer reads `bandName`), Mix tab header (`bandName || 'Untitled'`), and Perform tab all work correctly from creation. The user can change either independently in Config later.
+
+**Name validation (client + API hardening):**
+- Client: trim whitespace, reject if `slugify(trimmed)` is empty (e.g., all punctuation). Max length 100 characters.
+- API (`POST /api/shows`): add equivalent server-side check — if `slugify(name)` produces empty string, return 400. This hardens the existing API against whitespace-only or punctuation-only names.
+
+**Modal interaction states:**
+- Autofocus on the name input when modal opens.
+- Focus trap: Tab cycles within the modal (name input → Cancel → Create → name input). Implemented via `onKeyDown` handler on the overlay.
+- Submit-in-flight: Create button shows "Creating..." and is disabled. Prevent double-submit.
+- POST failure: show inline error below the form ("Could not create show. Try again."). Modal stays open.
+- Escape key or overlay click: dismiss modal, return focus to the "New Show" button.
 
 **Config sent to POST /api/shows:**
 ```typescript
 {
   config: {
-    showInfo: { bandName: '', showName: name, eventDate: '', venue: '' },
+    showInfo: { bandName: name, showName: name, eventDate: '', venue: '' },
     stagePlot: [],
     inputs: [],
     monitors: [],
@@ -64,7 +74,7 @@ Dashboard → [+ New Show] → Modal opens
 
 ### B. Duplicate Show
 
-Copy all config from an existing show into a new show with a fresh name and slug.
+Copy config from an existing show into a new show with a fresh name and slug. **Config is independent; chart assets are shared.**
 
 **Entry points:**
 1. Dashboard — "Duplicate" action on each owned show card (next to Delete).
@@ -81,10 +91,11 @@ Dashboard → [Duplicate] on "Friday at Roxy"
 
 **Details:**
 - Fetch the original show's full config via `GET /api/shows/{owner}/{slug}` (already exists — returns the config).
-- The duplicate is a new independent show. No link to the original. All config (stage plot, inputs, monitors, notes, setlist) is deep-copied.
-- Charts in the setlist reference Supabase Storage URLs, which are owner-scoped and public-read. They work across shows without copying blobs.
-- `showInfo.showName` is set to the new name from the modal.
-- `showInfo.bandName` carries over from the original (same band, different show — the common case).
+- The duplicate creates a new independent show. Config (stage plot, inputs, monitors, notes, setlist) is deep-copied into the new show's JSON.
+- **Charts are shared, not copied.** Charts live in `chart_library` (owner-scoped, matched by `song_key`). Both the original and duplicate reference the same library entries. Deleting a chart from the library removes it from all shows. This is by design — the chart library is owner-level, not show-level. The duplicate inherits chart references via the normal resolution path.
+- `showInfo.showName` and `showInfo.bandName` are both set to the new modal name. `bandName` carries over from the original as the default pre-fill in the modal's name field (user can change).
+- Duplicate explicitly sends `venue` and `show_date` from the source show's config: `venue: sourceConfig.showInfo.venue || null`, `show_date: sourceConfig.showInfo.eventDate || null` (validated as `YYYY-MM-DD` or null).
+- Modal reuses the same component as New Show — just different pre-fill and title ("Duplicate Show" vs "Create a New Show").
 
 ### C. use-show.ts Name Sync Fix
 
@@ -96,9 +107,9 @@ No change needed here. The modal sets the initial name + slug; subsequent edits 
 
 ## API Changes
 
-### POST /api/shows — No changes needed
+### POST /api/shows — Name validation hardening
 
-Already accepts `{ config, name, venue, show_date }` and slugifies `name`. Works as-is.
+Add server-side check: if `slugify(name.trim())` produces an empty string, return 400 `{ error: 'Name must contain at least one letter or number' }`. This prevents "show" slugs from whitespace/punctuation-only names.
 
 ### GET /api/shows/{owner}/{slug} — No changes needed
 
@@ -110,30 +121,42 @@ Already returns the full show config. Used by Duplicate to fetch source config.
 
 | File | Change |
 |------|--------|
-| `app/dashboard/page.tsx` | Replace `handleCreate` with modal. Add `handleDuplicate`. Add modal component. Add Duplicate button to ShowCard. |
-
-One file. No API changes. No migration.
+| `app/dashboard/page.tsx` | Replace `handleCreate` with modal component. Add `handleDuplicate`. Add Duplicate button to ShowCard. Modal with focus trap, loading/error states. |
+| `app/api/shows/route.ts` | Add name validation in POST handler (reject empty slugs). |
 
 ---
 
 ## Test Plan
 
 ### New Show Modal
-- [ ] Click "New Show" — modal opens, Create disabled
+- [ ] Click "New Show" — modal opens, Create disabled, name input focused
 - [ ] Type show name — slug preview updates live
 - [ ] Click Create — show created with correct name and slug
+- [ ] Both bandName and showName set to modal name — verify export works, Mix tab shows name, Perform tab shows name
 - [ ] Slug collision — server appends suffix, redirect uses server slug
-- [ ] Cancel / Escape — modal closes, no show created
+- [ ] Cancel / Escape / overlay click — modal closes, no show created, focus returns to button
 - [ ] Empty name — Create stays disabled
-- [ ] Show page reflects showName on Perform/Mix tabs
+- [ ] Whitespace-only name — Create stays disabled (slugify produces empty)
+- [ ] Punctuation-only name — Create stays disabled
+- [ ] Name > 100 chars — input truncates
+- [ ] Double-click Create — only one POST fires
+- [ ] POST failure — error shown inline, modal stays open
+- [ ] Tab key — cycles within modal (focus trap)
 
 ### Duplicate Show
 - [ ] Click "Duplicate" on a show — modal opens pre-filled "Copy of {name}"
 - [ ] Edit name, Create — new show with all config from original
 - [ ] Original show unchanged after duplicate
-- [ ] Charts work in duplicate (Supabase URLs still valid)
-- [ ] Band name carries over from original
+- [ ] Charts resolve in duplicate (shared chart_library references)
+- [ ] Deleting a chart affects both original and duplicate (shared, by design)
+- [ ] Band name, venue, show_date carry over from original
 - [ ] New slug is independent
+- [ ] Duplicate fetch failure — error shown
+
+### API Hardening
+- [ ] POST /api/shows with whitespace-only name — 400
+- [ ] POST /api/shows with punctuation-only name — 400
+- [ ] POST /api/shows with valid name — 201 (unchanged)
 
 ### Regression
 - [ ] Import YAML still works (no modal — direct create with parsed name)
@@ -147,3 +170,4 @@ One file. No API changes. No migration.
 - Show rename (changing slug of existing show)
 - Show templates / presets
 - Duplicate from within the show page (dashboard-only for now)
+- Chart duplication (charts are owner-level library assets, shared by design)
