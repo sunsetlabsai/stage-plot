@@ -1,6 +1,6 @@
 # Design: Owner Onboarding Polish + Admin Visibility
 
-**Status:** Draft v1.1 (rescoped from v1.0)
+**Status:** Draft v1.2 (addresses Codex round 1 — 5 findings)
 **Date:** 2026-06-04
 **Depends on:** Owner namespacing (PR #57, migration 005)
 
@@ -25,19 +25,23 @@ Three small, targeted fixes. No migration. No new auth model. Collaborator permi
 ## A. /claim Success + Navigation
 
 ### Current behavior
-`/claim` → POST → `router.push('/dashboard')`. No feedback. If push is slow, user sees nothing.
+`/claim` → POST → `router.push('/dashboard')`. No feedback. If push is slow, user sees nothing. Revisiting `/claim` after already claiming shows the form again (middleware exempts `/claim` from the profile redirect check).
 
 ### Proposed change
 
-After successful claim:
-1. Show a brief success state in the form: "Claimed! Redirecting..." with a manual link to `/dashboard` as fallback.
-2. Add a persistent back-nav link at the top of `/claim` for users who land there by accident or want to go back: "← Back to Dashboard" (only shown if they already have a profile — but since middleware redirects to /claim when no profile exists, this link only appears on direct navigation).
+**On-mount profile check:** When `/claim` loads, call `GET /api/profiles`. Three cases:
+
+1. **200 (profile exists):** Show "Already claimed as **{handle}**" with a link to `/dashboard`. Do not show the claim form.
+2. **404 (no profile):** Show the claim form (current behavior).
+3. **401 (not authenticated):** Redirect to `/sign-in?redirect=/claim`.
+
+**After successful claim:** Show a brief success state: "Claimed **{handle}**! Redirecting..." with a manual link to `/dashboard` as fallback. Then `router.push('/dashboard')` as today.
 
 ### Files changed
 
 | File | Change |
 |------|--------|
-| `app/claim/page.tsx` | Success state with "Claimed!" message + fallback link to /dashboard |
+| `app/claim/page.tsx` | On-mount profile check, already-claimed state, success state with fallback link |
 
 ---
 
@@ -47,36 +51,80 @@ After successful claim:
 
 Existing `/admin` page (ADMIN_SECRET-gated). New "Registered Owners" section.
 
+### Admin auth independence
+
+The current `/admin` page authenticates by calling `GET /api/admin/settings` — if KV is disconnected, that returns 503 and the page never enters authenticated state. The owner list is Supabase-backed and should not be gated on KV health.
+
+**Fix:** Split admin auth from settings load. The new `/api/admin/owners` route validates `ADMIN_SECRET` independently (direct `process.env` comparison, no KV dependency). The `/admin` page calls both endpoints after the user enters the secret — if settings returns 503 (KV down), still show the owner list if `/api/admin/owners` succeeds.
+
 ### UX
 
 ```
-┌──────────────────────────────────────────┐
-│  Registered Owners                       │
-│                                          │
-│  Handle        Display Name    Shows  Joined    │
-│  ──────────    ────────────    ─────  ────────  │
-│  graham        Graham Devlin   3      2026-05-15│
-│  rachel        Rachel K        1      2026-06-01│
+┌──────────────────────────────────────────────────┐
+│  Registered Owners                               │
 │                                                  │
-│  2 owners registered                             │
-└──────────────────────────────────────────────────┘
+│  Handle        Display Name   Email         Shows  Joined    │
+│  ──────────    ────────────   ───────────   ─────  ────────  │
+│  graham        Graham Devlin  g@sunset...   3      2026-05-15│
+│  rachel        Rachel K       r@band.com    1      2026-06-01│
+│                                                              │
+│  2 owners registered                                         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### API Route
 
 **`GET /api/admin/owners`**
 
-- Auth: `Authorization: Bearer {ADMIN_SECRET}` (same pattern as existing `/api/admin/settings`)
-- Query: join `profiles` with show count (aggregate) and `auth.users` for email
-- Uses admin client (needs `auth.users` for email)
-- Returns: `{ owners: [{ owner_slug, display_name, email, show_count, created_at }] }`
+- Auth: `Authorization: Bearer {ADMIN_SECRET}` — validated against `process.env.ADMIN_SECRET` (no KV dependency)
+- Rate limit: reuse the same in-memory rate limiter pattern from `/api/admin/settings` (5 req/min/IP). Extract the helper into a shared module or inline the same pattern.
+- **Multi-query implementation** (not a single join — `auth.users` is not a PostgREST table, and `profiles` has no FK to `shows`):
+
+```typescript
+const admin = getSupabaseAdmin();
+
+// 1. Fetch all profiles
+const { data: profiles } = await admin
+  .from('profiles')
+  .select('id, owner_slug, display_name, created_at')
+  .order('created_at', { ascending: false });
+
+// 2. Fetch show counts grouped by owner_id
+const { data: shows } = await admin
+  .from('shows')
+  .select('owner_id');
+const showCounts: Record<string, number> = {};
+for (const s of shows || []) {
+  showCounts[s.owner_id] = (showCounts[s.owner_id] || 0) + 1;
+}
+
+// 3. Fetch emails via admin auth API
+const { data: { users } } = await admin.auth.admin.listUsers();
+const emailMap: Record<string, string> = {};
+for (const u of users) {
+  emailMap[u.id] = u.email || '';
+}
+
+// 4. Assemble
+const owners = (profiles || []).map(p => ({
+  owner_slug: p.owner_slug,
+  display_name: p.display_name,
+  email: emailMap[p.id] || '',
+  show_count: showCounts[p.id] || 0,
+  created_at: p.created_at,
+}));
+```
+
+This works fine at ShowRunr's scale (< 100 users). `listUsers()` paginates at 1000 by default.
+
+- Returns: `{ owners: [...] }`
 
 ### Files changed
 
 | File | Change |
 |------|--------|
-| `app/api/admin/owners/route.ts` | New — list registered owners (admin-only) |
-| `app/admin/page.tsx` | Add "Registered Owners" section below existing settings |
+| `app/api/admin/owners/route.ts` | New — multi-query owner list with rate limiting (admin-only) |
+| `app/admin/page.tsx` | Add "Registered Owners" section; split auth so owner list works even if KV is down |
 
 ---
 
@@ -95,7 +143,7 @@ Create your first show, or import an existing .showrunr.yaml file.
 Your shows will live at showrunr.ai/{handle}/...
 ```
 
-Where `{handle}` is the user's actual owner_slug (already available in the dashboard data).
+Where `{handle}` is the user's actual `ownerSlug` (already loaded into state before the empty branch renders — `dashboard/page.tsx:31`).
 
 ### Files changed
 
@@ -108,14 +156,21 @@ Where `{handle}` is the user's actual owner_slug (already available in the dashb
 ## Test Plan
 
 ### /claim polish
-- [ ] Claim handle — see "Claimed!" success message
+- [ ] New user: claim handle — see "Claimed {handle}!" success message
 - [ ] Fallback link to /dashboard works
 - [ ] Redirect to dashboard still fires automatically
+- [ ] Revisit /claim after already claiming — see "Already claimed as {handle}" with dashboard link (no form)
+- [ ] Unauthenticated visit to /claim — redirect to /sign-in
+- [ ] Profile check failure (network error) — show claim form as fallback (don't block)
 
 ### Owner admin list
 - [ ] /admin shows registered owners with handle, name, email, show count, join date
-- [ ] Non-admin gets 401
-- [ ] Owner with zero shows displays correctly
+- [ ] Non-admin (wrong/missing secret) gets 401
+- [ ] Rate limiting: 6th request in 1 minute returns 429
+- [ ] Owner with zero shows displays correctly (show_count: 0)
+- [ ] Multiple owners with varying show counts — counts are accurate
+- [ ] KV disconnected — settings section shows error, but owner list still loads
+- [ ] Email mapping works (listUsers response matched by user ID)
 
 ### Dashboard guidance
 - [ ] New user with zero shows sees personalized welcome with their handle
@@ -129,3 +184,4 @@ Where `{handle}` is the user's actual owner_slug (already available in the dashb
 - Billing / usage gates (see `docs/design-payments.md`)
 - Email notifications
 - Profile editing (handle rename, display name change)
+- Unifying admin + owner auth (admin is a separate URL + password for now)
