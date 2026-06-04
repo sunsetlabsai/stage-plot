@@ -8,7 +8,7 @@ const RESERVED_SLUGS = new Set([
 ]);
 
 function slugify(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'show';
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 }
 
 // GET /api/shows — list authenticated user's shows
@@ -85,14 +85,26 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { config, name, venue, show_date } = body;
+  const { config, venue, show_date } = body;
+  let { name } = body;
 
-  if (!config || !name) {
-    return Response.json({ error: 'config and name are required' }, { status: 400 });
+  if (!config) {
+    return Response.json({ error: 'config is required' }, { status: 400 });
+  }
+  if (typeof name !== 'string' || !name) {
+    return Response.json({ error: 'name must be a non-empty string' }, { status: 400 });
+  }
+
+  name = name.trim().slice(0, 100);
+  if (!name) {
+    return Response.json({ error: 'Name is required' }, { status: 400 });
   }
 
   // Generate slug with collision handling
   const baseSlug = slugify(name);
+  if (!baseSlug) {
+    return Response.json({ error: 'Name must contain at least one letter or number' }, { status: 400 });
+  }
   let slug = baseSlug;
 
   if (RESERVED_SLUGS.has(slug)) {
