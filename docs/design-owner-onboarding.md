@@ -1,6 +1,6 @@
 # Design: Owner Onboarding Polish + Admin Visibility
 
-**Status:** Draft v1.2 (addresses Codex round 1 — 5 findings)
+**Status:** Draft v1.3 (addresses Codex rounds 1-2)
 **Date:** 2026-06-04
 **Depends on:** Owner namespacing (PR #57, migration 005)
 
@@ -29,11 +29,12 @@ Three small, targeted fixes. No migration. No new auth model. Collaborator permi
 
 ### Proposed change
 
-**On-mount profile check:** When `/claim` loads, call `GET /api/profiles`. Three cases:
+**On-mount profile check:** When `/claim` loads, show a loading spinner while calling `GET /api/profiles`. The claim form is NOT rendered until the check resolves. Three cases:
 
 1. **200 (profile exists):** Show "Already claimed as **{handle}**" with a link to `/dashboard`. Do not show the claim form.
 2. **404 (no profile):** Show the claim form (current behavior).
 3. **401 (not authenticated):** Redirect to `/sign-in?redirect=/claim`.
+4. **Network error:** Show the claim form as fallback (don't block on check failure).
 
 **After successful claim:** Show a brief success state: "Claimed **{handle}**! Redirecting..." with a manual link to `/dashboard` as fallback. Then `router.push('/dashboard')` as today.
 
@@ -84,38 +85,59 @@ The current `/admin` page authenticates by calling `GET /api/admin/settings` —
 const admin = getSupabaseAdmin();
 
 // 1. Fetch all profiles
-const { data: profiles } = await admin
+const { data: profiles, error: profilesErr } = await admin
   .from('profiles')
   .select('id, owner_slug, display_name, created_at')
   .order('created_at', { ascending: false });
 
+if (profilesErr || !profiles) {
+  return Response.json({ error: 'Failed to load profiles' }, { status: 500 });
+}
+
 // 2. Fetch show counts grouped by owner_id
-const { data: shows } = await admin
+const { data: shows, error: showsErr } = await admin
   .from('shows')
   .select('owner_id');
+
+if (showsErr) {
+  return Response.json({ error: 'Failed to load shows' }, { status: 500 });
+}
+
 const showCounts: Record<string, number> = {};
 for (const s of shows || []) {
   showCounts[s.owner_id] = (showCounts[s.owner_id] || 0) + 1;
 }
 
-// 3. Fetch emails via admin auth API
-const { data: { users } } = await admin.auth.admin.listUsers();
+// 3. Fetch emails via admin auth API (default is 50/page, request 1000)
+const { data: { users }, error: usersErr } = await admin.auth.admin.listUsers({
+  page: 1,
+  perPage: 1000,
+});
+
+// Email lookup is non-fatal — return owners with email: null + warning
 const emailMap: Record<string, string> = {};
-for (const u of users) {
-  emailMap[u.id] = u.email || '';
+let emailWarning: string | null = null;
+if (usersErr || !users) {
+  emailWarning = 'Could not load user emails';
+} else {
+  for (const u of users) {
+    emailMap[u.id] = u.email || '';
+  }
 }
 
 // 4. Assemble
-const owners = (profiles || []).map(p => ({
+const owners = profiles.map(p => ({
   owner_slug: p.owner_slug,
   display_name: p.display_name,
-  email: emailMap[p.id] || '',
+  email: emailMap[p.id] || null,
   show_count: showCounts[p.id] || 0,
   created_at: p.created_at,
 }));
+
+return Response.json({ owners, ...(emailWarning && { warning: emailWarning }) });
 ```
 
-This works fine at ShowRunr's scale (< 100 users). `listUsers()` paginates at 1000 by default.
+Supabase `listUsers()` defaults to 50/page (not 1000). Explicit `perPage: 1000` handles up to 1000 owners. Beyond that, add pagination loop — not needed at current scale.
 
 - Returns: `{ owners: [...] }`
 
