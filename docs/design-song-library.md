@@ -1,6 +1,6 @@
 # Design: Song Library Manager
 
-**Status:** Draft v1.4 (addresses Codex round 3: 3 HIGH, 3 MEDIUM, 1 LOW)
+**Status:** Draft v1.5 (addresses Codex round 4: 3 MEDIUM, 1 LOW)
 **Date:** 2025-06-04
 **Depends on:** Supabase backend (migration 003 chart_library)
 
@@ -67,10 +67,10 @@ CREATE TRIGGER set_songs_updated_at
 
 CREATE INDEX songs_owner_idx ON songs(owner_id);
 
--- RLS: owner can read/write; collaborators can read (for autocomplete)
-CREATE POLICY "Owner full access" ON songs
-  USING (auth.uid() = owner_id)
-  WITH CHECK (auth.uid() = owner_id);
+-- RLS: read-only for all client access. All writes go through service_role API routes
+-- which bypass RLS, enforcing title normalization, song_key cascade, and blob cleanup.
+CREATE POLICY "Owner read" ON songs FOR SELECT
+  USING (auth.uid() = owner_id);
 
 CREATE POLICY "Collaborator read" ON songs FOR SELECT
   USING (
@@ -156,15 +156,21 @@ DECLARE
   v_result jsonb;
   v_owner_id uuid;
 BEGIN
-  -- Verify owner invariant: all song_ids must belong to the show's owner
+  -- Verify show exists
   SELECT owner_id INTO v_owner_id FROM shows WHERE id = p_show_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Show not found';
+  END IF;
+
+  -- Verify owner invariant: every song_id must resolve to a song owned by this show's owner.
+  -- Anti-join catches missing songs, deleted songs, AND cross-owner songs in one check.
   IF p_entries IS NOT NULL AND jsonb_array_length(p_entries) > 0 THEN
     IF EXISTS (
       SELECT 1 FROM jsonb_array_elements(p_entries) AS e
-      JOIN songs s ON s.id = (e->>'song_id')::uuid
-      WHERE s.owner_id != v_owner_id
+      LEFT JOIN songs s ON s.id = (e->>'song_id')::uuid AND s.owner_id = v_owner_id
+      WHERE s.id IS NULL
     ) THEN
-      RAISE EXCEPTION 'Song does not belong to show owner';
+      RAISE EXCEPTION 'One or more songs not found or not owned by show owner';
     END IF;
   END IF;
 
@@ -215,6 +221,8 @@ GRANT EXECUTE ON FUNCTION rpc_save_show TO service_role;
 ### Song creation + setlist add (no dedicated RPC)
 
 **Simplified flow:** `POST /api/songs` creates the song (returns `id`). The client adds the new `song_id` to its local setlist state. The normal save flow calls `rpc_save_show`, which writes both entries and inline JSON atomically. This eliminates a dedicated RPC and ensures all setlist mutations go through a single atomic path with dual-write.
+
+**Accepted partial-persist:** If the user clicks "Create & Add" but never saves the show (tab close, navigation, validation error), the song persists in the library without a setlist reference. This is an intentionally accepted state — songs can exist in the library independent of any show (users can also create songs directly from `/library`). The "Create & Add" button shows a brief toast confirming the song was added to the library, and the setlist shows unsaved-change indicator (dirty dot) until the show is saved.
 
 ### `rpc_delete_song(song_id, owner_id)`
 
@@ -301,9 +309,13 @@ const setlist: SetlistSong[] = hydratedRows.map(row => ({
 }));
 ```
 
-**`songId` round-trip (H2 fix):** The adapter includes `songId` in the hydrated output. Existing client code ignores unknown fields, so this is backwards-compatible. On save, the client passes `songId` back in the entries array, which `rpc_save_show` uses to reconstruct `setlist_entries`. Without this, the save path cannot map client setlist items back to canonical songs.
+**`songId` round-trip (H2 fix):** The adapter includes `songId` in the hydrated output. On save, the client passes `songId` back in the entries array, which `rpc_save_show` uses to reconstruct `setlist_entries`. Without this, the save path cannot map client setlist items back to canonical songs.
 
-This is injected into `config.setlist` before returning. The client receives the exact same `AppConfig` shape it always has. Export/import (`show-file.ts`), AI (`agent.ts`), offline cache, rendering — all unchanged.
+**Type change:** Add `songId?: string` to the `SetlistSong` interface in `lib/types.ts`.
+
+**Export/import contract:** YAML export (`show-file.ts`) must explicitly strip `songId` from setlist entries to avoid leaking internal DB UUIDs into show files. On import, `songId` is discarded — songs are resolved by `song_key` (normalized title) against the importing owner's library. If no match, the song is created as a new library entry.
+
+This is injected into `config.setlist` before returning. The client receives the exact same `AppConfig` shape it always has. AI (`agent.ts`), offline cache, rendering — all unchanged. Export/import strips/resolves `songId` at boundaries.
 
 ### Dual-read
 
@@ -481,7 +493,9 @@ Add "Library" link.
 - [ ] Empty migrated setlist — returns `[]` (not legacy fallback)
 - [ ] Verify `id`, `sceneNote` (camelCase), `charts` all present in hydrated output
 - [ ] Offline fallback — cached hydrated data works
-- [ ] YAML export/import — works with hydrated config
+- [ ] YAML export — songId stripped from exported setlist entries
+- [ ] YAML import — songId discarded, songs resolved by song_key against owner's library
+- [ ] YAML import — unmatched songs created as new library entries
 
 ### Atomic operations
 - [ ] rpc_save_show — verify config + entries + inline all written or none
@@ -492,9 +506,12 @@ Add "Library" link.
 ### Security
 - [ ] RPCs not callable by authenticated/anon clients (REVOKE verified)
 - [ ] setlist_entries not readable/writable by authenticated client (RLS enabled, no policies)
-- [ ] songs readable by collaborators (any role), writable only by owner
+- [ ] songs not directly writable by authenticated owner (RLS is SELECT-only)
+- [ ] songs readable by collaborators (any role) via RLS
 - [ ] GET /api/songs — admin client, rejects unauthenticated, returns correct counts
 - [ ] rpc_save_show — rejects entry with song_id from different owner
+- [ ] rpc_save_show — rejects entry with missing/deleted song_id
+- [ ] rpc_save_show — rejects non-existent show_id
 - [ ] /library unauthenticated — redirect to sign-in
 
 ### Migration
