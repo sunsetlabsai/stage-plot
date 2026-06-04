@@ -54,8 +54,8 @@ export default function DashboardPage() {
         const config = JSON.parse(decodeURIComponent(atob(pending)));
         const name = config.showInfo?.showName || config.showInfo?.bandName || 'Imported Show';
         const legacySetlist = Array.isArray(config.setlist)
-          ? config.setlist.filter((s: { title?: string }) => s.title?.trim()).map((s: { title: string; key?: string; lead?: string; notes?: string; sceneNote?: string }) => ({
-              title: s.title, key: s.key ?? null, lead: s.lead ?? '', notes: s.notes ?? '', sceneNote: s.sceneNote ?? null,
+          ? config.setlist.map((s: { title?: string; key?: string; lead?: string; notes?: string; sceneNote?: string }) => ({
+              title: s.title ?? '', key: s.key ?? null, lead: s.lead ?? '', notes: s.notes ?? '', sceneNote: s.sceneNote ?? null,
             }))
           : [];
         fetch('/api/shows', {
@@ -98,15 +98,14 @@ export default function DashboardPage() {
       const name = config.showInfo.showName || config.showInfo.bandName || 'Imported Show';
 
       // Extract setlist songs for rpc_create_show_with_setlist
-      const setlistSongs = config.setlist
-        .filter((s) => s.title?.trim())
-        .map((s) => ({
-          title: s.title,
-          key: s.key ?? null,
-          lead: s.lead ?? '',
-          notes: s.notes ?? '',
-          sceneNote: s.sceneNote ?? null,
-        }));
+      // Send all songs — server validates and rejects bad titles with 400
+      const setlistSongs = config.setlist.map((s) => ({
+        title: s.title,
+        key: s.key ?? null,
+        lead: s.lead ?? '',
+        notes: s.notes ?? '',
+        sceneNote: s.sceneNote ?? null,
+      }));
 
       const res = await fetch('/api/shows', {
         method: 'POST',
@@ -436,18 +435,17 @@ function CreateShowModal({
       }
 
       // Extract setlist songs for rpc_create_show_with_setlist
+      // Send all songs — server validates and rejects bad titles with 400
       const rawSetlistForSongs = (config.setlist || []) as Array<{
         title?: string; key?: string; lead?: string; notes?: string; sceneNote?: string;
       }>;
-      const setlistSongs = rawSetlistForSongs
-        .filter((s) => s.title?.trim())
-        .map((s) => ({
-          title: s.title!,
-          key: s.key ?? null,
-          lead: s.lead ?? '',
-          notes: s.notes ?? '',
-          sceneNote: s.sceneNote ?? null,
-        }));
+      const setlistSongs = rawSetlistForSongs.map((s) => ({
+        title: s.title ?? '',
+        key: s.key ?? null,
+        lead: s.lead ?? '',
+        notes: s.notes ?? '',
+        sceneNote: s.sceneNote ?? null,
+      }));
 
       const res = await fetch('/api/shows', {
         method: 'POST',

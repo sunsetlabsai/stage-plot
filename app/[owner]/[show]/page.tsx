@@ -227,8 +227,9 @@ export default function Page() {
   const [loadError, setLoadError] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [chartCacheProgress, setChartCacheProgress] = useState<DownloadProgress | null>(null);
+  const [setlistMigrated, setSetlistMigrated] = useState(false);
 
-  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor);
+  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor, setlistMigrated);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
@@ -373,6 +374,7 @@ export default function Page() {
             setIsOwner(isOwnerFlag);
             setIsEditor(isEditorFlag);
             setShowId(data.show_id);
+            setSetlistMigrated(!!data.setlist_migrated);
           }
         } catch {
           // Auth check failed — show content is already loaded, continue as anonymous

@@ -47,26 +47,47 @@ export async function GET(request: NextRequest) {
   }
 
   // Enrich with counts (setlist_entries has no client RLS, so admin client is required)
-  const enriched = await Promise.all(
-    (songs || []).map(async (song) => {
-      const [chartRes, showRes] = await Promise.all([
-        admin
-          .from('chart_library')
-          .select('id', { count: 'exact', head: true })
-          .eq('owner_id', ownerId)
-          .eq('song_key', song.song_key),
-        admin
-          .from('setlist_entries')
-          .select('show_id', { count: 'exact', head: true })
-          .eq('song_id', song.id),
-      ]);
-      return {
-        ...song,
-        chart_count: chartRes.count ?? 0,
-        show_count: showRes.count ?? 0,
-      };
-    }),
-  );
+  // Batch-fetch all chart counts and show counts for efficiency
+  const songKeys = songs?.map((s) => s.song_key) || [];
+  const songIds = songs?.map((s) => s.id) || [];
+
+  const chartCounts: Record<string, number> = {};
+  let showCounts: Record<string, number> = {};
+
+  if (songKeys.length > 0) {
+    const { data: charts } = await admin
+      .from('chart_library')
+      .select('song_key')
+      .eq('owner_id', ownerId)
+      .in('song_key', songKeys);
+
+    for (const c of charts || []) {
+      chartCounts[c.song_key] = (chartCounts[c.song_key] || 0) + 1;
+    }
+  }
+
+  if (songIds.length > 0) {
+    // Fetch distinct show_ids per song for accurate show_count
+    const { data: entries } = await admin
+      .from('setlist_entries')
+      .select('song_id, show_id')
+      .in('song_id', songIds);
+
+    const songShowSets: Record<string, Set<string>> = {};
+    for (const e of entries || []) {
+      if (!songShowSets[e.song_id]) songShowSets[e.song_id] = new Set();
+      songShowSets[e.song_id].add(e.show_id);
+    }
+    showCounts = Object.fromEntries(
+      Object.entries(songShowSets).map(([k, v]) => [k, v.size]),
+    );
+  }
+
+  const enriched = (songs || []).map((song) => ({
+    ...song,
+    chart_count: chartCounts[song.song_key] || 0,
+    show_count: showCounts[song.id] || 0,
+  }));
 
   return Response.json({ songs: enriched, is_owner: ownerId === user.id });
 }

@@ -10,6 +10,7 @@ interface ShowContext {
   isReadOnly: boolean;
   saving: boolean;
   lastSavedAt: string | null;
+  setlistMigrated: boolean;
 }
 
 interface UseShowReturn {
@@ -23,6 +24,7 @@ export function useShow(
   slug: string | null,
   isOwner: boolean,
   isEditor: boolean,
+  setlistMigrated: boolean = false,
 ): UseShowReturn {
   const [saving, setSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
@@ -36,37 +38,41 @@ export function useShow(
 
     setSaving(true);
     try {
-      // Build entries array from setlist if songs have songId (reference-based)
+      // Build save payload
+      const payload: Record<string, unknown> = {
+        id: showId,
+        config,
+        name: (config.showInfo as { bandName?: string; showName?: string })?.showName
+          || (config.showInfo as { bandName?: string })?.bandName
+          || 'Untitled',
+        venue: (config.showInfo as { venue?: string })?.venue,
+        show_date: (config.showInfo as { eventDate?: string })?.eventDate,
+      };
+
+      // When migrated (or any song has songId), send setlist as entries
+      // Server-side diffing computes actual overrides vs library defaults
       const setlist = config.setlist as Array<{
-        songId?: string; position: number;
+        songId?: string; position: number; title: string;
         key?: string; lead?: string; notes?: string; sceneNote?: string;
       }> | undefined;
 
-      const hasSongRefs = setlist?.some((s) => s.songId);
-      const entries = hasSongRefs
-        ? setlist?.filter((s) => s.songId).map((s) => ({
-            song_id: s.songId,
-            position: s.position,
-            key_override: s.key !== undefined ? s.key : null,
-            lead_override: s.lead !== undefined ? s.lead : null,
-            notes_override: s.notes !== undefined ? s.notes : null,
-            scene_note: s.sceneNote ?? null,
-          }))
-        : undefined;
+      if (setlistMigrated || setlist?.some((s) => s.songId)) {
+        // Send entries with effective values — server will diff against song defaults
+        payload.entries = (setlist || []).map((s) => ({
+          song_id: s.songId || null,
+          title: s.title,
+          position: s.position,
+          key: s.key,
+          lead: s.lead,
+          notes: s.notes,
+          scene_note: s.sceneNote ?? null,
+        }));
+      }
 
       const res = await fetch('/api/shows/update', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: showId,
-          config,
-          name: (config.showInfo as { bandName?: string; showName?: string })?.showName
-            || (config.showInfo as { bandName?: string })?.bandName
-            || 'Untitled',
-          venue: (config.showInfo as { venue?: string })?.venue,
-          show_date: (config.showInfo as { eventDate?: string })?.eventDate,
-          entries,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (res.ok) {
@@ -80,7 +86,7 @@ export function useShow(
     } finally {
       setSaving(false);
     }
-  }, [showId, isReadOnly]);
+  }, [showId, isReadOnly, setlistMigrated]);
 
   const saveConfig = useCallback((config: Record<string, unknown>) => {
     if (!showId || isReadOnly) return;
@@ -120,6 +126,7 @@ export function useShow(
       isReadOnly,
       saving,
       lastSavedAt,
+      setlistMigrated,
     },
     saveConfig,
   };

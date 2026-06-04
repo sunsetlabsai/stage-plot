@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
-import { normalizeSongKeySafe } from '@/lib/normalize';
+import { normalizeSongKey, normalizeSongKeySafe } from '@/lib/normalize';
 import type { SetlistSong } from '@/lib/types';
 
 // Three-state override resolution for hydrating inline setlist
@@ -15,9 +15,19 @@ function resolveOverride(
   return fallback ?? undefined;
 }
 
+interface EntryInput {
+  song_id: string | null;
+  title?: string;
+  position: number;
+  key?: string;
+  lead?: string;
+  notes?: string;
+  scene_note?: string | null;
+}
+
 // PUT /api/shows/update — save show config (authenticated)
-// Now uses rpc_save_show for atomic entries + inline dual-write.
-// Falls back to direct update for non-migrated shows without setlist entries.
+// When entries are provided, uses rpc_save_show for atomic dual-write.
+// Server-side diffing: client sends effective values, server computes overrides vs library defaults.
 export async function PUT(request: NextRequest) {
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
@@ -35,8 +45,8 @@ export async function PUT(request: NextRequest) {
 
   const effectiveName = name || config.showInfo?.showName || config.showInfo?.bandName || 'Untitled';
 
-  // If entries are provided (migrated show), use RPC for atomic save
-  if (entries) {
+  // If entries are provided (reference-based save), use RPC
+  if (entries !== undefined) {
     const admin = getSupabaseAdmin();
 
     // Verify caller is owner or editor
@@ -63,11 +73,97 @@ export async function PUT(request: NextRequest) {
       }
     }
 
-    // Hydrate inline setlist for dual-write
-    const songIds = entries
-      .map((e: { song_id: string }) => e.song_id)
-      .filter(Boolean);
+    const entryList = entries as EntryInput[];
 
+    // Resolve songs: by songId if present, otherwise by normalized title
+    const resolvedEntries: Array<{
+      song_id: string;
+      position: number;
+      key_override: string | null;
+      lead_override: string | null;
+      notes_override: string | null;
+      scene_note: string | null;
+    }> = [];
+
+    if (entryList.length > 0) {
+      // Batch-fetch all songs for this owner for efficient lookup
+      const { data: ownerSongs } = await admin
+        .from('songs')
+        .select('id, song_key, title, key, lead, notes')
+        .eq('owner_id', show.owner_id);
+
+      const songsById = new Map(
+        (ownerSongs || []).map((s) => [s.id, s]),
+      );
+      const songsByKey = new Map(
+        (ownerSongs || []).map((s) => [s.song_key, s]),
+      );
+
+      for (const entry of entryList) {
+        let song;
+
+        if (entry.song_id) {
+          song = songsById.get(entry.song_id);
+        }
+
+        // Fallback: resolve by normalized title
+        if (!song && entry.title) {
+          const songKey = normalizeSongKeySafe(entry.title);
+          if (songKey) {
+            song = songsByKey.get(songKey);
+          }
+
+          // If still not found and user is owner, auto-create the song
+          if (!song && show.owner_id === user.id && songKey) {
+            try {
+              const normalizedKey = normalizeSongKey(entry.title);
+              const { data: newSong } = await admin
+                .from('songs')
+                .insert({
+                  owner_id: show.owner_id,
+                  song_key: normalizedKey,
+                  title: entry.title.trim(),
+                  key: entry.key || null,
+                  lead: entry.lead || '',
+                  notes: entry.notes || '',
+                })
+                .select('id, song_key, title, key, lead, notes')
+                .single();
+
+              if (newSong) {
+                song = newSong;
+                songsById.set(newSong.id, newSong);
+                songsByKey.set(newSong.song_key, newSong);
+              }
+            } catch {
+              // Collision — try lookup again (concurrent create)
+              const songKey2 = normalizeSongKeySafe(entry.title);
+              if (songKey2) song = songsByKey.get(songKey2);
+            }
+          }
+        }
+
+        if (!song) continue; // skip entries that can't be resolved
+
+        // Server-side diffing: compare effective values against library defaults
+        // null = use default, '' = explicitly blank, 'value' = override
+        const keyOverride = diffOverride(entry.key, song.key);
+        const leadOverride = diffOverride(entry.lead, song.lead);
+        const notesOverride = diffOverride(entry.notes, song.notes);
+
+        resolvedEntries.push({
+          song_id: song.id,
+          position: entry.position,
+          key_override: keyOverride,
+          lead_override: leadOverride,
+          notes_override: notesOverride,
+          scene_note: entry.scene_note ?? null,
+        });
+      }
+    }
+
+    // Hydrate inline setlist for dual-write
+    const songIds = [...new Set(resolvedEntries.map((e) => e.song_id))];
     let songsMap: Record<string, { title: string; key: string | null; lead: string; notes: string }> = {};
     if (songIds.length > 0) {
       const { data: songs } = await admin
@@ -80,14 +176,7 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    const inlineSetlist = entries.map((e: {
-      song_id: string;
-      position: number;
-      key_override?: string | null;
-      lead_override?: string | null;
-      notes_override?: string | null;
-      scene_note?: string | null;
-    }) => {
+    const inlineSetlist = resolvedEntries.map((e) => {
       const song = songsMap[e.song_id];
       if (!song) return null;
       return {
@@ -108,7 +197,7 @@ export async function PUT(request: NextRequest) {
       p_name: effectiveName,
       p_venue: venue || config.showInfo?.venue || '',
       p_show_date: show_date || config.showInfo?.eventDate || '',
-      p_entries: entries,
+      p_entries: resolvedEntries,
       p_inline_setlist: inlineSetlist,
     });
 
@@ -119,8 +208,7 @@ export async function PUT(request: NextRequest) {
     return Response.json({ updated_at: data.updated_at, slug: data.slug });
   }
 
-  // Legacy path: direct update (non-migrated shows, or shows without song references)
-  // Still uses RLS-enforced authenticated client
+  // Legacy path: direct update (non-migrated shows without song references)
   const updatePayload: Record<string, unknown> = {
     config,
     name: effectiveName,
@@ -128,21 +216,14 @@ export async function PUT(request: NextRequest) {
     show_date: show_date || config.showInfo?.eventDate || null,
   };
 
-  // Strip songId from inline setlist before persisting (defense in depth)
+  // Strip songId from inline setlist before persisting
   if (config.setlist && Array.isArray(config.setlist)) {
     const setlist = config.setlist as SetlistSong[];
-    const songKeys = setlist
-      .map((s) => normalizeSongKeySafe(s.title))
-      .filter((k): k is string => k !== null);
-
-    // If setlist has songIds, we should be using the entries path
-    // but handle gracefully for backwards compat
     updatePayload.config = {
       ...config,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       setlist: setlist.map(({ songId, charts, ...rest }) => rest),
     };
-    void songKeys; // suppress unused
   }
 
   const { data, error } = await supabase
@@ -157,4 +238,20 @@ export async function PUT(request: NextRequest) {
   }
 
   return Response.json({ updated_at: data.updated_at, slug: data.slug });
+}
+
+// Compare an effective value against a library default.
+// Returns: null (matches default), '' (explicitly blank), or the override value.
+function diffOverride(effective: string | undefined | null, libraryDefault: string | null): string | null {
+  const eff = effective ?? '';
+  const def = libraryDefault ?? '';
+
+  // If effective matches library default, no override needed
+  if (eff === def) return null;
+
+  // If effective is empty but library has a value, store '' (explicitly blank)
+  if (eff === '' && def !== '') return '';
+
+  // Otherwise, store the effective value as override
+  return eff;
 }
