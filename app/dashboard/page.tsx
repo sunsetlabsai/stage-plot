@@ -149,12 +149,20 @@ export default function DashboardPage() {
           <h1 className="text-2xl font-bold">My Shows</h1>
           <p className="text-xs text-zinc-500 mt-0.5">ShowRunr</p>
         </div>
-        <button
-          onClick={handleSignOut}
-          className="text-sm text-zinc-500 hover:text-zinc-300"
-        >
-          Sign Out
-        </button>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => router.push('/library')}
+            className="text-sm text-zinc-500 hover:text-zinc-300"
+          >
+            Library
+          </button>
+          <button
+            onClick={handleSignOut}
+            className="text-sm text-zinc-500 hover:text-zinc-300"
+          >
+            Sign Out
+          </button>
+        </div>
       </header>
 
       <div className="flex gap-3 mb-8">

@@ -1,8 +1,58 @@
 import { NextRequest } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { normalizeSongKeySafe } from '@/lib/normalize';
+import type { SetlistSong } from '@/lib/types';
 
 const SLUG_RE = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
+
+// Three-state override resolution
+function resolveOverride(
+  override: string | null | undefined,
+  fallback: string | null | undefined,
+  emptyAs?: string,
+): string | undefined {
+  if (override === '') return emptyAs;
+  if (override != null) return override;
+  return fallback ?? undefined;
+}
+
+// Hydrate setlist from setlist_entries + songs tables
+async function hydrateFromEntries(
+  admin: ReturnType<typeof getSupabaseAdmin>,
+  showId: string,
+): Promise<SetlistSong[]> {
+  const { data: entries } = await admin
+    .from('setlist_entries')
+    .select('id, song_id, position, key_override, lead_override, notes_override, scene_note')
+    .eq('show_id', showId)
+    .order('position');
+
+  if (!entries || entries.length === 0) return [];
+
+  const songIds = [...new Set(entries.map((e) => e.song_id))];
+  const { data: songs } = await admin
+    .from('songs')
+    .select('id, title, key, lead, notes')
+    .in('id', songIds);
+
+  const songsMap = Object.fromEntries(
+    (songs || []).map((s) => [s.id, s]),
+  );
+
+  return entries.map((row) => {
+    const song = songsMap[row.song_id];
+    return {
+      id: row.id,
+      songId: row.song_id,
+      position: row.position,
+      title: song?.title ?? 'Unknown',
+      key: resolveOverride(row.key_override, song?.key),
+      lead: resolveOverride(row.lead_override, song?.lead, '') ?? '',
+      notes: resolveOverride(row.notes_override, song?.notes, '') ?? '',
+      sceneNote: row.scene_note ?? undefined,
+    };
+  });
+}
 
 // GET /api/shows/[owner]/[show] — anonymous show resolution by owner + slug (no auth required)
 export async function GET(
@@ -31,7 +81,7 @@ export async function GET(
   // Fetch show by (owner_id, slug) pair
   const { data: showData, error } = await admin
     .from('shows')
-    .select('id, config, name, venue, show_date, owner_id')
+    .select('id, config, name, venue, show_date, owner_id, setlist_migrated')
     .eq('owner_id', profile.id)
     .eq('slug', show)
     .single();
@@ -40,8 +90,18 @@ export async function GET(
     return Response.json({ error: 'Show not found' }, { status: 404 });
   }
 
+  // Dual-read: hydrate from entries if migrated, otherwise from inline config
+  let setlist: SetlistSong[];
+  if (showData.setlist_migrated) {
+    setlist = await hydrateFromEntries(admin, showData.id);
+  } else {
+    setlist = ((showData.config as { setlist?: SetlistSong[] })?.setlist ?? []);
+  }
+
+  // Inject hydrated setlist into config
+  const config = { ...(showData.config as Record<string, unknown>), setlist };
+
   // Resolve charts from owner's library by normalized song titles
-  const setlist = (showData.config as { setlist?: Array<{ title: string }> })?.setlist || [];
   const songKeys = setlist
     .map((s) => normalizeSongKeySafe(s.title))
     .filter((k): k is string => k !== null);
@@ -71,10 +131,11 @@ export async function GET(
   }
 
   return Response.json({
-    config: showData.config,
+    config,
     charts: chartsBySong,
     slug: show,
     show_id: showData.id,
     owner_id: showData.owner_id,
+    setlist_migrated: showData.setlist_migrated,
   });
 }

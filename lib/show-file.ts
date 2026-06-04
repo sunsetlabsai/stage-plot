@@ -47,7 +47,7 @@ export function serializeShow(config: AppConfig): string {
     monitors: config.monitors.map(({ id, ...rest }) => rest),
     notes: config.notes,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    setlist: config.setlist.map(({ id, position, charts, ...rest }) => {
+    setlist: config.setlist.map(({ id, position, charts, songId, ...rest }) => {
       return rest as Omit<SetlistSong, 'id' | 'position'>;
     }),
   };
@@ -116,6 +116,12 @@ function fromJson(content: string): AppConfig {
     !parsed.showInfo?.bandName
   ) {
     throw new Error('Invalid show file — missing required sections (stagePlot, inputs, setlist, monitors, notes, showInfo).');
+  }
+
+  // Strip songId from imported setlist entries (internal DB UUIDs must not cross owners)
+  if (Array.isArray(parsed.setlist)) {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    parsed.setlist = parsed.setlist.map(({ songId, ...rest }: { songId?: string; [k: string]: unknown }) => rest);
   }
 
   return parsed as AppConfig;
