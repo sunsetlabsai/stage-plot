@@ -40,34 +40,40 @@ export default function AdminPage() {
 
     const authHeader = { Authorization: `Bearer ${secret}` };
 
-    // Fetch settings and owners in parallel — either can fail independently
-    const [settingsRes, ownersRes] = await Promise.all([
-      fetch('/api/admin/settings', { headers: authHeader }),
-      fetch('/api/admin/owners', { headers: authHeader }),
-    ]);
+    // Step 1: Authenticate via owners endpoint (no KV dependency, 1 rate-limit token)
+    const ownersRes = await fetch('/api/admin/owners', { headers: authHeader });
 
-    // Check auth on either response (both use same secret)
-    if (settingsRes.status === 401 || ownersRes.status === 401) {
+    if (ownersRes.status === 401) {
       setError('Invalid admin secret.');
       return;
     }
-
-    // Settings may be 503 (KV down) — still authenticate and show owners
-    if (settingsRes.ok) {
-      const settingsData = await settingsRes.json();
-      setConfig(settingsData.config);
-      setKvConnected(settingsData.kvConnected);
-    } else if (settingsRes.status === 503) {
-      setKvConnected(false);
+    if (ownersRes.status === 429) {
+      setError('Too many attempts. Wait a minute and try again.');
+      return;
     }
 
-    // Owners
+    // Auth passed — load owners
     if (ownersRes.ok) {
       const ownersData = await ownersRes.json();
       setOwners(ownersData.owners || []);
       if (ownersData.warning) setOwnersWarning(ownersData.warning);
     } else {
       setOwnersError('Failed to load owners');
+    }
+
+    // Step 2: Fetch settings (may 503 if KV down — non-fatal)
+    try {
+      const settingsRes = await fetch('/api/admin/settings', { headers: authHeader });
+      if (settingsRes.ok) {
+        const settingsData = await settingsRes.json();
+        setConfig(settingsData.config);
+        setKvConnected(settingsData.kvConnected);
+      } else if (settingsRes.status === 503) {
+        setKvConnected(false);
+      }
+    } catch {
+      // Settings fetch failed — non-fatal, KV section will show disconnected
+      setKvConnected(false);
     }
 
     setAuthenticated(true);

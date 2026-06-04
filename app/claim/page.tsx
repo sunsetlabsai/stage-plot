@@ -56,9 +56,19 @@ export default function ClaimPage() {
       setTimeout(() => router.push('/dashboard'), 1500);
     } else {
       const data = await res.json();
-      // Handle 409 gracefully — user already has a profile
+      // Handle 409 gracefully — user already has a profile, fetch real handle
       if (res.status === 409 && data.error?.includes('Profile already exists')) {
-        setAlreadyClaimed(slug);
+        try {
+          const profileRes = await fetch('/api/profiles');
+          if (profileRes.ok) {
+            const profileData = await profileRes.json();
+            setAlreadyClaimed(profileData.owner_slug);
+          } else {
+            setAlreadyClaimed('your handle');
+          }
+        } catch {
+          setAlreadyClaimed('your handle');
+        }
       } else {
         setError(data.error || 'Something went wrong');
       }
