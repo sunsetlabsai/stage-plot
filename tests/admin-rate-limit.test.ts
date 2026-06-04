@@ -26,6 +26,14 @@ describe('admin-rate-limit', () => {
       expect(checkRateLimit(ip)).toBe(false);
     });
 
+    it('uses separate buckets per route', () => {
+      const ip = uniqueIp('bucket');
+      for (let i = 0; i < 5; i++) checkRateLimit(ip, 'owners');
+      expect(checkRateLimit(ip, 'owners')).toBe(false);
+      // Same IP, different bucket — still allowed
+      expect(checkRateLimit(ip, 'settings')).toBe(true);
+    });
+
     it('tracks IPs independently', () => {
       const ip1 = uniqueIp('indep-a');
       const ip2 = uniqueIp('indep-b');

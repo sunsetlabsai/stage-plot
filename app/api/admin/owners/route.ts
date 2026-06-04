@@ -4,7 +4,7 @@ import { checkRateLimit, getIp, authenticate } from '@/lib/admin-rate-limit';
 
 export async function GET(request: NextRequest) {
   const ip = getIp(request);
-  if (!checkRateLimit(ip)) {
+  if (!checkRateLimit(ip, 'owners')) {
     return Response.json({ error: 'Too many requests' }, { status: 429 });
   }
 

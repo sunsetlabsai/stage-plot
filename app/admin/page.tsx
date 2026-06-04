@@ -61,7 +61,7 @@ export default function AdminPage() {
       setOwnersError('Failed to load owners');
     }
 
-    // Step 2: Fetch settings (may 503 if KV down — non-fatal)
+    // Step 2: Fetch settings (may 503/429 — non-fatal, auth already confirmed)
     try {
       const settingsRes = await fetch('/api/admin/settings', { headers: authHeader });
       if (settingsRes.ok) {
@@ -69,10 +69,10 @@ export default function AdminPage() {
         setConfig(settingsData.config);
         setKvConnected(settingsData.kvConnected);
       } else if (settingsRes.status === 503) {
+        // KV down — non-fatal
         setKvConnected(false);
       }
     } catch {
-      // Settings fetch failed — non-fatal, KV section will show disconnected
       setKvConnected(false);
     }
 

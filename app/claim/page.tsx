@@ -64,10 +64,10 @@ export default function ClaimPage() {
             const profileData = await profileRes.json();
             setAlreadyClaimed(profileData.owner_slug);
           } else {
-            setAlreadyClaimed('your handle');
+            setAlreadyClaimed('__unknown__');
           }
         } catch {
-          setAlreadyClaimed('your handle');
+          setAlreadyClaimed('__unknown__');
         }
       } else {
         setError(data.error || 'Something went wrong');
@@ -91,9 +91,13 @@ export default function ClaimPage() {
       <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-6">
         <div className="w-full max-w-md text-center space-y-4">
           <h1 className="text-2xl font-bold text-white">Already claimed</h1>
-          <p className="text-zinc-400">
-            Your handle is <span className="font-mono text-white">showrunr.ai/{alreadyClaimed}</span>
-          </p>
+          {alreadyClaimed === '__unknown__' ? (
+            <p className="text-zinc-400">You already have a ShowRunr handle.</p>
+          ) : (
+            <p className="text-zinc-400">
+              Your handle is <span className="font-mono text-white">showrunr.ai/{alreadyClaimed}</span>
+            </p>
+          )}
           <Link
             href="/dashboard"
             className="inline-block px-6 py-2.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition-colors"

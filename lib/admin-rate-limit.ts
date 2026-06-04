@@ -8,12 +8,13 @@ export function getIp(request: NextRequest): string {
   return request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
 }
 
-export function checkRateLimit(ip: string): boolean {
+export function checkRateLimit(ip: string, bucket: string = 'default'): boolean {
+  const key = `${bucket}:${ip}`;
   const now = Date.now();
-  let entry = rateLimitMap.get(ip);
+  let entry = rateLimitMap.get(key);
   if (!entry || now > entry.resetAt) {
     entry = { count: 0, resetAt: now + RATE_LIMIT_WINDOW };
-    rateLimitMap.set(ip, entry);
+    rateLimitMap.set(key, entry);
   }
   entry.count++;
   return entry.count <= RATE_LIMIT_MAX;
