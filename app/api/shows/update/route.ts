@@ -136,14 +136,31 @@ export async function PUT(request: NextRequest) {
                 songsByKey.set(newSong.song_key, newSong);
               }
             } catch {
-              // Collision — try lookup again (concurrent create)
+              // Collision — re-query from DB (concurrent create by another request)
               const songKey2 = normalizeSongKeySafe(entry.title);
-              if (songKey2) song = songsByKey.get(songKey2);
+              if (songKey2) {
+                const { data: existing } = await admin
+                  .from('songs')
+                  .select('id, song_key, title, key, lead, notes')
+                  .eq('owner_id', show.owner_id)
+                  .eq('song_key', songKey2)
+                  .single();
+                if (existing) {
+                  song = existing;
+                  songsById.set(existing.id, existing);
+                  songsByKey.set(existing.song_key, existing);
+                }
+              }
             }
           }
         }
 
-        if (!song) continue; // skip entries that can't be resolved
+        if (!song) {
+          return Response.json(
+            { error: `Song at position ${entry.position} could not be resolved ("${entry.title || 'unknown'}")` },
+            { status: 400 },
+          );
+        }
 
         // Server-side diffing: compare effective values against library defaults
         // null = use default, '' = explicitly blank, 'value' = override
