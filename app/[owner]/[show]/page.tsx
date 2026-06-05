@@ -222,6 +222,7 @@ export default function Page() {
 
   // ── Supabase show context ─────────────────────────────────────────────
   const [showId, setShowId] = useState<string | null>(null);
+  const [showOwnerId, setShowOwnerId] = useState<string | null>(null);
   const [isOwner, setIsOwner] = useState(false);
   const [isEditor, setIsEditor] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -374,6 +375,7 @@ export default function Page() {
             setIsOwner(isOwnerFlag);
             setIsEditor(isEditorFlag);
             setShowId(data.show_id);
+            setShowOwnerId(data.owner_id ?? null);
             setSetlistMigrated(!!data.setlist_migrated);
           }
         } catch {
@@ -593,7 +595,7 @@ export default function Page() {
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
       {tab === 'config' && (
-        <ConfigTab config={config} updateConfig={updateConfig} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} isOwner={isOwner} isEditor={isEditor} />
+        <ConfigTab config={config} updateConfig={updateConfig} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
       )}
       {tab === 'ai' && (
         <div className="p-4 md:p-8">
@@ -1738,10 +1740,12 @@ function ShowSortableRow({
 function AddSongFromLibrary({
   onAddSong,
   isOwner,
+  ownerId,
   isEditor,
 }: {
   onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string }) => void;
   isOwner: boolean;
+  ownerId: string | null;
   isEditor?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -1758,7 +1762,8 @@ function AddSongFromLibrary({
     async function loadLibrary() {
       setLoading(true);
       try {
-        const r = await fetch('/api/songs');
+        // Browse the show owner's library (editors must target the owner, not themselves)
+        const r = await fetch(ownerId ? `/api/songs?owner_id=${encodeURIComponent(ownerId)}` : '/api/songs');
         const data = r.ok ? await r.json() : { songs: [] };
         if (!cancelled) setSongs(data.songs || []);
       } finally {
@@ -1767,7 +1772,7 @@ function AddSongFromLibrary({
     }
     loadLibrary();
     return () => { cancelled = true; };
-  }, [open]);
+  }, [open, ownerId]);
 
   useEffect(() => {
     if (open) inputRef.current?.focus();
@@ -1905,7 +1910,7 @@ function AddSongFromLibrary({
 // ════════════════════════════════════════════════════════════════════════════
 
 function SetupSetlistTable({
-  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, isEditor, onChartUpload, onChartDelete,
+  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, ownerId, isEditor, onChartUpload, onChartDelete,
 }: {
   setlist: SetlistSong[];
   canResolveCharts: boolean;
@@ -1914,6 +1919,7 @@ function SetupSetlistTable({
   onDelete: (idx: number) => void;
   onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string }) => void;
   isOwner: boolean;
+  ownerId: string | null;
   isEditor?: boolean;
   onChartUpload?: (songTitle: string) => void;
   onChartDelete?: (chartId: string, songTitle: string, role: string) => void;
@@ -1974,7 +1980,7 @@ function SetupSetlistTable({
           </div>
         </SortableContext>
       </DndContext>
-      <AddSongFromLibrary onAddSong={onAddSong} isOwner={isOwner} isEditor={isEditor} />
+      <AddSongFromLibrary onAddSong={onAddSong} isOwner={isOwner} ownerId={ownerId} isEditor={isEditor} />
     </>
   );
 }
@@ -2942,6 +2948,7 @@ function ConfigTab({
   googleError,
   onDisconnectGoogle,
   showId,
+  ownerId,
   isOwner,
   isEditor,
 }: {
@@ -2951,6 +2958,7 @@ function ConfigTab({
   googleError?: string;
   onDisconnectGoogle: () => void;
   showId: string | null;
+  ownerId: string | null;
   isEditor?: boolean;
   isOwner: boolean;
 }) {
@@ -3497,6 +3505,7 @@ function ConfigTab({
             setlist={config.setlist}
             canResolveCharts={canResolveCharts}
             isOwner={isOwner}
+            ownerId={ownerId}
             onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))}
             onUpdate={(idx, field, value) => updateConfig((p) => {
               const arr = [...p.setlist];

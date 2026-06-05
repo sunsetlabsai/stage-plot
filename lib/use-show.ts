@@ -53,13 +53,17 @@ export function useShow(
       };
 
       // When migrated (or any song has songId), send setlist as entries
-      // Server-side diffing computes actual overrides vs library defaults
+      // Server-side diffing computes actual overrides vs library defaults.
+      // Owners always send entries so the first save of any unmigrated show
+      // (new empty show, Google Sheet import) resolves/creates library songs
+      // and flips setlist_migrated. Editors stay on the legacy path until the
+      // owner (or seed script) migrates the show, since they can't auto-create.
       const setlist = config.setlist as Array<{
         songId?: string; position: number; title: string;
         key?: string; lead?: string; notes?: string; sceneNote?: string;
       }> | undefined;
 
-      if (setlistMigrated || hasSentEntries.current || setlist?.some((s) => s.songId)) {
+      if (isOwner || setlistMigrated || hasSentEntries.current || setlist?.some((s) => s.songId)) {
         // Send entries with effective values — server will diff against song defaults
         payload.entries = (setlist || []).map((s) => ({
           song_id: s.songId || null,
@@ -93,7 +97,7 @@ export function useShow(
     } finally {
       setSaving(false);
     }
-  }, [showId, isReadOnly, setlistMigrated]);
+  }, [showId, isReadOnly, isOwner, setlistMigrated]);
 
   const saveConfig = useCallback((config: Record<string, unknown>) => {
     if (!showId || isReadOnly) return;
