@@ -52,17 +52,28 @@ export async function GET(request: NextRequest) {
   const songIds = songs?.map((s) => s.id) || [];
 
   const chartCounts: Record<string, number> = {};
+  const chartsBySong: Record<string, Array<Record<string, unknown>>> = {};
   let showCounts: Record<string, number> = {};
 
   if (songKeys.length > 0) {
     const { data: charts } = await admin
       .from('chart_library')
-      .select('song_key')
+      .select('id, song_key, role, file_name, storage_path, mime_type, updated_at')
       .eq('owner_id', ownerId)
       .in('song_key', songKeys);
 
     for (const c of charts || []) {
       chartCounts[c.song_key] = (chartCounts[c.song_key] || 0) + 1;
+      if (!chartsBySong[c.song_key]) chartsBySong[c.song_key] = [];
+      // Same shape the show GET uses so charts attach + cache identically
+      chartsBySong[c.song_key].push({
+        role: c.role,
+        url: `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/charts/${c.storage_path}`,
+        fileId: c.id,
+        mimeType: c.mime_type,
+        modifiedTime: c.updated_at,
+        label: c.file_name,
+      });
     }
   }
 
@@ -86,6 +97,7 @@ export async function GET(request: NextRequest) {
   const enriched = (songs || []).map((song) => ({
     ...song,
     chart_count: chartCounts[song.song_key] || 0,
+    charts: chartsBySong[song.song_key] || [],
     show_count: showCounts[song.id] || 0,
   }));
 
