@@ -486,9 +486,7 @@ export default function Page() {
       {/* ── Tab Bar ─────────────────────────────────────────────────────── */}
       <div className="sticky top-0 z-10 bg-white border-b shadow-sm">
         <div className="max-w-4xl mx-auto flex items-center">
-          {tab !== 'perform' && (
-            <LogoMark className="h-5 w-auto ml-3 mr-1 shrink-0" />
-          )}
+          <LogoMark className="h-5 w-auto ml-3 mr-1 shrink-0" />
           {isAuthenticated && (
             <Link href="/dashboard" className="px-3 py-3 text-gray-400 hover:text-black transition-colors" title="My Shows">
               <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -2213,19 +2211,33 @@ function SetupMonitorTable({
     <>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={monitorIds} strategy={verticalListSortingStrategy}>
-          <div className="space-y-3">
-            {monitors.map((mon, idx) => (
-              <SortableMonitorRow
-                key={mon.id!}
-                monitor={mon}
-                idx={idx}
-                total={monitors.length}
-                onUpdate={onUpdate}
-                onDelete={onDelete}
-                onMoveUp={() => onReorder(idx, idx - 1)}
-                onMoveDown={() => onReorder(idx, idx + 1)}
-              />
-            ))}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b">
+                  <th className="w-8"></th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-14">Mix #</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[140px]">Name</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[160px]">Needs</th>
+                  <th className="w-16"></th>
+                  <th className="w-10"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {monitors.map((mon, idx) => (
+                  <SortableMonitorRow
+                    key={mon.id!}
+                    monitor={mon}
+                    idx={idx}
+                    total={monitors.length}
+                    onUpdate={onUpdate}
+                    onDelete={onDelete}
+                    onMoveUp={() => onReorder(idx, idx - 1)}
+                    onMoveDown={() => onReorder(idx, idx + 1)}
+                  />
+                ))}
+              </tbody>
+            </table>
           </div>
         </SortableContext>
       </DndContext>
@@ -2249,30 +2261,29 @@ function SortableMonitorRow({
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
 
   return (
-    <div ref={setNodeRef} style={style} className="flex flex-col sm:flex-row gap-2 items-start sm:items-center border-b border-gray-100 pb-3">
-      <div className="cursor-grab shrink-0 pt-5 sm:pt-0 self-center" {...attributes} {...listeners}>
+    <tr ref={setNodeRef} style={style} className="border-b border-gray-100">
+      <td className="px-1 py-1 cursor-grab" {...attributes} {...listeners}>
         <span className="text-gray-300 text-sm select-none">&#x2630;</span>
-      </div>
-      <div className="w-16 shrink-0">
-        <label className={labelCls}>Mix #</label>
-        <span className="text-sm font-mono text-gray-500">{mon.mix}</span>
-      </div>
-      <div className="flex-1">
-        <label className={labelCls}>Name</label>
+      </td>
+      <td className="px-2 py-1">
+        <span className="text-xs font-mono text-gray-400">{mon.mix}</span>
+      </td>
+      <td className="px-2 py-1">
         <input className={inputCls} value={mon.name} onChange={(e) => onUpdate(idx, 'name', e.target.value)} />
-      </div>
-      <div className="flex-[2]">
-        <label className={labelCls}>Needs</label>
+      </td>
+      <td className="px-2 py-1">
         <input className={inputCls} value={mon.needs} onChange={(e) => onUpdate(idx, 'needs', e.target.value)} />
-      </div>
-      <div className="pt-5 flex items-center gap-1">
+      </td>
+      <td className="px-1 py-1">
         <div className="flex flex-col items-center">
           <button className={arrowBtn} disabled={idx === 0} onClick={onMoveUp} title="Move up">&uarr;</button>
           <button className={arrowBtn} disabled={idx === total - 1} onClick={onMoveDown} title="Move down">&darr;</button>
         </div>
-        <button className={btnRemove} onClick={() => onDelete(idx)}>X</button>
-      </div>
-    </div>
+      </td>
+      <td className="px-2 py-1">
+        <button className="px-2 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors" onClick={() => onDelete(idx)}>X</button>
+      </td>
+    </tr>
   );
 }
 
