@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import { LogoMark } from '@/components/Logo';
 import {
   DndContext,
   closestCenter,
@@ -485,6 +486,9 @@ export default function Page() {
       {/* ── Tab Bar ─────────────────────────────────────────────────────── */}
       <div className="sticky top-0 z-10 bg-white border-b shadow-sm">
         <div className="max-w-4xl mx-auto flex items-center">
+          {tab !== 'perform' && (
+            <LogoMark className="h-5 w-auto ml-3 mr-1 shrink-0" />
+          )}
           {isAuthenticated && (
             <Link href="/dashboard" className="px-3 py-3 text-gray-400 hover:text-black transition-colors" title="My Shows">
               <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -533,20 +537,18 @@ export default function Page() {
                 : 'text-gray-400 hover:text-gray-600'
             }`}
           >
-            AI Designer
+            AI
           </button>
           )}
-          {tab === 'mix' && (
-            <button
-              onClick={() => setShowPrintModal(true)}
-              className="p-2 text-gray-500 hover:text-black transition-colors print:hidden"
-              title="Print / Save PDF"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4H7v4a2 2 0 002 2zm0-14V3a2 2 0 012-2h2a2 2 0 012 2v4H9z" />
-              </svg>
-            </button>
-          )}
+          <button
+            onClick={() => setShowPrintModal(true)}
+            className="p-2 text-gray-500 hover:text-black transition-colors print:hidden"
+            title="Print / Save PDF"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4H7v4a2 2 0 002 2zm0-14V3a2 2 0 012-2h2a2 2 0 012 2v4H9z" />
+            </svg>
+          </button>
           <button
             onClick={handlePublish}
             disabled={publishing}
@@ -3232,48 +3234,17 @@ function ConfigTab({
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b">
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]">Name</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500">Position</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]">Role</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-16">Mix</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[120px]">Role</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[60px]">Mix</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[78px]">Position</th>
                   <th className="text-center px-2 py-2 text-xs font-bold text-gray-500 w-14">Power</th>
-                  <th className="text-center px-2 py-2 text-xs font-bold text-gray-500 w-14">Feat.</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[120px]">Name</th>
                   <th className="w-10"></th>
                 </tr>
               </thead>
               <tbody>
                 {config.stagePlot.map((slot, idx) => (
                   <tr key={idx} className="border-b border-gray-100">
-                    <td className="px-2 py-1">
-                      <input
-                        className={inputCls}
-                        value={slot.name}
-                        onChange={(e) =>
-                          updateConfig((p) => {
-                            const arr = [...p.stagePlot];
-                            arr[idx] = { ...arr[idx], name: e.target.value };
-                            return { ...p, stagePlot: arr };
-                          })
-                        }
-                      />
-                    </td>
-                    <td className="px-2 py-1">
-                      <select
-                        className={inputCls}
-                        value={slot.pos}
-                        onChange={(e) =>
-                          updateConfig((p) => {
-                            const arr = [...p.stagePlot];
-                            arr[idx] = { ...arr[idx], pos: e.target.value as StagePosition };
-                            return { ...p, stagePlot: arr };
-                          })
-                        }
-                      >
-                        {POSITIONS.map((pos) => (
-                          <option key={pos} value={pos}>{pos}</option>
-                        ))}
-                      </select>
-                    </td>
                     <td className="px-2 py-1">
                       <input
                         className={inputCls}
@@ -3290,7 +3261,7 @@ function ConfigTab({
                     <td className="px-2 py-1">
                       <input
                         type="number"
-                        className={inputCls}
+                        className={`${inputCls} px-1 text-center`}
                         value={slot.mix}
                         onChange={(e) =>
                           updateConfig((p) => {
@@ -3300,6 +3271,23 @@ function ConfigTab({
                           })
                         }
                       />
+                    </td>
+                    <td className="px-2 py-1">
+                      <select
+                        className={`${inputCls} px-1`}
+                        value={slot.pos}
+                        onChange={(e) =>
+                          updateConfig((p) => {
+                            const arr = [...p.stagePlot];
+                            arr[idx] = { ...arr[idx], pos: e.target.value as StagePosition };
+                            return { ...p, stagePlot: arr };
+                          })
+                        }
+                      >
+                        {POSITIONS.map((pos) => (
+                          <option key={pos} value={pos}>{pos}</option>
+                        ))}
+                      </select>
                     </td>
                     <td className="px-2 py-1 text-center">
                       <input
@@ -3314,14 +3302,14 @@ function ConfigTab({
                         }
                       />
                     </td>
-                    <td className="px-2 py-1 text-center">
+                    <td className="px-2 py-1">
                       <input
-                        type="checkbox"
-                        checked={slot.featured ?? false}
+                        className={inputCls}
+                        value={slot.name}
                         onChange={(e) =>
                           updateConfig((p) => {
                             const arr = [...p.stagePlot];
-                            arr[idx] = { ...arr[idx], featured: e.target.checked };
+                            arr[idx] = { ...arr[idx], name: e.target.value };
                             return { ...p, stagePlot: arr };
                           })
                         }
