@@ -11,6 +11,7 @@ interface ShowContext {
   isReadOnly: boolean;
   saving: boolean;
   lastSavedAt: string | null;
+  saveError: string | null;
   setlistMigrated: boolean;
 }
 
@@ -29,6 +30,7 @@ export function useShow(
 ): UseShowReturn {
   const [saving, setSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingConfig = useRef<Record<string, unknown> | null>(null);
   // Once entries have been sent successfully, treat show as migrated for the rest of the session.
@@ -41,6 +43,7 @@ export function useShow(
     if (!showId || isReadOnly) return;
 
     setSaving(true);
+    setSaveError(null);
     try {
       // Build save payload
       const payload: Record<string, unknown> = {
@@ -84,12 +87,18 @@ export function useShow(
       if (res.ok) {
         const { updated_at } = await res.json();
         setLastSavedAt(updated_at);
+        setSaveError(null);
         // Cache server timestamp for offline conflict detection
         localStorage.setItem(`showrunr-last-saved-${showId}`, updated_at);
         // Once entries have been sent successfully, lock into entries path
         if (payload.entries !== undefined) {
           hasSentEntries.current = true;
         }
+      } else {
+        // Save rejected (e.g. a song title couldn't be resolved on a migrated show).
+        // Surface it — config stays in localStorage but did NOT persist server-side.
+        const { error } = await res.json().catch(() => ({ error: '' }));
+        setSaveError(error || 'Could not save changes.');
       }
     } catch {
       // Network error — config remains in localStorage as fallback
@@ -136,6 +145,7 @@ export function useShow(
       isReadOnly,
       saving,
       lastSavedAt,
+      saveError,
       setlistMigrated,
     },
     saveConfig,

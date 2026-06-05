@@ -144,7 +144,7 @@ describe('Song library: shouldSendEntries (save-payload decision)', () => {
     expect(shouldSendEntries(undefined, { ...base, isOwner: true })).toBe(true);
   });
 
-  it('owner with an unnormalizable title and no songId → legacy fallback (false)', () => {
+  it('owner on UNMIGRATED show with an unnormalizable title and no songId → legacy fallback (false)', () => {
     expect(
       shouldSendEntries([{ title: 'Respect' }, { title: '!!!' }], { ...base, isOwner: true }),
     ).toBe(false);
@@ -162,9 +162,17 @@ describe('Song library: shouldSendEntries (save-payload decision)', () => {
     ).toBe(true);
   });
 
-  it('hasSentEntries behaves like migrated', () => {
+  it('migrated show with an unnormalizable no-songId row → STILL entries (true), never legacy', () => {
+    // Legacy write would be ignored by GET (reads setlist_entries); must send entries
+    // so the server 400s and the failure is surfaced rather than silently lost.
     expect(
-      shouldSendEntries([{ songId: 'abc', title: 'X' }], { ...base, hasSentEntries: true }),
+      shouldSendEntries([{ title: 'Respect' }, { title: '!!!' }], { ...base, setlistMigrated: true }),
+    ).toBe(true);
+  });
+
+  it('hasSentEntries behaves like migrated, even with an unnormalizable no-songId row', () => {
+    expect(
+      shouldSendEntries([{ title: '!!!' }], { ...base, hasSentEntries: true }),
     ).toBe(true);
   });
 

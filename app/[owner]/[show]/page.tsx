@@ -565,14 +565,18 @@ export default function Page() {
           </button>
           {/* Save status */}
           {(isOwner || isEditor) && (
-            <span role="status" aria-live="polite" className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 ${
-              showContext.saving
-                ? 'text-amber-600 bg-amber-50'
-                : showContext.lastSavedAt
-                  ? 'text-green-600 bg-green-50'
-                  : 'text-gray-400'
+            <span role="status" aria-live="polite" title={showContext.saveError ?? undefined} className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 max-w-[16rem] truncate ${
+              showContext.saveError
+                ? 'text-red-600 bg-red-50'
+                : showContext.saving
+                  ? 'text-amber-600 bg-amber-50'
+                  : showContext.lastSavedAt
+                    ? 'text-green-600 bg-green-50'
+                    : 'text-gray-400'
             }`}>
-              {showContext.saving ? 'Saving...' : showContext.lastSavedAt ? 'Saved' : ''}
+              {showContext.saveError
+                ? `Couldn't save — ${showContext.saveError}`
+                : showContext.saving ? 'Saving...' : showContext.lastSavedAt ? 'Saved' : ''}
             </span>
           )}
         </div>
