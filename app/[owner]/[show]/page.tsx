@@ -1747,14 +1747,14 @@ function AddSongFromLibrary({
   ownerId,
   isEditor,
 }: {
-  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string }) => void;
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; charts?: Chart[] }) => void;
   isOwner: boolean;
   ownerId: string | null;
   isEditor?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [songs, setSongs] = useState<Array<{ id: string; title: string; key: string | null; lead: string; notes: string }>>([]);
+  const [songs, setSongs] = useState<Array<{ id: string; title: string; key: string | null; lead: string; notes: string; charts?: Chart[] }>>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
@@ -1799,13 +1799,14 @@ function AddSongFromLibrary({
     : songs;
   const exactMatch = songs.find((s) => s.title.toLowerCase() === trimmed.toLowerCase());
 
-  function handleSelect(song: { id: string; title: string; key: string | null; lead: string; notes: string }) {
+  function handleSelect(song: { id: string; title: string; key: string | null; lead: string; notes: string; charts?: Chart[] }) {
     onAddSong({
       songId: song.id,
       title: song.title,
       key: song.key ?? undefined,
       lead: song.lead,
       notes: song.notes,
+      charts: song.charts,
     });
     setQuery('');
     setOpen(false);
@@ -1921,7 +1922,7 @@ function SetupSetlistTable({
   onReorder: (from: number, to: number) => void;
   onUpdate: (idx: number, field: string, value: string) => void;
   onDelete: (idx: number) => void;
-  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string }) => void;
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; charts?: Chart[] }) => void;
   isOwner: boolean;
   ownerId: string | null;
   isEditor?: boolean;
@@ -3039,6 +3040,10 @@ function ConfigTab({
   const resolveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    // Drive-era only. Supabase shows resolve charts from the library on every GET,
+    // so we must never wipe them here — bail out when this is a Supabase show.
+    if (showId) return;
+
     // Clear charts and invalidate in-flight requests when Drive is disconnected
     if (!config.chartsRootFolderId) {
       resolveVersionRef.current++;
@@ -3065,7 +3070,7 @@ function ConfigTab({
     }, 1000);
 
     return () => { if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current); };
-  }, [resolveSignature, canResolveCharts, resolveCharts, config.chartsRootFolderId, config.setlist, updateConfig]);
+  }, [showId, resolveSignature, canResolveCharts, resolveCharts, config.chartsRootFolderId, config.setlist, updateConfig]);
 
   // Extract folder ID from URL or bare ID
   const parseFolderId = (input: string): string | null => {
@@ -3520,18 +3525,28 @@ function ConfigTab({
               ...p,
               setlist: p.setlist.filter((_, i) => i !== idx).map((s, i) => ({ ...s, position: i + 1 })),
             }))}
-            onAddSong={(song) => updateConfig((p) => ({
-              ...p,
-              setlist: [...p.setlist, {
-                id: crypto.randomUUID(),
-                songId: song.songId,
-                position: p.setlist.length + 1,
-                title: song.title,
-                key: song.key,
-                lead: song.lead || '',
-                notes: song.notes,
-              }],
-            }))}
+            onAddSong={(song) => {
+              updateConfig((p) => ({
+                ...p,
+                setlist: [...p.setlist, {
+                  id: crypto.randomUUID(),
+                  songId: song.songId,
+                  position: p.setlist.length + 1,
+                  title: song.title,
+                  key: song.key,
+                  lead: song.lead || '',
+                  notes: song.notes,
+                  charts: song.charts,
+                }],
+              }));
+              // Cache the song's charts for offline use immediately (no reload needed)
+              const newCharts = (song.charts ?? []).filter(
+                (c) => c.url?.includes('/storage/v1/object/public/') && chartCacheKey(c),
+              );
+              if (newCharts.length > 0) {
+                downloadAllCharts(newCharts, null, () => {}).catch(() => {});
+              }
+            }}
             isEditor={isEditor}
             onChartUpload={(songTitle) => {
               const input = document.createElement('input');
@@ -3691,11 +3706,13 @@ function ConfigTab({
         </section>
         )}
 
-        {/* ── 8. Offline Access ──────────────────────────────────────────── */}
-        <OfflineSection
-          charts={config.setlist.flatMap((s) => s.charts ?? [])}
-          googleToken={googleToken}
-        />
+        {/* ── 8. Offline Access (Drive/anonymous only — Supabase shows auto-cache on load) ── */}
+        {!showId && (
+          <OfflineSection
+            charts={config.setlist.flatMap((s) => s.charts ?? [])}
+            googleToken={googleToken}
+          />
+        )}
 
         {/* ── 8. Export / Import ───────────────────────────────────────────── */}
         <section className={sectionCls}>
