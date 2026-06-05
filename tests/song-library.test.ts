@@ -1,0 +1,223 @@
+import { describe, it, expect } from 'vitest';
+import { normalizeSongKey, normalizeSongKeySafe } from '../lib/normalize';
+import { serializeShow, deserializeShow } from '../lib/show-file';
+import { resolveOverride, diffOverride, shouldSendEntries } from '../lib/overrides';
+
+describe('Song library: normalization single keyspace', () => {
+  it('normalizes basic titles', () => {
+    expect(normalizeSongKey('Mustang Sally')).toBe('mustang sally');
+  });
+
+  it('strips diacritics', () => {
+    expect(normalizeSongKey('Beyoncé')).toBe('beyonce');
+  });
+
+  it('strips leading articles', () => {
+    expect(normalizeSongKey('The Weight')).toBe('weight');
+    expect(normalizeSongKey('A Day in the Life')).toBe('day in the life');
+  });
+
+  it('strips punctuation and collapses whitespace', () => {
+    expect(normalizeSongKey('Rock & Roll!!!')).toBe('rock roll');
+  });
+
+  it('throws on empty result', () => {
+    expect(() => normalizeSongKey('!!!')).toThrow();
+  });
+
+  it('safe variant returns null on empty', () => {
+    expect(normalizeSongKeySafe('!!!')).toBe(null);
+  });
+
+  it('safe variant returns key for valid title', () => {
+    expect(normalizeSongKeySafe('Respect')).toBe('respect');
+  });
+});
+
+describe('Song library: export strips songId', () => {
+  it('serializeShow strips songId from setlist entries', () => {
+    const config = {
+      showInfo: { bandName: 'TestBand', eventDate: '', venue: '' },
+      stagePlot: [],
+      inputs: [],
+      monitors: [],
+      notes: [],
+      setlist: [
+        {
+          id: 'entry-1',
+          songId: 'song-uuid-123',
+          position: 1,
+          title: 'Test Song',
+          lead: 'Graham',
+          key: 'C',
+        },
+      ],
+    };
+
+    const yaml = serializeShow(config);
+    expect(yaml).not.toContain('songId');
+    expect(yaml).not.toContain('song-uuid-123');
+    expect(yaml).toContain('Test Song');
+  });
+});
+
+describe('Song library: import strips songId', () => {
+  it('deserializeShow (YAML) strips songId', () => {
+    const yaml = `format: showrunr/v1
+name: TestBand
+stagePlot: []
+inputs: []
+monitors: []
+notes: []
+setlist:
+  - title: Test Song
+    songId: stale-uuid-456
+    lead: Graham
+    key: C`;
+
+    const config = deserializeShow(yaml, 'test.yaml');
+    const song = config.setlist[0];
+    expect(song.title).toBe('Test Song');
+    // songId should not be present (stripped or ignored)
+    // YAML import goes through fromYaml which reconstructs from ShowFileV1 schema
+    // songId is not in the schema so it's dropped
+  });
+
+  it('deserializeShow (JSON) strips songId', () => {
+    const json = JSON.stringify({
+      showInfo: { bandName: 'TestBand', eventDate: '', venue: '' },
+      stagePlot: [],
+      inputs: [],
+      monitors: [],
+      notes: [],
+      setlist: [
+        { title: 'Test Song', songId: 'stale-uuid-789', lead: 'Graham', key: 'C', position: 1 },
+      ],
+    });
+
+    const config = deserializeShow(json, 'test.json');
+    const song = config.setlist[0];
+    expect(song.title).toBe('Test Song');
+    expect((song as unknown as Record<string, unknown>).songId).toBeUndefined();
+  });
+});
+
+describe('Song library: override resolution', () => {
+
+  it('null override uses library default', () => {
+    expect(resolveOverride(null, 'C')).toBe('C');
+  });
+
+  it('empty string override means explicitly blank', () => {
+    expect(resolveOverride('', 'C')).toBeUndefined();
+    expect(resolveOverride('', 'C', '')).toBe('');
+  });
+
+  it('value override replaces default', () => {
+    expect(resolveOverride('D', 'C')).toBe('D');
+  });
+
+  it('null override with null fallback returns undefined', () => {
+    expect(resolveOverride(null, null)).toBeUndefined();
+  });
+
+  it('undefined override uses fallback', () => {
+    expect(resolveOverride(undefined, 'Am')).toBe('Am');
+  });
+});
+
+describe('Song library: shouldSendEntries (save-payload decision)', () => {
+  const base = { isOwner: false, setlistMigrated: false, hasSentEntries: false };
+
+  it('non-owner, unmigrated, no songIds → legacy (false)', () => {
+    expect(shouldSendEntries([{ title: 'Mustang Sally' }], base)).toBe(false);
+  });
+
+  it('owner with all-normalizable titles → entries (true)', () => {
+    expect(
+      shouldSendEntries([{ title: 'Mustang Sally' }, { title: 'Respect' }], { ...base, isOwner: true }),
+    ).toBe(true);
+  });
+
+  it('owner with empty setlist → entries (true), enables migrate-on-save', () => {
+    expect(shouldSendEntries([], { ...base, isOwner: true })).toBe(true);
+    expect(shouldSendEntries(undefined, { ...base, isOwner: true })).toBe(true);
+  });
+
+  it('owner on UNMIGRATED show with an unnormalizable title and no songId → legacy fallback (false)', () => {
+    expect(
+      shouldSendEntries([{ title: 'Respect' }, { title: '!!!' }], { ...base, isOwner: true }),
+    ).toBe(false);
+  });
+
+  it('owner: unnormalizable title is fine if that row already has a songId', () => {
+    expect(
+      shouldSendEntries([{ songId: 'abc', title: '!!!' }], { ...base, isOwner: true }),
+    ).toBe(true);
+  });
+
+  it('migrated show with resolvable rows → entries (true)', () => {
+    expect(
+      shouldSendEntries([{ songId: 'abc', title: 'X' }], { ...base, setlistMigrated: true }),
+    ).toBe(true);
+  });
+
+  it('migrated show with an unnormalizable no-songId row → STILL entries (true), never legacy', () => {
+    // Legacy write would be ignored by GET (reads setlist_entries); must send entries
+    // so the server 400s and the failure is surfaced rather than silently lost.
+    expect(
+      shouldSendEntries([{ title: 'Respect' }, { title: '!!!' }], { ...base, setlistMigrated: true }),
+    ).toBe(true);
+  });
+
+  it('hasSentEntries behaves like migrated, even with an unnormalizable no-songId row', () => {
+    expect(
+      shouldSendEntries([{ title: '!!!' }], { ...base, hasSentEntries: true }),
+    ).toBe(true);
+  });
+
+  it('mixed songId row + junk row (no songId) → legacy fallback (false), not a 400', () => {
+    expect(
+      shouldSendEntries([{ songId: 'abc', title: 'Good' }, { title: '###' }], base),
+    ).toBe(false);
+  });
+
+  it('non-owner with a songId row, all resolvable → entries (true)', () => {
+    expect(shouldSendEntries([{ songId: 'abc', title: 'Good' }], base)).toBe(true);
+  });
+});
+
+describe('Song library: diffOverride (server-side)', () => {
+
+  it('matching values return null (no override)', () => {
+    expect(diffOverride('C', 'C')).toBe(null);
+  });
+
+  it('different values return the effective value', () => {
+    expect(diffOverride('D', 'C')).toBe('D');
+  });
+
+  it('blank effective vs non-blank default returns empty string', () => {
+    expect(diffOverride('', 'C')).toBe('');
+  });
+
+  it('both blank returns null', () => {
+    expect(diffOverride('', '')).toBe(null);
+  });
+
+  it('undefined effective treated as blank', () => {
+    expect(diffOverride(undefined, 'C')).toBe('');
+  });
+
+  it('null effective treated as blank', () => {
+    expect(diffOverride(null, 'C')).toBe('');
+  });
+
+  it('null default treated as blank', () => {
+    expect(diffOverride('D', null)).toBe('D');
+  });
+
+  it('both null returns null', () => {
+    expect(diffOverride(null, null)).toBe(null);
+  });
+});

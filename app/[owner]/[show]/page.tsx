@@ -222,13 +222,15 @@ export default function Page() {
 
   // ── Supabase show context ─────────────────────────────────────────────
   const [showId, setShowId] = useState<string | null>(null);
+  const [showOwnerId, setShowOwnerId] = useState<string | null>(null);
   const [isOwner, setIsOwner] = useState(false);
   const [isEditor, setIsEditor] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [chartCacheProgress, setChartCacheProgress] = useState<DownloadProgress | null>(null);
+  const [setlistMigrated, setSetlistMigrated] = useState(false);
 
-  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor);
+  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor, setlistMigrated);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
@@ -373,6 +375,8 @@ export default function Page() {
             setIsOwner(isOwnerFlag);
             setIsEditor(isEditorFlag);
             setShowId(data.show_id);
+            setShowOwnerId(data.owner_id ?? null);
+            setSetlistMigrated(!!data.setlist_migrated);
           }
         } catch {
           // Auth check failed — show content is already loaded, continue as anonymous
@@ -561,14 +565,18 @@ export default function Page() {
           </button>
           {/* Save status */}
           {(isOwner || isEditor) && (
-            <span role="status" aria-live="polite" className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 ${
-              showContext.saving
-                ? 'text-amber-600 bg-amber-50'
-                : showContext.lastSavedAt
-                  ? 'text-green-600 bg-green-50'
-                  : 'text-gray-400'
+            <span role="status" aria-live="polite" title={showContext.saveError ?? undefined} className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 max-w-[16rem] truncate ${
+              showContext.saveError
+                ? 'text-red-600 bg-red-50'
+                : showContext.saving
+                  ? 'text-amber-600 bg-amber-50'
+                  : showContext.lastSavedAt
+                    ? 'text-green-600 bg-green-50'
+                    : 'text-gray-400'
             }`}>
-              {showContext.saving ? 'Saving...' : showContext.lastSavedAt ? 'Saved' : ''}
+              {showContext.saveError
+                ? `Couldn't save — ${showContext.saveError}`
+                : showContext.saving ? 'Saving...' : showContext.lastSavedAt ? 'Saved' : ''}
             </span>
           )}
         </div>
@@ -591,7 +599,7 @@ export default function Page() {
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
       {tab === 'config' && (
-        <ConfigTab config={config} updateConfig={updateConfig} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} isOwner={isOwner} />
+        <ConfigTab config={config} updateConfig={updateConfig} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
       )}
       {tab === 'ai' && (
         <div className="p-4 md:p-8">
@@ -1730,19 +1738,193 @@ function ShowSortableRow({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ADD SONG FROM LIBRARY (autocomplete + Create & Add)
+// ════════════════════════════════════════════════════════════════════════════
+
+function AddSongFromLibrary({
+  onAddSong,
+  isOwner,
+  ownerId,
+  isEditor,
+}: {
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string }) => void;
+  isOwner: boolean;
+  ownerId: string | null;
+  isEditor?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [songs, setSongs] = useState<Array<{ id: string; title: string; key: string | null; lead: string; notes: string }>>([]);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    async function loadLibrary() {
+      setLoading(true);
+      try {
+        // Browse the show owner's library (editors must target the owner, not themselves)
+        const r = await fetch(ownerId ? `/api/songs?owner_id=${encodeURIComponent(ownerId)}` : '/api/songs');
+        const data = r.ok ? await r.json() : { songs: [] };
+        if (!cancelled) setSongs(data.songs || []);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    loadLibrary();
+    return () => { cancelled = true; };
+  }, [open, ownerId]);
+
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
+
+  if (!open) {
+    return (
+      <button
+        className="px-3 py-1.5 text-xs font-bold bg-gray-100 border border-gray-300 rounded hover:bg-gray-200 transition-colors mt-3"
+        onClick={() => setOpen(true)}
+      >
+        + Add Song
+      </button>
+    );
+  }
+
+  const trimmed = query.trim();
+  const filtered = trimmed
+    ? songs.filter((s) => s.title.toLowerCase().includes(trimmed.toLowerCase()))
+    : songs;
+  const exactMatch = songs.find((s) => s.title.toLowerCase() === trimmed.toLowerCase());
+
+  function handleSelect(song: { id: string; title: string; key: string | null; lead: string; notes: string }) {
+    onAddSong({
+      songId: song.id,
+      title: song.title,
+      key: song.key ?? undefined,
+      lead: song.lead,
+      notes: song.notes,
+    });
+    setQuery('');
+    setOpen(false);
+  }
+
+  async function handleCreateAndAdd() {
+    if (!trimmed || creating) return;
+    setCreating(true);
+    setCreateError('');
+    try {
+      const res = await fetch('/api/songs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: trimmed }),
+      });
+      if (res.ok) {
+        const newSong = await res.json();
+        onAddSong({
+          songId: newSong.id,
+          title: newSong.title,
+          key: newSong.key ?? undefined,
+          lead: newSong.lead || '',
+          notes: newSong.notes || '',
+        });
+        setQuery('');
+        setOpen(false);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setCreateError(data.error || 'Failed to create song');
+      }
+    } catch {
+      setCreateError('Network error');
+    }
+    setCreating(false);
+  }
+
+  return (
+    <div className="mt-3 relative">
+      <div className="flex gap-2">
+        <input
+          ref={inputRef}
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') { setOpen(false); setQuery(''); }
+            if (e.key === 'Enter' && exactMatch) { e.preventDefault(); handleSelect(exactMatch); }
+          }}
+          placeholder="Search library or type new title..."
+          className="flex-1 bg-white border border-gray-300 rounded px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+        />
+        <button
+          onClick={() => { setOpen(false); setQuery(''); }}
+          className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700"
+        >
+          Cancel
+        </button>
+      </div>
+      {loading ? (
+        <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded shadow-lg p-2 text-sm text-gray-400">
+          Loading library...
+        </div>
+      ) : trimmed ? (
+        <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded shadow-lg max-h-48 overflow-y-auto">
+          {filtered.map((song) => (
+            <button
+              key={song.id}
+              className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 transition-colors flex justify-between"
+              onClick={() => handleSelect(song)}
+            >
+              <span className="font-medium">{song.title}</span>
+              {song.key && <span className="text-xs text-gray-400 ml-2">{song.key}</span>}
+            </button>
+          ))}
+          {!exactMatch && trimmed && (
+            isOwner ? (
+              <>
+                <button
+                  className="w-full text-left px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 border-t border-gray-100 font-medium transition-colors"
+                  onClick={handleCreateAndAdd}
+                  disabled={creating}
+                >
+                  {creating ? 'Creating...' : `Create & Add "${trimmed}"`}
+                </button>
+                {createError && (
+                  <div className="px-3 py-1.5 text-xs text-red-500 border-t border-gray-100">{createError}</div>
+                )}
+              </>
+            ) : isEditor ? (
+              <div className="px-3 py-2 text-sm text-gray-400 border-t border-gray-100">
+                Song not found. Ask the show owner to add it to the library.
+              </div>
+            ) : null
+          )}
+          {filtered.length === 0 && exactMatch === undefined && !isOwner && !isEditor && (
+            <div className="px-3 py-2 text-sm text-gray-400">No matches</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // SORTABLE SETLIST TABLE (shared DnD logic for Config tab)
 // ════════════════════════════════════════════════════════════════════════════
 
 function SetupSetlistTable({
-  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAdd, isOwner, onChartUpload, onChartDelete,
+  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, ownerId, isEditor, onChartUpload, onChartDelete,
 }: {
   setlist: SetlistSong[];
   canResolveCharts: boolean;
   onReorder: (from: number, to: number) => void;
   onUpdate: (idx: number, field: string, value: string) => void;
   onDelete: (idx: number) => void;
-  onAdd: () => void;
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string }) => void;
   isOwner: boolean;
+  ownerId: string | null;
+  isEditor?: boolean;
   onChartUpload?: (songTitle: string) => void;
   onChartDelete?: (chartId: string, songTitle: string, role: string) => void;
 }) {
@@ -1802,12 +1984,7 @@ function SetupSetlistTable({
           </div>
         </SortableContext>
       </DndContext>
-      <button
-        className="px-3 py-1.5 text-xs font-bold bg-gray-100 border border-gray-300 rounded hover:bg-gray-200 transition-colors mt-3"
-        onClick={onAdd}
-      >
-        + Add Song
-      </button>
+      <AddSongFromLibrary onAddSong={onAddSong} isOwner={isOwner} ownerId={ownerId} isEditor={isEditor} />
     </>
   );
 }
@@ -2775,7 +2952,9 @@ function ConfigTab({
   googleError,
   onDisconnectGoogle,
   showId,
+  ownerId,
   isOwner,
+  isEditor,
 }: {
   config: AppConfig;
   updateConfig: (fn: (prev: AppConfig) => AppConfig) => void;
@@ -2783,6 +2962,8 @@ function ConfigTab({
   googleError?: string;
   onDisconnectGoogle: () => void;
   showId: string | null;
+  ownerId: string | null;
+  isEditor?: boolean;
   isOwner: boolean;
 }) {
   const [sheetUrl, setSheetUrl] = useState('');
@@ -3328,6 +3509,7 @@ function ConfigTab({
             setlist={config.setlist}
             canResolveCharts={canResolveCharts}
             isOwner={isOwner}
+            ownerId={ownerId}
             onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))}
             onUpdate={(idx, field, value) => updateConfig((p) => {
               const arr = [...p.setlist];
@@ -3338,10 +3520,19 @@ function ConfigTab({
               ...p,
               setlist: p.setlist.filter((_, i) => i !== idx).map((s, i) => ({ ...s, position: i + 1 })),
             }))}
-            onAdd={() => updateConfig((p) => ({
+            onAddSong={(song) => updateConfig((p) => ({
               ...p,
-              setlist: [...p.setlist, { id: crypto.randomUUID(), position: p.setlist.length + 1, title: '', lead: '', notes: '' }],
+              setlist: [...p.setlist, {
+                id: crypto.randomUUID(),
+                songId: song.songId,
+                position: p.setlist.length + 1,
+                title: song.title,
+                key: song.key,
+                lead: song.lead || '',
+                notes: song.notes,
+              }],
             }))}
+            isEditor={isEditor}
             onChartUpload={(songTitle) => {
               const input = document.createElement('input');
               input.type = 'file';
