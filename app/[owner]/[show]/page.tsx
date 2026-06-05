@@ -842,7 +842,9 @@ function StageSlotCell({ slot }: { slot: StageSlot | undefined }) {
         <>
           <p className="font-bold text-sm leading-tight uppercase">{slot.name}</p>
           <p className={`text-[11px] leading-tight ${isFeatured ? 'opacity-80' : 'text-gray-600'}`}>{slot.role}</p>
-          <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
+          {slot.mix ? (
+            <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
+          ) : null}
         </>
       ) : (
         <p className="text-[10px] text-gray-300 italic">empty</p>
@@ -933,7 +935,9 @@ function DraggableStageSlot({ pos, slot }: { pos: StagePosition; slot: StageSlot
           <>
             <p className="font-bold text-sm leading-tight uppercase">{slot.name}</p>
             <p className={`text-[11px] leading-tight ${isFeatured ? 'opacity-80' : 'text-gray-600'}`}>{slot.role}</p>
-            <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
+            {slot.mix ? (
+              <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
+            ) : null}
           </>
         ) : (
           <p className="text-[10px] text-gray-300 italic">empty</p>
@@ -2627,6 +2631,7 @@ function AgentChat({
             // Cascade: generate monitor mixes from stage plot
             const mixMap = new Map<number, string[]>();
             for (const slot of newPlot) {
+              if (!slot.mix) continue; // skip slots with no monitor assignment
               const names = mixMap.get(slot.mix) || [];
               names.push(slot.name);
               mixMap.set(slot.mix, names);
@@ -2873,6 +2878,7 @@ function ToolCallPreview({ name, input }: { name: string; input: Record<string, 
                 const mixMap = new Map<number, string[]>();
                 for (const s of slots) {
                   const mix = Number(s.mix);
+                  if (!mix) continue; // skip slots with no monitor assignment
                   const names = mixMap.get(mix) || [];
                   names.push(String(s.name));
                   mixMap.set(mix, names);
@@ -3270,8 +3276,7 @@ function ConfigTab({
                       />
                     </td>
                     <td className="px-2 py-1">
-                      <input
-                        type="number"
+                      <select
                         className={`${inputCls} px-1 text-center`}
                         value={slot.mix}
                         onChange={(e) =>
@@ -3281,7 +3286,15 @@ function ConfigTab({
                             return { ...p, stagePlot: arr };
                           })
                         }
-                      />
+                      >
+                        <option value={0}>&mdash;</option>
+                        {config.monitors.map((m) => (
+                          <option key={m.id ?? m.mix} value={m.mix}>{m.mix}</option>
+                        ))}
+                        {slot.mix > 0 && !config.monitors.some((m) => m.mix === slot.mix) && (
+                          <option value={slot.mix}>{slot.mix}</option>
+                        )}
+                      </select>
                     </td>
                     <td className="px-2 py-1">
                       <select
@@ -3351,7 +3364,7 @@ function ConfigTab({
                 ...p,
                 stagePlot: [
                   ...p.stagePlot,
-                  { name: '', pos: 'DSC' as StagePosition, role: '', mix: p.stagePlot.length + 1 },
+                  { name: '', pos: 'DSC' as StagePosition, role: '', mix: 0 },
                 ],
               }))
             }
