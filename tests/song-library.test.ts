@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeSongKey, normalizeSongKeySafe } from '../lib/normalize';
 import { serializeShow, deserializeShow } from '../lib/show-file';
-import { resolveOverride, diffOverride } from '../lib/overrides';
+import { resolveOverride, diffOverride, shouldSendEntries } from '../lib/overrides';
 
 describe('Song library: normalization single keyspace', () => {
   it('normalizes basic titles', () => {
@@ -123,6 +123,59 @@ describe('Song library: override resolution', () => {
 
   it('undefined override uses fallback', () => {
     expect(resolveOverride(undefined, 'Am')).toBe('Am');
+  });
+});
+
+describe('Song library: shouldSendEntries (save-payload decision)', () => {
+  const base = { isOwner: false, setlistMigrated: false, hasSentEntries: false };
+
+  it('non-owner, unmigrated, no songIds → legacy (false)', () => {
+    expect(shouldSendEntries([{ title: 'Mustang Sally' }], base)).toBe(false);
+  });
+
+  it('owner with all-normalizable titles → entries (true)', () => {
+    expect(
+      shouldSendEntries([{ title: 'Mustang Sally' }, { title: 'Respect' }], { ...base, isOwner: true }),
+    ).toBe(true);
+  });
+
+  it('owner with empty setlist → entries (true), enables migrate-on-save', () => {
+    expect(shouldSendEntries([], { ...base, isOwner: true })).toBe(true);
+    expect(shouldSendEntries(undefined, { ...base, isOwner: true })).toBe(true);
+  });
+
+  it('owner with an unnormalizable title and no songId → legacy fallback (false)', () => {
+    expect(
+      shouldSendEntries([{ title: 'Respect' }, { title: '!!!' }], { ...base, isOwner: true }),
+    ).toBe(false);
+  });
+
+  it('owner: unnormalizable title is fine if that row already has a songId', () => {
+    expect(
+      shouldSendEntries([{ songId: 'abc', title: '!!!' }], { ...base, isOwner: true }),
+    ).toBe(true);
+  });
+
+  it('migrated show with resolvable rows → entries (true)', () => {
+    expect(
+      shouldSendEntries([{ songId: 'abc', title: 'X' }], { ...base, setlistMigrated: true }),
+    ).toBe(true);
+  });
+
+  it('hasSentEntries behaves like migrated', () => {
+    expect(
+      shouldSendEntries([{ songId: 'abc', title: 'X' }], { ...base, hasSentEntries: true }),
+    ).toBe(true);
+  });
+
+  it('mixed songId row + junk row (no songId) → legacy fallback (false), not a 400', () => {
+    expect(
+      shouldSendEntries([{ songId: 'abc', title: 'Good' }, { title: '###' }], base),
+    ).toBe(false);
+  });
+
+  it('non-owner with a songId row, all resolvable → entries (true)', () => {
+    expect(shouldSendEntries([{ songId: 'abc', title: 'Good' }], base)).toBe(true);
   });
 });
 

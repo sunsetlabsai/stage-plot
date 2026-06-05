@@ -246,4 +246,3 @@ export async function PUT(request: NextRequest) {
 
   return Response.json({ updated_at: data.updated_at, slug: data.slug });
 }
-

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { shouldSendEntries } from './overrides';
 
 interface ShowContext {
   showId: string | null;
@@ -52,18 +53,16 @@ export function useShow(
         show_date: (config.showInfo as { eventDate?: string })?.eventDate,
       };
 
-      // When migrated (or any song has songId), send setlist as entries
-      // Server-side diffing computes actual overrides vs library defaults.
-      // Owners always send entries so the first save of any unmigrated show
-      // (new empty show, Google Sheet import) resolves/creates library songs
-      // and flips setlist_migrated. Editors stay on the legacy path until the
-      // owner (or seed script) migrates the show, since they can't auto-create.
+      // Decide entries (reference path) vs legacy blob. Owners migrate-on-first-save;
+      // editors stay legacy until owner/seed migrates. Rows with no songId and an
+      // unnormalizable title fall back to legacy so the save can't be blocked.
+      // See shouldSendEntries for the full rule.
       const setlist = config.setlist as Array<{
         songId?: string; position: number; title: string;
         key?: string; lead?: string; notes?: string; sceneNote?: string;
       }> | undefined;
 
-      if (isOwner || setlistMigrated || hasSentEntries.current || setlist?.some((s) => s.songId)) {
+      if (shouldSendEntries(setlist, { isOwner, setlistMigrated, hasSentEntries: hasSentEntries.current })) {
         // Send entries with effective values — server will diff against song defaults
         payload.entries = (setlist || []).map((s) => ({
           song_id: s.songId || null,
