@@ -31,6 +31,32 @@ The AI copilot handles this seamlessly because it sees everything at once. Manua
 
 ---
 
+## Prior Art — What We Already Tried (PR #53 / #55, reverted)
+
+> Note added later so we don't re-search or relitigate this.
+
+The input list **used to have a Mix column** (original Setup UI, commit `796d4d6`). It was removed
+during the "Stage plot → monitor mix sync" work:
+
+- `c815800` (PR #53) made `StageSlot.mix` the **single source of truth** and dropped the per-channel
+  mix, with the code comment *"mix # and name are derived from stage plot."*
+- `a0aee19` — Codex finding titled **"drop monitor mix"** (removed the mix association from console export).
+- `dc8ae04` (PR #55) — **"Revert monitor lockdown — restore full monitor mix editing."** Undid the
+  over-tight coupling but did **not** restore a per-input Mix field.
+
+**Where it landed (current `main`):** `InputChannel` = `ch / inst / mic / stand / notes` — **no mix
+field**. Monitor assignment lives **only** on `StageSlot.mix`. (S31 made that stage-plot mix a
+validated dropdown of defined mixes + "None"/0 — but still position-anchored, one mix per slot.)
+
+**Lesson — don't relitigate:** making the stage plot the *sole* owner of mix was too lossy and got
+reverted. You lose **per-channel mix overrides** — e.g. a drummer's kick routed to a different wedge
+than the rest of the kit, or a singer's vocal to their own IEM mix. This is the concrete evidence
+behind Constraint #4 ("tight coupling — too tight") and Open Question #2 (per-channel override on the
+input, independent of the stage slot). Any new linkage design **must preserve a path for per-input
+mix overrides** — do not collapse mix onto a single stage-position anchor again.
+
+---
+
 ## Direction Under Discussion: Input-First Flow with Cross-References
 
 Rather than mandating a starting point, allow any entry point but use **performer name as the linking key** with **cross-reference dropdowns** that propagate.
