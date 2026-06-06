@@ -48,6 +48,7 @@ export interface Chart {
 
 export interface SetlistSong {
   id?: string;              // stable identity for DnD + navigator; guaranteed at runtime
+  songId?: string;          // canonical song ID from songs table (round-trips for save)
   position: number;
   title: string;
   key?: string;           // musical key — e.g. "Eb", "Am", "F#m"
@@ -55,6 +56,20 @@ export interface SetlistSong {
   notes?: string;         // e.g. "key change", "guest", "spoken word"
   sceneNote?: string;     // engineer cue — e.g. "save scene after"
   charts?: Chart[];       // matched charts from Google Drive
+}
+
+export interface Song {
+  id: string;
+  owner_id: string;
+  song_key: string;
+  title: string;
+  key: string | null;
+  lead: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+  chart_count?: number;
+  show_count?: number;
 }
 
 export interface BandConfig {

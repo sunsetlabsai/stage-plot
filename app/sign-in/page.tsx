@@ -3,6 +3,7 @@
 import { Suspense, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
+import { LogoFull } from '@/components/Logo';
 
 export default function SignInPage() {
   return (
@@ -68,6 +69,7 @@ function SignInForm() {
     <div className="min-h-screen flex items-center justify-center bg-zinc-950 px-4">
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center">
+          <LogoFull className="w-24 h-24 mx-auto mb-4 rounded-3xl" />
           <h1 className="text-2xl font-bold text-white">ShowRunr</h1>
           <p className="text-zinc-400 mt-1">Sign in to manage your shows</p>
         </div>

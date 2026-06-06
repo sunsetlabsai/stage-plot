@@ -59,8 +59,8 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  // ── Protect /dashboard — redirect to sign-in if not authenticated ──
-  if (pathname === '/dashboard') {
+  // ── Protect /dashboard and /library — redirect to sign-in if not authenticated ──
+  if (pathname === '/dashboard' || pathname === '/library') {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
       const url = request.nextUrl.clone();

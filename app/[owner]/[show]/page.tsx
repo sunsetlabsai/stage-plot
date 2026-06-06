@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import { LogoMark } from '@/components/Logo';
 import {
   DndContext,
   closestCenter,
@@ -222,13 +223,15 @@ export default function Page() {
 
   // ── Supabase show context ─────────────────────────────────────────────
   const [showId, setShowId] = useState<string | null>(null);
+  const [showOwnerId, setShowOwnerId] = useState<string | null>(null);
   const [isOwner, setIsOwner] = useState(false);
   const [isEditor, setIsEditor] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [chartCacheProgress, setChartCacheProgress] = useState<DownloadProgress | null>(null);
+  const [setlistMigrated, setSetlistMigrated] = useState(false);
 
-  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor);
+  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor, setlistMigrated);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
@@ -373,6 +376,8 @@ export default function Page() {
             setIsOwner(isOwnerFlag);
             setIsEditor(isEditorFlag);
             setShowId(data.show_id);
+            setShowOwnerId(data.owner_id ?? null);
+            setSetlistMigrated(!!data.setlist_migrated);
           }
         } catch {
           // Auth check failed — show content is already loaded, continue as anonymous
@@ -481,6 +486,7 @@ export default function Page() {
       {/* ── Tab Bar ─────────────────────────────────────────────────────── */}
       <div className="sticky top-0 z-10 bg-white border-b shadow-sm">
         <div className="max-w-4xl mx-auto flex items-center">
+          <LogoMark className="h-5 w-auto ml-3 mr-1 shrink-0" />
           {isAuthenticated && (
             <Link href="/dashboard" className="px-3 py-3 text-gray-400 hover:text-black transition-colors" title="My Shows">
               <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -529,20 +535,18 @@ export default function Page() {
                 : 'text-gray-400 hover:text-gray-600'
             }`}
           >
-            AI Designer
+            AI
           </button>
           )}
-          {tab === 'mix' && (
-            <button
-              onClick={() => setShowPrintModal(true)}
-              className="p-2 text-gray-500 hover:text-black transition-colors print:hidden"
-              title="Print / Save PDF"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4H7v4a2 2 0 002 2zm0-14V3a2 2 0 012-2h2a2 2 0 012 2v4H9z" />
-              </svg>
-            </button>
-          )}
+          <button
+            onClick={() => setShowPrintModal(true)}
+            className="p-2 text-gray-500 hover:text-black transition-colors print:hidden"
+            title="Print / Save PDF"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4H7v4a2 2 0 002 2zm0-14V3a2 2 0 012-2h2a2 2 0 012 2v4H9z" />
+            </svg>
+          </button>
           <button
             onClick={handlePublish}
             disabled={publishing}
@@ -561,14 +565,18 @@ export default function Page() {
           </button>
           {/* Save status */}
           {(isOwner || isEditor) && (
-            <span role="status" aria-live="polite" className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 ${
-              showContext.saving
-                ? 'text-amber-600 bg-amber-50'
-                : showContext.lastSavedAt
-                  ? 'text-green-600 bg-green-50'
-                  : 'text-gray-400'
+            <span role="status" aria-live="polite" title={showContext.saveError ?? undefined} className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 max-w-[16rem] truncate ${
+              showContext.saveError
+                ? 'text-red-600 bg-red-50'
+                : showContext.saving
+                  ? 'text-amber-600 bg-amber-50'
+                  : showContext.lastSavedAt
+                    ? 'text-green-600 bg-green-50'
+                    : 'text-gray-400'
             }`}>
-              {showContext.saving ? 'Saving...' : showContext.lastSavedAt ? 'Saved' : ''}
+              {showContext.saveError
+                ? `Couldn't save — ${showContext.saveError}`
+                : showContext.saving ? 'Saving...' : showContext.lastSavedAt ? 'Saved' : ''}
             </span>
           )}
         </div>
@@ -591,7 +599,7 @@ export default function Page() {
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
       {tab === 'config' && (
-        <ConfigTab config={config} updateConfig={updateConfig} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} isOwner={isOwner} />
+        <ConfigTab config={config} updateConfig={updateConfig} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
       )}
       {tab === 'ai' && (
         <div className="p-4 md:p-8">
@@ -834,7 +842,9 @@ function StageSlotCell({ slot }: { slot: StageSlot | undefined }) {
         <>
           <p className="font-bold text-sm leading-tight uppercase">{slot.name}</p>
           <p className={`text-[11px] leading-tight ${isFeatured ? 'opacity-80' : 'text-gray-600'}`}>{slot.role}</p>
-          <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
+          {slot.mix ? (
+            <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
+          ) : null}
         </>
       ) : (
         <p className="text-[10px] text-gray-300 italic">empty</p>
@@ -925,7 +935,9 @@ function DraggableStageSlot({ pos, slot }: { pos: StagePosition; slot: StageSlot
           <>
             <p className="font-bold text-sm leading-tight uppercase">{slot.name}</p>
             <p className={`text-[11px] leading-tight ${isFeatured ? 'opacity-80' : 'text-gray-600'}`}>{slot.role}</p>
-            <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
+            {slot.mix ? (
+              <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
+            ) : null}
           </>
         ) : (
           <p className="text-[10px] text-gray-300 italic">empty</p>
@@ -1730,19 +1742,194 @@ function ShowSortableRow({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ADD SONG FROM LIBRARY (autocomplete + Create & Add)
+// ════════════════════════════════════════════════════════════════════════════
+
+function AddSongFromLibrary({
+  onAddSong,
+  isOwner,
+  ownerId,
+  isEditor,
+}: {
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; charts?: Chart[] }) => void;
+  isOwner: boolean;
+  ownerId: string | null;
+  isEditor?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [songs, setSongs] = useState<Array<{ id: string; title: string; key: string | null; lead: string; notes: string; charts?: Chart[] }>>([]);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    async function loadLibrary() {
+      setLoading(true);
+      try {
+        // Browse the show owner's library (editors must target the owner, not themselves)
+        const r = await fetch(ownerId ? `/api/songs?owner_id=${encodeURIComponent(ownerId)}` : '/api/songs');
+        const data = r.ok ? await r.json() : { songs: [] };
+        if (!cancelled) setSongs(data.songs || []);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    loadLibrary();
+    return () => { cancelled = true; };
+  }, [open, ownerId]);
+
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open]);
+
+  if (!open) {
+    return (
+      <button
+        className="px-3 py-1.5 text-xs font-bold bg-gray-100 border border-gray-300 rounded hover:bg-gray-200 transition-colors mt-3"
+        onClick={() => setOpen(true)}
+      >
+        + Add Song
+      </button>
+    );
+  }
+
+  const trimmed = query.trim();
+  const filtered = trimmed
+    ? songs.filter((s) => s.title.toLowerCase().includes(trimmed.toLowerCase()))
+    : songs;
+  const exactMatch = songs.find((s) => s.title.toLowerCase() === trimmed.toLowerCase());
+
+  function handleSelect(song: { id: string; title: string; key: string | null; lead: string; notes: string; charts?: Chart[] }) {
+    onAddSong({
+      songId: song.id,
+      title: song.title,
+      key: song.key ?? undefined,
+      lead: song.lead,
+      notes: song.notes,
+      charts: song.charts,
+    });
+    setQuery('');
+    setOpen(false);
+  }
+
+  async function handleCreateAndAdd() {
+    if (!trimmed || creating) return;
+    setCreating(true);
+    setCreateError('');
+    try {
+      const res = await fetch('/api/songs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: trimmed }),
+      });
+      if (res.ok) {
+        const newSong = await res.json();
+        onAddSong({
+          songId: newSong.id,
+          title: newSong.title,
+          key: newSong.key ?? undefined,
+          lead: newSong.lead || '',
+          notes: newSong.notes || '',
+        });
+        setQuery('');
+        setOpen(false);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setCreateError(data.error || 'Failed to create song');
+      }
+    } catch {
+      setCreateError('Network error');
+    }
+    setCreating(false);
+  }
+
+  return (
+    <div className="mt-3 relative">
+      <div className="flex gap-2">
+        <input
+          ref={inputRef}
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') { setOpen(false); setQuery(''); }
+            if (e.key === 'Enter' && exactMatch) { e.preventDefault(); handleSelect(exactMatch); }
+          }}
+          placeholder="Search library or type new title..."
+          className="flex-1 bg-white border border-gray-300 rounded px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+        />
+        <button
+          onClick={() => { setOpen(false); setQuery(''); }}
+          className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700"
+        >
+          Cancel
+        </button>
+      </div>
+      {loading ? (
+        <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded shadow-lg p-2 text-sm text-gray-400">
+          Loading library...
+        </div>
+      ) : trimmed ? (
+        <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded shadow-lg max-h-48 overflow-y-auto">
+          {filtered.map((song) => (
+            <button
+              key={song.id}
+              className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 transition-colors flex justify-between"
+              onClick={() => handleSelect(song)}
+            >
+              <span className="font-medium">{song.title}</span>
+              {song.key && <span className="text-xs text-gray-400 ml-2">{song.key}</span>}
+            </button>
+          ))}
+          {!exactMatch && trimmed && (
+            isOwner ? (
+              <>
+                <button
+                  className="w-full text-left px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 border-t border-gray-100 font-medium transition-colors"
+                  onClick={handleCreateAndAdd}
+                  disabled={creating}
+                >
+                  {creating ? 'Creating...' : `Create & Add "${trimmed}"`}
+                </button>
+                {createError && (
+                  <div className="px-3 py-1.5 text-xs text-red-500 border-t border-gray-100">{createError}</div>
+                )}
+              </>
+            ) : isEditor ? (
+              <div className="px-3 py-2 text-sm text-gray-400 border-t border-gray-100">
+                Song not found. Ask the show owner to add it to the library.
+              </div>
+            ) : null
+          )}
+          {filtered.length === 0 && exactMatch === undefined && !isOwner && !isEditor && (
+            <div className="px-3 py-2 text-sm text-gray-400">No matches</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // SORTABLE SETLIST TABLE (shared DnD logic for Config tab)
 // ════════════════════════════════════════════════════════════════════════════
 
 function SetupSetlistTable({
-  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAdd, isOwner, onChartUpload, onChartDelete,
+  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, ownerId, isEditor, onChartUpload, onChartDelete,
 }: {
   setlist: SetlistSong[];
   canResolveCharts: boolean;
   onReorder: (from: number, to: number) => void;
   onUpdate: (idx: number, field: string, value: string) => void;
   onDelete: (idx: number) => void;
-  onAdd: () => void;
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; charts?: Chart[] }) => void;
   isOwner: boolean;
+  ownerId: string | null;
+  isEditor?: boolean;
   onChartUpload?: (songTitle: string) => void;
   onChartDelete?: (chartId: string, songTitle: string, role: string) => void;
 }) {
@@ -1802,12 +1989,7 @@ function SetupSetlistTable({
           </div>
         </SortableContext>
       </DndContext>
-      <button
-        className="px-3 py-1.5 text-xs font-bold bg-gray-100 border border-gray-300 rounded hover:bg-gray-200 transition-colors mt-3"
-        onClick={onAdd}
-      >
-        + Add Song
-      </button>
+      <AddSongFromLibrary onAddSong={onAddSong} isOwner={isOwner} ownerId={ownerId} isEditor={isEditor} />
     </>
   );
 }
@@ -2033,19 +2215,33 @@ function SetupMonitorTable({
     <>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
         <SortableContext items={monitorIds} strategy={verticalListSortingStrategy}>
-          <div className="space-y-3">
-            {monitors.map((mon, idx) => (
-              <SortableMonitorRow
-                key={mon.id!}
-                monitor={mon}
-                idx={idx}
-                total={monitors.length}
-                onUpdate={onUpdate}
-                onDelete={onDelete}
-                onMoveUp={() => onReorder(idx, idx - 1)}
-                onMoveDown={() => onReorder(idx, idx + 1)}
-              />
-            ))}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b">
+                  <th className="w-8"></th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-14">Mix #</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[140px]">Name</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[160px]">Needs</th>
+                  <th className="w-16"></th>
+                  <th className="w-10"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {monitors.map((mon, idx) => (
+                  <SortableMonitorRow
+                    key={mon.id!}
+                    monitor={mon}
+                    idx={idx}
+                    total={monitors.length}
+                    onUpdate={onUpdate}
+                    onDelete={onDelete}
+                    onMoveUp={() => onReorder(idx, idx - 1)}
+                    onMoveDown={() => onReorder(idx, idx + 1)}
+                  />
+                ))}
+              </tbody>
+            </table>
           </div>
         </SortableContext>
       </DndContext>
@@ -2069,30 +2265,29 @@ function SortableMonitorRow({
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
 
   return (
-    <div ref={setNodeRef} style={style} className="flex flex-col sm:flex-row gap-2 items-start sm:items-center border-b border-gray-100 pb-3">
-      <div className="cursor-grab shrink-0 pt-5 sm:pt-0 self-center" {...attributes} {...listeners}>
+    <tr ref={setNodeRef} style={style} className="border-b border-gray-100">
+      <td className="px-1 py-1 cursor-grab" {...attributes} {...listeners}>
         <span className="text-gray-300 text-sm select-none">&#x2630;</span>
-      </div>
-      <div className="w-16 shrink-0">
-        <label className={labelCls}>Mix #</label>
-        <span className="text-sm font-mono text-gray-500">{mon.mix}</span>
-      </div>
-      <div className="flex-1">
-        <label className={labelCls}>Name</label>
+      </td>
+      <td className="px-2 py-1">
+        <span className="text-xs font-mono text-gray-400">{mon.mix}</span>
+      </td>
+      <td className="px-2 py-1">
         <input className={inputCls} value={mon.name} onChange={(e) => onUpdate(idx, 'name', e.target.value)} />
-      </div>
-      <div className="flex-[2]">
-        <label className={labelCls}>Needs</label>
+      </td>
+      <td className="px-2 py-1">
         <input className={inputCls} value={mon.needs} onChange={(e) => onUpdate(idx, 'needs', e.target.value)} />
-      </div>
-      <div className="pt-5 flex items-center gap-1">
+      </td>
+      <td className="px-1 py-1">
         <div className="flex flex-col items-center">
           <button className={arrowBtn} disabled={idx === 0} onClick={onMoveUp} title="Move up">&uarr;</button>
           <button className={arrowBtn} disabled={idx === total - 1} onClick={onMoveDown} title="Move down">&darr;</button>
         </div>
-        <button className={btnRemove} onClick={() => onDelete(idx)}>X</button>
-      </div>
-    </div>
+      </td>
+      <td className="px-2 py-1">
+        <button className="px-2 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors" onClick={() => onDelete(idx)}>X</button>
+      </td>
+    </tr>
   );
 }
 
@@ -2436,6 +2631,7 @@ function AgentChat({
             // Cascade: generate monitor mixes from stage plot
             const mixMap = new Map<number, string[]>();
             for (const slot of newPlot) {
+              if (!slot.mix) continue; // skip slots with no monitor assignment
               const names = mixMap.get(slot.mix) || [];
               names.push(slot.name);
               mixMap.set(slot.mix, names);
@@ -2682,6 +2878,7 @@ function ToolCallPreview({ name, input }: { name: string; input: Record<string, 
                 const mixMap = new Map<number, string[]>();
                 for (const s of slots) {
                   const mix = Number(s.mix);
+                  if (!mix) continue; // skip slots with no monitor assignment
                   const names = mixMap.get(mix) || [];
                   names.push(String(s.name));
                   mixMap.set(mix, names);
@@ -2775,7 +2972,9 @@ function ConfigTab({
   googleError,
   onDisconnectGoogle,
   showId,
+  ownerId,
   isOwner,
+  isEditor,
 }: {
   config: AppConfig;
   updateConfig: (fn: (prev: AppConfig) => AppConfig) => void;
@@ -2783,6 +2982,8 @@ function ConfigTab({
   googleError?: string;
   onDisconnectGoogle: () => void;
   showId: string | null;
+  ownerId: string | null;
+  isEditor?: boolean;
   isOwner: boolean;
 }) {
   const [sheetUrl, setSheetUrl] = useState('');
@@ -2858,6 +3059,10 @@ function ConfigTab({
   const resolveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
+    // Drive-era only. Supabase shows resolve charts from the library on every GET,
+    // so we must never wipe them here — bail out when this is a Supabase show.
+    if (showId) return;
+
     // Clear charts and invalidate in-flight requests when Drive is disconnected
     if (!config.chartsRootFolderId) {
       resolveVersionRef.current++;
@@ -2884,7 +3089,7 @@ function ConfigTab({
     }, 1000);
 
     return () => { if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current); };
-  }, [resolveSignature, canResolveCharts, resolveCharts, config.chartsRootFolderId, config.setlist, updateConfig]);
+  }, [showId, resolveSignature, canResolveCharts, resolveCharts, config.chartsRootFolderId, config.setlist, updateConfig]);
 
   // Extract folder ID from URL or bare ID
   const parseFolderId = (input: string): string | null => {
@@ -3046,48 +3251,17 @@ function ConfigTab({
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b">
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]">Name</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500">Position</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]">Role</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-16">Mix</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[120px]">Role</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[60px]">Mix</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[78px]">Position</th>
                   <th className="text-center px-2 py-2 text-xs font-bold text-gray-500 w-14">Power</th>
-                  <th className="text-center px-2 py-2 text-xs font-bold text-gray-500 w-14">Feat.</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[120px]">Name</th>
                   <th className="w-10"></th>
                 </tr>
               </thead>
               <tbody>
                 {config.stagePlot.map((slot, idx) => (
                   <tr key={idx} className="border-b border-gray-100">
-                    <td className="px-2 py-1">
-                      <input
-                        className={inputCls}
-                        value={slot.name}
-                        onChange={(e) =>
-                          updateConfig((p) => {
-                            const arr = [...p.stagePlot];
-                            arr[idx] = { ...arr[idx], name: e.target.value };
-                            return { ...p, stagePlot: arr };
-                          })
-                        }
-                      />
-                    </td>
-                    <td className="px-2 py-1">
-                      <select
-                        className={inputCls}
-                        value={slot.pos}
-                        onChange={(e) =>
-                          updateConfig((p) => {
-                            const arr = [...p.stagePlot];
-                            arr[idx] = { ...arr[idx], pos: e.target.value as StagePosition };
-                            return { ...p, stagePlot: arr };
-                          })
-                        }
-                      >
-                        {POSITIONS.map((pos) => (
-                          <option key={pos} value={pos}>{pos}</option>
-                        ))}
-                      </select>
-                    </td>
                     <td className="px-2 py-1">
                       <input
                         className={inputCls}
@@ -3102,9 +3276,8 @@ function ConfigTab({
                       />
                     </td>
                     <td className="px-2 py-1">
-                      <input
-                        type="number"
-                        className={inputCls}
+                      <select
+                        className={`${inputCls} px-1 text-center`}
                         value={slot.mix}
                         onChange={(e) =>
                           updateConfig((p) => {
@@ -3113,7 +3286,32 @@ function ConfigTab({
                             return { ...p, stagePlot: arr };
                           })
                         }
-                      />
+                      >
+                        <option value={0}>&mdash;</option>
+                        {config.monitors.map((m) => (
+                          <option key={m.id ?? m.mix} value={m.mix}>{m.mix}</option>
+                        ))}
+                        {slot.mix > 0 && !config.monitors.some((m) => m.mix === slot.mix) && (
+                          <option value={slot.mix}>{slot.mix}</option>
+                        )}
+                      </select>
+                    </td>
+                    <td className="px-2 py-1">
+                      <select
+                        className={`${inputCls} px-1`}
+                        value={slot.pos}
+                        onChange={(e) =>
+                          updateConfig((p) => {
+                            const arr = [...p.stagePlot];
+                            arr[idx] = { ...arr[idx], pos: e.target.value as StagePosition };
+                            return { ...p, stagePlot: arr };
+                          })
+                        }
+                      >
+                        {POSITIONS.map((pos) => (
+                          <option key={pos} value={pos}>{pos}</option>
+                        ))}
+                      </select>
                     </td>
                     <td className="px-2 py-1 text-center">
                       <input
@@ -3128,14 +3326,14 @@ function ConfigTab({
                         }
                       />
                     </td>
-                    <td className="px-2 py-1 text-center">
+                    <td className="px-2 py-1">
                       <input
-                        type="checkbox"
-                        checked={slot.featured ?? false}
+                        className={inputCls}
+                        value={slot.name}
                         onChange={(e) =>
                           updateConfig((p) => {
                             const arr = [...p.stagePlot];
-                            arr[idx] = { ...arr[idx], featured: e.target.checked };
+                            arr[idx] = { ...arr[idx], name: e.target.value };
                             return { ...p, stagePlot: arr };
                           })
                         }
@@ -3166,7 +3364,7 @@ function ConfigTab({
                 ...p,
                 stagePlot: [
                   ...p.stagePlot,
-                  { name: '', pos: 'DSC' as StagePosition, role: '', mix: p.stagePlot.length + 1 },
+                  { name: '', pos: 'DSC' as StagePosition, role: '', mix: 0 },
                 ],
               }))
             }
@@ -3328,6 +3526,7 @@ function ConfigTab({
             setlist={config.setlist}
             canResolveCharts={canResolveCharts}
             isOwner={isOwner}
+            ownerId={ownerId}
             onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))}
             onUpdate={(idx, field, value) => updateConfig((p) => {
               const arr = [...p.setlist];
@@ -3338,10 +3537,29 @@ function ConfigTab({
               ...p,
               setlist: p.setlist.filter((_, i) => i !== idx).map((s, i) => ({ ...s, position: i + 1 })),
             }))}
-            onAdd={() => updateConfig((p) => ({
-              ...p,
-              setlist: [...p.setlist, { id: crypto.randomUUID(), position: p.setlist.length + 1, title: '', lead: '', notes: '' }],
-            }))}
+            onAddSong={(song) => {
+              updateConfig((p) => ({
+                ...p,
+                setlist: [...p.setlist, {
+                  id: crypto.randomUUID(),
+                  songId: song.songId,
+                  position: p.setlist.length + 1,
+                  title: song.title,
+                  key: song.key,
+                  lead: song.lead || '',
+                  notes: song.notes,
+                  charts: song.charts,
+                }],
+              }));
+              // Cache the song's charts for offline use immediately (no reload needed)
+              const newCharts = (song.charts ?? []).filter(
+                (c) => c.url?.includes('/storage/v1/object/public/') && chartCacheKey(c),
+              );
+              if (newCharts.length > 0) {
+                downloadAllCharts(newCharts, null, () => {}).catch(() => {});
+              }
+            }}
+            isEditor={isEditor}
             onChartUpload={(songTitle) => {
               const input = document.createElement('input');
               input.type = 'file';
@@ -3500,11 +3718,13 @@ function ConfigTab({
         </section>
         )}
 
-        {/* ── 8. Offline Access ──────────────────────────────────────────── */}
-        <OfflineSection
-          charts={config.setlist.flatMap((s) => s.charts ?? [])}
-          googleToken={googleToken}
-        />
+        {/* ── 8. Offline Access (Drive/anonymous only — Supabase shows auto-cache on load) ── */}
+        {!showId && (
+          <OfflineSection
+            charts={config.setlist.flatMap((s) => s.charts ?? [])}
+            googleToken={googleToken}
+          />
+        )}
 
         {/* ── 8. Export / Import ───────────────────────────────────────────── */}
         <section className={sectionCls}>
