@@ -1,12 +1,26 @@
 # Design: Input List / Stage Plot / Mix Linkage
 
-**Status:** Proposed (v4) — ready for adversarial review (Codex R3)
-**Date:** 2026-06-06 (supersedes v3 same-day; v3 superseded v2 2026-06-05, v1 2026-06-04)
+**Status:** Proposed (v5) — ready for adversarial review (Codex R3)
+**Date:** 2026-06-06 (supersedes v4 same-day; v4←v3←v2 2026-06-05←v1 2026-06-04)
 **Branch:** `opus/design-input-plot-linkage` (merged up to `main`)
 
 ---
 
-## What changed since v3 (read first if you reviewed v3)
+## What changed since v4 (read first if you reviewed v4)
+
+A show-runner conceptual call closes the remaining open questions and **simplifies** the design:
+
+- **Mix is a slot/performer property only — never an input-channel property, anywhere this phase.** The v4 read-only `→ Mix n` badge on the input row is **removed**, and so is the v4 **console-export Mix column** (and its resolver / warning UI). Rationale: a mix reference on an input row implies an input *send* ("flip-to-fade" — input faders driving a discrete aux/send mix), which **we are not modeling**. What this tool captures is monitor *grouping* (which performers/sections share a wedge, and where it sits). Actual input→mix sends are the engineer's showtime job. **Clarity > envelope-pushing here.**
+- The input row's **only** new element is the **Position (slot) dropdown** (pure grouping by performer/zone). Inputs still link to slots by `slotId` — for organization, rename-safety, and AI coherence — they just don't surface or derive a mix.
+- **Console/patch export is untouched** (stays the input-only channel list it is today). Dropping mix from export is now a **deliberate clarity decision**, not the `a0aee19` regression — monitor/wedge info lives in the **monitor section** (its own print block), not joined onto the channel list.
+- The old "per-channel mix override" is re-scoped: it's not a cheap one-field add, it's part of a future **Input Sends** phase (a send-matrix / N-mix-per-input model). Captured in `docs/design-input-sends.md`.
+- Resolved open questions: **confirm-gate** = silent for zero-linkage shows, confirm on **any** removal once a show has ≥1 linkage. **Slot delete** = prompt at delete time. **Touch drag** = grip-drag stands (revisit in UAT).
+
+Everything else from v4 (slot-id lifecycle + de-dupe, multi-occupant render/DnD, unified AI upsert-by-id + explicit-remove contract, monitor row lifecycle, PIT/FOH/OTHER descope) is unchanged.
+
+---
+
+## What changed since v3
 
 Codex R2 returned 4 HIGH + 3 MEDIUM + 1 LOW, all correct against code. v4 resolves each:
 
@@ -98,7 +112,7 @@ Cardinalities — two distinct `1:N` axes that must **not** be conflated:
 - **Mint:** new slot → `id = crypto.randomUUID()` (match the existing id util used for `SetlistSong`).
 - **Legacy load — `ensureStageSlotIds(config)`:** idempotent; runs on load **before** any linking UI paints. Slots missing `id` get one. **De-dupe:** if two slots share an `id` (import, copy-paste, hand-edited JSON, AI dup), keep the first occurrence's id and re-mint the collisions; emit a console-level warning. Returns a stable set with unique ids.
 - **Serialize:** `id` written to stored JSON/YAML for every slot, and round-trips on save (without persistence a reload re-mints and severs links).
-- **Delete a slot:** linked inputs are **orphaned** (their `slotId` dangles), not auto-deleted; the input row shows an **orphan badge** ("⚠ unlinked — block removed") and a config-tab validation warning. (No cascade-delete of channel definitions.)
+- **Delete a slot:** **prompt at delete time** if any inputs are linked — "3 inputs are linked to this block — clear their link, or keep them as unlinked?" (No cascade-delete of channel definitions.) Inputs kept-as-unlinked (and any dangle from a non-prompted path or import) show an **orphan badge** ("⚠ unlinked — block removed") plus a config-tab validation warning. The prompt is the primary guard (a silent badge is too easy to miss before a gig); the badge is the backstop.
 - **Dangling on import:** an `InputChannel.slotId` matching no slot = orphaned (same badge), never a hard error.
 
 ### Multi-occupant blocks — render & DnD (resolves R1-HIGH#2)
@@ -122,9 +136,11 @@ A **Position dropdown per input row**, listing occupied **slots** as `TLA — na
 - **Coalescing:** once the slot exists it's in the dropdown, so subsequent drum rows *pick* `USC — Drums`. For rapid multi-row assignment in one unsaved session, "New occupant at {block}" with the same intended label reuses the just-created slot. Net: 6 drum rows + empty USC → one `USC` slot, six inputs linked.
 - Inputs that belong nowhere (playback DI, click, announce mic) take `slotId = none` and don't roll up.
 
-### Mix: on the slot only
+### Mix: on the slot only — and nowhere on the input list
 
-- Set on the stage plot (the anchor). On the input list, the slot's mix shows **read-only** as a derived `→ Mix 2` badge — not editable there. Monitor section stays freely editable (names/needs) and shows derived membership.
+- Mix is set on the **stage plot** (the slot/performer anchor) and surfaced in the **monitor section** (the derived roster of who's on each wedge). That is the *only* place mix appears.
+- The input list shows **no mix** — not editable, not read-only, not derived. The input row's only new element is the **Position (slot) dropdown**. A mix reference on a channel row would imply an input *send* (input fader → discrete aux/send mix), which this phase does **not** model; suppressing it is a deliberate clarity choice.
+- Inputs still carry `slotId` (grouping/rename-safety/AI coherence); they simply never expose the slot's mix.
 
 ### Monitor row lifecycle (resolves R2-MEDIUM#6)
 
@@ -151,7 +167,7 @@ The agent is prompted to **cascade** `update_stage_plot` + `update_inputs` + `up
 2. **Inputs.** Upsert by `id` (known → update; none → new). Resolve `slotRef`: a known slot id → use it; a `"POS:Name"` matching an upserted slot → use that id; otherwise `slotId = none` (unlinked).
 3. **Monitors.** Upsert by `id`/`mix` number; preserve `name`/`needs` per the lifecycle above.
 4. **Removals are explicit:** only ids in a tool's `removedIds` are deleted. **Absence never deletes.** Deleting a slot orphans its inputs (badge), per lifecycle.
-5. **Confirm-gate (the truncation safety net):** if a single apply would **remove or orphan more than a threshold** of linked items (proposed: ≥ 30% of existing linked slots/inputs, or any removal on a show that already has ≥1 linkage), surface a confirm dialog summarizing the deltas ("AI will remove 3 stage slots and orphan 14 inputs — apply?") before mutating. This catches a model that truncates output or hallucinates a fresh build over an existing linked show.
+5. **Confirm-gate (the truncation safety net):** a **zero-linkage show builds silently** (a fresh band description should just work). Once a show has **≥1 linkage**, **any** apply that would remove or orphan a linked item surfaces a confirm dialog summarizing the deltas ("AI will remove 3 stage slots and orphan 14 inputs — apply?") before mutating. This catches a model that truncates output or hallucinates a fresh build over an existing linked show. (Tune the nag-tolerance later if it proves too eager.)
 
 **Prompt change:** relax agent.ts:29 from "replace the entire …" to "**reconcile** against the current config; preserve ids; build on what exists; remove only via `removedIds`."
 
@@ -161,25 +177,13 @@ Nothing is duplicated → no authority conflict. Mix is owned by the slot; input
 
 ---
 
-## Console / export (resolves R1-MEDIUM#6, R2-MEDIUM#5)
+## Console / export — unchanged this phase (closes R1-MEDIUM#6, R2-MEDIUM#5)
 
-Add a resolver and a defined output contract.
+**No change to `lib/console-export.ts`.** The patch/console export stays the input-only channel list it is today (`Channel, Name, Mic, Stand, Notes`; XML `<channel>` with the same attrs). No `Mix` column, no `mix` attribute, no `mixForChannel` resolver, no warning UI.
 
-**Resolver** (`lib/console-export.ts`):
-```
-mixForChannel(ch, stagePlot): { mix: number; warn?: 'dangling' }
-  if !ch.slotId                              -> { mix: 0 }              // unrouted (DI/click) — no warning
-  slot = stagePlot.find(s => s.id === ch.slotId)
-  if !slot                                   -> { mix: 0, warn: 'dangling' }  // orphan
-  return { mix: slot.mix }                    // 0 allowed (= no mix)
-```
-(Forward-compatible with the deferred per-channel override: `ch.mixOverride ?? slot.mix`.)
+This is the **deliberate consequence** of "mix is not an input-channel property." A mix column on the patch sheet would imply an input *send* we don't model. Monitor/wedge information is exported/printed from the **monitor section** (its own print block — `printSections.monitorMixes`), where it belongs as performer-grouping, not joined onto the channel list.
 
-**Output contract:**
-- **CSV** — append a **`Mix`** column after `Notes`: `['Channel','Name','Mic','Stand','Notes','Mix']`. Value = `mixForChannel(...).mix` (blank string for `0`). `exportPatchCsv` signature gains `stagePlot: StageSlot[]`.
-- **XML** — add a `mix` attribute on `<channel>` (omitted when `0`, consistent with the existing `xmlAttr` "skip empty" behavior). `exportPatchXml` gains `stagePlot`.
-- **Return shape** — both exporters return `{ content: string; warnings: { ch: number }[] }` (warnings = channels whose `slotId` dangled).
-- **UI** (export buttons at `page.tsx:3754`) — if `warnings.length > 0`, show a non-blocking pre-download confirm ("3 channels are linked to a removed block and will export with no mix — continue?"). The download proceeds on confirm; no warning path = immediate download as today. This closes the `a0aee19` "drop monitor mix" door: mix is now *derivable and exported*, dangles are *surfaced*, not silently dropped.
+> **For the reviewer:** this is **not** a re-introduction of the `a0aee19` "drop monitor mix" regression. That was an *accidental* loss during the lockdown work. Here it is an *intentional* product decision (clarity), with the monitor information still fully present in its own section. The export simply has no business asserting input→mix routing.
 
 ---
 
@@ -189,9 +193,9 @@ Near-non-event. `StageSlot.id` added; `InputChannel.slotId` optional. Existing s
 
 ---
 
-## Deferred (cheap escape hatch) — per-channel mix override
+## Deferred — Input Sends (separate future phase)
 
-A *single channel* routing to a different wedge than its slot (e.g. kick to a separate mix). **Distinct** from multi-mix-per-block (which v1 ships). Deferred (rare at this tier); bolts on as one optional `InputChannel.mixOverride`, resolver already shaped (`ch.mixOverride ?? slot.mix`). Not a one-way door. Flagged so the reviewer can challenge the YAGNI call.
+Modeling **where each input is sent** (a send matrix / N-mix-per-input) — and the "per-channel mix override" special case within it — is a **distinct future phase**, not part of linkage v1. It is the proper (and only) place an input↔mix relationship belongs, and it would *earn* a mix surface on the input list at that time. Captured in `docs/design-input-sends.md`. Linkage v1 deliberately leaves inputs mix-free to avoid implying a send model we don't yet build.
 
 ---
 
@@ -208,25 +212,29 @@ A *single channel* routing to a different wedge than its slot (e.g. kick to a se
 1. `StageSlot.id` + `ensureStageSlotIds` (mint + de-dupe, load) + serialize.
 2. Group-by-pos render in both plot views; container cell (TLA header, stacked chips, add-occupant); per-mix color palette; `×n inputs` badge; print = all occupants.
 3. Per-occupant DnD (`drag-${id}`/`drop-${pos}`); `onMove(slotId, toPos)`; fix `:3238` lookup to id-based.
-4. Input-row Position dropdown (`TLA — name`, slot-owned fallback), pending-slot + coalescing, read-only `→ Mix n` badge, orphan badge.
+4. Input-row Position dropdown (`TLA — name`, slot-owned fallback), pending-slot + coalescing, orphan badge, delete-time prompt. **No mix on the input row.**
 5. Monitor roster derivation (read-only display) + lifecycle preservation.
-6. AI: schema (`id`/`slotRef`/`removedIds`), context with ids, upsert-by-id reconcile across all three tools, confirm-gate, prompt relax.
-7. `mixForChannel` + CSV `Mix` column + XML `mix` attr + `{content,warnings}` shape + pre-download warning UI.
-8. Tests: id lifecycle (mint/legacy/round-trip/**dup de-dupe**/delete-orphan); reconcile across slots+inputs+monitors (keep/rename/add/explicit-remove/**no-delete-on-absence**/confirm-gate threshold); `slotRef` resolution (id, POS:Name, dangling); export resolver (none/dangling) + CSV/XML columns; pending-slot coalescing; monitor roster preservation.
+6. AI: schema (`id`/`slotRef`/`removedIds`), context with ids, upsert-by-id reconcile across all three tools, confirm-gate (silent zero-linkage / confirm any removal once linked), prompt relax.
+7. *(No console-export work — unchanged this phase.)*
+8. Tests: id lifecycle (mint/legacy/round-trip/**dup de-dupe**/delete-prompt+orphan); reconcile across slots+inputs+monitors (keep/rename/add/explicit-remove/**no-delete-on-absence**/confirm-gate); `slotRef` resolution (id, POS:Name, dangling); pending-slot coalescing; monitor roster preservation. (No export tests — export untouched.)
 
 ---
 
+## Resolved since v4 (no longer open)
+
+- **Confirm-gate** — silent for zero-linkage shows; confirm on **any** removal/orphan once a show has ≥1 linkage.
+- **Slot-delete policy** — prompt at delete time (clear-or-keep-unlinked); orphan badge as backstop.
+- **Touch drag** — grip-per-chip stands for v1; revisit in UAT.
+- **PIT/FOH/OTHER** — descoped to a follow-on (`docs/design-offgrid-zones.md`); multi-mix runs on the 9 on-grid blocks.
+- **Mix on inputs / per-channel override** — removed from this phase entirely; deferred to the Input Sends phase (`docs/design-input-sends.md`).
+
 ## Open Questions for Review (R3)
 
-1. **Confirm-gate threshold** — is "≥30% linked items removed, or any removal on a linked show" the right trip-wire, or too eager/lax? Should a brand-new (zero-linkage) show always allow silent full builds (likely yes)?
-2. **`slotRef` "POS:Name" collision** — if the AI creates two new slots at the same block with the same name in one cascade, the `POS:Name` map is ambiguous. Reject the second, or suffix? (Proposal: require distinct names per block; reconcile dedupes by appending " 2".)
-3. **Orphan policy on slot delete** — orphan-and-badge vs. a prompt at delete time. Badge enough, or too easy to miss before a gig?
-4. **Per-occupant drag on touch** — grip-per-chip in a tall cell on iPad at FOH. Acceptable, or a different move affordance on touch?
-5. **PIT/FOH/OTHER descope** — confirmed acceptable for v1 (see Scope decision), or does a literal rendered orchestra pit need to be in scope now?
-6. **YAGNI on per-channel mix override** — still acceptable to defer given the cheap hatch?
+1. **`slotRef` "POS:Name" collision** — if the AI creates two new slots at the same block with the same name in one cascade, the `POS:Name` map is ambiguous. Reject the second, or suffix? (Proposal: require distinct names per block; reconcile dedupes by appending " 2".)
+2. **Anything else surfaced by the unified reconcile contract** — open to adversarial findings on upsert-by-id + explicit-remove + confirm-gate across all three tools, and on the slot-id de-dupe path.
 
 ---
 
 ## Status
 
-Proposed (v4), branch merged up to `main`. **Not yet built.** Pending Codex R3; build only after a clean round.
+Proposed (v5), branch merged up to `main`. **Not yet built.** Pending Codex R3; build only after a clean round.
