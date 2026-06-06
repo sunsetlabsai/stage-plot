@@ -1,12 +1,30 @@
 # Design: Input List / Stage Plot / Mix Linkage
 
-**Status:** Proposed (v5) — ready for adversarial review (Codex R3)
-**Date:** 2026-06-06 (supersedes v4 same-day; v4←v3←v2 2026-06-05←v1 2026-06-04)
+**Status:** Proposed (v6) — ready for adversarial review (Codex R4)
+**Date:** 2026-06-06 (supersedes v5 same-day; v5←v4←v3←v2 2026-06-05←v1 2026-06-04)
 **Branch:** `opus/design-input-plot-linkage` (merged up to `main`)
 
 ---
 
-## What changed since v4 (read first if you reviewed v4)
+## What changed since v5 (read first if you reviewed v5)
+
+Codex R3 returned 4 HIGH + 2 MEDIUM + 1 LOW, all correct — and a code read surfaced one issue *worse* than reported. v6 resolves each, mostly by hardening the AI apply path:
+
+- **The `update_stage_plot` apply already self-destructs links (worse than R3-HIGH#1).** `page.tsx:2617–2647` shows the stage-plot apply **regenerates the entire input list** (`expandSlotToInputs`, re-numbered `ch`) **and** monitors on its own — so a stage edit nukes every `slotId` link and input edit *before* any cross-tool ordering matters. v6 **removes that client-side regeneration**; each tool reconciles only its own list.
+- **Cross-tool apply must be atomic (R3-HIGH#1).** The current per-tool Apply button (`applyToolCall(msgIdx, toolIdx)`) can apply `update_inputs` before `update_stage_plot`, leaving new-slot refs unresolvable. v6 replaces per-tool apply with an **atomic per-message cascade apply** in fixed dependency order (slots → inputs → monitors → rest).
+- **New-slot references use a model-supplied `clientRef`, not `"POS:Name"` (R3 recommended direction; fixes HIGH#1 resolution + MEDIUM#5).** Names are never identifiers.
+- **`slotRef` omission now preserves the existing link (R3-HIGH#2).** Unlinking requires an explicit `slotRef: null`. Default = preserve.
+- **Duplicate `StageSlot.id` de-dupe no longer silently rebinds inputs (R3-HIGH#3).** Inputs pointing at a de-duped id are flagged for **user review** (repair prompt), not bound to the surviving slot.
+- **Mix numbers are immutable routing identities (R3-HIGH#4).** `moveMonitor`'s renumber-on-reorder is removed; deleting a monitor orphans referencing slots with a badge (parallel to slot delete). `MonitorMix.id` (already exists via `ensureMonitorIds`) carries row identity.
+- **`(pos, name)` fallback only fires when unique (R3-MEDIUM#5).**
+- **Stale "inputs inherit/display mix read-only" text removed (R3-MEDIUM#6).**
+- **Off-grid doc's reference to the removed `mixForChannel`/v4 export fixed (R3-LOW#7).**
+
+Everything else from v5 (mix slot-only, no mix on inputs/export, multi-occupant render/DnD, descopes) is unchanged.
+
+---
+
+## What changed since v4 (read if you reviewed v4)
 
 A show-runner conceptual call closes the remaining open questions and **simplifies** the design:
 
@@ -110,7 +128,7 @@ Cardinalities — two distinct `1:N` axes that must **not** be conflated:
 ### `StageSlot.id` lifecycle (resolves R1-HIGH#1, R2-HIGH#4)
 
 - **Mint:** new slot → `id = crypto.randomUUID()` (match the existing id util used for `SetlistSong`).
-- **Legacy load — `ensureStageSlotIds(config)`:** idempotent; runs on load **before** any linking UI paints. Slots missing `id` get one. **De-dupe:** if two slots share an `id` (import, copy-paste, hand-edited JSON, AI dup), keep the first occurrence's id and re-mint the collisions; emit a console-level warning. Returns a stable set with unique ids.
+- **Legacy load — `ensureStageSlotIds(config)`:** idempotent; runs on load **before** any linking UI paints. Slots missing `id` get one. **De-dupe with ambiguity handling (resolves R3-HIGH#3):** if two slots share an `id` (import, copy-paste, hand-edited JSON, AI dup), keep the first occurrence's id and re-mint the collision(s). Then check inputs: any `InputChannel.slotId` equal to a de-duped id is **ambiguous** — it could have meant the original *or* the re-minted copy, and we must not guess. Such inputs are **not** silently bound to the survivor; they are flagged **needs-review** (a distinct badge) and collected into a **repair prompt** ("Imported data had duplicate occupant ids; N channels can't be confidently linked — review and reassign"). The function returns `{ config, ambiguousInputs: InputChannel[] }` so the UI can surface the prompt. (Silent rebinding to the first slot is the corruption R3 flagged.)
 - **Serialize:** `id` written to stored JSON/YAML for every slot, and round-trips on save (without persistence a reload re-mints and severs links).
 - **Delete a slot:** **prompt at delete time** if any inputs are linked — "3 inputs are linked to this block — clear their link, or keep them as unlinked?" (No cascade-delete of channel definitions.) Inputs kept-as-unlinked (and any dangle from a non-prompted path or import) show an **orphan badge** ("⚠ unlinked — block removed") plus a config-tab validation warning. The prompt is the primary guard (a silent badge is too easy to miss before a gig); the badge is the backstop.
 - **Dangling on import:** an `InputChannel.slotId` matching no slot = orphaned (same badge), never a hard error.
@@ -148,32 +166,41 @@ Disambiguating "derived membership" from "editable names":
 
 - `MonitorMix.name` and `.needs` are **user-owned free text** (e.g. name "Riddim", needs "drums + bass, vocal lite"). They are **never** auto-derived or overwritten.
 - What's **derived** is the **roster** — the set of slots whose `mix` points at this mix number. It is computed on the fly (never stored) and shown read-only beside the row ("→ Strings, Brass").
-- **Lifecycle / preservation:** a `MonitorMix` row is keyed by its `mix` number. Changing a slot's mix assignment only recomputes rosters — it **never** creates, deletes, or edits a monitor row. A mix row with an empty roster (no slot currently routes to it) is **kept** and shown as "(no one assigned)", not auto-removed — so a user can define "Mix 8 — guest" before assigning anyone. Monitor rows are created/removed only by explicit user (or AI, per contract below) action.
+- **Lifecycle / preservation:** a `MonitorMix` row carries its own stable `id` (already minted by `ensureMonitorIds`, `setlist.ts:43`), and its `mix` **number is an immutable routing identity** (an aux/wedge number — "Mix 3" *is* aux 3, like a console). Changing a slot's mix assignment only recomputes rosters — it **never** creates, deletes, or edits a monitor row. An empty-roster row is **kept** ("(no one assigned)"), not auto-removed.
+- **Mix numbers do not renumber on reorder (resolves R3-HIGH#4).** Today `moveMonitor` (`setlist.ts:49`) renumbers `mon.mix = i+1` on drag, but `StageSlot.mix` references *by number* and is **not** remapped — so reordering silently breaks every slot→mix link once rosters are derived. Fix: **remove drag-renumber.** Monitor rows render sorted by their (immutable) `mix` number; "reorder" by renumber is dropped (it never made domain sense — you don't renumber auxes by dragging). Add/edit/delete remain.
+- **Deleting a monitor** removes that mix number; slots whose `mix` pointed at it become **orphaned-mix** (a badge: "mix removed", treated as no-mix until reassigned) — the exact parallel of slot-delete orphaning inputs. A delete-time prompt mirrors the slot case if any slots reference it.
+- **Explicit renumber** (if ever needed) is a deliberate action that **remaps every referencing `slot.mix`** in the same transaction — never a side effect of reordering.
 
-### AI copilot reconcile contract (resolves R2-HIGH#1 + HIGH#2)
+### AI copilot reconcile contract (resolves R2-HIGH#1/#2, R3-HIGH#1/#2, R3-MEDIUM#5)
 
-The agent is prompted to **cascade** `update_stage_plot` + `update_inputs` + `update_monitors` together (agent.ts:29), and each tool currently does a **full replace** with no ids. v4 replaces "full replace" with **upsert-by-id + explicit-remove**, applied uniformly:
+The agent is prompted to **cascade** `update_stage_plot` + `update_inputs` + `update_monitors` together (agent.ts:29). Two problems must be fixed together: each tool does a **full replace** with no ids, **and** the `update_stage_plot` apply *itself* regenerates inputs+monitors from scratch (`page.tsx:2617–2647`).
+
+**Step 0 — remove the self-cascade in `update_stage_plot` apply (R3-HIGH#1, worse-than-reported).** Delete the `expandSlotToInputs` input regeneration and the monitor regeneration from the `update_stage_plot` case. Each tool reconciles **only its own list**. (Fresh builds still get inputs/monitors because the model is prompted to call all three tools with real data — the client-side expansion was a redundant link-destroyer.)
+
+**Identity model — names are never identifiers.** New items are referenced by a **model-supplied `clientRef`** (R3 recommended direction), not by name or `"POS:Name"`.
 
 **Schema changes (`lib/agent.ts` TOOLS):**
-- `update_stage_plot` items: add optional `id`.
-- `update_inputs` items: add optional `id` **and** optional `slotRef` (the linked slot's `id`, or — for a slot created in the same cascade — a `"POS:Name"` reference, e.g. `"MSR:Strings"`).
+- `update_stage_plot` items: add optional `id` (existing slot) **or** optional `clientRef` (new slot, e.g. `"slot-strings-1"`).
+- `update_inputs` items: add optional `id`; add `slotRef` which is **either** an existing slot `id`, **or** a `clientRef` of a slot in the same cascade, **or** explicit `null` to unlink. **Omitting `slotRef` preserves the input's current `slotId`** (R3-HIGH#2).
 - `update_monitors` items: add optional `id`.
-- Each of the three tools: add optional `removedIds: string[]`.
+- All three tools: add optional `removedIds: string[]`.
 
-**Context we send to the model:** the current config **including** every slot `id`, input `id` + `slotId`, and monitor `id`. Instruction: *preserve `id` for items you keep; omit `id` for new items; to link an input to a slot set `slotRef`; to remove an item, put its id in `removedIds` — never drop items you intend to keep.*
+**Context we send to the model:** the current config **including** every slot `id`, input `id` + `slotId`, monitor `id`. Instruction: *preserve `id` for items you keep; give new items a `clientRef`; link an input via `slotRef` (an existing slot `id` or a same-cascade `clientRef`); omit `slotRef` to keep an input's current link; set `slotRef: null` to unlink; remove items only via `removedIds` — never drop items you intend to keep.*
 
-**Apply / reconcile (page.tsx ~`:2618`–`:2651`):**
-1. **Slots first.** Upsert: returned slot with known `id` → update in place (keep id); no `id` → fall back to `(pos, name)` match, else mint; unknown `id` → mint fresh (defensive). Build a `{ "POS:Name" → id }` map of the resulting slots.
-2. **Inputs.** Upsert by `id` (known → update; none → new). Resolve `slotRef`: a known slot id → use it; a `"POS:Name"` matching an upserted slot → use that id; otherwise `slotId = none` (unlinked).
-3. **Monitors.** Upsert by `id`/`mix` number; preserve `name`/`needs` per the lifecycle above.
-4. **Removals are explicit:** only ids in a tool's `removedIds` are deleted. **Absence never deletes.** Deleting a slot orphans its inputs (badge), per lifecycle.
-5. **Confirm-gate (the truncation safety net):** a **zero-linkage show builds silently** (a fresh band description should just work). Once a show has **≥1 linkage**, **any** apply that would remove or orphan a linked item surfaces a confirm dialog summarizing the deltas ("AI will remove 3 stage slots and orphan 14 inputs — apply?") before mutating. This catches a model that truncates output or hallucinates a fresh build over an existing linked show. (Tune the nag-tolerance later if it proves too eager.)
+**Atomic per-message apply (R3-HIGH#1).** Replace per-tool `applyToolCall(msgIdx, toolIdx)` with **`applyMessageCascade(msgIdx)`** that applies all of a message's tool calls **in one transaction, in fixed dependency order**: slots → inputs → monitors → setlist/notes/info. (Reject is still per-tool, but apply is all-or-nothing for the message, so same-cascade refs always resolve.)
 
-**Prompt change:** relax agent.ts:29 from "replace the entire …" to "**reconcile** against the current config; preserve ids; build on what exists; remove only via `removedIds`."
+**Reconcile, in order:**
+1. **Slots.** Upsert: known `id` → update in place (keep id); `clientRef` (no id) → mint id, record `clientRef → newId`; no id and no clientRef → fall back to `(pos, normalizedName)` **only if that pair is unique** in the current slot set, else mint (R3-MEDIUM#5 — never adopt an id on an ambiguous name); unknown `id` → mint fresh.
+2. **Inputs.** Upsert by `id`. Resolve `slotRef`: existing slot `id` → use; `clientRef` → resolve via the map from step 1; `null` → clear (`slotId` none); **omitted → keep the input's current `slotId`** (preserve).
+3. **Monitors.** Upsert by `id` (then `mix` number); preserve `name`/`needs`; numbers immutable per Monitor lifecycle.
+4. **Removals explicit:** only `removedIds` delete. **Absence never deletes.** Deleting a slot orphans its inputs (badge); deleting a monitor orphans referencing slots (badge).
+5. **Confirm-gate:** a **zero-linkage show builds silently**. Once a show has **≥1 linkage**, **any** apply that would remove or orphan a linked item shows a confirm summarizing deltas before mutating (truncation / fresh-build-over-linked-show safety net). Tune nag-tolerance later.
+
+**Prompt change:** relax agent.ts:29 from "replace the entire …" to "**reconcile** against the current config; preserve ids; new items get a `clientRef`; build on what exists; remove only via `removedIds`."
 
 ### Authority / drift
 
-Nothing is duplicated → no authority conflict. Mix is owned by the slot; inputs inherit/display it read-only (no sync prompts). The name is a label on the slot; renaming keeps links because inputs point at the **id**, which survives DnD and (via round-trip) AI edits.
+Nothing is duplicated → no authority conflict. Mix is owned by the slot and surfaced only on the stage plot + monitor section — **never on inputs** (inputs carry `slotId` for grouping but expose no mix; see "Mix: on the slot only"). The name is a label on the slot; renaming keeps links because inputs point at the **id**, which survives DnD and (via clientRef round-trip) AI edits.
 
 ---
 
@@ -209,32 +236,39 @@ Modeling **where each input is sent** (a send matrix / N-mix-per-input) — and 
 
 ## Build outline (sizing, not a commitment)
 
-1. `StageSlot.id` + `ensureStageSlotIds` (mint + de-dupe, load) + serialize.
+1. `StageSlot.id` + `ensureStageSlotIds` (mint + **de-dupe with ambiguous-input repair**, returns `{config, ambiguousInputs}`) + serialize.
 2. Group-by-pos render in both plot views; container cell (TLA header, stacked chips, add-occupant); per-mix color palette; `×n inputs` badge; print = all occupants.
 3. Per-occupant DnD (`drag-${id}`/`drop-${pos}`); `onMove(slotId, toPos)`; fix `:3238` lookup to id-based.
-4. Input-row Position dropdown (`TLA — name`, slot-owned fallback), pending-slot + coalescing, orphan badge, delete-time prompt. **No mix on the input row.**
-5. Monitor roster derivation (read-only display) + lifecycle preservation.
-6. AI: schema (`id`/`slotRef`/`removedIds`), context with ids, upsert-by-id reconcile across all three tools, confirm-gate (silent zero-linkage / confirm any removal once linked), prompt relax.
+4. Input-row Position dropdown (`TLA — name`, slot-owned fallback), pending-slot + coalescing, orphan badge + needs-review badge, delete-time prompt. **No mix on the input row.**
+5. Monitor: roster derivation (read-only); **remove `moveMonitor` renumber** (sort by immutable number); delete-orphans-slots badge + prompt; explicit-renumber remaps `slot.mix`.
+6. AI: **remove `update_stage_plot` self-cascade regeneration** (`:2617–2647`); schema (`id`/`clientRef`/`slotRef`-or-`null`/`removedIds`); context with ids; **`applyMessageCascade` atomic ordered apply** replacing per-tool apply; upsert-by-id reconcile with clientRef map + preserve-on-omit + unique-`(pos,name)` fallback; confirm-gate; prompt relax.
 7. *(No console-export work — unchanged this phase.)*
-8. Tests: id lifecycle (mint/legacy/round-trip/**dup de-dupe**/delete-prompt+orphan); reconcile across slots+inputs+monitors (keep/rename/add/explicit-remove/**no-delete-on-absence**/confirm-gate); `slotRef` resolution (id, POS:Name, dangling); pending-slot coalescing; monitor roster preservation. (No export tests — export untouched.)
+8. Tests: id lifecycle (mint/legacy/round-trip/**dup de-dupe + ambiguous-input repair**/delete-prompt+orphan); reconcile (keep/rename/add/explicit-remove/**no-delete-on-absence**/**slotRef omit=preserve**/**null=unlink**/confirm-gate); `clientRef` resolution + **non-unique `(pos,name)` mints not adopts**; **atomic cascade applies all-or-nothing in order**; **`update_stage_plot` apply no longer regenerates inputs/monitors**; monitor reorder-does-not-renumber + delete-orphans-slots; pending-slot coalescing. (No export tests — export untouched.)
 
 ---
 
-## Resolved since v4 (no longer open)
+## Resolved (no longer open)
 
-- **Confirm-gate** — silent for zero-linkage shows; confirm on **any** removal/orphan once a show has ≥1 linkage.
-- **Slot-delete policy** — prompt at delete time (clear-or-keep-unlinked); orphan badge as backstop.
-- **Touch drag** — grip-per-chip stands for v1; revisit in UAT.
-- **PIT/FOH/OTHER** — descoped to a follow-on (`docs/design-offgrid-zones.md`); multi-mix runs on the 9 on-grid blocks.
-- **Mix on inputs / per-channel override** — removed from this phase entirely; deferred to the Input Sends phase (`docs/design-input-sends.md`).
+- **Confirm-gate** — silent for zero-linkage shows; confirm on **any** removal/orphan once ≥1 linkage.
+- **Slot-delete** — prompt at delete; orphan badge backstop. **Monitor-delete** — same pattern (orphans referencing slots).
+- **Touch drag** — grip-per-chip for v1; revisit in UAT.
+- **PIT/FOH/OTHER** — descoped (`docs/design-offgrid-zones.md`); multi-mix on the 9 on-grid blocks.
+- **Mix on inputs / per-channel override** — removed; deferred to Input Sends (`docs/design-input-sends.md`).
+- **Same-cascade new-slot refs** — `clientRef`, not `"POS:Name"`; names are never identifiers (R3-rec).
+- **slotRef omission** — preserves existing link; explicit `null` unlinks (R3-HIGH#2).
+- **Dup slot-id** — ambiguous inputs flagged for review, never silently rebound (R3-HIGH#3).
+- **Mix-number identity** — immutable; no renumber-on-reorder (R3-HIGH#4).
+- **Cross-tool apply** — atomic ordered `applyMessageCascade`; `update_stage_plot` no longer self-regenerates (R3-HIGH#1).
 
-## Open Questions for Review (R3)
+## Open Questions for Review (R4)
 
-1. **`slotRef` "POS:Name" collision** — if the AI creates two new slots at the same block with the same name in one cascade, the `POS:Name` map is ambiguous. Reject the second, or suffix? (Proposal: require distinct names per block; reconcile dedupes by appending " 2".)
-2. **Anything else surfaced by the unified reconcile contract** — open to adversarial findings on upsert-by-id + explicit-remove + confirm-gate across all three tools, and on the slot-id de-dupe path.
+1. **Atomic apply UX** — does all-or-nothing per-message apply (vs. today's per-tool) need a partial-apply or per-tool-preview affordance, or is whole-cascade accept/reject sufficient for the copilot flow?
+2. **Monitor reorder removal** — is dropping drag-reorder acceptable (rows sort by immutable number), or is there a real need for a display order independent of the routing number?
+3. **Ambiguous-input repair UX** — is a review badge + repair prompt the right surface, or should dup-id imports hard-block load until resolved?
+4. Open to any further adversarial findings on the reconcile/apply path.
 
 ---
 
 ## Status
 
-Proposed (v5), branch merged up to `main`. **Not yet built.** Pending Codex R3; build only after a clean round.
+Proposed (v6), branch merged up to `main`. **Not yet built.** Pending Codex R4; build only after a clean round.

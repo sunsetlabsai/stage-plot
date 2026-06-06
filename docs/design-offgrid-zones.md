@@ -57,10 +57,10 @@ A follow-on must define all of the below; none are addressed by linkage v1.
 ### 5. AI agent changes
 - Extend `POS_ENUM` (`lib/agent.ts:49`) to include `PIT`/`FOH`/`OTHER`.
 - Remove the prohibition at `agent.ts:12` and replace with **guidance** on when to use them ("use PIT for an orchestra pit, FOH for engineer/talkback/playback sources, OTHER for non-standard placements; prefer the 3×3 for the band").
-- The v4 reconcile contract (upsert-by-id, `slotRef`, `removedIds`, confirm-gate) needs **no change** — it's position-agnostic.
+- The reconcile contract (upsert-by-id, `clientRef`, `slotRef`, `removedIds`, confirm-gate, atomic cascade apply) needs **no change** — it's position-agnostic.
 
 ### 6. Console export
-- No change required: `mixForChannel` resolves by `slotId` regardless of the slot's `pos`. Off-grid slots already flow through the v4 export contract.
+- No change required: linkage v1 keeps mix off the export entirely (see linkage doc "Console / export — unchanged this phase"). Off-grid slots are just more slots; nothing about them touches the export. (If the future Input Sends phase adds sends to the export, off-grid slots flow through it unchanged — but that's that phase's concern, not this one.)
 
 ---
 
