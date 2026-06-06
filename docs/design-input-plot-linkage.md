@@ -1,12 +1,38 @@
 # Design: Input List / Stage Plot / Mix Linkage
 
-**Status:** Proposed (v7) — ready for adversarial review (Codex R5)
-**Date:** 2026-06-06 (supersedes v6 same-day; v6←v5 same-day; v5←v4←v3←v2 2026-06-05←v1 2026-06-04)
+**Status:** Proposed (v8) — ready for adversarial review (Codex R5)
+**Date:** 2026-06-06 (supersedes v7 same-day; v7←v6←v5 same-day; v5←v4←v3←v2 2026-06-05←v1 2026-06-04)
 **Branch:** `opus/design-input-plot-linkage` (merged up to `main`)
 
 ---
 
-## What changed since v6 (read first if you reviewed v6)
+## What changed since v7 (read first if you reviewed v7) — the root-cause reframe
+
+R1→R4 each found HIGHs, **all in the same place: the AI apply/reconcile path**, and the HIGH count stayed flat (3/4/4/3). That is structural, not bad luck: the three AI tools are shaped as **"replace the entire list"** (`agent.ts`), and v2→v7 kept **bolting identity + intent onto a replace-shaped contract** (`id`, `clientRef`, `slotRef`, `removedIds`, omit-preserves, de-dupe, atomic-cascade, delta-gate). Each bolt-on spawned the next edge case. v8 fixes the **shape**, not another instance — and a self-driven adversarial sweep folds in seven issues Codex had not yet named (so R5 aims to be the clean round, not R7).
+
+**Architectural change — the AI edits via explicit operations, not full-list replacement.** One `edit_show` tool takes an ordered **op list** (`addSlot`/`updateSlot`/`removeSlot`, `addInput`/`updateInput`/`linkInput`/`removeInput`, `addMonitor`/`updateMonitor`/`removeMonitor`). Consequences — most of R2–R4 **cannot exist** under this shape:
+- **Absence never deletes** — *structural*: only an explicit `removeX` op deletes. No `removedIds` list needed.
+- **Preserve-on-omit** — *structural*: `updateX` touches only the fields it carries; an untouched item gets no op.
+- **Atomic, ordered apply** — *structural*: the op list is planned then committed all-or-nothing.
+- **`clientRef`/`slotRef`** become the ordinary handle for new items, with defined precedence (existing `id` → same-cascade `clientRef` → error) and a `clientRef` namespace disjoint from `id`.
+- **Two-phase apply** — plan/validate (resolve refs, check invariants, compute deltas) → confirm-gate → commit. Accurate deltas, no half-applied cascade.
+- **Delta-gate** reads directly off the destructive ops + computed orphans.
+- The v7 "remove `update_stage_plot` self-cascade regeneration" is **moot** — there is no full-replace path to regenerate from.
+
+**Seven issues found by self-review (folded in, not waited-for):**
+1. **(HIGH) Lazy-mint persistence race.** v7 persisted ids "on next save" — but if load mints/de-dupes and the user makes no edit, autosave may not fire → reload re-mints fresh ids → in-session links severed. v8: `ensureStageSlotIds` **marks the config dirty and forces a save** whenever it mints or de-dupes (alt: eager-persist on load). See id lifecycle.
+2. **(HIGH) `slot.mix` → monitor referential integrity.** v7 handled only the reverse (delete monitor orphans slots). A slot can carry `mix: 7` with no MonitorMix #7 (AI/import). v8 adds the **forward** orphaned-mix check + badge, and the plan validator flags it.
+3. **(MED) `needsReview` lifecycle.** v8: cleared by **any** valid `slotId` assignment (user dropdown *or* AI `linkInput`); the AI context **surfaces** needs-attention inputs so the model can repair them.
+4. **(MED) Badge-state explosion → unify.** v7 had 4 input states. v8 collapses "orphaned" (slot deleted) and "needs-review" (de-dupe ambiguity) into **one "needs attention — relink" state** (with a sub-reason), leaving: linked / intentionally-unlinked / needs-attention. (Plus slot-level orphaned-mix.) Clarity-is-king.
+5. **(MED) Two-phase apply** — now explicit (above).
+6. **(LOW) `slotRef` precedence + namespace** — now specified (above).
+7. **(LOW) Intra-block occupant order** — print/render order pinned to **stable insertion order** (array index) so print diffs aren't flaky.
+
+Everything else from v7 (slot-id hub, multi-occupant render/DnD, mix slot-only + off-inputs + off-export, immutable mix numbers, `validateMonitors`, descopes) is unchanged.
+
+---
+
+## What changed since v6 (read if you reviewed v6)
 
 Codex R4 returned 3 HIGH + 3 MEDIUM, all correct against code. v7 resolves each — the cluster is the apply/reconcile/persistence layer, so the fixes harden the data model and the cascade contract:
 
@@ -131,7 +157,12 @@ InputChannel { id?, ch, inst, mic, stand, notes, slotId?, needsReview? }  // lin
 MonitorMix   { id?, mix, name, needs }                                    // name/needs = labels; roster DERIVED
 ```
 
-New structural fields: **`StageSlot.id`** (stable), **`InputChannel.slotId`** (the link), and **`InputChannel.needsReview?`** (persistent repair flag — set when a link becomes ambiguous, see id lifecycle; cleared on reassignment). `stagePlot` stays a flat `StageSlot[]` — the per-block singleton was only a render-time collapse (`Object.fromEntries(...)` at `app/[owner]/[show]/page.tsx:862` and `:956`). Allowing multiple slots per `pos` is mostly a render/DnD change, not a data migration.
+New structural fields: **`StageSlot.id`** (stable), **`InputChannel.slotId`** (the link), and **`InputChannel.needsReview?`** (persistent flag backing the unified **"needs attention — relink"** state; cleared by any valid `slotId` assignment — see "Input link states" below). `stagePlot` stays a flat `StageSlot[]` — the per-block singleton was only a render-time collapse (`Object.fromEntries(...)` at `app/[owner]/[show]/page.tsx:862` and `:956`). Allowing multiple slots per `pos` is mostly a render/DnD change, not a data migration.
+
+**Input link states (unified, resolves v8-self#4).** An input is exactly one of:
+- **linked** — `slotId` resolves to a live slot.
+- **intentionally unlinked** — no `slotId` (playback DI, click, announce mic); never flagged.
+- **needs attention — relink** — `needsReview: true`; covers *both* prior states ("orphaned": its `slotId` no longer resolves because the slot was deleted, and "ambiguous": a dup-slot-id de-dupe cleared the link). One badge, with a sub-reason in the tooltip. Cleared the moment a valid `slotId` is set (user dropdown or AI `linkInput`).
 
 Cardinalities — two distinct `1:N` axes that must **not** be conflated:
 
@@ -142,16 +173,19 @@ Cardinalities — two distinct `1:N` axes that must **not** be conflated:
 ### `StageSlot.id` lifecycle (resolves R1-HIGH#1, R2-HIGH#4)
 
 - **Mint:** new slot → `id = crypto.randomUUID()` (match the existing id util used for `SetlistSong`).
-- **Legacy load — `ensureStageSlotIds(config)`:** idempotent; runs on load **before** any linking UI paints. Slots missing `id` get one. **De-dupe with persistent ambiguity handling (resolves R3-HIGH#3, R4-HIGH#1):** if two slots share an `id` (import, copy-paste, hand-edited JSON, AI dup), keep the first occurrence's id and re-mint the collision(s). Then check inputs: any `InputChannel.slotId` equal to a de-duped id is **ambiguous** — it could have meant the original *or* the re-minted copy, and we must not guess. Such inputs are **not** silently bound to the survivor; instead the function **clears their `slotId` and sets `needsReview: true`** — both **persisted** (the function returns the mutated `config`, written on next save), so the needs-review state survives reload. (R4-HIGH#1: v6's in-memory-only `ambiguousInputs` had nowhere to live on `InputChannel`, so the flag evaporated and the dangling `slotId` was undefined behavior. Storing `needsReview` makes the repair state representable.) The function returns `{ config, ambiguousInputs: InputChannel[] }` for the immediate session prompt ("Imported data had duplicate occupant ids; N channels can't be confidently linked — review and reassign"), and the persisted `needsReview` flag drives a **distinct badge** that persists until the user reassigns a slot (which clears it). *(Alternative for Q3: hard-block the config UI behind a repair modal on load until all `needsReview` inputs are resolved — stricter, but blocks viewing; not chosen because the persistent badge keeps the non-blocking flow. Show-runner call.)*
-- **Serialize:** `id` written to stored JSON/YAML for every slot, and round-trips on save (without persistence a reload re-mints and severs links).
-- **Delete a slot:** **prompt at delete time** if any inputs are linked — "3 inputs are linked to this block — clear their link, or keep them as unlinked?" (No cascade-delete of channel definitions.) Inputs kept-as-unlinked (and any dangle from a non-prompted path or import) show an **orphan badge** ("⚠ unlinked — block removed") plus a config-tab validation warning. The prompt is the primary guard (a silent badge is too easy to miss before a gig); the badge is the backstop.
-- **Dangling on import:** an `InputChannel.slotId` matching no slot = orphaned (same badge), never a hard error.
+- **Legacy load — `ensureStageSlotIds(config)`:** idempotent; runs on load **before** any linking UI paints. Slots missing `id` get one. **De-dupe (resolves R3-HIGH#3, R4-HIGH#1):** if two slots share an `id` (import, copy-paste, hand-edited JSON, AI dup), keep the first occurrence's id and re-mint the collision(s). Then check inputs: any `InputChannel.slotId` equal to a de-duped id is **ambiguous** — it could have meant the original *or* the re-minted copy. Such inputs are **not** silently bound to the survivor; the function **clears their `slotId` and sets `needsReview: true`** (the unified needs-attention state). It returns `{ config, dirty: boolean, ambiguousInputs: InputChannel[] }` — `ambiguousInputs` drives the immediate session prompt ("Imported data had duplicate occupant ids; N channels can't be confidently linked — review and reassign").
+- **Persistence (resolves v8-self#1 — the lazy-mint race).** `ensureStageSlotIds` returns **`dirty: true`** whenever it minted an id or de-duped. The load path **must force a save when `dirty`** — *not* rely on the user making an edit. Otherwise: load mints fresh ids in memory → user links inputs against them in-session → reload re-runs `ensureStageSlotIds`, which (no persisted ids) **mints different ids** → every in-session `slotId` dangles. Forcing the save on `dirty` (or, equivalently, eager-persisting on first load) closes this. Saving `needsReview` likewise persists the needs-attention state across reload.
+- **Serialize:** `id` on every slot, `slotId` + `needsReview` on inputs that carry them; all round-trip on save. (`needsReview` absent ⇒ `false`.)
+- **Delete a slot:** **prompt at delete time** if any inputs are linked — "3 inputs are linked to this block — clear their link, or keep them?" (No cascade-delete of channel definitions.) Inputs kept show the **needs-attention badge** (sub-reason: "block removed") plus a config-tab validation warning; deleting the slot sets `needsReview: true` on each. The prompt is the primary guard (a silent badge is too easy to miss before a gig); the badge is the backstop.
+- **Dangling on import:** an `InputChannel.slotId` matching no slot ⇒ needs-attention (sub-reason: "linked block missing"); `ensureStageSlotIds` sets `needsReview: true` for these too. Never a hard error.
+- *(Alternative for Q3: hard-block the config UI behind a repair modal on load until all needs-attention inputs are resolved — stricter, but blocks viewing; not chosen because the persistent badge keeps the non-blocking flow. Show-runner call.)*
 
 ### Multi-occupant blocks — render & DnD (resolves R1-HIGH#2)
 
 - **Group, don't collapse:** `slotMap: pos → slot` becomes `pos → slot[]` (a `groupBy(pos)`). Both `StagePlotView` (read-only/print) and `DraggableStagePlotView` (config) change.
 - **Cell = container:** TLA header (three-letter zone code) + occupant count, a **vertical stack of occupant chips**, then "+ add occupant". Each chip: drag grip, `name`, `role`, per-mix color-coded `MIX n` badge. `featured` styles the chip, not the cell.
 - **Shared-mix chip:** a slot with N linked inputs also shows an `×n inputs` badge (derived count).
+- **Occupant order is stable insertion order (resolves v8-self#7):** within a block, occupants render (on screen and in print) in their `stagePlot` array order — the order they were added. No re-sort by name/mix; print output is therefore deterministic.
 - **Unbounded growth** (no cap/scroll); **print shows all occupants** (no "MSR · 2 mixes" collapse).
 - **Per-occupant DnD:** drag id `drag-${slot.id}` (was `drag-${pos}`); drop target stays `drop-${pos}`. Dropping re-parents that slot (`slot.pos = toPos`); its `id` rides along so **input links survive a reposition**. Other occupants of the source block are untouched. Intra-block reorder not required for v1 (order is presentation-only).
 - **`onMove` signature:** `(fromPos, toPos)` → `(slotId, toPos)`. The handler at `:3238` uses `findLastIndex(s => s.pos === fromPos)` — ambiguous with multiple occupants; switch to `findIndex(s => s.id === slotId)`.
@@ -186,40 +220,43 @@ Disambiguating "derived membership" from "editable names":
 - What's **derived** is the **roster** — the set of slots whose `mix` points at this mix number. It is computed on the fly (never stored) and shown read-only beside the row ("→ Strings, Brass").
 - **Lifecycle / preservation:** a `MonitorMix` row carries its own stable `id` (already minted by `ensureMonitorIds`, `setlist.ts:43`), and its `mix` **number is an immutable routing identity** (an aux/wedge number — "Mix 3" *is* aux 3, like a console). Changing a slot's mix assignment only recomputes rosters — it **never** creates, deletes, or edits a monitor row. An empty-roster row is **kept** ("(no one assigned)"), not auto-removed.
 - **Mix numbers do not renumber on reorder (resolves R3-HIGH#4).** Today `moveMonitor` (`setlist.ts:49`) renumbers `mon.mix = i+1` on drag, but `StageSlot.mix` references *by number* and is **not** remapped — so reordering silently breaks every slot→mix link once rosters are derived. Fix: **remove drag-renumber.** Monitor rows render sorted by their (immutable) `mix` number; "reorder" by renumber is dropped (it never made domain sense — you don't renumber auxes by dragging). Add/edit/delete remain.
-- **Deleting a monitor** removes that mix number; slots whose `mix` pointed at it become **orphaned-mix** (a badge: "mix removed", treated as no-mix until reassigned) — the exact parallel of slot-delete orphaning inputs. A delete-time prompt mirrors the slot case if any slots reference it.
+- **Deleting a monitor** removes that mix number; slots whose `mix` pointed at it become **orphaned-mix** (a slot-level badge: "mix removed", treated as no-mix until reassigned) — the exact parallel of slot-delete orphaning inputs. A delete-time prompt mirrors the slot case if any slots reference it.
+- **Forward referential integrity — `slot.mix` must reference a live monitor (resolves v8-self#2).** v7 only handled the reverse (delete monitor → orphan slots). But a slot can carry a positive `mix` with **no** matching `MonitorMix` row (AI sets `mix: 7` with no monitor 7; a hand-edited/imported file). The stage-plot dropdown already prevents this in the UI (validated to defined mixes + "None"), but the data model must not assume it. Rule: a slot whose `mix > 0` references no monitor row is **orphaned-mix** — same slot-level badge, treated as no-mix until reassigned. The AI plan validator (below) flags any op that would leave a slot pointing at a non-existent mix; load surfaces pre-existing cases via the same badge.
 - **Explicit renumber** (if ever needed) is a deliberate action that **remaps every referencing `slot.mix`** in the same transaction — never a side effect of reordering.
 
-### AI copilot reconcile contract (resolves R2-HIGH#1/#2, R3-HIGH#1/#2, R3-MEDIUM#5)
+### AI copilot edit contract — operation-based (resolves the recurring apply-path HIGH class)
 
-The agent is prompted to **cascade** `update_stage_plot` + `update_inputs` + `update_monitors` together (agent.ts:29). Two problems must be fixed together: each tool does a **full replace** with no ids, **and** the `update_stage_plot` apply *itself* regenerates inputs+monitors from scratch (`page.tsx:2617–2647`).
+The recurring R2–R4 HIGHs all came from **replace-shaped tools** (`update_stage_plot`/`update_inputs`/`update_monitors`, each "replace the entire list" — `agent.ts:29`, plus the `update_stage_plot` apply self-regenerating inputs+monitors at `page.tsx:2617–2647`). v8 replaces that shape: the AI edits the show through **explicit operations**, so identity and intent are first-class instead of inferred.
 
-**Step 0 — remove the self-cascade in `update_stage_plot` apply (R3-HIGH#1, worse-than-reported).** Delete the `expandSlotToInputs` input regeneration and the monitor regeneration from the `update_stage_plot` case. Each tool reconciles **only its own list**. (Fresh builds still get inputs/monitors because the model is prompted to call all three tools with real data — the client-side expansion was a redundant link-destroyer.)
+**One tool — `edit_show({ ops: Op[] })`** (replaces the three replace tools). Ops, with their fields:
 
-**Identity model — names are never identifiers.** New items are referenced by a **model-supplied `clientRef`** (R3 recommended direction), not by name or `"POS:Name"`.
+| Op | Fields | Notes |
+|----|--------|-------|
+| `addSlot` | `clientRef`, `pos`, `name`, `role`, `mix`, `power?`, `featured?` | `clientRef` = in-cascade handle; mints a real `id`. |
+| `updateSlot` | `id`, + any subset of `pos`/`name`/`role`/`mix`/`power`/`featured` | only provided fields change. |
+| `removeSlot` | `id` | orphans linked inputs → needs-attention. |
+| `addInput` | `clientRef?`, `inst`, `mic`, `stand`, `notes?`, `slotRef?` | `ch` auto-assigned (next free); `slotRef` per resolution rules. |
+| `updateInput` | `id`, + any subset of `inst`/`mic`/`stand`/`notes` | does **not** touch the link. |
+| `linkInput` | `id`, `slotRef` | the **only** way to change a link: `slotRef` = id \| clientRef \| `null` (unlink). Setting a valid slot clears `needsReview`. |
+| `removeInput` | `id` | — |
+| `addMonitor` | `clientRef?`, `mix`, `name`, `needs` | `mix` must be unique positive. |
+| `updateMonitor` | `id`, + any subset of `name`/`needs`/`mix` | `mix` change must preserve the invariant + remap referencing `slot.mix` (explicit-renumber). |
+| `removeMonitor` | `id` | orphans referencing slots → orphaned-mix. |
 
-**Schema changes (`lib/agent.ts` TOOLS):**
-- `update_stage_plot` items: add optional `id` (existing slot) **or** optional `clientRef` (new slot, e.g. `"slot-strings-1"`).
-- `update_inputs` items: add optional `id`; add `slotRef` which is **either** an existing slot `id`, **or** a `clientRef` of a slot in the same cascade, **or** explicit `null` to unlink. **Omitting `slotRef` preserves the input's current `slotId`** (R3-HIGH#2).
-- `update_monitors` items: add optional `id`.
-- All three tools: add optional `removedIds: string[]`.
+**Why this dissolves the prior HIGHs (each is now structural, not a rule we must remember):**
+- **Absence never deletes** — only `removeSlot/removeInput/removeMonitor` delete. No `removedIds` envelope, no "infer deletion from a shorter list."
+- **Preserve-on-omit** — an item with no op is untouched; `updateX` carries only changed fields. (v7's "omit `slotRef` to preserve" special case is gone — links change *only* via `linkInput`.)
+- **No self-cascade** — there is no full-replace path, so nothing regenerates inputs/monitors as a side effect. `expandSlotToInputs`-style regeneration is deleted; a fresh build is just many `addSlot`/`addInput`/`addMonitor` ops.
 
-**Context we send to the model:** the current config **including** every slot `id`, input `id` + `slotId`, monitor `id`. Instruction: *preserve `id` for items you keep; give new items a `clientRef`; link an input via `slotRef` (an existing slot `id` or a same-cascade `clientRef`); omit `slotRef` to keep an input's current link; set `slotRef: null` to unlink; remove items only via `removedIds` — never drop items you intend to keep.*
+**Reference resolution (resolves v8-self#6).** `clientRef` lives in a **namespace disjoint from `id`** (a planning handle, never persisted). A `slotRef` resolves in fixed precedence: **(1)** matches an existing slot `id` → that slot; **(2)** else matches a `clientRef` introduced by an `addSlot` in this same `ops` list → that new slot; **(3)** else → **error** (whole apply fails). Forward references are allowed: a pre-pass registers every `addSlot` clientRef before resolving any `slotRef`, so op order within the list is forgiving.
 
-**Atomic per-message apply — whole-cascade accept/reject (R3-HIGH#1, R4-HIGH#3).** Replace per-tool `applyToolCall(msgIdx, toolIdx)` **and** per-tool reject (`page.tsx:2768–2787`) with a single **`applyMessageCascade(msgIdx)` / `rejectMessageCascade(msgIdx)`** pair: the **message cascade is the unit**. Apply runs all of a message's tool calls **in one transaction, in fixed dependency order** (slots → inputs → monitors → setlist/notes/info); reject discards the whole cascade. (R4-HIGH#3: v6's "atomic apply, per-tool reject" was contradictory — rejecting the slots tool while keeping the inputs tool leaves same-cascade `clientRef`s unresolvable. Making reject whole-cascade removes the hazard entirely. Finer control = re-prompt; answers v6-OQ1.)
+**Two-phase atomic apply (resolves R3-HIGH#1, R4-HIGH#3, v8-self#5).** A message's `edit_show` call is **planned, then committed** as one unit — replacing both per-tool apply (`applyToolCall`) and per-tool reject (`page.tsx:2768–2787`):
 
-**Pre-mutation validation (atomic — all checks pass before anything mutates):**
-- **`clientRef` uniqueness (R4-MEDIUM#4):** all `clientRef`s within the cascade must be distinct; a duplicate would make the resolution map ambiguous → **fail the whole apply** with an explanatory error.
-- **Ref resolvability:** every `slotRef` that is a `clientRef` must match a `clientRef` defined in the same cascade; otherwise fail.
-- **Monitor invariant:** the resulting monitor set must satisfy `validateMonitors` (unique positive `mix`); otherwise fail.
+1. **Plan / validate (no mutation).** Register `clientRef`s (must be **unique** — duplicate ⇒ fail); resolve every `slotRef` (unresolved ⇒ fail); apply ops to a *working copy*; check invariants on the result — `validateMonitors` (unique positive `mix`) **and** forward integrity (no `slot.mix` left pointing at a missing monitor) — fail the whole plan on violation; compute the **delta set** (slots/inputs/monitors removed, inputs orphaned, slots orphaned-by-mix).
+2. **Confirm-gate (delta-based, resolves R4-MEDIUM#5 + #6).** If the delta set has **no** removals/orphans → **apply silently**. If it has **any** removal or new orphan → show a confirm summarizing the exact deltas before committing — **regardless of linkage count or modify-vs-replace.** (A "start over" is just an op list full of `removeX` ops → large delta → always surfaced; no silent wipe. A `removeMonitor` that orphans slots in a zero-input-linkage show still confirms, because the orphaned-slot delta is non-empty.)
+3. **Commit.** The planned working copy replaces the live config in one transaction. The whole message's ops succeed or none do; **Reject** discards the plan. (Finer than whole-message control = re-prompt.)
 
-**Reconcile, in order:**
-1. **Slots.** Upsert: known `id` → update in place (keep id); `clientRef` (no id) → mint id, record `clientRef → newId`; no id and no clientRef → fall back to `(pos, normalizedName)` **only if that pair is unique** in the current slot set, else mint (R3-MEDIUM#5 — never adopt an id on an ambiguous name); unknown `id` → mint fresh.
-2. **Inputs.** Upsert by `id`. Resolve `slotRef`: existing slot `id` → use; `clientRef` → resolve via the map from step 1; `null` → clear (`slotId` none); **omitted → keep the input's current `slotId`** (preserve).
-3. **Monitors.** Upsert by `id` (then `mix` number); preserve `name`/`needs`; numbers immutable per Monitor lifecycle.
-4. **Removals explicit:** only `removedIds` delete. **Absence never deletes.** Deleting a slot orphans its inputs (badge); deleting a monitor orphans referencing slots (badge). There is **no separate "fresh replace" mode** — a genuine start-over is just a cascade whose `removedIds` lists every dropped item, which the delta gate below always surfaces (resolves R4-MEDIUM#6: no silent wipe, even on a zero-linkage show).
-5. **Confirm-gate — delta-based, not linkage-count-based (resolves R4-MEDIUM#5 + #6).** Compute the actual deltas the cascade would cause: **slots removed, inputs orphaned (slot deleted/unlinked), monitors removed, slots orphaned by a monitor removal.** Rule: an **additive/upsert-only cascade** (no removals, no new orphans) **applies silently**; **any** cascade that removes an existing item *or* creates an orphan shows a confirm summarizing the exact deltas before mutating — **regardless of linkage count or modify-vs-replace.** (R4-MEDIUM#5: v6 gated on "show has ≥1 input linkage," which missed a monitor removal that orphans slots in a zero-input-linkage show; the delta rule catches it because the orphaned-slot delta is non-empty. R4-MEDIUM#6: a "fresh replace" over a non-empty zero-linkage show is a large removal delta, so it confirms instead of wiping silently.) Tune nag-tolerance later.
-
-**Prompt change:** relax agent.ts:29 from "replace the entire …" to "**reconcile** against the current config; preserve ids; new items get a **unique** `clientRef`; build on what exists; remove items **only** via `removedIds` — and to start a show over, list every dropped item's id in `removedIds` (never silently omit). Monitor `mix` numbers must stay unique positive integers."
+**Context we send to the model:** the current config **with** every slot `id`, input `id` + `slotId` + `needsReview`, monitor `id` + `mix`. Instruction: *edit via ops — `updateX`/`linkInput`/`removeX` by `id`; new items via `addX` with a **unique** `clientRef`; link inputs only with `linkInput` (existing `id` or a same-list `clientRef`, or `null` to unlink); **don't emit ops for things you aren't changing** (no op = unchanged); to remove something, emit `removeX` (never just drop it); monitor `mix` numbers stay unique positive integers; **relink any input I flag as needs-attention.*** Surfacing `needsReview` lets the model repair ambiguous/orphaned links (resolves v8-self#3).
 
 ### Authority / drift
 
@@ -239,7 +276,7 @@ This is the **deliberate consequence** of "mix is not an input-channel property.
 
 ## Migration
 
-Near-non-event. `StageSlot.id` added; `InputChannel.slotId` optional. Existing shows load, `ensureStageSlotIds` mints + de-dupes (persisted next save), inputs stay unlinked and behave as today. Linking is opt-in per row. Slots already carry `mix`. JSON/YAML: `id` on every slot, `slotId` on linked inputs, both absent on legacy data and tolerated. No destructive migration, no backfill job (lazy mint on load + save).
+Near-non-event. `StageSlot.id` added; `InputChannel.slotId` + `needsReview` optional. Existing shows load, `ensureStageSlotIds` mints + de-dupes and (when it changes anything) **forces a save** so ids persist immediately — not "whenever the user next edits" (the v8-self#1 race). Inputs stay unlinked and behave as today. Linking is opt-in per row. Slots already carry `mix`. JSON/YAML: `id` on every slot, `slotId`/`needsReview` on inputs that carry them, all absent on legacy data and tolerated. No destructive migration, no backfill job (mint-on-load + forced save).
 
 ---
 
@@ -259,14 +296,14 @@ Modeling **where each input is sent** (a send matrix / N-mix-per-input) — and 
 
 ## Build outline (sizing, not a commitment)
 
-1. `StageSlot.id` + `InputChannel.needsReview?` + `ensureStageSlotIds` (mint + **de-dupe; ambiguous inputs get `slotId` cleared and `needsReview: true`, both persisted**; returns `{config, ambiguousInputs}`) + serialize.
-2. Group-by-pos render in both plot views; container cell (TLA header, stacked chips, add-occupant); per-mix color palette; `×n inputs` badge; print = all occupants.
+1. `StageSlot.id` + `InputChannel.needsReview?` + `ensureStageSlotIds` (mint + **de-dupe; ambiguous/dangling inputs get `slotId` cleared + `needsReview: true`**; returns `{config, dirty, ambiguousInputs}`) + serialize + **force-save on `dirty`** (v8-self#1 race).
+2. Group-by-pos render in both plot views; container cell (TLA header, stacked chips, add-occupant); per-mix color palette; `×n inputs` badge; print = all occupants in **stable insertion order**.
 3. Per-occupant DnD (`drag-${id}`/`drop-${pos}`); `onMove(slotId, toPos)`; fix `:3238` lookup to id-based.
-4. Input-row Position dropdown (`TLA — name`, slot-owned fallback), pending-slot + coalescing, orphan badge + needs-review badge, delete-time prompt. **No mix on the input row.**
-5. Monitor: roster derivation (read-only); **`validateMonitors` (unique positive `mix`)** enforced on edit (revert+error), add (`max+1`), and reconcile; **remove `moveMonitor` renumber** (sort by immutable number); delete-orphans-slots badge + prompt; explicit-renumber remaps `slot.mix`.
-6. AI: **remove `update_stage_plot` self-cascade regeneration** (`:2617–2647`); schema (`id`/`clientRef`/`slotRef`-or-`null`/`removedIds`); context with ids; **`applyMessageCascade`/`rejectMessageCascade` whole-cascade atomic ordered apply** replacing per-tool apply **and** per-tool reject; **pre-mutation validation** (unique `clientRef`, resolvable `slotRef`, `validateMonitors`); upsert-by-id reconcile with clientRef map + preserve-on-omit + unique-`(pos,name)` fallback; **delta-based confirm-gate**; prompt relax.
+4. Input-row Position dropdown (`TLA — name`, slot-owned fallback), pending-slot + coalescing, **unified needs-attention badge** (sub-reasons: block removed / link missing / ambiguous; clears on valid assign), delete-time prompt. **No mix on the input row.**
+5. Monitor: roster derivation (read-only); **`validateMonitors` (unique positive `mix`)** enforced on edit (revert+error), add (`max+1`), and plan-validate; **forward integrity** (orphaned-mix badge when `slot.mix` has no monitor); **remove `moveMonitor` renumber** (sort by immutable number); delete-orphans-slots badge + prompt; explicit-renumber remaps `slot.mix`.
+6. AI (op-based): **replace the three `update_*` tools with one `edit_show({ops})`**; op handlers (`addSlot`/`updateSlot`/`removeSlot`/`addInput`/`updateInput`/`linkInput`/`removeInput`/`addMonitor`/`updateMonitor`/`removeMonitor`); **two-phase apply** (plan→validate→confirm→commit) replacing per-tool apply *and* per-tool reject; ref resolution (id→same-list clientRef→error, forward-ref pre-pass, clientRef namespace disjoint from id); plan validation (unique clientRef, resolvable slotRef, `validateMonitors`, forward integrity); delta-based confirm-gate; context surfaces ids + `needsReview`; prompt rewritten to ops. **Delete `expandSlotToInputs` self-cascade** (`:2617–2647`).
 7. *(No console-export work — unchanged this phase.)*
-8. Tests: id lifecycle (mint/legacy/round-trip/**dup de-dupe → `slotId` cleared + `needsReview` set + persisted across reload**/needs-review badge clears on reassign/delete-prompt+orphan); reconcile (keep/rename/add/explicit-remove/**no-delete-on-absence**/**slotRef omit=preserve**/**null=unlink**); `clientRef` resolution + **duplicate `clientRef` fails whole apply** + **non-unique `(pos,name)` mints not adopts**; **whole-cascade apply all-or-nothing in order**; **whole-cascade reject discards all** (no per-tool reject); **pre-mutation validation blocks before mutating** (dup clientRef / unresolvable slotRef / monitor invariant); **delta-based confirm-gate** (additive=silent, any removal/orphan=confirm, incl. monitor-removal-orphans-slots on a zero-input-linkage show, and fresh-replace over a non-empty zero-linkage show); **`update_stage_plot` apply no longer regenerates inputs/monitors**; **`validateMonitors`** (dup/non-positive `mix` rejected on edit; add seeds `max+1`); monitor reorder-does-not-renumber + delete-orphans-slots; pending-slot coalescing. (No export tests — export untouched.)
+8. Tests: id lifecycle (mint/legacy/round-trip/**dup de-dupe → `slotId` cleared + `needsReview` set + persisted**/**`dirty` forces save**/needs-attention clears on reassign/delete-prompt+orphan/**dangling import → needs-attention**); ops (`addSlot`+`linkInput` by clientRef links correctly; **forward-ref order-independent**; `updateInput` doesn't touch link; `linkInput null` unlinks + nothing else does; **no op = unchanged**; `removeX` is the only delete path → **no-delete-on-absence**); ref resolution (**duplicate clientRef fails whole apply**, **unresolvable slotRef fails**, id-before-clientRef precedence); **two-phase atomic** (plan failure mutates nothing; commit all-or-nothing; reject discards); plan validation (`validateMonitors` dup/non-positive; **forward integrity** — op leaving `slot.mix` dangling fails); **delta-based confirm-gate** (additive=silent; any removal/orphan=confirm, incl. `removeMonitor`-orphans-slots on a zero-input-linkage show, and remove-everything start-over); monitor add seeds `max+1`, reorder-does-not-renumber; pending-slot coalescing; occupant insertion order stable in print. (No export tests — export untouched.)
 
 ---
 
@@ -281,22 +318,31 @@ Modeling **where each input is sent** (a send matrix / N-mix-per-input) — and 
 - **slotRef omission** — preserves existing link; explicit `null` unlinks (R3-HIGH#2).
 - **Dup slot-id** — ambiguous inputs flagged for review, never silently rebound (R3-HIGH#3).
 - **Mix-number identity** — immutable; no renumber-on-reorder (R3-HIGH#4).
-- **Cross-tool apply** — atomic ordered `applyMessageCascade`; `update_stage_plot` no longer self-regenerates (R3-HIGH#1).
+- **Cross-tool apply** — now the two-phase atomic op apply (plan→commit); no self-cascade regeneration (R3-HIGH#1; mechanism superseded by the v8 op contract).
 - **Dup-slot-id repair state** — persisted via `InputChannel.needsReview` (`slotId` cleared); badge survives reload, clears on reassign (R4-HIGH#1).
 - **Monitor mix-number invariant** — unique positive integers, enforced on edit/add/reconcile via `validateMonitors` (R4-HIGH#2).
 - **Apply/reject granularity** — whole-cascade unit; per-tool reject removed (R4-HIGH#3, v6-OQ1).
 - **`clientRef` uniqueness** — required within a cascade; duplicate fails whole apply pre-mutation (R4-MEDIUM#4).
 - **Confirm-gate** — delta-based (additive=silent; any removal/orphan=confirm), independent of linkage count and modify-vs-replace; no silent fresh-wipe (R4-MEDIUM#5 + #6).
+- **AI contract shape** — **operation-based** `edit_show({ops})` replaces the three replace-shaped tools; absence-never-deletes / preserve-on-omit / no-self-cascade are now *structural*, not remembered rules (v8 reframe).
+- **Lazy-mint persistence race** — `ensureStageSlotIds` returns `dirty` and the load path force-saves; ids persist immediately (v8-self#1).
+- **Forward `slot.mix` integrity** — a `slot.mix` with no monitor row is orphaned-mix (badge); plan validator rejects ops that create it (v8-self#2).
+- **`needsReview` lifecycle** — cleared by any valid `slotId` assignment (user or AI `linkInput`); AI context surfaces needs-attention inputs to repair (v8-self#3).
+- **Input badge states unified** — linked / intentionally-unlinked / needs-attention (orphaned + ambiguous merged) (v8-self#4).
+- **Two-phase atomic apply** — plan→validate→confirm→commit; accurate deltas, no partial apply (v8-self#5).
+- **`slotRef` precedence + namespace** — id → same-list clientRef → error; clientRef disjoint from id; forward-ref pre-pass (v8-self#6).
+- **Intra-block occupant order** — stable insertion order, deterministic print (v8-self#7).
 
 ## Open Questions for Review (R5)
 
-1. **Repair-flag UX (Q3, show-runner call)** — persistent `needsReview` badge (non-blocking, chosen) vs. hard-block-on-load repair modal for dup-id imports. Confirm the non-blocking choice or escalate to hard-block.
-2. **Delta-gate nag tolerance** — is "confirm on *any* removal/orphan" too chatty for routine pruning (e.g. removing one empty monitor), or is always-confirm-on-destructive correct until UAT tunes a threshold?
-3. **Monitor reorder removal** — still: is dropping drag-reorder acceptable (rows sort by immutable number), or is a display order independent of routing number actually needed?
-4. Open to any further adversarial findings on the reconcile/apply/persistence path.
+1. **Repair-flag UX (Q3, show-runner call)** — persistent needs-attention badge (non-blocking, chosen) vs. hard-block-on-load repair modal for dup-id/dangling imports. Confirm or escalate.
+2. **Delta-gate nag tolerance** — is "confirm on *any* removal/orphan" too chatty for routine pruning (e.g. removing one empty monitor), or correct until UAT tunes a threshold?
+3. **Monitor reorder removal** — is dropping drag-reorder acceptable (rows sort by immutable number), or is a display order independent of routing number actually needed?
+4. **`updateMonitor` mix change vs immutability** — v8 allows an explicit `updateMonitor.mix` that remaps referencing `slot.mix` in the same plan (the deliberate "explicit renumber"). Is allowing the AI to do that worth the surface, or should mix# be add/remove-only (no in-place renumber) for v1 to keep the invariant trivially safe?
+5. Open to any further adversarial findings — especially on the op planner/validator and the two-phase commit.
 
 ---
 
 ## Status
 
-Proposed (v7), branch merged up to `main`. **Not yet built.** Pending Codex R5; build only after a clean round.
+Proposed (v8), branch merged up to `main`. **Not yet built.** Pending Codex R5; build only after a clean round.
