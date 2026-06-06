@@ -640,7 +640,19 @@ export default function Page() {
               <button
                 onClick={() => {
                   setShowPrintModal(false);
-                  setTimeout(() => window.print(), 100);
+                  // The printable sections (incl. the 2-col cue sheet) live in
+                  // MixTab, which only mounts on the Mix tab. The print button is
+                  // global, so a print from another tab would be blank. There is
+                  // one canonical print view, so route every print through MixTab:
+                  // switch to it, print, then restore the user's tab.
+                  const prevTab = tab;
+                  setTab('mix');
+                  const restore = () => {
+                    setTab(prevTab);
+                    window.removeEventListener('afterprint', restore);
+                  };
+                  window.addEventListener('afterprint', restore);
+                  setTimeout(() => window.print(), 150);
                 }}
                 className="flex-1 px-4 py-2 text-sm font-bold bg-black text-white rounded hover:bg-gray-800 transition-colors"
               >
