@@ -337,7 +337,7 @@ Modeling **where each input is sent** (a send matrix / N-mix-per-input) — and 
 
 ## Resolved (no longer open)
 
-- **Confirm-gate** — silent for zero-linkage shows; confirm on **any** removal/orphan once ≥1 linkage.
+- **Confirm-gate** — delta-based and **independent of linkage count**: any removal/orphan/implicit-renumber confirms even on a zero-linkage show; single requested edits stay silent. (See "Delta-gate (sharpened)" below — this supersedes the earlier "silent until ≥1 linkage" model.)
 - **Slot-delete** — prompt at delete; orphan badge backstop. **Monitor-delete** — same pattern (orphans referencing slots).
 - **Touch drag** — grip-per-chip for v1; revisit in UAT.
 - **PIT/FOH/OTHER** — descoped (`docs/design-offgrid-zones.md` *— deferred follow-on, PR #77*); multi-mix on the 9 on-grid blocks.
