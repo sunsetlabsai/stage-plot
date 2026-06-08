@@ -7,6 +7,7 @@ export type StagePosition =
   | 'OTHER';                 // Catch-all for non-standard positions
 
 export interface StageSlot {
+  id?: string;         // stable hub identity for input↔slot linkage; guaranteed at runtime by ensureStageSlotIds
   name: string;
   pos: StagePosition;
   role: string;
@@ -22,6 +23,8 @@ export interface InputChannel {
   mic: string;
   stand: string;
   notes?: string;
+  slotId?: string;     // links this channel to a StageSlot.id (the linkage); absent ⇒ unassigned
+  needsReview?: boolean; // needs-attention/relink flag (orphaned or ambiguous link); absent ⇒ false
 }
 
 export interface MonitorMix {

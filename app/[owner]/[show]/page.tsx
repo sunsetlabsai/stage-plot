@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { LogoMark } from '@/components/Logo';
@@ -32,7 +33,7 @@ import type {
   GeneralNote,
   Chart,
 } from '@/lib/types';
-import { ensureSetlistSongIds, moveSetlistSong, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor } from '@/lib/setlist';
+import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf } from '@/lib/setlist';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -140,6 +141,70 @@ function getSingerColor(name: string, colorMap: Map<string, string>): string {
   return colorMap.get(name)!;
 }
 
+// ─── Stage-plot linkage helpers (multi-occupant blocks) ─────────────────────
+
+// Per-mix color palette — deterministic by mix number so the same wedge reads the
+// same color everywhere, and two mixes in one block are visually distinct.
+const MIX_BADGE_COLORS = [
+  'bg-indigo-600',
+  'bg-fuchsia-600',
+  'bg-emerald-600',
+  'bg-amber-600',
+  'bg-sky-600',
+  'bg-rose-600',
+  'bg-violet-600',
+  'bg-teal-600',
+];
+function mixColor(mix: number): string {
+  return MIX_BADGE_COLORS[(mix - 1) % MIX_BADGE_COLORS.length];
+}
+
+// Shared occupant chip — name, role, per-mix MIX badge, ×n inputs badge, power.
+// `featured` styles the chip (not the cell). `grip` is the drag handle (config view only).
+function OccupantChip({
+  slot,
+  indexInBlock,
+  inputCount,
+  grip,
+}: {
+  slot: StageSlot;
+  indexInBlock: number;
+  inputCount: number;
+  grip?: ReactNode;
+}) {
+  const featured = slot.featured;
+  const badges: ReactNode[] = [];
+  if (slot.mix) {
+    badges.push(
+      <span key="mix" className={`px-1.5 py-0.5 ${mixColor(slot.mix)} text-white rounded text-[9px] font-bold`}>MIX {slot.mix}</span>
+    );
+  }
+  if (inputCount > 0) {
+    badges.push(
+      <span key="inp" className="px-1.5 py-0.5 bg-gray-200 text-gray-700 rounded text-[9px] font-bold">×{inputCount} inputs</span>
+    );
+  }
+  if (slot.power) {
+    badges.push(
+      <span key="pwr" className="px-1.5 py-0.5 bg-yellow-400 text-black rounded text-[9px] font-bold">POWER</span>
+    );
+  }
+  return (
+    <div className={`flex items-center gap-1 rounded border px-1.5 py-1 ${featured ? 'bg-gray-900 text-white border-black' : 'bg-white border-blue-100'}`}>
+      {grip}
+      <div className="flex-1 text-left leading-tight">
+        <p className="font-bold text-[12px] uppercase">{slotLabel(slot, indexInBlock)}</p>
+        <p className={`text-[10px] ${featured ? 'opacity-70' : 'text-gray-500'}`}>{slot.role}</p>
+      </div>
+      {badges.length > 1 ? (
+        <div className="flex flex-col items-end gap-0.5">{badges}</div>
+      ) : (
+        badges
+      )}
+    </div>
+  );
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function decodeConfig(s: string): AppConfig | null {
   try {
@@ -153,11 +218,19 @@ function decodeConfig(s: string): AppConfig | null {
 // MAIN COMPONENT
 // ════════════════════════════════════════════════════════════════════════════
 function withStableIds(config: AppConfig): AppConfig {
-  const setlist = ensureSetlistSongIds(config.setlist);
-  const inputs = ensureInputIds(config.inputs);
-  const monitors = ensureMonitorIds(config.monitors);
-  const changed = setlist !== config.setlist || inputs !== config.inputs || monitors !== config.monitors;
-  return changed ? { ...config, setlist, inputs, monitors } : config;
+  // Mint/de-dupe the StageSlot.id hub + flag ambiguous/dangling links FIRST, so input
+  // id-minting runs on top of any cleared slotIds. When this is dirty it returns a new
+  // config object → the persist effect saves it → the lazy-mint race is closed.
+  const { config: linked } = ensureStageSlotIds(config);
+  const setlist = ensureSetlistSongIds(linked.setlist);
+  const inputs = ensureInputIds(linked.inputs);
+  const monitors = ensureMonitorIds(linked.monitors);
+  const changed =
+    linked !== config ||
+    setlist !== linked.setlist ||
+    inputs !== linked.inputs ||
+    monitors !== linked.monitors;
+  return changed ? { ...linked, setlist, inputs, monitors } : config;
 }
 
 function initConfig(): AppConfig {
@@ -422,7 +495,10 @@ export default function Page() {
   }, []);
 
   const updateConfig = useCallback((fn: (prev: AppConfig) => AppConfig) => {
-    setConfig((prev) => fn(prev));
+    // Normalize StageSlot.id through the single mutation chokepoint so every live
+    // writer (Add Row, AI ops, DnD) mints ids + de-dupes/flags links — not just
+    // load/import. Idempotent and ref-stable when nothing's dirty (no edit churn).
+    setConfig((prev) => ensureStageSlotIds(fn(prev)).config);
   }, []);
 
   const [publishSlug] = useState(slug);
@@ -840,30 +916,25 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, ch
 // MIX TAB — engineer's rider view
 // ════════════════════════════════════════════════════════════════════════════
 
-function StageSlotCell({ slot }: { slot: StageSlot | undefined }) {
-  const isFeatured = slot?.featured;
+// Read-only / print container cell: TLA header + occupant count, stacked chips
+// (stable insertion order), or "empty".
+function StageSlotCell({ pos, slots, inputs }: { pos: StagePosition; slots: StageSlot[]; inputs: InputChannel[] }) {
+  const count = slots.length;
   return (
-    <div
-      className={`flex flex-col items-center rounded-lg p-2 text-center gap-0.5 border-2 ${
-        isFeatured
-          ? 'border-black bg-gray-900 text-white shadow-lg'
-          : 'border-dashed border-blue-100 bg-blue-50/30'
-      }`}
-    >
-      {slot ? (
-        <>
-          <p className="font-bold text-sm leading-tight uppercase">{slot.name}</p>
-          <p className={`text-[11px] leading-tight ${isFeatured ? 'opacity-80' : 'text-gray-600'}`}>{slot.role}</p>
-          {slot.mix ? (
-            <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
-          ) : null}
-        </>
-      ) : (
-        <p className="text-[10px] text-gray-300 italic">empty</p>
-      )}
-      <div className="h-5 flex items-center justify-center">
-        {slot?.power && (
-          <span className="px-1.5 py-0.5 bg-yellow-400 text-[9px] font-bold rounded text-black">POWER</span>
+    <div className="rounded-lg border-2 border-dashed border-blue-100 bg-blue-50/30 overflow-hidden">
+      <div className={`flex items-center justify-between px-1.5 py-0.5 ${count ? 'bg-blue-100/60' : 'bg-blue-50'}`}>
+        <span className={`text-[9px] font-bold tracking-wider ${count ? 'text-blue-700' : 'text-gray-400'}`}>{pos}</span>
+        {count > 0 && (
+          <span className="text-[9px] text-blue-400">{count} occupant{count > 1 ? 's' : ''}</span>
+        )}
+      </div>
+      <div className="p-1.5 space-y-1">
+        {count === 0 ? (
+          <p className="text-[10px] text-gray-300 italic text-center py-1">empty</p>
+        ) : (
+          slots.map((s, i) => (
+            <OccupantChip key={s.id ?? i} slot={s} indexInBlock={i} inputCount={countLinkedInputs(s.id, inputs)} />
+          ))
         )}
       </div>
     </div>
@@ -871,8 +942,11 @@ function StageSlotCell({ slot }: { slot: StageSlot | undefined }) {
 }
 
 function StagePlotView({ band }: { band: BandConfig }) {
-  const slotMap = Object.fromEntries(band.stagePlot.map((s) => [s.pos, s]));
-  const hasMidStage = (['MSR', 'MSC', 'MSL'] as StagePosition[]).some((p) => slotMap[p]);
+  const byPos = groupByPos(band.stagePlot);
+  const cell = (pos: StagePosition) => (
+    <StageSlotCell key={pos} pos={pos} slots={byPos.get(pos) ?? []} inputs={band.inputs} />
+  );
+  const hasMidStage = (['MSR', 'MSC', 'MSL'] as StagePosition[]).some((p) => byPos.has(p));
 
   return (
     <div className="bg-white border-4 border-gray-200 rounded-xl shadow-inner overflow-hidden">
@@ -881,26 +955,20 @@ function StagePlotView({ band }: { band: BandConfig }) {
         <span className="text-[10px] font-bold text-gray-500 tracking-widest">UPSTAGE</span>
         <span className="text-[10px] font-bold text-gray-400">USL</span>
       </div>
-      <div className="grid grid-cols-3 gap-2 px-3 pb-2">
-        {(['USR', 'USC', 'USL'] as StagePosition[]).map((pos) => (
-          <StageSlotCell key={pos} slot={slotMap[pos]} />
-        ))}
+      <div className="grid grid-cols-3 gap-2 px-3 pb-2 items-start">
+        {(['USR', 'USC', 'USL'] as StagePosition[]).map(cell)}
       </div>
       {hasMidStage && (
         <>
           <div className="mx-3 border-t-2 border-dashed border-gray-300 my-1" />
-          <div className="grid grid-cols-3 gap-2 px-3 pt-2 pb-2">
-            {(['MSR', 'MSC', 'MSL'] as StagePosition[]).map((pos) => (
-              <StageSlotCell key={pos} slot={slotMap[pos]} />
-            ))}
+          <div className="grid grid-cols-3 gap-2 px-3 pt-2 pb-2 items-start">
+            {(['MSR', 'MSC', 'MSL'] as StagePosition[]).map(cell)}
           </div>
         </>
       )}
       <div className="mx-3 border-t-2 border-dashed border-gray-300 my-1" />
-      <div className="grid grid-cols-3 gap-2 px-3 pt-2 pb-2">
-        {(['DSR', 'DSC', 'DSL'] as StagePosition[]).map((pos) => (
-          <StageSlotCell key={pos} slot={slotMap[pos]} />
-        ))}
+      <div className="grid grid-cols-3 gap-2 px-3 pt-2 pb-2 items-start">
+        {(['DSR', 'DSC', 'DSL'] as StagePosition[]).map(cell)}
       </div>
       <div className="flex justify-between px-3 pb-2 pt-1">
         <span className="text-[10px] font-bold text-gray-400">DSR</span>
@@ -915,57 +983,89 @@ function StagePlotView({ band }: { band: BandConfig }) {
 // DRAGGABLE STAGE PLOT (Config tab — drag to reposition)
 // ════════════════════════════════════════════════════════════════════════════
 
-function DraggableStageSlot({ pos, slot }: { pos: StagePosition; slot: StageSlot | undefined }) {
-  const { setNodeRef: setDropRef, isOver } = useDroppable({ id: `drop-${pos}` });
-  const { attributes, listeners, setNodeRef: setDragRef, isDragging } = useDraggable({
-    id: `drag-${pos}`,
-    disabled: !slot,
-    data: { pos },
+// One draggable occupant chip — the grip is the drag handle (id `drag-${slot.id}`,
+// so input links survive a reposition). Dimmed while dragging; the moving copy is
+// rendered in the DragOverlay.
+function DraggableOccupantChip({ slot, indexInBlock, inputCount }: { slot: StageSlot; indexInBlock: number; inputCount: number }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `drag-${slot.id}`,
+    disabled: !slot.id,
+    data: { slotId: slot.id, pos: slot.pos },
   });
-
-  const isFeatured = slot?.featured;
-
+  const grip = (
+    <span
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      className="grip text-gray-300 text-xs leading-none cursor-grab touch-none select-none"
+      aria-label="Drag to reposition"
+    >
+      ⠿
+    </span>
+  );
   return (
-    <div ref={setDropRef} className="relative">
-      <div
-        ref={setDragRef}
-        {...attributes}
-        {...listeners}
-        className={`flex flex-col items-center rounded-lg p-2 text-center gap-0.5 border-2 transition-colors ${
-          isDragging
-            ? 'opacity-30 border-dashed border-gray-300'
-            : isOver
-              ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-200'
-              : isFeatured
-                ? 'border-black bg-gray-900 text-white shadow-lg'
-                : slot
-                  ? 'border-dashed border-blue-100 bg-blue-50/30 cursor-grab'
-                  : 'border-dashed border-blue-100 bg-blue-50/30'
-        }`}
-      >
-        {slot ? (
-          <>
-            <p className="font-bold text-sm leading-tight uppercase">{slot.name}</p>
-            <p className={`text-[11px] leading-tight ${isFeatured ? 'opacity-80' : 'text-gray-600'}`}>{slot.role}</p>
-            {slot.mix ? (
-              <p className={`text-[10px] ${isFeatured ? 'opacity-60' : 'text-gray-400'}`}>Mix {slot.mix}</p>
-            ) : null}
-          </>
-        ) : (
-          <p className="text-[10px] text-gray-300 italic">empty</p>
+    <div className={isDragging ? 'opacity-30' : ''}>
+      <OccupantChip slot={slot} indexInBlock={indexInBlock} inputCount={inputCount} grip={grip} />
+    </div>
+  );
+}
+
+// Config container cell: droppable block (id `drop-${pos}`) with stacked draggable
+// chips (stable insertion order) + "+ add occupant".
+function DraggableStageCell({
+  pos,
+  slots,
+  inputs,
+  onAddOccupant,
+}: {
+  pos: StagePosition;
+  slots: StageSlot[];
+  inputs: InputChannel[];
+  onAddOccupant: (pos: StagePosition) => void;
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: `drop-${pos}` });
+  const count = slots.length;
+  return (
+    <div
+      ref={setNodeRef}
+      className={`rounded-lg border-2 overflow-hidden transition-colors ${
+        isOver ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-200' : 'border-dashed border-blue-100 bg-blue-50/30'
+      }`}
+    >
+      <div className={`flex items-center justify-between px-1.5 py-0.5 ${count ? 'bg-blue-100/60' : 'bg-blue-50'}`}>
+        <span className={`text-[9px] font-bold tracking-wider ${count ? 'text-blue-700' : 'text-gray-400'}`}>{pos}</span>
+        {count > 0 && (
+          <span className="text-[9px] text-blue-400">{count} occupant{count > 1 ? 's' : ''}</span>
         )}
-        <div className="h-5 flex items-center justify-center">
-          {slot?.power && (
-            <span className="px-1.5 py-0.5 bg-yellow-400 text-[9px] font-bold rounded text-black">POWER</span>
-          )}
-        </div>
+      </div>
+      <div className="p-1.5 space-y-1">
+        {slots.map((s, i) => (
+          <DraggableOccupantChip key={s.id ?? i} slot={s} indexInBlock={i} inputCount={countLinkedInputs(s.id, inputs)} />
+        ))}
+        <button
+          type="button"
+          onClick={() => onAddOccupant(pos)}
+          className="w-full text-[10px] text-blue-500 border border-dashed border-blue-200 rounded py-1.5 hover:bg-blue-50"
+        >
+          + add occupant
+        </button>
       </div>
     </div>
   );
 }
 
-function DraggableStagePlotView({ stagePlot, onMove }: { stagePlot: StageSlot[]; onMove: (fromPos: StagePosition, toPos: StagePosition) => void }) {
-  const slotMap = Object.fromEntries(stagePlot.map((s) => [s.pos, s]));
+function DraggableStagePlotView({
+  stagePlot,
+  inputs,
+  onMove,
+  onAddOccupant,
+}: {
+  stagePlot: StageSlot[];
+  inputs: InputChannel[];
+  onMove: (slotId: string, toPos: StagePosition) => void;
+  onAddOccupant: (pos: StagePosition) => void;
+}) {
+  const byPos = groupByPos(stagePlot);
   const [activeSlot, setActiveSlot] = useState<StageSlot | null>(null);
 
   const sensors = useSensors(
@@ -974,18 +1074,24 @@ function DraggableStagePlotView({ stagePlot, onMove }: { stagePlot: StageSlot[];
   );
 
   const handleDragStart = (event: DragStartEvent) => {
-    const pos = event.active.data.current?.pos as StagePosition | undefined;
-    if (pos && slotMap[pos]) setActiveSlot(slotMap[pos]);
+    const slotId = event.active.data.current?.slotId as string | undefined;
+    const s = stagePlot.find((x) => x.id === slotId);
+    if (s) setActiveSlot(s);
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
     setActiveSlot(null);
     const { active, over } = event;
     if (!over) return;
-    const fromPos = (active.id as string).replace('drag-', '') as StagePosition;
+    const slotId = (active.id as string).replace('drag-', '');
     const toPos = (over.id as string).replace('drop-', '') as StagePosition;
-    if (fromPos !== toPos) onMove(fromPos, toPos);
+    const s = stagePlot.find((x) => x.id === slotId);
+    if (s && s.pos !== toPos) onMove(slotId, toPos);
   };
+
+  const cell = (pos: StagePosition) => (
+    <DraggableStageCell key={pos} pos={pos} slots={byPos.get(pos) ?? []} inputs={inputs} onAddOccupant={onAddOccupant} />
+  );
 
   return (
     <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
@@ -995,22 +1101,16 @@ function DraggableStagePlotView({ stagePlot, onMove }: { stagePlot: StageSlot[];
           <span className="text-[10px] font-bold text-gray-500 tracking-widest">UPSTAGE</span>
           <span className="text-[10px] font-bold text-gray-400">USL</span>
         </div>
-        <div className="grid grid-cols-3 gap-2 px-3 pb-2">
-          {(['USR', 'USC', 'USL'] as StagePosition[]).map((pos) => (
-            <DraggableStageSlot key={pos} pos={pos} slot={slotMap[pos]} />
-          ))}
+        <div className="grid grid-cols-3 gap-2 px-3 pb-2 items-start">
+          {(['USR', 'USC', 'USL'] as StagePosition[]).map(cell)}
         </div>
         <div className="mx-3 border-t-2 border-dashed border-gray-300 my-1" />
-        <div className="grid grid-cols-3 gap-2 px-3 pt-2 pb-2">
-          {(['MSR', 'MSC', 'MSL'] as StagePosition[]).map((pos) => (
-            <DraggableStageSlot key={pos} pos={pos} slot={slotMap[pos]} />
-          ))}
+        <div className="grid grid-cols-3 gap-2 px-3 pt-2 pb-2 items-start">
+          {(['MSR', 'MSC', 'MSL'] as StagePosition[]).map(cell)}
         </div>
         <div className="mx-3 border-t-2 border-dashed border-gray-300 my-1" />
-        <div className="grid grid-cols-3 gap-2 px-3 pt-2 pb-2">
-          {(['DSR', 'DSC', 'DSL'] as StagePosition[]).map((pos) => (
-            <DraggableStageSlot key={pos} pos={pos} slot={slotMap[pos]} />
-          ))}
+        <div className="grid grid-cols-3 gap-2 px-3 pt-2 pb-2 items-start">
+          {(['DSR', 'DSC', 'DSL'] as StagePosition[]).map(cell)}
         </div>
         <div className="flex justify-between px-3 pb-2 pt-1">
           <span className="text-[10px] font-bold text-gray-400">DSR</span>
@@ -1020,15 +1120,10 @@ function DraggableStagePlotView({ stagePlot, onMove }: { stagePlot: StageSlot[];
       </div>
       <DragOverlay>
         {activeSlot && (
-          <div className={`flex flex-col items-center rounded-lg p-2 text-center gap-0.5 border-2 shadow-xl ${
-            activeSlot.featured ? 'border-black bg-gray-900 text-white' : 'border-blue-300 bg-white'
-          }`}>
-            <p className="font-bold text-sm leading-tight uppercase">{activeSlot.name}</p>
-            <p className={`text-[11px] leading-tight ${activeSlot.featured ? 'opacity-80' : 'text-gray-600'}`}>{activeSlot.role}</p>
-          </div>
+          <OccupantChip slot={activeSlot} indexInBlock={0} inputCount={countLinkedInputs(activeSlot.id, inputs)} />
         )}
       </DragOverlay>
-      <p className="text-[10px] text-gray-400 text-center mt-2">Drag to reposition</p>
+      <p className="text-[10px] text-gray-400 text-center mt-2">Drag a chip by its grip to reposition</p>
     </DndContext>
   );
 }
@@ -2088,11 +2183,14 @@ function SetupSortableRow({
 // ════════════════════════════════════════════════════════════════════════════
 
 function SetupInputTable({
-  inputs, onReorder, onUpdate, onDelete, onAdd,
+  inputs, slots, onReorder, onUpdate, onLink, onCreateOccupant, onDelete, onAdd,
 }: {
   inputs: import('@/lib/types').InputChannel[];
+  slots: StageSlot[];
   onReorder: (from: number, to: number) => void;
   onUpdate: (idx: number, field: string, value: string) => void;
+  onLink: (idx: number, slotId: string | undefined) => void;
+  onCreateOccupant: (idx: number, pos: StagePosition) => void;
   onDelete: (idx: number) => void;
   onAdd: () => void;
 }) {
@@ -2101,6 +2199,8 @@ function SetupInputTable({
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
   );
   const inputIds = inputs.map((inp) => inp.id!);
+  // The Position dropdown options — one per occupied slot, "TLA — label".
+  const slotOptions = slotOptionsForInputs(slots);
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
@@ -2123,6 +2223,7 @@ function SetupInputTable({
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]">Mic/DI</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500">Stand</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500">Notes</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[150px]">Position</th>
                   <th className="w-16"></th>
                   <th className="w-10"></th>
                 </tr>
@@ -2134,7 +2235,10 @@ function SetupInputTable({
                     input={inp}
                     idx={idx}
                     total={inputs.length}
+                    slotOptions={slotOptions}
                     onUpdate={onUpdate}
+                    onLink={onLink}
+                    onCreateOccupant={onCreateOccupant}
                     onDelete={onDelete}
                     onMoveUp={() => onReorder(idx, idx - 1)}
                     onMoveDown={() => onReorder(idx, idx + 1)}
@@ -2150,19 +2254,38 @@ function SetupInputTable({
   );
 }
 
+const NEW_OCCUPANT_PREFIX = '__new__:';
+
 function SortableInputRow({
-  input: inp, idx, total, onUpdate, onDelete, onMoveUp, onMoveDown,
+  input: inp, idx, total, slotOptions, onUpdate, onLink, onCreateOccupant, onDelete, onMoveUp, onMoveDown,
 }: {
   input: import('@/lib/types').InputChannel;
   idx: number;
   total: number;
+  slotOptions: { id: string; label: string }[];
   onUpdate: (idx: number, field: string, value: string) => void;
+  onLink: (idx: number, slotId: string | undefined) => void;
+  onCreateOccupant: (idx: number, pos: StagePosition) => void;
   onDelete: (idx: number) => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: inp.id! });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
+
+  // Dangling link: a slotId that no longer resolves to a live occupant.
+  const dangling = !!inp.slotId && !slotOptions.some((o) => o.id === inp.slotId);
+  // Unified needs-attention state; sub-reason drives the tooltip.
+  const attentionTip = inp.slotId
+    ? 'The linked occupant no longer exists — reassign.'
+    : 'This channel’s link was ambiguous after import — reassign.';
+
+  const handleLinkChange = (value: string) => {
+    if (value === '') onLink(idx, undefined);
+    else if (value.startsWith(NEW_OCCUPANT_PREFIX)) {
+      onCreateOccupant(idx, value.slice(NEW_OCCUPANT_PREFIX.length) as StagePosition);
+    } else onLink(idx, value);
+  };
 
   return (
     <tr ref={setNodeRef} style={style} className="border-b border-gray-100">
@@ -2183,6 +2306,29 @@ function SortableInputRow({
       </td>
       <td className="px-2 py-1">
         <input className={inputCls} value={inp.notes ?? ''} onChange={(e) => onUpdate(idx, 'notes', e.target.value)} />
+      </td>
+      <td className="px-2 py-1">
+        <div className="flex items-center gap-1">
+          <select
+            className={`${inputCls} px-1 ${inp.needsReview ? 'border-amber-400 bg-amber-50' : ''}`}
+            value={dangling ? inp.slotId : inp.slotId ?? ''}
+            onChange={(e) => handleLinkChange(e.target.value)}
+          >
+            <option value="">&mdash; None &mdash;</option>
+            {slotOptions.map((o) => (
+              <option key={o.id} value={o.id}>{o.label}</option>
+            ))}
+            {dangling && <option value={inp.slotId}>&#9888; removed occupant</option>}
+            <optgroup label="＋ New occupant at…">
+              {POSITIONS.map((pos) => (
+                <option key={`new-${pos}`} value={`${NEW_OCCUPANT_PREFIX}${pos}`}>{pos}</option>
+              ))}
+            </optgroup>
+          </select>
+          {inp.needsReview && (
+            <span className="text-amber-500 text-sm select-none" title={attentionTip}>&#9888;</span>
+          )}
+        </div>
       </td>
       <td className="px-1 py-1">
         <div className="flex flex-col items-center">
@@ -3245,18 +3391,18 @@ function ConfigTab({
           <div className="mb-6">
             <DraggableStagePlotView
               stagePlot={config.stagePlot}
-              onMove={(fromPos, toPos) => updateConfig((p) => {
-                const arr = p.stagePlot.map((s) => ({ ...s }));
-                const fromIdx = arr.findLastIndex((s) => s.pos === fromPos);
-                const toIdx = arr.findLastIndex((s) => s.pos === toPos);
-                if (fromIdx === -1) return p;
-                if (toIdx !== -1) {
-                  // Swap positions
-                  arr[toIdx] = { ...arr[toIdx], pos: fromPos };
-                }
-                arr[fromIdx] = { ...arr[fromIdx], pos: toPos };
-                return { ...p, stagePlot: arr };
-              })}
+              inputs={config.inputs}
+              onMove={(slotId, toPos) => updateConfig((p) => ({
+                ...p,
+                // Re-parent only the dragged slot; its id rides along so input links
+                // survive. Other occupants of the source block are untouched (no swap).
+                stagePlot: p.stagePlot.map((s) => (s.id === slotId ? { ...s, pos: toPos } : s)),
+              }))}
+              onAddOccupant={(pos) => updateConfig((p) => ({
+                ...p,
+                // New blank slot at this block; id is minted by the updateConfig normalizer.
+                stagePlot: [...p.stagePlot, { name: '', pos, role: '', mix: 0 }],
+              }))}
             />
           </div>
           <div className="overflow-x-auto">
@@ -3354,12 +3500,32 @@ function ConfigTab({
                     <td className="px-2 py-1">
                       <button
                         className={btnRemove}
-                        onClick={() =>
+                        onClick={() => {
+                          const linked = slot.id
+                            ? config.inputs.filter((i) => i.slotId === slot.id)
+                            : [];
+                          // Delete-time prompt is the primary guard when inputs are linked;
+                          // the needs-attention badge is the backstop. OK = keep & flag,
+                          // Cancel = clear their link.
+                          const keep =
+                            linked.length === 0 ||
+                            window.confirm(
+                              `${linked.length} input${linked.length > 1 ? 's are' : ' is'} linked to “${slotLabel(slot, blockIndexOf(config.stagePlot, idx))}”.\n\n` +
+                                `OK: keep them (they'll be flagged to relink).\n` +
+                                `Cancel: clear their link.`,
+                            );
                           updateConfig((p) => ({
                             ...p,
                             stagePlot: p.stagePlot.filter((_, i) => i !== idx),
-                          }))
-                        }
+                            // Kept inputs keep their slotId and get flagged by the
+                            // normalizer (dangling → needsReview). Cleared inputs drop it.
+                            inputs: keep
+                              ? p.inputs
+                              : p.inputs.map((i) =>
+                                  i.slotId === slot.id ? { ...i, slotId: undefined, needsReview: false } : i,
+                                ),
+                          }));
+                        }}
                       >
                         X
                       </button>
@@ -3390,11 +3556,40 @@ function ConfigTab({
           <h2 className="text-lg font-bold mb-4">Input List</h2>
           <SetupInputTable
             inputs={config.inputs}
+            slots={config.stagePlot}
             onReorder={(from, to) => updateConfig((p) => ({ ...p, inputs: moveInput(p.inputs, from, to) }))}
             onUpdate={(idx, field, value) => updateConfig((p) => {
               const arr = [...p.inputs];
               arr[idx] = { ...arr[idx], [field]: field === 'ch' ? Number(value) : value };
               return { ...p, inputs: arr };
+            })}
+            onLink={(idx, slotId) => updateConfig((p) => {
+              const arr = [...p.inputs];
+              // Explicit user pick resolves any needs-attention state (valid slot OR "None").
+              arr[idx] = { ...arr[idx], slotId, needsReview: false };
+              return { ...p, inputs: arr };
+            })}
+            onCreateOccupant={(idx, pos) => updateConfig((p) => {
+              const inst = p.inputs[idx]?.inst?.trim() ?? '';
+              // Coalesce: reuse a same-block slot already named for this instrument
+              // (so 6 drum rows + "New at USC" land on one shared-mix slot).
+              const existing = inst
+                ? p.stagePlot.find((s) => s.pos === pos && s.name.trim() === inst)
+                : undefined;
+              const arr = [...p.inputs];
+              if (existing?.id) {
+                arr[idx] = { ...arr[idx], slotId: existing.id, needsReview: false };
+                return { ...p, inputs: arr };
+              }
+              // Otherwise mint a real slot now; name from the row's instrument else "Occupant {n}".
+              const id = crypto.randomUUID();
+              const name = inst || `Occupant ${p.stagePlot.filter((s) => s.pos === pos).length + 1}`;
+              arr[idx] = { ...arr[idx], slotId: id, needsReview: false };
+              return {
+                ...p,
+                stagePlot: [...p.stagePlot, { id, name, pos, role: '', mix: 0 }],
+                inputs: arr,
+              };
             })}
             onDelete={(idx) => updateConfig((p) => ({
               ...p,

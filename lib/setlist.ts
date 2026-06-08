@@ -1,4 +1,53 @@
-import type { SetlistSong, InputChannel, MonitorMix } from './types';
+import type { SetlistSong, StagePosition, StageSlot, InputChannel, MonitorMix } from './types';
+
+// ── Stage-plot grouping / derivation (multi-occupant blocks) ──────────────
+
+// Group slots by stage position, preserving stable insertion (array) order within
+// each block so on-screen + print output is deterministic.
+export function groupByPos(slots: StageSlot[]): Map<StagePosition, StageSlot[]> {
+  const m = new Map<StagePosition, StageSlot[]>();
+  for (const s of slots) {
+    const arr = m.get(s.pos);
+    if (arr) arr.push(s);
+    else m.set(s.pos, [s]);
+  }
+  return m;
+}
+
+// Derived count of input channels linked to a slot (the ×n shared-mix badge;
+// derived from slotId, never stored).
+export function countLinkedInputs(slotId: string | undefined, inputs: InputChannel[]): number {
+  if (!slotId) return 0;
+  return inputs.reduce((n, i) => (i.slotId === slotId ? n + 1 : n), 0);
+}
+
+// Slot-owned display label: a blank name falls back to "Occupant {n}" (n = 1-based
+// index within its block), identical on every surface that shows this slot.
+export function slotLabel(slot: StageSlot, indexInBlock: number): string {
+  return slot.name?.trim() || `Occupant ${indexInBlock + 1}`;
+}
+
+// Index of slots[idx] among the occupants of its own block (same pos), in array
+// order — the n for the "Occupant {n}" fallback label.
+export function blockIndexOf(slots: StageSlot[], idx: number): number {
+  const pos = slots[idx]?.pos;
+  let n = 0;
+  for (let i = 0; i < idx; i++) if (slots[i].pos === pos) n++;
+  return n;
+}
+
+// Build the Position-dropdown option list for the input list: one entry per slot
+// that has an id, labeled "TLA — <slot label>" (the slot-owned label, so a blank
+// name reads "Occupant {n}" everywhere). Grouped by block in stable array order.
+export function slotOptionsForInputs(slots: StageSlot[]): { id: string; label: string }[] {
+  const opts: { id: string; label: string }[] = [];
+  for (const [pos, arr] of groupByPos(slots)) {
+    arr.forEach((s, i) => {
+      if (s.id) opts.push({ id: s.id, label: `${pos} — ${slotLabel(s, i)}` });
+    });
+  }
+  return opts;
+}
 
 export function ensureSetlistSongIds(setlist: SetlistSong[]): SetlistSong[] {
   return setlist.map((s) =>
@@ -18,6 +67,72 @@ export function moveSetlistSong(setlist: SetlistSong[], from: number, to: number
 
 export function renumberSetlist(setlist: SetlistSong[]): SetlistSong[] {
   return setlist.map((s, i) => (s.position === i + 1 ? s : { ...s, position: i + 1 }));
+}
+
+// ── Stage slot id lifecycle (the linkage hub) ─────────────────────────────
+
+/**
+ * Idempotent load-time normalizer for the StageSlot.id hub identity.
+ *
+ * - Mints `id = crypto.randomUUID()` for any slot missing one.
+ * - De-dupes: if two slots share an `id` (import, copy-paste, hand-edited JSON,
+ *   AI dup), the first occurrence keeps the id and the collision(s) are re-minted.
+ * - Any `InputChannel.slotId` equal to a de-duped (shared) id is **ambiguous** —
+ *   it could have meant the original or the re-minted copy — so its `slotId` is
+ *   cleared and `needsReview` is set. These are returned in `ambiguousInputs`
+ *   to drive the session relink prompt.
+ * - Any `InputChannel.slotId` matching no slot (dangling import / deleted slot)
+ *   keeps its `slotId` but gets `needsReview: true` (the relink badge resolves it).
+ *
+ * Returns `{ config, dirty, ambiguousInputs }`. `dirty` is true whenever anything
+ * was minted, de-duped, cleared, or flagged — the load path force-saves on dirty
+ * (a new config object) to close the lazy-mint persistence race.
+ */
+export function ensureStageSlotIds<
+  C extends { stagePlot: StageSlot[]; inputs: InputChannel[] }
+>(config: C): { config: C; dirty: boolean; ambiguousInputs: InputChannel[] } {
+  let dirty = false;
+
+  const seen = new Set<string>();
+  const collisionValues = new Set<string>(); // shared id values that triggered a re-mint
+  const newSlots = config.stagePlot.map((slot) => {
+    if (!slot.id) {
+      dirty = true;
+      return { ...slot, id: crypto.randomUUID() };
+    }
+    if (seen.has(slot.id)) {
+      collisionValues.add(slot.id);
+      dirty = true;
+      return { ...slot, id: crypto.randomUUID() };
+    }
+    seen.add(slot.id);
+    return slot;
+  });
+
+  const validIds = new Set(newSlots.map((s) => s.id!));
+
+  const ambiguousInputs: InputChannel[] = [];
+  const newInputs = config.inputs.map((inp) => {
+    if (!inp.slotId) return inp;
+    if (collisionValues.has(inp.slotId)) {
+      dirty = true;
+      const cleared: InputChannel = { ...inp, slotId: undefined, needsReview: true };
+      ambiguousInputs.push(cleared);
+      return cleared;
+    }
+    if (!validIds.has(inp.slotId)) {
+      if (inp.needsReview) return inp;
+      dirty = true;
+      return { ...inp, needsReview: true };
+    }
+    return inp;
+  });
+
+  return {
+    config: dirty ? { ...config, stagePlot: newSlots, inputs: newInputs } : config,
+    dirty,
+    ambiguousInputs,
+  };
 }
 
 // ── Input channel reorder ─────────────────────────────────────────────────
