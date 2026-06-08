@@ -1,6 +1,6 @@
 # Design: Realtime Chart Control (Perform-mode redline) + Chart Calibration
 
-**Status:** Proposed (v1.4) — Codex R1–R3 findings resolved (see resolution blocks below); ready for R4
+**Status:** Proposed (v1.5) — Codex R1–R4 findings resolved (see resolution blocks below); ready for R5
 **Date:** 2026-06-08
 **Branch:** `opus/design-realtime-chart-control`
 **Target/benchmark:** ForScore — a static PDF reader (library + setlists + pedal page-turns + annotations). Everything here is the *live, band-aware* layer ForScore structurally lacks.
@@ -14,6 +14,14 @@
 - **#2 (HIGH) calibration persistence / invalidation — RESOLVED.** The library has no version concept (`chart_library` is `unique(owner_id, song_key, role)`, upsert replaces — design-chart-library.md:496), so the **PDF content hash becomes the de-facto version.** Content-hash-keyed sidecar; apply-only-on-match; mismatch ⇒ stale, never silent-apply; carry-forward old anchors as a low-confidence draft. See "Calibration persistence" below.
 - **#4 (HIGH) temporal model for the redline — RESOLVED.** Thin temporal layer on the graph: beats-per-bar from time sig, per-bar override for pickups, **nullable tempo** (null ⇒ redline is seek-only-advance, not broken), fermata/caesura = **hold point** (park, don't clock). See "Temporal model" below.
 - **#5 (MED/HIGH) reconcile with `design-storage-notation` (Markdown-first direction) — RESOLVED.** No format conflict: storage-notation owns the chart *artifact* (`.md`/`.pdf`); chart-control owns a calibration *sidecar* (not a chart-storage format — corrected an overreach below). **v1 live redline is PDF-only** — `.md` charts lack stable per-bar geometry (reflowing HTML; corpus includes prose/ABC), so they keep static markdown rendering and are out of scope for the redline. An `.md` adapter is deferred behind a DOM-ID rendering contract; nav/temporal layers are kept source-agnostic so it can slot in later. See "Reconciliation with `design-storage-notation`" below.
+
+---
+
+## R4 resolutions (Codex adversarial pass on `9369bd5`)
+
+- **#1 (HIGH) step 1 couldn't produce a Perform-usable calibration — RESOLVED.** Perform eats only `verified`, but scrub-verify (the only promotion path) was step-4 → the step-1 rail could only ever be `draft`. Fix: **decouple the promotion *gate* (invariant: all required elements accepted/disabled) from the *affordance*.** Step 1 gets a **primitive accept** path (place section markers → accept required anchors → save `verified`); step-4 scrub-verify is the *richer* affordance for bar-level, not the definition of promotion. Step 1 is now Perform-usable on its own. See Verification rule.
+- **#2 (HIGH) calibration keyed to `chart_library` but the viewer also serves Drive charts — RESOLVED.** Drive/batch charts lack `chart_library.id`/`content_hash`/`page_dims`, so they can't supply the `(chart_id, source_hash)` key. **Scoped v1 redline/calibration to owner-library PDFs only**; Drive charts render in the same viewer **without** the calibrate/redline affordance. Path in = import to the library (existing flow). Drive-native keying deferred. See "Source-scope boundary".
+- **(cleanup) `(bar, pass)` overgeneralized — RESOLVED.** True position is now `(PositionRef, pass)` (sectionId | barId), so the section-only rail is covered.
 
 ---
 
@@ -148,8 +156,8 @@ A **directed graph over the physical anchors**. This is where a single printed p
 - Nodes = `PositionRef`s (a `SectionAnchor` in step 1; a `Bar` once subdivided). Edges = "what comes next," including **back-jumps** (repeats, D.S., D.C.) and conditional edges (1st/2nd endings keyed on pass). In the step-1 floor the graph is typically a coarse section chain; bar-level edges are step-2 enrichment.
 - Markers: `repeatStart/End`, `ending{n}`, `D.S.`, `D.C.`, `Coda`, `Fine`.
 
-### The timeline is non-linear: position = `(bar, pass)`
-The redline's true position is **not "bar 37" but "bar 37, pass 2."** The road-map graph models passes. This ripples into B (broadcast `(bar,pass)`) and C (detect pass). The **physical** editor edits one box per printed bar; the **navigation** layer says it's visited twice — these stay distinct.
+### The timeline is non-linear: position = `(PositionRef, pass)`
+The redline's true position is **not a place but a place-on-a-pass** — e.g. *"bar 37, pass 2"* in a bar-level calibration, or *"Chorus, pass 2"* in the step-1 section rail. The `PositionRef` (sectionId | (barId)) carries the *where*; `pass` carries the *which time through*. The road-map graph models passes. This ripples into B (broadcast `(PositionRef, pass)`) and C (detect pass). The **physical** layer edits one anchor per printed position; the **navigation** layer says it's visited twice — these stay distinct.
 
 ### The two-detector model (resolves "Snap to printed line")
 A correction critique surfaced this: re-running the *same* detector on the *same* chart can't improve a position. So there are **two different detectors, different precision/scope:**
@@ -230,9 +238,12 @@ The calibration *is* the navigation-graph JSON. It must survive ordinary re-uplo
 - **Invalidation rule (hash boundary):** apply calibration only where `source_hash == the current file's hash`. A hash mismatch ⇒ **stale ⇒ chart flagged "needs recalibration."** *Never* silent-apply across a hash change — confidently-wrong anchors (old graph over new ink) are the worst failure mode.
 - **Verification rule (the *second* boundary — R2 #2):** a matching hash is necessary but **not sufficient.** Perform mode consumes a calibration **only when `status == verified`.** A `draft` row that happens to match the current hash is **not** used to drive the live redline — it only seeds the editor. This closes the gap where a carry-forward draft, once saved under the current hash, would otherwise "match and apply."
   - **`status` is orthogonal to per-element `confidence`.** `confidence` is the *machine's* score (auto-routes the review queue); `status` is the *human's* sign-off. An element can be high-confidence-but-unverified (freshly auto-imported, not yet playback-checked). **Perform gates on `verified`, not on confidence.**
-  - **Verify-by-playback is the `draft → verified` transition** (scrub the redline over the actual PDF and accept) — but promotion **fails closed (R3 #2).** Chart-level `verified` is permitted **only when no *required* element remains unresolved**: every review-queue / flagged element must be **explicitly accepted or disabled** first. So a chart with clean barlines but a still-uncertain D.S./Coda edge **cannot** go `verified` (and thus cannot drive Perform) until that jump is accepted or the jump is disabled (degrading that spot to a manual-seek hold point). This keeps the chart-level flag honest without needing per-element verification in v1.
-    - *Required* elements = the nav edges and section anchors the redline actually traverses. *Non-required* = cosmetic/low-stakes. Only required-element resolution gates promotion.
-    - **Disable = a real escape hatch:** an un-resolvable jump can be turned off, which converts it into a `holdPoint` (redline parks; player seeks manually past it). Verified-with-a-known-hole is allowed *only* as an explicit disable, never as an ignored flag.
+  - **The gate is an invariant, not a specific gesture (R4 #1).** `draft → verified` is permitted **only when no *required* element remains unresolved** — every required element is **explicitly accepted or disabled.** Promotion **fails closed**: a chart with clean barlines but a still-uncertain D.S./Coda edge **cannot** go `verified` (and thus cannot drive Perform) until that jump is accepted, or disabled (degrading that spot to a manual-seek `holdPoint`).
+    - *Required* elements = the nav edges and anchors the redline actually traverses. *Non-required* = cosmetic/low-stakes. Only required-element resolution gates promotion.
+    - **Disable = a real escape hatch:** an un-resolvable jump can be turned off, becoming a `holdPoint` (redline parks; player seeks manually past it). Verified-with-a-known-hole is allowed *only* as an explicit disable, never as an ignored flag.
+  - **Two promotion *affordances*, same gate — and step 1 owns the primitive one (R4 #1).** The gate above is satisfiable without the step-4 editor:
+    - **Step 1 — primitive accept:** *place section markers → accept the required section anchors → save as `verified`.* For a pure section-chain rail the only required elements are the section anchors themselves, so a confirm-and-save satisfies the invariant. This is what makes the step-1 slice **Perform-usable on its own** (otherwise it would save only `draft` and Perform would ignore it — the contradiction R4 #1 caught).
+    - **Step 4 — scrub-verify:** scrubbing the redline over the actual PDF and accepting is the *richer* review affordance for bar-level calibrations, not a different gate. It's the preferred tool once bars/nav exist, but it is **not** the definition of promotion.
 - **Identical re-upload survives:** same bytes → same hash → calibration still matches *and* keeps its `verified` status. The common "I re-saved the same file" case does not nuke prior work.
 - **Carry-forward (honors "correction never exceeds creation"):** on a hash mismatch we do **not** discard the old graph. We seed the editor with the previous hash's anchors as a **`draft`** (every imported element flagged low-confidence) to verify-by-playback against — a minor re-export becomes a ~20-second re-confirm, not a re-chart. It stays `draft` (Perform won't use it) until the human verifies.
 - **History: retain across hashes.** Keep every `(chart_id, source_hash)` row (cheap JSON). This gives a revert path *and* makes the carry-forward draft trivially "the prior hash's row." Accepted tradeoff: a little storage cruft per re-upload.
@@ -247,10 +258,16 @@ The calibration *is* the navigation-graph JSON. It must survive ordinary re-uplo
 
 This touches several shipped/spec'd areas; flagged as reconciliation points (not yet cross-read in depth — **Codex: please check for conflict/overlap**):
 - `design-perform-tab.md` — the redline lives here; A's gestures attach to the Perform view.
-- `design-chart-library.md` + `design-batch-chart-resolution.md` — the converter + Calibration Editor are an extension of the library add/CRUD/confidence flow.
-- `design-inline-chart-viewer.md` — the overlay renders atop this viewer.
+- `design-chart-library.md` + `design-batch-chart-resolution.md` — the converter + Calibration Editor are an extension of the library add/CRUD/confidence flow. **Source-scope boundary below — v1 calibrates owner-library PDFs only, not Drive-resolved charts.**
+- `design-inline-chart-viewer.md` — the overlay renders atop this viewer **for library-PDF charts**; Drive-resolved charts render in the same viewer but **without** the calibration/redline affordance.
 - `design-storage-notation.md` — **reconciled (see below):** it owns the chart *artifact* (`.md`/`.pdf`); this doc owns a calibration *sidecar*. No format conflict.
 - `design-console-export.md` — **untouched** by this phase (export stays input-only; out of scope).
+
+### Source-scope boundary: v1 = owner-library PDFs only (R4 #2)
+The viewer currently renders **two** chart sources: **owner-library uploads** (`chart_library` rows: `id`, and — new in this design — `content_hash`, `page_count`, `page_dims`) and **Drive-resolved / batch charts** (`fileId`, `modifiedTime`, `url` — *no* `chart_library.id`, no content hash, no page dims). The calibration sidecar is keyed `(chart_id, source_hash)`, which **only library uploads can supply.** So:
+- **v1 redline + calibration are scoped to owner-library PDF charts.** Drive-resolved charts render in the same inline viewer **without** the calibration/redline affordance (the "calibrate" entry point and the Perform redline are simply not offered for them). No half-keyed sidecar, no ambiguous source boundary.
+- **Path to bring a Drive chart in (existing, no new mechanism):** import/save it into the owner library (it gains a `chart_library.id` + `content_hash`), then it's calibratable like any upload. This is the same "promote into the library" flow the library already supports.
+- **Drive-native calibration is explicitly deferred.** It would need a second keying path (e.g. `(fileId, content_hash)` after proxy-download) — out of scope for v1, consistent with keeping one clean source model (mirrors the `.md` deferral).
 
 ### Reconciliation with `design-storage-notation`
 Its Phase 3 converts charts PDF→Markdown (`.md`-first, PDF demoted to `original.pdf` fallback). Read naively that fights this doc's "keep the PDF as canvas + overlay." It doesn't — they are **different layers**, once an earlier overreach here is corrected:
