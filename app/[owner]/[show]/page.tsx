@@ -32,7 +32,7 @@ import type {
   GeneralNote,
   Chart,
 } from '@/lib/types';
-import { ensureSetlistSongIds, moveSetlistSong, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor } from '@/lib/setlist';
+import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor } from '@/lib/setlist';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -153,11 +153,19 @@ function decodeConfig(s: string): AppConfig | null {
 // MAIN COMPONENT
 // ════════════════════════════════════════════════════════════════════════════
 function withStableIds(config: AppConfig): AppConfig {
-  const setlist = ensureSetlistSongIds(config.setlist);
-  const inputs = ensureInputIds(config.inputs);
-  const monitors = ensureMonitorIds(config.monitors);
-  const changed = setlist !== config.setlist || inputs !== config.inputs || monitors !== config.monitors;
-  return changed ? { ...config, setlist, inputs, monitors } : config;
+  // Mint/de-dupe the StageSlot.id hub + flag ambiguous/dangling links FIRST, so input
+  // id-minting runs on top of any cleared slotIds. When this is dirty it returns a new
+  // config object → the persist effect saves it → the lazy-mint race is closed.
+  const { config: linked } = ensureStageSlotIds(config);
+  const setlist = ensureSetlistSongIds(linked.setlist);
+  const inputs = ensureInputIds(linked.inputs);
+  const monitors = ensureMonitorIds(linked.monitors);
+  const changed =
+    linked !== config ||
+    setlist !== linked.setlist ||
+    inputs !== linked.inputs ||
+    monitors !== linked.monitors;
+  return changed ? { ...linked, setlist, inputs, monitors } : config;
 }
 
 function initConfig(): AppConfig {

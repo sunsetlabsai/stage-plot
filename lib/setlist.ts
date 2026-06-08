@@ -1,4 +1,4 @@
-import type { SetlistSong, InputChannel, MonitorMix } from './types';
+import type { SetlistSong, StageSlot, InputChannel, MonitorMix } from './types';
 
 export function ensureSetlistSongIds(setlist: SetlistSong[]): SetlistSong[] {
   return setlist.map((s) =>
@@ -18,6 +18,72 @@ export function moveSetlistSong(setlist: SetlistSong[], from: number, to: number
 
 export function renumberSetlist(setlist: SetlistSong[]): SetlistSong[] {
   return setlist.map((s, i) => (s.position === i + 1 ? s : { ...s, position: i + 1 }));
+}
+
+// ── Stage slot id lifecycle (the linkage hub) ─────────────────────────────
+
+/**
+ * Idempotent load-time normalizer for the StageSlot.id hub identity.
+ *
+ * - Mints `id = crypto.randomUUID()` for any slot missing one.
+ * - De-dupes: if two slots share an `id` (import, copy-paste, hand-edited JSON,
+ *   AI dup), the first occurrence keeps the id and the collision(s) are re-minted.
+ * - Any `InputChannel.slotId` equal to a de-duped (shared) id is **ambiguous** —
+ *   it could have meant the original or the re-minted copy — so its `slotId` is
+ *   cleared and `needsReview` is set. These are returned in `ambiguousInputs`
+ *   to drive the session relink prompt.
+ * - Any `InputChannel.slotId` matching no slot (dangling import / deleted slot)
+ *   keeps its `slotId` but gets `needsReview: true` (the relink badge resolves it).
+ *
+ * Returns `{ config, dirty, ambiguousInputs }`. `dirty` is true whenever anything
+ * was minted, de-duped, cleared, or flagged — the load path force-saves on dirty
+ * (a new config object) to close the lazy-mint persistence race.
+ */
+export function ensureStageSlotIds<
+  C extends { stagePlot: StageSlot[]; inputs: InputChannel[] }
+>(config: C): { config: C; dirty: boolean; ambiguousInputs: InputChannel[] } {
+  let dirty = false;
+
+  const seen = new Set<string>();
+  const collisionValues = new Set<string>(); // shared id values that triggered a re-mint
+  const newSlots = config.stagePlot.map((slot) => {
+    if (!slot.id) {
+      dirty = true;
+      return { ...slot, id: crypto.randomUUID() };
+    }
+    if (seen.has(slot.id)) {
+      collisionValues.add(slot.id);
+      dirty = true;
+      return { ...slot, id: crypto.randomUUID() };
+    }
+    seen.add(slot.id);
+    return slot;
+  });
+
+  const validIds = new Set(newSlots.map((s) => s.id!));
+
+  const ambiguousInputs: InputChannel[] = [];
+  const newInputs = config.inputs.map((inp) => {
+    if (!inp.slotId) return inp;
+    if (collisionValues.has(inp.slotId)) {
+      dirty = true;
+      const cleared: InputChannel = { ...inp, slotId: undefined, needsReview: true };
+      ambiguousInputs.push(cleared);
+      return cleared;
+    }
+    if (!validIds.has(inp.slotId)) {
+      if (inp.needsReview) return inp;
+      dirty = true;
+      return { ...inp, needsReview: true };
+    }
+    return inp;
+  });
+
+  return {
+    config: dirty ? { ...config, stagePlot: newSlots, inputs: newInputs } : config,
+    dirty,
+    ambiguousInputs,
+  };
 }
 
 // ── Input channel reorder ─────────────────────────────────────────────────
