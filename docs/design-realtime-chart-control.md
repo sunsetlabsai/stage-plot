@@ -1,9 +1,19 @@
 # Design: Realtime Chart Control (Perform-mode redline) + Chart Calibration
 
-**Status:** Proposed (v1) — ready for adversarial review (Codex R1)
+**Status:** Proposed (v1.2) — all five Codex R1 findings resolved (see "R1 resolutions" below); ready for R2
 **Date:** 2026-06-08
 **Branch:** `opus/design-realtime-chart-control`
 **Target/benchmark:** ForScore — a static PDF reader (library + setlists + pedal page-turns + annotations). Everything here is the *live, band-aware* layer ForScore structurally lacks.
+
+---
+
+## R1 resolutions (Codex adversarial pass on `bc039c1`)
+
+- **#3 (HIGH) gesture conflict with the inline viewer — RESOLVED.** Root cause: the canvas tap surface is *fully* allocated to page-turns (`page.tsx:1544`) and tap fires immediately on `touchend` (no double-tap window — why paging feels snappy), so seek can't be a canvas-wide tap and double-tap-to-hold would tax every tap. Fix: **redline auto-turns pages** (demotes manual paging) → **seek = tap a section marker** (object above the canvas, like the existing pill-picker) · **hold/loop = long-press** (not double-tap) · no zone grid · explicit precedence/hit-test + follow-mode scope. See "Gesture model (Perform mode)" under Concept A.
+- **#1 (HIGH) build-order bootstrap** — IN PROGRESS.
+- **#2 (HIGH) calibration persistence / invalidation — RESOLVED.** The library has no version concept (`chart_library` is `unique(owner_id, song_key, role)`, upsert replaces — design-chart-library.md:496), so the **PDF content hash becomes the de-facto version.** Content-hash-keyed sidecar; apply-only-on-match; mismatch ⇒ stale, never silent-apply; carry-forward old anchors as a low-confidence draft. See "Calibration persistence" below.
+- **#4 (HIGH) temporal model for the redline — RESOLVED.** Thin temporal layer on the graph: beats-per-bar from time sig, per-bar override for pickups, **nullable tempo** (null ⇒ redline is seek-only-advance, not broken), fermata/caesura = **hold point** (park, don't clock). See "Temporal model" below.
+- **#5 (MED/HIGH) reconcile with `design-storage-notation` (Markdown-first direction) — RESOLVED.** No format conflict: storage-notation owns the chart *artifact* (`.md`/`.pdf`); chart-control owns a calibration *sidecar* (not a chart-storage format — corrected an overreach below). The nav+temporal layer is **source-agnostic**; only the physical-anchor layer forks into `pdfBox` vs `mdBlock` adapters. `.md` charts get near-free structural extraction (their `##`/`| bar |` syntax *is* the nav skeleton). Fingerprint keys align (PDF sha256 / `.md` git blob sha). See "Reconciliation with `design-storage-notation`" below.
 
 ---
 
@@ -26,7 +36,7 @@ The atom under every idea here is a **seek**: *re-anchor the redline to position
 
 | Concept | What it is | = |
 |---|---|---|
-| **A — Manual seek** | A performer taps/double-taps a section to re-orient their own redline | the primitive |
+| **A — Manual seek** | A performer taps a section marker (long-press to hold/loop) to re-orient their own redline | the primitive |
 | **B — Networked seek** | MD/conductor is leader; their seek broadcasts to followers | A, broadcast |
 | **C — Automated seek** | Audio listener decides where the redline should be | A, triggered by a listener |
 
@@ -39,11 +49,27 @@ The headline use case — *intentional MD changes* — is **human-initiated** an
 
 ## Concepts — feasibility & decisions
 
-### A — Tap / double-tap to re-orient (manual seek)
+### A — Tap a marker to re-orient (manual seek)
 - **Feasibility: high.** Fully local; no network, no ML.
-- **Gesture semantics:** single tap = *seek here*; **double-tap = hold/loop this section** (vamp until released) — a near-perfect fit for "stay on the solo another round."
-- **Anti-mis-seek:** requires a deliberate gesture so a sleeve-brush on stage doesn't re-seek. (Tap a section marker / double-tap, not a bare single tap anywhere.)
-- **Decision:** A is v1's foundation and the universal manual fallback.
+- **Decision:** A is v1's foundation and the universal manual fallback. Gesture model below (resolved against Codex #3).
+
+#### Gesture model (Perform mode)
+The conflict (Codex #3): the inline viewer already spends the *entire* canvas tap surface on page-turns (`page.tsx:1544`, tap fires immediately on `touchend`, no double-tap window — that's why paging is snappy). A canvas-wide "tap to seek" or "double-tap to hold" would collide head-on with paging and tax every page-turn. Resolution = **make seek an object, not a surface; make paging automatic; never overload the bare canvas tap.**
+
+| Action | Gesture | Notes |
+|---|---|---|
+| **Change song** | swipe L↔R · arrow ←/→ | unchanged from inline viewer (existing dominant-axis lock, 60px trigger) |
+| **Change page** (manual) | redline **auto-turns** (primary) · swipe ↑/↓ · existing tap-half (secondary) | auto-turn demotes manual paging to backup; the existing tap-half stays as a harmless fallback |
+| **Seek** (re-anchor redline) | **tap a section/bar marker** — a discrete object rendered *above* the canvas | like the pill-picker: the marker captures the tap and `stopPropagation()`s so it never reaches the page-turn handler. Section-granular by default (markers = section heads + rehearsal letters), not every bar — fewer, fat targets on stage. |
+| **Hold / loop** (vamp a section) | **long-press a marker** (~450ms) | replaces double-tap (double-tap would tax every page-turn tap). Enters a visible **`◌ LOOPING — Chorus`** state; tap anywhere / next marker to release. |
+| **Fine nudge** | drag the redline | rare live; mostly an Edit-mode affordance |
+| **Back / Edit / app nav** | header buttons | chrome, not canvas gestures — no hidden zones |
+
+- **No zone grid.** Center-tap surfaces the transport/controls overlay; everything else is an object tap or an existing swipe. (Considered a tap-zone scheme — rejected: invisible quadrants are unlearnable on stage and fight the existing tap-half paging.)
+- **Hit-test precedence (z-order):** markers + redline handle → center controls → page-turn tap-halves → swipe. First hit wins; markers `stopPropagation`.
+- **Long-press guards:** `touch-callout: none` + `contextmenu` `preventDefault` (kill iOS magnifier/context menu) + a haptic tick on entering loop so the player *feels* the mode change without looking.
+- **Anti-mis-seek:** seek is a deliberate marker hit, not a bare canvas tap — a sleeve-brush on the page body pages (harmless) rather than re-seeking.
+- **Follow-mode scope:** in B, only the **leader's** seek/hold broadcasts; a follower tapping their own marker is a *local* override (grab-the-wheel), it does not broadcast.
 
 ### B — Leader/follower sync (networked seek)
 - **Logic is easy** (reuses A; leader's seek + hold events broadcast). **The transport is the real architectural fork:**
@@ -81,7 +107,7 @@ Two strategies for a "native format":
 
 **Decision: (ii).** Sidesteps re-engraving, preserves the chart's look, and shrinks the agent's job from "transcribe music" to "find barlines, systems, section labels, and road-map jumps → coordinates + confidence." It works for **both** chord/rhythm charts and full staff parts because it only hunts barlines/sections/coords. It degrades gracefully (see handwritten charts).
 
-**Consequence:** the "native format" is **not a notation document** — it is a thin **navigation/timeline graph**. This is the format that A taps to seek into, B broadcasts positions in, and C tries to detect.
+**Consequence:** what we extract is **not a chart-storage format** — it is a thin **navigation/timeline graph that rides alongside the chart artifact as a calibration sidecar.** (Correction vs v1: an earlier draft called this the chart's "native format" — overreach. The chart artifact stays whatever `design-storage-notation` says it is — `.pdf` or `.md`; the nav-graph is a *companion*, not a replacement. See Reconciliation below.) This sidecar is what A taps to seek into, B broadcasts positions in, and C tries to detect.
 
 ---
 
@@ -89,12 +115,11 @@ Two strategies for a "native format":
 
 Two **distinct layers** — keep them separate; conflating them is a trap.
 
-### 1. Physical anchors (geometry — where a bar is *printed*)
-1:1 with the PDF ink. A bar has exactly **one** bounding box.
-- `Page { index, w, h }` (coords stored **PDF-relative / normalized**, never screen pixels — survive zoom/rotation/device size).
-- `System { id, page, yTop, yBottom, barlines: [x...] }` — a staff row; the redline sweeps L→R within it then snaps to the next.
-- `Bar { id, systemId, xStart, xEnd, absNumber }`.
-- Each anchor carries **per-element confidence** (see review queue).
+### 1. Physical anchors (geometry — where a bar is *positioned on the rendered canvas*)
+1:1 with the chart's visual rendering. A bar has exactly **one** positioning handle. This layer is the **only** part that knows about the source artifact; it has two concrete adapter flavors (see Reconciliation):
+- **`pdfBox` adapter** (PDF/image source): `Page { index, w, h }` (coords **PDF-relative / normalized**, never screen pixels — survive zoom/rotation/device size) · `System { id, page, yTop, yBottom, barlines: [x...] }` (a staff row; redline sweeps L→R then snaps to next) · `Bar { id, systemId, xStart, xEnd, absNumber }`.
+- **`mdBlock` adapter** (`.md` source): a bar references a rendered-markdown location instead of a pixel rect — `{ sectionHeading, rowIndex, cellIndex }` against the `##`/`| bar |` structure. No vision needed; the markdown *is* the skeleton.
+- Either way, each anchor carries **per-element confidence** (see review queue), and the navigation + temporal layers above are **identical regardless of adapter.**
 
 ### 2. Navigation (logic — what *order* bars are played)
 A **directed graph over the physical anchors**. This is where a single printed bar can be **visited multiple times**.
@@ -162,6 +187,27 @@ The overlay carries **more visual weight in Edit, recedes in Perform.** In **Per
 - **Physical anchors vs navigation are separate edit surfaces** (drag "where bar 37 sits" ≠ graph-edit "the road map hits it twice").
 - **Page turns mid-song** — the timeline crosses pages; anchors carry a page index (falls out of the overlay approach).
 
+### Temporal model (how the redline *moves* between seeks)
+A (manual seek) only re-anchors; something still has to move the redline forward. Bars aren't uniform in time, so the graph carries a **thin temporal layer** — deliberately minimal, and honest about what we can't read off a page.
+
+- **Beats-per-bar** — from time signature (already in the extract list). Sets the per-bar duration unit.
+- **Per-bar `beats` override** — pickups/partial bars (a 2-beat pickup in 4/4 isn't a full sweep). Geometry stays one box per printed bar; the temporal layer overrides duration.
+- **`tempoBpm` is nullable.** From a marking at import; absent/handwritten ⇒ no clock — and that's fine: **A needs no tempo at all** (the player drives the seek). Tempo only powers *auto-advance between seeks*, so null degrades to **"redline only moves on seek / page-turn,"** not a broken feature. (Dovetails with C-tier-1 tempo-awareness being deferred — when it lands it *fills in* this nullable field live.)
+- **Fermata / caesura / rit. = `holdPoint`, not a duration.** These are genuinely un-clockable live; don't pretend to model their length. The redline **parks at a hold point and waits for the next seek** (manual A, or leader broadcast B). This is exactly where A/B earn their keep — we mark the un-clockable spots instead of guessing them.
+
+Shape: `temporal: { beatsPerBar, perBarBeatsOverride?, tempoBpm?: null, holdPoints: [barId...] }`, stored *inside* the calibration graph JSON (so it versions and invalidates with the rest of the calibration).
+
+### Calibration persistence (where the graph lives, and when it goes stale)
+The calibration *is* the navigation-graph JSON. It must survive ordinary re-uploads but never be silently mis-applied to a *different* PDF. The trap: the library has **no version concept** — `chart_library` is `unique(owner_id, song_key, role)` and **upsert replaces** (design-chart-library.md:496, "No version history"). So there is nothing to "attach a version to." Resolution: **the PDF content hash becomes the de-facto version.**
+
+- **`chart_library` row gains:** `content_hash` (sha256 of PDF bytes), `page_count`, `page_dims` (for normalized-coord validation).
+- **New sidecar `chart_calibration`, keyed `(chart_id, source_hash)`:** `schema_version` + the full navigation-graph JSON (physical anchors, systems, nav edges, per-element confidence, temporal model). Sidecar (not a column) because it's large and edited on a different cadence than the library row. `chart_id` is already owner-scoped ⇒ calibration is **owner-scoped** for free; no cross-owner leakage.
+- **Invalidation rule:** apply calibration only where `source_hash == the current file's hash`. A hash mismatch ⇒ **stale ⇒ chart flagged "needs recalibration."** *Never* silent-apply across a hash change — confidently-wrong anchors (old graph over new ink) are the worst failure mode.
+- **Identical re-upload survives:** same bytes → same hash → calibration still matches. The common "I re-saved the same file" case does not nuke prior work.
+- **Carry-forward (honors "correction never exceeds creation"):** on a hash mismatch we do **not** discard the old graph. We seed the editor with the previous hash's anchors as a **low-confidence draft** to verify-by-playback against — a minor re-export becomes a ~20-second re-confirm, not a re-chart.
+- **History: retain across hashes.** Keep every `(chart_id, source_hash)` row (cheap JSON). This gives a revert path *and* makes the carry-forward draft trivially "the prior hash's row." Accepted tradeoff: a little storage cruft per re-upload.
+- **Portability (free optionality):** hash-keyed rather than row-id-keyed means calibration could travel if charts are ever shared (currently out of scope — design-chart-library.md:495).
+
 ### Graceful degradation
 - **Handwritten / low-confidence / un-convertible charts:** vision confidence tanks → fall back to **manual marker-rail = the Calibration Editor with zero pre-filled anchors.** Convert-it and hand-tag-it are **one tool, not two.** Concept A's manual rail *is* this editor, so A is both the floor feature and the conversion safety net.
 
@@ -173,8 +219,16 @@ This touches several shipped/spec'd areas; flagged as reconciliation points (not
 - `design-perform-tab.md` — the redline lives here; A's gestures attach to the Perform view.
 - `design-chart-library.md` + `design-batch-chart-resolution.md` — the converter + Calibration Editor are an extension of the library add/CRUD/confidence flow.
 - `design-inline-chart-viewer.md` — the overlay renders atop this viewer.
-- `design-storage-notation.md` — **potential overlap:** confirm whether a chart storage/notation format already exists and whether the navigation-graph sidecar extends or conflicts with it.
+- `design-storage-notation.md` — **reconciled (see below):** it owns the chart *artifact* (`.md`/`.pdf`); this doc owns a calibration *sidecar*. No format conflict.
 - `design-console-export.md` — **untouched** by this phase (export stays input-only; out of scope).
+
+### Reconciliation with `design-storage-notation`
+Its Phase 3 converts charts PDF→Markdown (`.md`-first, PDF demoted to `original.pdf` fallback). Read naively that fights this doc's "keep the PDF as canvas + overlay." It doesn't — they are **different layers**, once an earlier overreach here is corrected:
+- **Artifact vs sidecar.** storage-notation owns the chart *artifact* ("what the chart says," portable/diffable text or the PDF). This doc owns a *calibration sidecar* ("where bar N sits + how the redline moves"). The sidecar **travels alongside** the artifact and is **not** a chart-storage format. (v1 wrongly called the nav-graph the chart's "native format" — corrected.)
+- **Source-agnostic nav/temporal layer.** The navigation graph + temporal model are identical whether the chart is `.pdf` or `.md`. Only the **physical-anchor layer** forks — `pdfBox` (normalized rect, vision + edge-snap path) vs `mdBlock` (a reference into rendered markdown). Same redline, same graph, two positioning adapters.
+- **`.md` is *cheaper* to calibrate, not harder.** Phase-3 markdown is already explicit structure (`## Chorus`, `| E | Abm |` bar tables) — that **is** the nav skeleton, parseable with zero vision. PDFs take the vision + two-detector path; `.md` charts get near-free structural extraction. The two-detector model (structural pass / local edge-snap) applies to the PDF adapter only.
+- **Fingerprint keys align.** Calibration invalidation keys on the artifact's content fingerprint: PDF → sha256-of-bytes (this doc); `.md` → its existing git blob `sha` (storage-notation already uses it for cache invalidation). `source_hash` generalizes to "the artifact fingerprint, whichever model produced it."
+- **BYOS placement.** In the GitHub provider the sidecar lives beside the artifact, e.g. `charts/valerie/guitar.calibration.json`, versioned by the same repo/SHA machinery.
 
 ---
 
@@ -184,15 +238,15 @@ This touches several shipped/spec'd areas; flagged as reconciliation points (not
 2. **Band prominence:** on-demand (hidden until hover/select) vs always-on-but-quieter (fainter + "System N" label). Lean: on-demand (matches effort reality). Needs chart-reader eyes.
 3. **Non-linear timeline edge cases:** nested repeats; multiple passes with different endings (1st/2nd/3rd); D.S. al Coda *al Fine* interactions; how `(bar,pass)` resolves and how the graph rejects contradictory road maps.
 4. **Confidence thresholds:** what auto-routes an element into the review queue; how scrub-preview correctness interacts with element confidence.
-5. **Tempo source for the redline:** time-sig + tempo marking at import; behavior when tempo is absent/handwritten; relationship to deferred tempo-awareness (C tier 1).
-6. **`design-storage-notation.md` reconciliation** (see Integration) — does a format already exist?
+5. **Tempo source for the redline** — *resolved in "Temporal model"* (nullable tempo ⇒ seek-only-advance; fermata = hold point). Left here only for Codex to stress-test the hold-point call and the null-tempo degrade.
+6. **`design-storage-notation.md` reconciliation** — *resolved in "Reconciliation with design-storage-notation"* (artifact vs sidecar; `pdfBox`/`mdBlock` adapters; aligned fingerprint keys). Left for Codex to stress-test the `mdBlock` redline-positioning claim and the sidecar-not-format split.
 7. **Author caveats:** UX bets are from a non-chart-reader/non-ForScore-user; explicitly want adversarial scrutiny on chart-reader ergonomics.
 
 ---
 
 ## Build order (when approved — separate build PR, not this doc)
 
-1. **A — manual seek** (foundation + universal fallback; double-tap = hold/loop).
+1. **A — manual seek** (foundation + universal fallback; tap marker = seek, long-press = hold/loop).
 2. **Navigation-graph data model + overlay renderer** atop the existing chart viewer.
 3. **Converter** (structural import pass → graph + per-element confidence).
 4. **Calibration Editor** (gizmos, auto-distribute, snap-to-printed-line / detector #2, hybrid nav, Edit/Perform weighting, scrub-preview, chart-scoped).
