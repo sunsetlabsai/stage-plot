@@ -430,7 +430,10 @@ export default function Page() {
   }, []);
 
   const updateConfig = useCallback((fn: (prev: AppConfig) => AppConfig) => {
-    setConfig((prev) => fn(prev));
+    // Normalize StageSlot.id through the single mutation chokepoint so every live
+    // writer (Add Row, AI ops, DnD) mints ids + de-dupes/flags links — not just
+    // load/import. Idempotent and ref-stable when nothing's dirty (no edit churn).
+    setConfig((prev) => ensureStageSlotIds(fn(prev)).config);
   }, []);
 
   const [publishSlug] = useState(slug);
