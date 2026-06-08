@@ -1,4 +1,31 @@
-import type { SetlistSong, StageSlot, InputChannel, MonitorMix } from './types';
+import type { SetlistSong, StagePosition, StageSlot, InputChannel, MonitorMix } from './types';
+
+// ── Stage-plot grouping / derivation (multi-occupant blocks) ──────────────
+
+// Group slots by stage position, preserving stable insertion (array) order within
+// each block so on-screen + print output is deterministic.
+export function groupByPos(slots: StageSlot[]): Map<StagePosition, StageSlot[]> {
+  const m = new Map<StagePosition, StageSlot[]>();
+  for (const s of slots) {
+    const arr = m.get(s.pos);
+    if (arr) arr.push(s);
+    else m.set(s.pos, [s]);
+  }
+  return m;
+}
+
+// Derived count of input channels linked to a slot (the ×n shared-mix badge;
+// derived from slotId, never stored).
+export function countLinkedInputs(slotId: string | undefined, inputs: InputChannel[]): number {
+  if (!slotId) return 0;
+  return inputs.reduce((n, i) => (i.slotId === slotId ? n + 1 : n), 0);
+}
+
+// Slot-owned display label: a blank name falls back to "Occupant {n}" (n = 1-based
+// index within its block), identical on every surface that shows this slot.
+export function slotLabel(slot: StageSlot, indexInBlock: number): string {
+  return slot.name?.trim() || `Occupant ${indexInBlock + 1}`;
+}
 
 export function ensureSetlistSongIds(setlist: SetlistSong[]): SetlistSong[] {
   return setlist.map((s) =>
