@@ -33,7 +33,7 @@ import type {
   GeneralNote,
   Chart,
 } from '@/lib/types';
-import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel } from '@/lib/setlist';
+import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf } from '@/lib/setlist';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -2183,11 +2183,14 @@ function SetupSortableRow({
 // ════════════════════════════════════════════════════════════════════════════
 
 function SetupInputTable({
-  inputs, onReorder, onUpdate, onDelete, onAdd,
+  inputs, slots, onReorder, onUpdate, onLink, onCreateOccupant, onDelete, onAdd,
 }: {
   inputs: import('@/lib/types').InputChannel[];
+  slots: StageSlot[];
   onReorder: (from: number, to: number) => void;
   onUpdate: (idx: number, field: string, value: string) => void;
+  onLink: (idx: number, slotId: string | undefined) => void;
+  onCreateOccupant: (idx: number, pos: StagePosition) => void;
   onDelete: (idx: number) => void;
   onAdd: () => void;
 }) {
@@ -2196,6 +2199,8 @@ function SetupInputTable({
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
   );
   const inputIds = inputs.map((inp) => inp.id!);
+  // The Position dropdown options — one per occupied slot, "TLA — label".
+  const slotOptions = slotOptionsForInputs(slots);
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
@@ -2218,6 +2223,7 @@ function SetupInputTable({
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]">Mic/DI</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500">Stand</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500">Notes</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[150px]">Position</th>
                   <th className="w-16"></th>
                   <th className="w-10"></th>
                 </tr>
@@ -2229,7 +2235,10 @@ function SetupInputTable({
                     input={inp}
                     idx={idx}
                     total={inputs.length}
+                    slotOptions={slotOptions}
                     onUpdate={onUpdate}
+                    onLink={onLink}
+                    onCreateOccupant={onCreateOccupant}
                     onDelete={onDelete}
                     onMoveUp={() => onReorder(idx, idx - 1)}
                     onMoveDown={() => onReorder(idx, idx + 1)}
@@ -2245,19 +2254,38 @@ function SetupInputTable({
   );
 }
 
+const NEW_OCCUPANT_PREFIX = '__new__:';
+
 function SortableInputRow({
-  input: inp, idx, total, onUpdate, onDelete, onMoveUp, onMoveDown,
+  input: inp, idx, total, slotOptions, onUpdate, onLink, onCreateOccupant, onDelete, onMoveUp, onMoveDown,
 }: {
   input: import('@/lib/types').InputChannel;
   idx: number;
   total: number;
+  slotOptions: { id: string; label: string }[];
   onUpdate: (idx: number, field: string, value: string) => void;
+  onLink: (idx: number, slotId: string | undefined) => void;
+  onCreateOccupant: (idx: number, pos: StagePosition) => void;
   onDelete: (idx: number) => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: inp.id! });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
+
+  // Dangling link: a slotId that no longer resolves to a live occupant.
+  const dangling = !!inp.slotId && !slotOptions.some((o) => o.id === inp.slotId);
+  // Unified needs-attention state; sub-reason drives the tooltip.
+  const attentionTip = inp.slotId
+    ? 'The linked occupant no longer exists — reassign.'
+    : 'This channel’s link was ambiguous after import — reassign.';
+
+  const handleLinkChange = (value: string) => {
+    if (value === '') onLink(idx, undefined);
+    else if (value.startsWith(NEW_OCCUPANT_PREFIX)) {
+      onCreateOccupant(idx, value.slice(NEW_OCCUPANT_PREFIX.length) as StagePosition);
+    } else onLink(idx, value);
+  };
 
   return (
     <tr ref={setNodeRef} style={style} className="border-b border-gray-100">
@@ -2278,6 +2306,29 @@ function SortableInputRow({
       </td>
       <td className="px-2 py-1">
         <input className={inputCls} value={inp.notes ?? ''} onChange={(e) => onUpdate(idx, 'notes', e.target.value)} />
+      </td>
+      <td className="px-2 py-1">
+        <div className="flex items-center gap-1">
+          <select
+            className={`${inputCls} px-1 ${inp.needsReview ? 'border-amber-400 bg-amber-50' : ''}`}
+            value={dangling ? inp.slotId : inp.slotId ?? ''}
+            onChange={(e) => handleLinkChange(e.target.value)}
+          >
+            <option value="">&mdash; None &mdash;</option>
+            {slotOptions.map((o) => (
+              <option key={o.id} value={o.id}>{o.label}</option>
+            ))}
+            {dangling && <option value={inp.slotId}>&#9888; removed occupant</option>}
+            <optgroup label="＋ New occupant at…">
+              {POSITIONS.map((pos) => (
+                <option key={`new-${pos}`} value={`${NEW_OCCUPANT_PREFIX}${pos}`}>{pos}</option>
+              ))}
+            </optgroup>
+          </select>
+          {inp.needsReview && (
+            <span className="text-amber-500 text-sm select-none" title={attentionTip}>&#9888;</span>
+          )}
+        </div>
       </td>
       <td className="px-1 py-1">
         <div className="flex flex-col items-center">
@@ -3449,12 +3500,32 @@ function ConfigTab({
                     <td className="px-2 py-1">
                       <button
                         className={btnRemove}
-                        onClick={() =>
+                        onClick={() => {
+                          const linked = slot.id
+                            ? config.inputs.filter((i) => i.slotId === slot.id)
+                            : [];
+                          // Delete-time prompt is the primary guard when inputs are linked;
+                          // the needs-attention badge is the backstop. OK = keep & flag,
+                          // Cancel = clear their link.
+                          const keep =
+                            linked.length === 0 ||
+                            window.confirm(
+                              `${linked.length} input${linked.length > 1 ? 's are' : ' is'} linked to “${slotLabel(slot, blockIndexOf(config.stagePlot, idx))}”.\n\n` +
+                                `OK: keep them (they'll be flagged to relink).\n` +
+                                `Cancel: clear their link.`,
+                            );
                           updateConfig((p) => ({
                             ...p,
                             stagePlot: p.stagePlot.filter((_, i) => i !== idx),
-                          }))
-                        }
+                            // Kept inputs keep their slotId and get flagged by the
+                            // normalizer (dangling → needsReview). Cleared inputs drop it.
+                            inputs: keep
+                              ? p.inputs
+                              : p.inputs.map((i) =>
+                                  i.slotId === slot.id ? { ...i, slotId: undefined, needsReview: false } : i,
+                                ),
+                          }));
+                        }}
                       >
                         X
                       </button>
@@ -3485,11 +3556,40 @@ function ConfigTab({
           <h2 className="text-lg font-bold mb-4">Input List</h2>
           <SetupInputTable
             inputs={config.inputs}
+            slots={config.stagePlot}
             onReorder={(from, to) => updateConfig((p) => ({ ...p, inputs: moveInput(p.inputs, from, to) }))}
             onUpdate={(idx, field, value) => updateConfig((p) => {
               const arr = [...p.inputs];
               arr[idx] = { ...arr[idx], [field]: field === 'ch' ? Number(value) : value };
               return { ...p, inputs: arr };
+            })}
+            onLink={(idx, slotId) => updateConfig((p) => {
+              const arr = [...p.inputs];
+              // Explicit user pick resolves any needs-attention state (valid slot OR "None").
+              arr[idx] = { ...arr[idx], slotId, needsReview: false };
+              return { ...p, inputs: arr };
+            })}
+            onCreateOccupant={(idx, pos) => updateConfig((p) => {
+              const inst = p.inputs[idx]?.inst?.trim() ?? '';
+              // Coalesce: reuse a same-block slot already named for this instrument
+              // (so 6 drum rows + "New at USC" land on one shared-mix slot).
+              const existing = inst
+                ? p.stagePlot.find((s) => s.pos === pos && s.name.trim() === inst)
+                : undefined;
+              const arr = [...p.inputs];
+              if (existing?.id) {
+                arr[idx] = { ...arr[idx], slotId: existing.id, needsReview: false };
+                return { ...p, inputs: arr };
+              }
+              // Otherwise mint a real slot now; name from the row's instrument else "Occupant {n}".
+              const id = crypto.randomUUID();
+              const name = inst || `Occupant ${p.stagePlot.filter((s) => s.pos === pos).length + 1}`;
+              arr[idx] = { ...arr[idx], slotId: id, needsReview: false };
+              return {
+                ...p,
+                stagePlot: [...p.stagePlot, { id, name, pos, role: '', mix: 0 }],
+                inputs: arr,
+              };
             })}
             onDelete={(idx) => updateConfig((p) => ({
               ...p,

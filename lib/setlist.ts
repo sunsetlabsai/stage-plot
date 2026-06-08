@@ -27,6 +27,28 @@ export function slotLabel(slot: StageSlot, indexInBlock: number): string {
   return slot.name?.trim() || `Occupant ${indexInBlock + 1}`;
 }
 
+// Index of slots[idx] among the occupants of its own block (same pos), in array
+// order — the n for the "Occupant {n}" fallback label.
+export function blockIndexOf(slots: StageSlot[], idx: number): number {
+  const pos = slots[idx]?.pos;
+  let n = 0;
+  for (let i = 0; i < idx; i++) if (slots[i].pos === pos) n++;
+  return n;
+}
+
+// Build the Position-dropdown option list for the input list: one entry per slot
+// that has an id, labeled "TLA — <slot label>" (the slot-owned label, so a blank
+// name reads "Occupant {n}" everywhere). Grouped by block in stable array order.
+export function slotOptionsForInputs(slots: StageSlot[]): { id: string; label: string }[] {
+  const opts: { id: string; label: string }[] = [];
+  for (const [pos, arr] of groupByPos(slots)) {
+    arr.forEach((s, i) => {
+      if (s.id) opts.push({ id: s.id, label: `${pos} — ${slotLabel(s, i)}` });
+    });
+  }
+  return opts;
+}
+
 export function ensureSetlistSongIds(setlist: SetlistSong[]): SetlistSong[] {
   return setlist.map((s) =>
     s.id ? s : { ...s, id: crypto.randomUUID() }
