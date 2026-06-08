@@ -1,6 +1,6 @@
 # Design: Realtime Chart Control (Perform-mode redline) + Chart Calibration
 
-**Status:** Proposed (v1.3) — Codex R1 + R2 findings resolved (see "R1 resolutions" / "R2 resolutions" below); ready for R3
+**Status:** Proposed (v1.4) — Codex R1–R3 findings resolved (see resolution blocks below); ready for R4
 **Date:** 2026-06-08
 **Branch:** `opus/design-realtime-chart-control`
 **Target/benchmark:** ForScore — a static PDF reader (library + setlists + pedal page-turns + annotations). Everything here is the *live, band-aware* layer ForScore structurally lacks.
@@ -14,6 +14,14 @@
 - **#2 (HIGH) calibration persistence / invalidation — RESOLVED.** The library has no version concept (`chart_library` is `unique(owner_id, song_key, role)`, upsert replaces — design-chart-library.md:496), so the **PDF content hash becomes the de-facto version.** Content-hash-keyed sidecar; apply-only-on-match; mismatch ⇒ stale, never silent-apply; carry-forward old anchors as a low-confidence draft. See "Calibration persistence" below.
 - **#4 (HIGH) temporal model for the redline — RESOLVED.** Thin temporal layer on the graph: beats-per-bar from time sig, per-bar override for pickups, **nullable tempo** (null ⇒ redline is seek-only-advance, not broken), fermata/caesura = **hold point** (park, don't clock). See "Temporal model" below.
 - **#5 (MED/HIGH) reconcile with `design-storage-notation` (Markdown-first direction) — RESOLVED.** No format conflict: storage-notation owns the chart *artifact* (`.md`/`.pdf`); chart-control owns a calibration *sidecar* (not a chart-storage format — corrected an overreach below). **v1 live redline is PDF-only** — `.md` charts lack stable per-bar geometry (reflowing HTML; corpus includes prose/ABC), so they keep static markdown rendering and are out of scope for the redline. An `.md` adapter is deferred behind a DOM-ID rendering contract; nav/temporal layers are kept source-agnostic so it can slot in later. See "Reconciliation with `design-storage-notation`" below.
+
+---
+
+## R3 resolutions (Codex adversarial pass on `c1b6316`)
+
+- **#1 (HIGH) step-1 rail had no compatible data model — RESOLVED.** The graph was bar/system-only; a sections-only rail couldn't persist. Added a **coarse `SectionAnchor { id, page, x, y, label }` tier** (the step-1 floor) alongside the fine `System`/`Bar` tier (step-2 enrichment), an explicit **upgrade path** (`Bar.sectionId` subdivides a section), and a **`PositionRef`** (sectionId | (barId,pass)) that the navigation + temporal layers use so they never assume bar geometry. See Data model §1.
+- **#2 (HIGH) chart-level `verified` could certify known-bad elements — RESOLVED.** Promotion now **fails closed**: `verified` is permitted only when no *required* element (traversed nav edges / section anchors) remains unresolved — each flagged element must be explicitly **accepted or disabled** first. Disable converts an un-resolvable jump into a `holdPoint`. See Verification rule.
+- **#3 (MED) vertical-swipe page-turn conflicted with the viewer contract — RESOLVED by dropping it.** The inline viewer deliberately ignores vertical touch and reserves horizontal swipe for songs. Removed the new swipe ↑/↓; manual paging stays the **existing tap-half** — contract unchanged, nothing to supersede. See gesture table.
 
 ---
 
@@ -69,7 +77,7 @@ The conflict (Codex #3): the inline viewer already spends the *entire* canvas ta
 | Action | Gesture | Notes |
 |---|---|---|
 | **Change song** | swipe L↔R · arrow ←/→ | unchanged from inline viewer (existing dominant-axis lock, 60px trigger) |
-| **Change page** | redline **auto-turns** (primary *when tempo present*) · swipe ↑/↓ · existing tap-half | auto-turn requires the redline to advance, so it's primary only in the tempo-present regime; **with null tempo there's no auto-turn and manual paging stays primary** (see Temporal model). The existing tap-half is always a harmless fallback. |
+| **Change page** | redline **auto-turns** (primary *when tempo present*) · existing **tap-half** (manual) | **No new vertical-swipe gesture** (R3 #3): the inline viewer deliberately ignores vertical touch movement and reserves horizontal swipe for songs (design-inline-chart-viewer.md:105; page.tsx dominant-axis lock). We **keep that contract unchanged** — manual paging stays the existing tap-half. Auto-turn requires the redline to advance, so it's primary only in the tempo-present regime; with null tempo there's no auto-turn and the tap-half stays primary (see Temporal model). |
 | **Seek** (re-anchor redline) | **tap a section/bar marker** — a discrete object rendered *above* the canvas | like the pill-picker: the marker captures the tap and `stopPropagation()`s so it never reaches the page-turn handler. Section-granular by default (markers = section heads + rehearsal letters), not every bar — fewer, fat targets on stage. |
 | **Hold / loop** (vamp a section) | **long-press a marker** (~450ms) | replaces double-tap (double-tap would tax every page-turn tap). Enters a visible **`◌ LOOPING — Chorus`** state; tap anywhere / next marker to release. |
 | **Fine nudge** | drag the redline | rare live; mostly an Edit-mode affordance |
@@ -125,16 +133,19 @@ Two strategies for a "native format":
 
 Two **distinct layers** — keep them separate; conflating them is a trap.
 
-### 1. Physical anchors (geometry — where a bar is *printed on the PDF*)
-1:1 with the PDF ink. A bar has exactly **one** bounding box. **Source charts are PDF/image only in v1** (see Reconciliation — `.md` charts are deliberately out of scope for the live redline).
-- `Page { index, w, h }` (coords stored **PDF-relative / normalized**, never screen pixels — survive zoom/rotation/device size).
-- `System { id, page, yTop, yBottom, barlines: [x...] }` — a staff row; the redline sweeps L→R within it then snaps to the next.
-- `Bar { id, systemId, xStart, xEnd, absNumber }`.
-- Each anchor carries **per-element confidence** (see review queue). The navigation + temporal layers above are **source-agnostic** — kept separable so a future `.md` adapter (behind a DOM-ID rendering contract) could slot in without touching them.
+### 1. Physical anchors (geometry — where a position is *printed on the PDF*)
+Anchors are PDF-relative / normalized coords (never screen pixels — survive zoom/rotation/device size). **Source charts are PDF/image only in v1.** There are **two granularity tiers** of anchor, and they share a `Page { index, w, h }` and per-element confidence:
 
-### 2. Navigation (logic — what *order* bars are played)
-A **directed graph over the physical anchors**. This is where a single printed bar can be **visited multiple times**.
-- Nodes = physical bars. Edges = "what comes next," including **back-jumps** (repeats, D.S., D.C.) and conditional edges (1st/2nd endings keyed on pass).
+- **Coarse — `SectionAnchor { id, page, x, y, label }`** (the **step-1 floor**). A single point per section head ("Intro", "Chorus", rehearsal letter "B"). Hand-droppable with zero bar geometry. Seek snaps the redline *to a section anchor*; between anchors the redline parks or advances coarsely. This is the only physical anchor the bootstrap rail needs.
+- **Fine — `System` + `Bar`** (the **step-2 enrichment**). `System { id, page, yTop, yBottom, barlines: [x...] }` (a staff row; redline sweeps L→R then snaps to next) · `Bar { id, systemId, xStart, xEnd, absNumber, sectionId }`. Bars **subdivide** a section.
+
+**Upgrade path (explicit):** a section is the unit of position in step 1; adding bars in step 2 *subdivides* its `SectionAnchor` without invalidating it (`Bar.sectionId` back-references the section). So seek-state has two forms: **step 1 seeks a `SectionAnchor`; step 2+ seeks a `(bar, pass)`** that resolves up to its section. `holdPoints` and nav targets reference a **`PositionRef`** = *either* a `sectionId` (coarse) *or* a `(barId, pass)` (fine) — the navigation + temporal layers never assume bar-level geometry exists.
+
+The navigation + temporal layers are **source-agnostic** — kept separable so a future `.md` adapter (behind a DOM-ID rendering contract) could slot in without touching them.
+
+### 2. Navigation (logic — what *order* positions are played)
+A **directed graph over the physical anchors**. This is where a single printed position can be **visited multiple times**.
+- Nodes = `PositionRef`s (a `SectionAnchor` in step 1; a `Bar` once subdivided). Edges = "what comes next," including **back-jumps** (repeats, D.S., D.C.) and conditional edges (1st/2nd endings keyed on pass). In the step-1 floor the graph is typically a coarse section chain; bar-level edges are step-2 enrichment.
 - Markers: `repeatStart/End`, `ending{n}`, `D.S.`, `D.C.`, `Coda`, `Fine`.
 
 ### The timeline is non-linear: position = `(bar, pass)`
@@ -209,7 +220,7 @@ A (manual seek) only re-anchors; something still has to move the redline forward
   - This also scopes B: a follower whose chart has null tempo is seek-only too (it can't auto-advance off a leader's clock it doesn't have). (Dovetails with C-tier-1 tempo-awareness being deferred — when it lands it *fills in* this nullable field and flips a chart from the seek-only regime into the auto-advance one.)
 - **Fermata / caesura / rit. = `holdPoint`, not a duration.** These are genuinely un-clockable live; don't pretend to model their length. The redline **parks at a hold point and waits for the next seek** (manual A, or leader broadcast B). This is exactly where A/B earn their keep — we mark the un-clockable spots instead of guessing them.
 
-Shape: `temporal: { beatsPerBar, perBarBeatsOverride?, tempoBpm?: null, holdPoints: [barId...] }`, stored *inside* the calibration graph JSON (so it versions and invalidates with the rest of the calibration).
+Shape: `temporal: { beatsPerBar, perBarBeatsOverride?, tempoBpm?: null, holdPoints: [PositionRef...] }`, stored *inside* the calibration graph JSON (so it versions and invalidates with the rest of the calibration). `PositionRef` = a `sectionId` (coarse) or `(barId, pass)` (fine) — in the step-1 rail hold points sit on section anchors.
 
 ### Calibration persistence (where the graph lives, and when it goes stale)
 The calibration *is* the navigation-graph JSON. It must survive ordinary re-uploads but never be silently mis-applied to a *different* PDF. The trap: the library has **no version concept** — `chart_library` is `unique(owner_id, song_key, role)` and **upsert replaces** (design-chart-library.md:496, "No version history"). So there is nothing to "attach a version to." Resolution: **the PDF content hash becomes the de-facto version.**
@@ -219,7 +230,9 @@ The calibration *is* the navigation-graph JSON. It must survive ordinary re-uplo
 - **Invalidation rule (hash boundary):** apply calibration only where `source_hash == the current file's hash`. A hash mismatch ⇒ **stale ⇒ chart flagged "needs recalibration."** *Never* silent-apply across a hash change — confidently-wrong anchors (old graph over new ink) are the worst failure mode.
 - **Verification rule (the *second* boundary — R2 #2):** a matching hash is necessary but **not sufficient.** Perform mode consumes a calibration **only when `status == verified`.** A `draft` row that happens to match the current hash is **not** used to drive the live redline — it only seeds the editor. This closes the gap where a carry-forward draft, once saved under the current hash, would otherwise "match and apply."
   - **`status` is orthogonal to per-element `confidence`.** `confidence` is the *machine's* score (auto-routes the review queue); `status` is the *human's* sign-off. An element can be high-confidence-but-unverified (freshly auto-imported, not yet playback-checked). **Perform gates on `verified`, not on confidence.**
-  - **Verify-by-playback is the `draft → verified` transition.** Scrubbing the redline over the actual PDF and accepting it promotes a calibration to `verified` (same affordance already specced as the primary review tool).
+  - **Verify-by-playback is the `draft → verified` transition** (scrub the redline over the actual PDF and accept) — but promotion **fails closed (R3 #2).** Chart-level `verified` is permitted **only when no *required* element remains unresolved**: every review-queue / flagged element must be **explicitly accepted or disabled** first. So a chart with clean barlines but a still-uncertain D.S./Coda edge **cannot** go `verified` (and thus cannot drive Perform) until that jump is accepted or the jump is disabled (degrading that spot to a manual-seek hold point). This keeps the chart-level flag honest without needing per-element verification in v1.
+    - *Required* elements = the nav edges and section anchors the redline actually traverses. *Non-required* = cosmetic/low-stakes. Only required-element resolution gates promotion.
+    - **Disable = a real escape hatch:** an un-resolvable jump can be turned off, which converts it into a `holdPoint` (redline parks; player seeks manually past it). Verified-with-a-known-hole is allowed *only* as an explicit disable, never as an ignored flag.
 - **Identical re-upload survives:** same bytes → same hash → calibration still matches *and* keeps its `verified` status. The common "I re-saved the same file" case does not nuke prior work.
 - **Carry-forward (honors "correction never exceeds creation"):** on a hash mismatch we do **not** discard the old graph. We seed the editor with the previous hash's anchors as a **`draft`** (every imported element flagged low-confidence) to verify-by-playback against — a minor re-export becomes a ~20-second re-confirm, not a re-chart. It stays `draft` (Perform won't use it) until the human verifies.
 - **History: retain across hashes.** Keep every `(chart_id, source_hash)` row (cheap JSON). This gives a revert path *and* makes the carry-forward draft trivially "the prior hash's row." Accepted tradeoff: a little storage cruft per re-upload.
