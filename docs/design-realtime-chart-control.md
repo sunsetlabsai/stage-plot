@@ -1,6 +1,6 @@
 # Design: Realtime Chart Control (Perform-mode redline) + Chart Calibration
 
-**Status:** Proposed (v1.5) — Codex R1–R4 findings resolved (see resolution blocks below); ready for R5
+**Status:** Proposed (v1.5) — **Codex R5: no merge blockers** (R1–R4 findings resolved; two R5 nits folded). Merge-ready pending owner GO.
 **Date:** 2026-06-08
 **Branch:** `opus/design-realtime-chart-control`
 **Target/benchmark:** ForScore — a static PDF reader (library + setlists + pedal page-turns + annotations). Everything here is the *live, band-aware* layer ForScore structurally lacks.
@@ -14,6 +14,14 @@
 - **#2 (HIGH) calibration persistence / invalidation — RESOLVED.** The library has no version concept (`chart_library` is `unique(owner_id, song_key, role)`, upsert replaces — design-chart-library.md:496), so the **PDF content hash becomes the de-facto version.** Content-hash-keyed sidecar; apply-only-on-match; mismatch ⇒ stale, never silent-apply; carry-forward old anchors as a low-confidence draft. See "Calibration persistence" below.
 - **#4 (HIGH) temporal model for the redline — RESOLVED.** Thin temporal layer on the graph: beats-per-bar from time sig, per-bar override for pickups, **nullable tempo** (null ⇒ redline is seek-only-advance, not broken), fermata/caesura = **hold point** (park, don't clock). See "Temporal model" below.
 - **#5 (MED/HIGH) reconcile with `design-storage-notation` (Markdown-first direction) — RESOLVED.** No format conflict: storage-notation owns the chart *artifact* (`.md`/`.pdf`); chart-control owns a calibration *sidecar* (not a chart-storage format — corrected an overreach below). **v1 live redline is PDF-only** — `.md` charts lack stable per-bar geometry (reflowing HTML; corpus includes prose/ABC), so they keep static markdown rendering and are out of scope for the redline. An `.md` adapter is deferred behind a DOM-ID rendering contract; nav/temporal layers are kept source-agnostic so it can slot in later. See "Reconciliation with `design-storage-notation`" below.
+
+---
+
+## R5 (Codex adversarial pass on `5c3ff48`) — no merge blockers
+
+Sign-off pass. Two non-blocking nits folded:
+- **PDF-only tightened.** "PDF/image" → **PDF only in v1** (raster-image render + dimension path deferred; the viewer is PDF-oriented and `page_dims` come from the PDF).
+- **Drive-import wording softened.** No longer asserts a direct Drive→library import exists; reworded to "upload/import the PDF into the owner library" (reuses the existing upload path; one-tap Drive import is a nice-to-have, not assumed).
 
 ---
 
@@ -142,7 +150,7 @@ Two strategies for a "native format":
 Two **distinct layers** — keep them separate; conflating them is a trap.
 
 ### 1. Physical anchors (geometry — where a position is *printed on the PDF*)
-Anchors are PDF-relative / normalized coords (never screen pixels — survive zoom/rotation/device size). **Source charts are PDF/image only in v1.** There are **two granularity tiers** of anchor, and they share a `Page { index, w, h }` and per-element confidence:
+Anchors are PDF-relative / normalized coords (never screen pixels — survive zoom/rotation/device size). **Source charts are PDF only in v1** (the viewer is PDF-oriented and `page_dims` come from the PDF; raster-image charts would need a separate render+dimension path — deferred). There are **two granularity tiers** of anchor, and they share a `Page { index, w, h }` and per-element confidence:
 
 - **Coarse — `SectionAnchor { id, page, x, y, label }`** (the **step-1 floor**). A single point per section head ("Intro", "Chorus", rehearsal letter "B"). Hand-droppable with zero bar geometry. Seek snaps the redline *to a section anchor*; between anchors the redline parks or advances coarsely. This is the only physical anchor the bootstrap rail needs.
 - **Fine — `System` + `Bar`** (the **step-2 enrichment**). `System { id, page, yTop, yBottom, barlines: [x...] }` (a staff row; redline sweeps L→R then snaps to next) · `Bar { id, systemId, xStart, xEnd, absNumber, sectionId }`. Bars **subdivide** a section.
@@ -266,7 +274,7 @@ This touches several shipped/spec'd areas; flagged as reconciliation points (not
 ### Source-scope boundary: v1 = owner-library PDFs only (R4 #2)
 The viewer currently renders **two** chart sources: **owner-library uploads** (`chart_library` rows: `id`, and — new in this design — `content_hash`, `page_count`, `page_dims`) and **Drive-resolved / batch charts** (`fileId`, `modifiedTime`, `url` — *no* `chart_library.id`, no content hash, no page dims). The calibration sidecar is keyed `(chart_id, source_hash)`, which **only library uploads can supply.** So:
 - **v1 redline + calibration are scoped to owner-library PDF charts.** Drive-resolved charts render in the same inline viewer **without** the calibration/redline affordance (the "calibrate" entry point and the Perform redline are simply not offered for them). No half-keyed sidecar, no ambiguous source boundary.
-- **Path to bring a Drive chart in (existing, no new mechanism):** import/save it into the owner library (it gains a `chart_library.id` + `content_hash`), then it's calibratable like any upload. This is the same "promote into the library" flow the library already supports.
+- **Path to bring a Drive chart in:** upload/import the PDF into the owner library (it gains a `chart_library.id` + `content_hash`), then it's calibratable like any upload. (This reuses the existing library *upload* path; a one-tap *Drive-to-library* import is a nice-to-have, not assumed to exist today.)
 - **Drive-native calibration is explicitly deferred.** It would need a second keying path (e.g. `(fileId, content_hash)` after proxy-download) — out of scope for v1, consistent with keeping one clean source model (mirrors the `.md` deferral).
 
 ### Reconciliation with `design-storage-notation`
