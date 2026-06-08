@@ -10,7 +10,7 @@
 ## R1 resolutions (Codex adversarial pass on `bc039c1`)
 
 - **#3 (HIGH) gesture conflict with the inline viewer — RESOLVED.** Root cause: the canvas tap surface is *fully* allocated to page-turns (`page.tsx:1544`) and tap fires immediately on `touchend` (no double-tap window — why paging feels snappy), so seek can't be a canvas-wide tap and double-tap-to-hold would tax every tap. Fix: **redline auto-turns pages** (demotes manual paging) → **seek = tap a section marker** (object above the canvas, like the existing pill-picker) · **hold/loop = long-press** (not double-tap) · no zone grid · explicit precedence/hit-test + follow-mode scope. See "Gesture model (Perform mode)" under Concept A.
-- **#1 (HIGH) build-order bootstrap** — IN PROGRESS.
+- **#1 (HIGH) build-order bootstrap — RESOLVED.** The chicken/egg: A is "step 1" but seeks into a nav graph that the converter (step 3) and editor (step 4) produce. Fix: the **graceful-degradation manual marker-rail *is* the bootstrap** — A's first shippable unit is *A over a hand-placed, sections-only rail* (tap to drop section markers; zero converter, zero vision, no bar-level geometry required). Seek snaps to section heads; redline parks/advances coarsely; the converter + auto-distribute + bar ticks are **enrichment that makes creation cheap, not prerequisites.** This is the same "convert-it and hand-tag-it are one tool" insight, applied to sequencing. See revised Build order step 1.
 - **#2 (HIGH) calibration persistence / invalidation — RESOLVED.** The library has no version concept (`chart_library` is `unique(owner_id, song_key, role)`, upsert replaces — design-chart-library.md:496), so the **PDF content hash becomes the de-facto version.** Content-hash-keyed sidecar; apply-only-on-match; mismatch ⇒ stale, never silent-apply; carry-forward old anchors as a low-confidence draft. See "Calibration persistence" below.
 - **#4 (HIGH) temporal model for the redline — RESOLVED.** Thin temporal layer on the graph: beats-per-bar from time sig, per-bar override for pickups, **nullable tempo** (null ⇒ redline is seek-only-advance, not broken), fermata/caesura = **hold point** (park, don't clock). See "Temporal model" below.
 - **#5 (MED/HIGH) reconcile with `design-storage-notation` (Markdown-first direction) — RESOLVED.** No format conflict: storage-notation owns the chart *artifact* (`.md`/`.pdf`); chart-control owns a calibration *sidecar* (not a chart-storage format — corrected an overreach below). The nav+temporal layer is **source-agnostic**; only the physical-anchor layer forks into `pdfBox` vs `mdBlock` adapters. `.md` charts get near-free structural extraction (their `##`/`| bar |` syntax *is* the nav skeleton). Fingerprint keys align (PDF sha256 / `.md` git blob sha). See "Reconciliation with `design-storage-notation`" below.
@@ -246,9 +246,9 @@ Its Phase 3 converts charts PDF→Markdown (`.md`-first, PDF demoted to `origina
 
 ## Build order (when approved — separate build PR, not this doc)
 
-1. **A — manual seek** (foundation + universal fallback; tap marker = seek, long-press = hold/loop).
-2. **Navigation-graph data model + overlay renderer** atop the existing chart viewer.
-3. **Converter** (structural import pass → graph + per-element confidence).
+1. **A — manual seek over a minimal hand-placed rail** (the bootstrap, resolves #1): tap-to-drop **sections-only** markers, zero converter/vision, no bar-level geometry. Seek snaps to section heads; redline parks/advances coarsely. Ships standalone value and is the universal fallback (tap marker = seek, long-press = hold/loop).
+2. **Navigation-graph data model + overlay renderer** atop the existing chart viewer (adds bar-level anchors + `pdfBox`/`mdBlock` adapters; enriches step 1's coarse rail).
+3. **Converter** (structural import pass → graph + per-element confidence) — makes creation cheap; *not* a gate for step 1.
 4. **Calibration Editor** (gizmos, auto-distribute, snap-to-printed-line / detector #2, hybrid nav, Edit/Perform weighting, scrub-preview, chart-scoped).
 5. **B — leader/follower** over WebRTC discrete events (after the transport OQ resolves).
 6. **C — deferred** (follow-leader audio; tempo-awareness first).
