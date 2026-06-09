@@ -200,15 +200,61 @@ function pruneRoadmap(
     if (m.kind === 'ending') return m.barIds.every((b) => liveBarIds.has(b));
     return liveBarIds.has(m.barId);
   };
-  const survived = roadmap.filter(barAlive);
+  return dropOrphanedRepeatBindings(roadmap.filter(barAlive));
+}
+
+// Drop any ending/repeatEnd whose bound repeatStart is no longer in the set.
+// Shared by the bar-deletion cascade (pruneRoadmap) and direct marker removal
+// (removeRoadmapMarker) — deleting a `|:` must take its `:|`/voltas with it.
+function dropOrphanedRepeatBindings(markers: RoadmapMarker[]): RoadmapMarker[] {
   const repeatStartIds = new Set(
-    survived.filter((m) => m.kind === 'repeatStart').map((m) => m.id),
+    markers.filter((m) => m.kind === 'repeatStart').map((m) => m.id),
   );
-  return survived.filter((m) =>
+  return markers.filter((m) =>
     (m.kind === 'repeatEnd' || m.kind === 'ending')
       ? repeatStartIds.has(m.repeatStartId)
       : true,
   );
+}
+
+// ── Roadmap authoring (the Roadmap calibrate tool) ──────────────────────────
+
+// The repeatStart a `:|`/volta dropped at `barId` binds to: the latest
+// repeatStart at-or-before that bar in reading order (the enclosing `|:` span).
+// Returns null when no `|:` precedes — the UI disables `:|`/ending in that case.
+// This computes the EXPLICIT binding the marker stores; the resolver never
+// re-guesses it (design §OQ-B).
+export function enclosingRepeatStartId(cal: ChartCalibration, barId: string): string | null {
+  const order = barsInOrder(cal);
+  const pos = new Map(order.map((b, i) => [b.id, i] as const));
+  const target = pos.get(barId);
+  if (target === undefined) return null;
+  let best: { id: string; p: number } | null = null;
+  for (const m of cal.roadmap ?? []) {
+    if (m.kind !== 'repeatStart') continue;
+    const p = pos.get(m.barId);
+    if (p === undefined || p > target) continue;
+    if (!best || p > best.p) best = { id: m.id, p };
+  }
+  return best?.id ?? null;
+}
+
+// Append a roadmap marker (caller builds it, incl. its id). Resets to draft.
+// Structural validity / resolvability is enforced at the save boundary, not
+// here — mid-edit drafts (e.g. a D.S. before its Segno) persist (design §7,
+// BLOCKER-1 no authoring lockout).
+export function addRoadmapMarker(cal: ChartCalibration, marker: RoadmapMarker): ChartCalibration {
+  return { ...cal, status: 'draft', roadmap: [...(cal.roadmap ?? []), marker] };
+}
+
+// Remove a marker by id, then cascade-drop any ending/repeatEnd orphaned by
+// removing a repeatStart. Collapses an emptied roadmap to undefined so the
+// payload stays v2 (per-payload schema, §8). Resets to draft.
+export function removeRoadmapMarker(cal: ChartCalibration, markerId: string): ChartCalibration {
+  const roadmap = cal.roadmap ?? [];
+  if (!roadmap.some((m) => m.id === markerId)) return cal;
+  const remaining = dropOrphanedRepeatBindings(roadmap.filter((m) => m.id !== markerId));
+  return { ...cal, status: 'draft', roadmap: remaining.length > 0 ? remaining : undefined };
 }
 
 // Resize a system's vertical band (drag the top/bottom edges to fit the printed
@@ -719,6 +765,32 @@ export function resolveRoadmap(cal: ChartCalibration): RoadmapResult {
   }
 
   return { ok: true, traversal };
+}
+
+// Human-readable play order for the Roadmap tool's live-resolve readout, e.g.
+// "1–8, 1–8, 9–16". Compresses consecutive absNumbers into ranges; a jump or a
+// repeat-reset breaks the run. Pass the resolved traversal (the UI already has
+// it); returns '' for an empty traversal.
+export function summarizeTraversal(cal: ChartCalibration, traversal: TraversalStep[]): string {
+  const absById = new Map((cal.bars ?? []).map((b) => [b.id, b.absNumber] as const));
+  const nums: number[] = [];
+  for (const step of traversal) {
+    const n = absById.get(step.barId);
+    if (n !== undefined) nums.push(n);
+  }
+  if (nums.length === 0) return '';
+  const runs: string[] = [];
+  let runStart = nums[0];
+  let prev = nums[0];
+  const flush = () => runs.push(runStart === prev ? `${runStart}` : `${runStart}\u2013${prev}`);
+  for (let i = 1; i < nums.length; i++) {
+    if (nums[i] === prev + 1) { prev = nums[i]; continue; }
+    flush();
+    runStart = nums[i];
+    prev = nums[i];
+  }
+  flush();
+  return runs.join(', ');
 }
 
 // ── Payload validation (untrusted boundary: API + hand-edited DB rows) ─────

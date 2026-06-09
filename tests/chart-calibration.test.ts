@@ -32,6 +32,10 @@ import {
   firstBar,
   nextBar,
   prevBar,
+  enclosingRepeatStartId,
+  addRoadmapMarker,
+  removeRoadmapMarker,
+  summarizeTraversal,
 } from '../lib/chart-calibration';
 import type { ChartCalibration, System, Bar, RoadmapMarker } from '../lib/types';
 
@@ -1379,5 +1383,116 @@ describe('autoDistributeBars — roadmap cascade pruning', () => {
     };
     const next = autoDistributeBars(c, 'sys1', 3);
     expect(next.roadmap?.map((m) => m.id)).toEqual(['seg']);
+  });
+});
+
+describe('enclosingRepeatStartId (Roadmap-tool :|/volta binding)', () => {
+  it('returns null when no repeatStart precedes the bar', () => {
+    const c = barsChart(4, []);
+    expect(enclosingRepeatStartId(c, 'b3')).toBeNull();
+  });
+
+  it('binds to the single enclosing repeatStart', () => {
+    const c = barsChart(4, [{ id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' }]);
+    expect(enclosingRepeatStartId(c, 'b4')).toBe('rs');
+  });
+
+  it('binds to a repeatStart on the same bar (at-or-before)', () => {
+    const c = barsChart(4, [{ id: 'rs', kind: 'repeatStart', barId: 'b2', edge: 'start' }]);
+    expect(enclosingRepeatStartId(c, 'b2')).toBe('rs');
+  });
+
+  it('picks the latest (innermost) repeatStart at-or-before the bar', () => {
+    const c = barsChart(8, [
+      { id: 'outer', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'inner', kind: 'repeatStart', barId: 'b5', edge: 'start' },
+    ]);
+    expect(enclosingRepeatStartId(c, 'b6')).toBe('inner');
+    expect(enclosingRepeatStartId(c, 'b3')).toBe('outer');
+  });
+
+  it('ignores a repeatStart that comes after the bar', () => {
+    const c = barsChart(4, [{ id: 'rs', kind: 'repeatStart', barId: 'b3', edge: 'start' }]);
+    expect(enclosingRepeatStartId(c, 'b2')).toBeNull();
+  });
+
+  it('returns null for an unknown bar id', () => {
+    const c = barsChart(4, [{ id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' }]);
+    expect(enclosingRepeatStartId(c, 'nope')).toBeNull();
+  });
+});
+
+describe('addRoadmapMarker / removeRoadmapMarker', () => {
+  it('appends a marker, creating the roadmap array and resetting to draft', () => {
+    const c = { ...barsChart(4), status: 'verified' as const };
+    const next = addRoadmapMarker(c, { id: 'seg', kind: 'segno', barId: 'b2', edge: 'start' });
+    expect(next.status).toBe('draft');
+    expect(next.roadmap).toEqual([{ id: 'seg', kind: 'segno', barId: 'b2', edge: 'start' }]);
+  });
+
+  it('removes a marker by id and resets to draft', () => {
+    const c = barsChart(4, [
+      { id: 'seg', kind: 'segno', barId: 'b2', edge: 'start' },
+      { id: 'fine', kind: 'fine', barId: 'b4', edge: 'end' },
+    ]);
+    const next = removeRoadmapMarker({ ...c, status: 'verified' }, 'seg');
+    expect(next.status).toBe('draft');
+    expect(next.roadmap?.map((m) => m.id)).toEqual(['fine']);
+  });
+
+  it('removing a repeatStart cascades its bound repeatEnd and voltas', () => {
+    const c = barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'rs', times: 2 },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b5', 'b6'], numbers: [1] },
+      { id: 'seg', kind: 'segno', barId: 'b9', edge: 'start' },
+    ]);
+    const next = removeRoadmapMarker(c, 'rs');
+    // The orphaned :| and volta go with the |:; the unrelated segno survives.
+    expect(next.roadmap?.map((m) => m.id)).toEqual(['seg']);
+  });
+
+  it('collapses an emptied roadmap to undefined (stays v2 on persist)', () => {
+    const c = barsChart(4, [{ id: 'seg', kind: 'segno', barId: 'b2', edge: 'start' }]);
+    const next = removeRoadmapMarker(c, 'seg');
+    expect(next.roadmap).toBeUndefined();
+  });
+
+  it('removing an unknown id is a no-op (same reference)', () => {
+    const c = barsChart(4, [{ id: 'seg', kind: 'segno', barId: 'b2', edge: 'start' }]);
+    expect(removeRoadmapMarker(c, 'nope')).toBe(c);
+  });
+});
+
+describe('summarizeTraversal (Roadmap-tool play-order readout)', () => {
+  const c = barsChart(8);
+  it('compresses a single consecutive run into one range', () => {
+    const r = resolveRoadmap(c);
+    expect(r.ok && summarizeTraversal(c, r.traversal)).toBe('1\u20138');
+  });
+
+  it('shows a repeated span as two ranges', () => {
+    const rep = barsChart(8, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    const r = resolveRoadmap(rep);
+    expect(r.ok && summarizeTraversal(rep, r.traversal)).toBe('1\u20138, 1\u20138');
+  });
+
+  it('breaks a run at a non-consecutive jump', () => {
+    expect(summarizeTraversal(c, [
+      { barId: 'b1', pass: 1 }, { barId: 'b2', pass: 1 },
+      { barId: 'b5', pass: 1 }, { barId: 'b6', pass: 1 },
+    ])).toBe('1\u20132, 5\u20136');
+  });
+
+  it('renders a single bar as a bare number (no range)', () => {
+    expect(summarizeTraversal(c, [{ barId: 'b3', pass: 1 }])).toBe('3');
+  });
+
+  it('skips steps whose bar id is unknown, and returns empty for none', () => {
+    expect(summarizeTraversal(c, [{ barId: 'ghost', pass: 1 }])).toBe('');
+    expect(summarizeTraversal(c, [])).toBe('');
   });
 });
