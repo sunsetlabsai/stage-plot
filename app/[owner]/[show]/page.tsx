@@ -2043,7 +2043,13 @@ function ChartNavigator({
     const resolved = resolveRoadmap(barCal);
     return resolved.ok ? resolved.traversal : barsInOrder(barCal).map((b) => ({ barId: b.id, pass: 1 }));
   }, [barCal]);
-  const currentStep = barCal && barSeekIdx !== null ? traversal[barSeekIdx] ?? null : null;
+  // Effective (clamped) seek index: a stored index can fall out of range when the
+  // traversal shrinks under it (a roadmap/bar edit, or leaving perform for
+  // calibrate where the traversal is empty). Reading it as null when stale keeps
+  // the redline and the Next/Prev disabled logic correct at render time — no
+  // setState-in-effect, no flash of a vanished redline with Next stuck disabled.
+  const seekIdx = barSeekIdx !== null && barSeekIdx < traversal.length ? barSeekIdx : null;
+  const currentStep = barCal && seekIdx !== null ? traversal[seekIdx] : null;
   const currentBar = currentStep && barCal ? (barCal.bars ?? []).find((b) => b.id === currentStep.barId) ?? null : null;
   const currentSystem = currentBar && barCal ? findSystem(barCal, currentBar.systemId) : null;
   const barRedline = currentBar && currentSystem ? { bar: currentBar, system: currentSystem } : null;
@@ -2063,8 +2069,8 @@ function ChartNavigator({
     const idx = traversal.findIndex((t) => t.barId === bar.id);
     if (idx !== -1) seekToIndex(idx);
   };
-  const stepNextBar = () => seekToIndex(barSeekIdx === null ? 0 : barSeekIdx + 1);
-  const stepPrevBar = () => { if (barSeekIdx !== null) seekToIndex(barSeekIdx - 1); };
+  const stepNextBar = () => seekToIndex(seekIdx === null ? 0 : seekIdx + 1);
+  const stepPrevBar = () => { if (seekIdx !== null) seekToIndex(seekIdx - 1); };
 
   const saveCalibration = async (promote: boolean) => {
     if (!calibration || !chartFileId || !sourceHash) return;
@@ -2315,7 +2321,7 @@ function ChartNavigator({
           {charts.map((c, i) => (
             <button
               key={`${c.role}-${c.fileId}`}
-              onClick={() => { setActiveChartIdx(i); setPageNum(1); }}
+              onClick={() => { setActiveChartIdx(i); setPageNum(1); setBarSeekIdx(null); }}
               className={`px-2 py-1 rounded text-xs font-bold shrink-0 transition-colors ${
                 i === activeChartIdx
                   ? 'bg-white text-black'
@@ -2467,7 +2473,7 @@ function ChartNavigator({
         <div className="flex items-center justify-center gap-3 py-1.5 text-xs bg-zinc-900 border-t border-zinc-800">
           <button
             onClick={stepPrevBar}
-            disabled={barSeekIdx === null || barSeekIdx <= 0}
+            disabled={seekIdx === null || seekIdx <= 0}
             className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
           >
             &larr; Prev bar
@@ -2484,7 +2490,7 @@ function ChartNavigator({
           </span>
           <button
             onClick={stepNextBar}
-            disabled={traversal.length === 0 || (barSeekIdx !== null && barSeekIdx >= traversal.length - 1)}
+            disabled={traversal.length === 0 || (seekIdx !== null && seekIdx >= traversal.length - 1)}
             className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
           >
             Next bar &rarr;
