@@ -1,7 +1,12 @@
 import { NextRequest } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
-import { canVerify, CALIBRATION_SCHEMA_VERSION } from '@/lib/chart-calibration';
+import {
+  canVerify,
+  isPerformable,
+  isValidCalibration,
+  CALIBRATION_SCHEMA_VERSION,
+} from '@/lib/chart-calibration';
 import type { ChartCalibration, SectionAnchor } from '@/lib/types';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -22,10 +27,27 @@ function rowToCalibration(row: {
   };
 }
 
+async function isOwnerOfChart(chartId: string): Promise<boolean> {
+  const supabase = await getSupabaseServer();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return false;
+  const { data } = await supabase
+    .from('chart_library')
+    .select('id')
+    .eq('id', chartId)
+    .eq('owner_id', user.id)
+    .maybeSingle();
+  return !!data;
+}
+
 // GET /api/charts/calibration?chart_id=&hash=
-// Public read for Perform mode (anonymous show shares), via the service-role
-// client — consistent with charts themselves being served from public storage
-// URLs. Returns the single (chart_id, source_hash) row, or 404.
+// Dual-audience by caller identity:
+//   - Owner (authenticated, owns the chart) → returns any row, incl. drafts, for
+//     the calibration editor.
+//   - Everyone else (anonymous Perform reads on public shares) → the server
+//     enforces the Perform boundary: only an isPerformable (verified + invariant)
+//     row is returned; a draft is hidden behind the same 404 as a missing row, so
+//     draft existence never leaks.
 export async function GET(request: NextRequest) {
   const chartId = request.nextUrl.searchParams.get('chart_id');
   const hash = request.nextUrl.searchParams.get('hash');
@@ -48,36 +70,27 @@ export async function GET(request: NextRequest) {
   if (error) {
     return Response.json({ error: error.message }, { status: 500 });
   }
-  if (!data) {
-    return Response.json({ error: 'No calibration for this chart + hash' }, { status: 404 });
+
+  const notFound = Response.json(
+    { error: 'No calibration for this chart + hash' },
+    { status: 404 },
+  );
+  if (!data) return notFound;
+
+  const calibration = rowToCalibration(data);
+
+  // Perform boundary: non-owners only ever see a performable calibration.
+  if (!isPerformable(calibration) && !(await isOwnerOfChart(chartId))) {
+    return notFound;
   }
 
-  return Response.json({ calibration: rowToCalibration(data) });
+  return Response.json({ calibration });
 }
 
 interface PutBody {
   chart_id?: string;
   source_hash?: string;
   calibration?: ChartCalibration;
-}
-
-function isValidCalibration(c: unknown): c is ChartCalibration {
-  if (!c || typeof c !== 'object') return false;
-  const cal = c as Record<string, unknown>;
-  if (cal.status !== 'draft' && cal.status !== 'verified') return false;
-  if (typeof cal.schemaVersion !== 'number') return false;
-  if (!Array.isArray(cal.sections)) return false;
-  return (cal.sections as unknown[]).every((s) => {
-    if (!s || typeof s !== 'object') return false;
-    const a = s as Record<string, unknown>;
-    return (
-      typeof a.id === 'string' &&
-      typeof a.page === 'number' &&
-      typeof a.x === 'number' &&
-      typeof a.y === 'number' &&
-      typeof a.label === 'string'
-    );
-  });
 }
 
 // PUT /api/charts/calibration — upsert a calibration for a chart the caller owns.
@@ -91,7 +104,12 @@ export async function PUT(request: NextRequest) {
     return Response.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  const body = (await request.json()) as PutBody;
+  let body: PutBody;
+  try {
+    body = (await request.json()) as PutBody;
+  } catch {
+    return Response.json({ error: 'Invalid JSON' }, { status: 400 });
+  }
   const { chart_id: chartId, source_hash: hash, calibration } = body;
 
   if (!chartId || !UUID_RE.test(chartId)) {

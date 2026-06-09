@@ -113,6 +113,36 @@ export function isPerformable(cal: ChartCalibration): boolean {
   return cal.status === 'verified' && canVerify(cal);
 }
 
+// ── Payload validation (untrusted boundary: API + hand-edited DB rows) ─────
+
+// A structurally valid section anchor: present id, a 1-based integer page, and
+// finite normalized coords in [0,1]. (Label content is enforced by canVerify.)
+export function isValidSectionAnchor(s: unknown): s is SectionAnchor {
+  if (!s || typeof s !== 'object') return false;
+  const a = s as Record<string, unknown>;
+  return (
+    typeof a.id === 'string' && a.id.length > 0 &&
+    typeof a.page === 'number' && Number.isInteger(a.page) && a.page >= 1 &&
+    typeof a.x === 'number' && Number.isFinite(a.x) && a.x >= 0 && a.x <= 1 &&
+    typeof a.y === 'number' && Number.isFinite(a.y) && a.y >= 0 && a.y <= 1 &&
+    typeof a.label === 'string'
+  );
+}
+
+// A structurally valid calibration: known status, numeric schema version, and an
+// array of valid section anchors with unique ids. (Does NOT enforce the verify
+// invariant — callers add canVerify when persisting/consuming a 'verified' row.)
+export function isValidCalibration(c: unknown): c is ChartCalibration {
+  if (!c || typeof c !== 'object') return false;
+  const cal = c as Record<string, unknown>;
+  if (cal.status !== 'draft' && cal.status !== 'verified') return false;
+  if (typeof cal.schemaVersion !== 'number') return false;
+  if (!Array.isArray(cal.sections)) return false;
+  if (!cal.sections.every(isValidSectionAnchor)) return false;
+  const ids = new Set((cal.sections as SectionAnchor[]).map((s) => s.id));
+  return ids.size === cal.sections.length;
+}
+
 // sha256 hex of PDF bytes — the de-facto chart version (the library has no
 // version concept). Computed where the bytes already live (the client viewer);
 // the sidecar stores this as source_hash and apply is gated on a live re-hash.

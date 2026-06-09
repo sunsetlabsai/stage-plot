@@ -11,6 +11,9 @@ import {
   canVerify,
   verify,
   isPerformable,
+  isValidSectionAnchor,
+  isValidCalibration,
+  CALIBRATION_SCHEMA_VERSION as SCHEMA,
   hashPdfBytes,
 } from '../lib/chart-calibration';
 import type { ChartCalibration } from '../lib/types';
@@ -151,6 +154,57 @@ describe('verify / isPerformable', () => {
       sections: [{ id: 'a', page: 1, x: 0.1, y: 0.1, label: '  ' }],
     });
     expect(isPerformable(tampered)).toBe(false);
+  });
+});
+
+describe('isValidSectionAnchor', () => {
+  const ok = { id: 'a', page: 1, x: 0.5, y: 0.5, label: 'Intro' };
+
+  it('accepts a well-formed anchor (blank label allowed at this layer)', () => {
+    expect(isValidSectionAnchor(ok)).toBe(true);
+    expect(isValidSectionAnchor({ ...ok, label: '' })).toBe(true);
+  });
+
+  it('rejects non-objects and missing/blank id', () => {
+    expect(isValidSectionAnchor(null)).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, id: '' })).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, id: 5 })).toBe(false);
+  });
+
+  it('rejects non-integer or sub-1 pages', () => {
+    expect(isValidSectionAnchor({ ...ok, page: 0 })).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, page: 1.5 })).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, page: -2 })).toBe(false);
+  });
+
+  it('rejects out-of-range or non-finite coords', () => {
+    expect(isValidSectionAnchor({ ...ok, x: 1.01 })).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, y: -0.01 })).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, x: NaN })).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, y: Infinity })).toBe(false);
+  });
+});
+
+describe('isValidCalibration', () => {
+  const section = { id: 'a', page: 1, x: 0.5, y: 0.5, label: 'Intro' };
+  const base = { schemaVersion: SCHEMA, status: 'draft', sections: [section] };
+
+  it('accepts a well-formed calibration', () => {
+    expect(isValidCalibration(base)).toBe(true);
+  });
+
+  it('rejects unknown status and non-numeric schema version', () => {
+    expect(isValidCalibration({ ...base, status: 'published' })).toBe(false);
+    expect(isValidCalibration({ ...base, schemaVersion: '1' })).toBe(false);
+  });
+
+  it('rejects a non-array sections field or an invalid section', () => {
+    expect(isValidCalibration({ ...base, sections: {} })).toBe(false);
+    expect(isValidCalibration({ ...base, sections: [{ ...section, page: 0 }] })).toBe(false);
+  });
+
+  it('rejects duplicate section ids', () => {
+    expect(isValidCalibration({ ...base, sections: [section, section] })).toBe(false);
   });
 });
 
