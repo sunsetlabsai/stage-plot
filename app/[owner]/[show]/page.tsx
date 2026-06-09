@@ -2098,7 +2098,7 @@ function NumStepper({ label, value, min, onChange }: {
 // order or red contradiction). Empty geometry shows a hint to add bars first.
 // Duplicate marker kinds disable; repeat-end and endings require an enclosing |:.
 function RoadmapToolbar({
-  hasBars, selectedBar, selectedMarkerId, markerKindsOnBar, boundRepeatStartId,
+  hasBars, selectedBar, selectedMarkerId, markerKindsOnBar, globalSingletonsUsed, boundRepeatStartId,
   endingDraft, nextTimes, nextUntil, playOrder, resolveError,
   onSetTimes, onSetUntil, onRepeatStart, onRepeatEnd, onSegno, onCoda, onToCoda,
   onFine, onJump, onBeginEnding, onConfirmEnding, onCancelEnding, onSetEndingNumber, onDeleteMarker,
@@ -2107,6 +2107,7 @@ function RoadmapToolbar({
   selectedBar: Bar | null;
   selectedMarkerId: string | null;
   markerKindsOnBar: Set<RoadmapMarker['kind']>;
+  globalSingletonsUsed: Set<RoadmapMarker['kind']>;
   boundRepeatStartId: string | null;
   endingDraft: { barIds: string[]; number: number } | null;
   nextTimes: number;
@@ -2202,10 +2203,10 @@ function RoadmapToolbar({
         <NumStepper label={'\u00d7'} value={nextTimes} min={2} onChange={onSetTimes} />
       </div>
       <PaletteBtn label="Ending" title="1st/2nd ending (volta)" onClick={onBeginEnding} disabled={!boundRepeatStartId} />
-      <PaletteBtn label="Segno" onClick={onSegno} disabled={has('segno')} />
-      <PaletteBtn label="Coda" onClick={onCoda} disabled={has('coda')} />
+      <PaletteBtn label="Segno" title="One per chart" onClick={onSegno} disabled={globalSingletonsUsed.has('segno')} />
+      <PaletteBtn label="Coda" title="One per chart" onClick={onCoda} disabled={globalSingletonsUsed.has('coda')} />
       <PaletteBtn label="To Coda" onClick={onToCoda} disabled={has('toCoda')} />
-      <PaletteBtn label="Fine" onClick={onFine} disabled={has('fine')} />
+      <PaletteBtn label="Fine" title="One per chart" onClick={onFine} disabled={globalSingletonsUsed.has('fine')} />
       <PaletteBtn label="D.C." title="Da Capo" onClick={() => onJump('capo')} disabled={has('jump')} />
       <PaletteBtn label="D.S." title="Dal Segno" onClick={() => onJump('segno')} disabled={has('jump')} />
       <select
@@ -2385,6 +2386,14 @@ function ChartNavigator({
   const markerKindsOnBar = new Set(
     roadmapMarkers
       .filter((m) => m.kind !== 'ending' && m.barId === selectedBarId)
+      .map((m) => m.kind),
+  );
+  // Segno/Coda/Fine are v1 global singletons (resolveRoadmap §5 #2 rejects more
+  // than one of each), so their palette buttons disable once one exists ANYWHERE
+  // — not just on the selected bar — to keep authoring out of an avoidable error.
+  const globalSingletonsUsed = new Set(
+    roadmapMarkers
+      .filter((m) => m.kind === 'segno' || m.kind === 'coda' || m.kind === 'fine')
       .map((m) => m.kind),
   );
   const boundRepeatStartId = calibration && selectedBarId ? enclosingRepeatStartId(calibration, selectedBarId) : null;
@@ -2851,6 +2860,7 @@ function ChartNavigator({
                 selectedBar={selectedBar}
                 selectedMarkerId={selectedMarkerId}
                 markerKindsOnBar={markerKindsOnBar}
+                globalSingletonsUsed={globalSingletonsUsed}
                 boundRepeatStartId={boundRepeatStartId}
                 endingDraft={endingDraft}
                 nextTimes={nextTimes}
