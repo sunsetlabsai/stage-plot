@@ -62,15 +62,48 @@ export interface SectionAnchor {
   label: string;  // human label; required (non-blank) to verify the calibration
 }
 
-// The calibration sidecar payload (the navigation/timeline graph). Step 1 is a
-// pure section chain; nav edges + temporal layer are step-2+ enrichment and are
-// intentionally absent here. Persisted keyed by (chart_id, source_hash).
+// ── Step-2 enrichment: bar-level geometry ────────────────────────────────────
+// A System is a horizontal band on a PDF page containing one or more bars (a
+// "staff system" or "chord chart line"). Coords are PDF-relative / normalized
+// 0..1 so they survive zoom, rotation, and device size.
+export interface System {
+  id: string;
+  page: number;     // 1-based
+  yTop: number;     // normalized 0..1 (top edge of the system band)
+  yBottom: number;  // normalized 0..1 (bottom edge; yBottom > yTop)
+  xStart: number;   // normalized 0..1 (left edge)
+  xEnd: number;     // normalized 0..1 (right edge; xEnd > xStart)
+}
+
+// A Bar is a barline-delimited region within a System. absNumber is the global
+// bar number in reading order (page→yTop→xStart across systems, then xStart
+// within each system). sectionId links to a SectionAnchor when assigned.
+export interface Bar {
+  id: string;
+  systemId: string;       // FK to System.id
+  xStart: number;         // normalized 0..1 within the page
+  xEnd: number;           // normalized 0..1 within the page (xEnd > xStart)
+  absNumber: number;      // 1-based global bar number in reading order
+  sectionId: string | null; // FK to SectionAnchor.id; null until assignment
+}
+
+// A position reference — used by nav/temporal layers so they never assume bar
+// geometry. Coarse (sectionId string) for step-1; fine (barId + pass) for step-2+.
+export type PositionRef =
+  | string                              // sectionId (coarse, step-1 rail)
+  | { barId: string; pass: number };    // bar-level (fine, step-2+)
+
+// The calibration sidecar payload (the navigation/timeline graph). Persisted
+// keyed by (chart_id, source_hash). Step 1 = section chain; step 2 adds
+// system/bar geometry. Nav edges + temporal layer are later enrichment.
 //   status: Perform consumes ONLY 'verified' (a matching hash is necessary, not
 //   sufficient). 'draft' seeds the editor but never drives the live redline.
 export interface ChartCalibration {
   schemaVersion: number;
   status: 'draft' | 'verified';
   sections: SectionAnchor[];
+  systems?: System[];   // step-2+ enrichment; absent in v1 payloads
+  bars?: Bar[];         // step-2+ enrichment; absent in v1 payloads
 }
 
 export interface SetlistSong {

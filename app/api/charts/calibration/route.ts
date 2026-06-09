@@ -5,26 +5,31 @@ import {
   canVerify,
   isPerformable,
   isValidCalibration,
+  upgradeToV2,
   CALIBRATION_SCHEMA_VERSION,
 } from '@/lib/chart-calibration';
-import type { ChartCalibration, SectionAnchor } from '@/lib/types';
+import type { Bar, ChartCalibration, SectionAnchor, System } from '@/lib/types';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/;
 
 // Reconstruct the client-facing ChartCalibration from a stored row. The status
 // and schema_version columns are authoritative for querying; graph holds the
-// section payload (and, later, nav/temporal — kept extensible).
+// section/system/bar payload. Always returns a v2 calibration (v1 rows are
+// upgraded on read — the DB row is NOT rewritten, just the response).
 function rowToCalibration(row: {
   schema_version: number;
   status: string;
-  graph: { sections?: SectionAnchor[] };
+  graph: { sections?: SectionAnchor[]; systems?: System[]; bars?: Bar[] };
 }): ChartCalibration {
-  return {
+  const raw: ChartCalibration = {
     schemaVersion: row.schema_version,
     status: row.status === 'verified' ? 'verified' : 'draft',
     sections: Array.isArray(row.graph?.sections) ? row.graph.sections : [],
+    systems: Array.isArray(row.graph?.systems) ? row.graph.systems : undefined,
+    bars: Array.isArray(row.graph?.bars) ? row.graph.bars : undefined,
   };
+  return upgradeToV2(raw);
 }
 
 async function isOwnerOfChart(chartId: string): Promise<boolean> {
@@ -127,7 +132,8 @@ export async function PUT(request: NextRequest) {
   if (!isValidCalibration(calibration)) {
     return Response.json({ error: 'invalid calibration payload' }, { status: 400 });
   }
-  if (calibration.schemaVersion !== CALIBRATION_SCHEMA_VERSION) {
+  // Accept v1 (sections-only) or v2 (sections + systems/bars). Persist as v2.
+  if (calibration.schemaVersion !== 1 && calibration.schemaVersion !== CALIBRATION_SCHEMA_VERSION) {
     return Response.json({ error: 'unsupported calibration schema version' }, { status: 400 });
   }
   // Fail closed: never persist a 'verified' calibration that breaks the invariant.
@@ -147,15 +153,18 @@ export async function PUT(request: NextRequest) {
     return Response.json({ error: 'Chart not found or permission denied' }, { status: 403 });
   }
 
+  // Upgrade to v2 before persisting (a v1 client payload gets systems/bars=[]).
+  const toStore = upgradeToV2(calibration);
+
   const { error } = await supabase
     .from('chart_calibration')
     .upsert(
       {
         chart_id: chartId,
         source_hash: hash,
-        schema_version: calibration.schemaVersion,
-        status: calibration.status,
-        graph: { sections: calibration.sections },
+        schema_version: CALIBRATION_SCHEMA_VERSION,
+        status: toStore.status,
+        graph: { sections: toStore.sections, systems: toStore.systems, bars: toStore.bars },
       },
       { onConflict: 'chart_id,source_hash' },
     );
