@@ -299,6 +299,29 @@ Its Phase 3 converts charts PDF→Markdown (`.md`-first, PDF demoted to `origina
 
 ---
 
+## Build divergence — step 1 hashing (client-side, not denormalized)
+
+The doc-literal plan added `content_hash` / `page_count` / `page_dims` columns to
+`chart_library`. **Step 1 instead hashes client-side** (Opus + Codex agreed):
+
+- The `source_hash` (sha256 of PDF bytes) is computed in the viewer, which already
+  downloads the PDF to render markers/redline — no extra conceptual work — and is
+  stored **only** in the `chart_calibration` sidecar.
+- **Stronger invariant:** "apply calibration only to the bytes actually being
+  rendered." A live re-hash beats a DB column if storage/CDN/cache ever serves
+  stale bytes. Perform fetches the matching `(chart_id, source_hash)` row, then
+  requires `status === 'verified'` *and* the local invariant (`canVerify`). **If
+  hashing fails ⇒ no redline** (not best-effort).
+- `page_count` / `page_dims` come from PDF.js at render/editor time; not needed
+  denormalized for the section rail.
+- Keying is unchanged: `(chart_id, source_hash)`. Save/load APIs validate
+  `chart_id` ownership (PUT: owner-only; GET: public read like the chart's own
+  public storage URL).
+- **Add `chart_library.content_hash` later** only when library-wide
+  stale/calibrated status is needed *without opening PDFs* (server-side
+  conversion/import, admin audit/backfill, cross-device preflight). Premature for
+  the minimal vertical slice.
+
 ## Build order (when approved — separate build PR, not this doc)
 
 1. **A — manual seek over a minimal hand-placed rail** (the bootstrap, resolves #1). This step is a *self-contained vertical slice*, not editor-free — it explicitly includes: (a) a **minimal marker-creation UI** (tap-to-drop **sections-only** markers over the PDF; no bar geometry, no converter, no vision), (b) **sidecar save/load** (the persistence model below — write the graph, read it back, hash-key it), and (c) **perform-mode overlay rendering** (draw the markers + redline on the PDF). Seek snaps to section heads; redline parks/advances coarsely. The **full** Calibration Editor (gizmos, auto-distribute, snap, hybrid nav, scrub-verify, bar ticks) is step 4 enrichment — *not* required here. Universal fallback (tap marker = seek, long-press = hold/loop).
