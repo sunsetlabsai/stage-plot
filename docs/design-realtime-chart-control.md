@@ -350,9 +350,11 @@ without it — "correction never exceeds creation" already makes calibration ~20
       for irregular bars, snap-to-printed-line (detector #2), copy-system layout, and
       per-system x-bounds (bands are full-width 0..1 for now).
    4. **Nav graph** — repeats / 1st-2nd endings / D.S. / D.C. / Coda / Fine + the
-      non-linear `(bar, pass)` timeline. **Needs a focused mini-spec first** (OQ #3:
-      nested repeats, multiple endings, *D.S. al Coda al Fine*, contradictory-roadmap
-      rejection) — not built blind.
+      non-linear `(bar, pass)` timeline. **Mini-spec drafted: `design-nav-graph.md`**
+      (markers + pure resolver; resolver doubles as the contradiction validator;
+      schema → 3 with finding-1's fail-closed GET as the load-bearing guard). Covers
+      OQ #3 (nested repeats, multiple endings, *D.S. al Coda al Fine*, contradictory-
+      roadmap rejection). Awaiting Codex cross-check + sign-off before build.
    5. **Verify-by-playback (scrub/play)** as the primary review affordance + hybrid nav
       badges + Edit/Perform weighting.
 3. **Converter (fast-follow merge, right behind the editor)** — structural import pass →
