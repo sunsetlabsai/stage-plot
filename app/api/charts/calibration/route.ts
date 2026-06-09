@@ -5,6 +5,7 @@ import {
   canVerify,
   isPerformable,
   isValidCalibration,
+  resolveRoadmap,
   upgradeCalibration,
   CALIBRATION_SCHEMA_VERSION,
 } from '@/lib/chart-calibration';
@@ -155,9 +156,16 @@ export async function PUT(request: NextRequest) {
   if (![1, 2, CALIBRATION_SCHEMA_VERSION].includes(calibration.schemaVersion)) {
     return Response.json({ error: 'unsupported calibration schema version' }, { status: 400 });
   }
-  // Fail closed: never persist a 'verified' calibration that breaks the invariant.
+  // Fail closed: never persist a 'verified' calibration that breaks the
+  // invariant. canVerify gates on both labeled sections AND a resolvable
+  // roadmap — surface which one failed so the editor can show a useful message.
   if (calibration.status === 'verified' && !canVerify(calibration)) {
-    return Response.json({ error: 'cannot verify: every section needs a label' }, { status: 400 });
+    let reason = 'cannot verify: every section needs a label';
+    if ((calibration.roadmap?.length ?? 0) > 0) {
+      const resolved = resolveRoadmap(calibration);
+      if (!resolved.ok) reason = `cannot verify: roadmap does not resolve (${resolved.error.reason})`;
+    }
+    return Response.json({ error: reason }, { status: 400 });
   }
 
   // Ownership pre-check (RLS would also block, but this yields a clean 403).

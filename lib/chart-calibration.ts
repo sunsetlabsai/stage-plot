@@ -319,11 +319,15 @@ export function autoDistributeBars(
     }
   }
 
-  const allBars = [...otherBars, ...newBars];
+  const nextBars = renumberBars([...otherBars, ...newBars], systems);
   return {
     ...cal,
     status: 'draft',
-    bars: renumberBars(allBars, systems),
+    bars: nextBars,
+    // Cascade: the old bars for this system were replaced with fresh ids, so
+    // prune roadmap markers that referenced the now-deleted bars (same
+    // treatment as removeSystem — the bar-deletion cascade in the design §7).
+    roadmap: pruneRoadmap(cal.roadmap, new Set(nextBars.map((b) => b.id))),
   };
 }
 
@@ -475,6 +479,25 @@ export function resolveRoadmap(cal: ChartCalibration): RoadmapResult {
     }
     if ((m.kind === 'repeatEnd' || m.kind === 'ending') && !repeatStartById.has(m.repeatStartId)) {
       return err([m.id], `${m.kind} is not bound to a repeatStart`);
+    }
+  }
+
+  // §5 — no two same-kind markers may share a bar. The walk keys its
+  // action lookups (repeatEndAt / jumpAt / toCodaAt) by bar position, so a
+  // second same-kind marker on the same bar would silently overwrite the first
+  // and drive the wrong traversal. Reject as contradictory (endings handled by
+  // their own overlap checks). v1 also rejects two repeats closing on one bar.
+  const byKindBar = new Map<string, string[]>();
+  for (const m of markers) {
+    if (m.kind === 'ending') continue;
+    const key = `${m.kind}\u0000${m.barId}`;
+    const arr = byKindBar.get(key) ?? [];
+    arr.push(m.id);
+    byKindBar.set(key, arr);
+  }
+  for (const [key, ids] of byKindBar) {
+    if (ids.length > 1) {
+      return err(ids, `duplicate ${key.split('\u0000')[0]} markers on the same bar`);
     }
   }
 

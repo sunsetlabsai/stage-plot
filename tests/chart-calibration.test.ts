@@ -1060,6 +1060,31 @@ describe('resolveRoadmap — contradiction rejection (§5)', () => {
     ])).reason).toMatch(/Coda/);
   });
 
+  it('rejects two jump markers on the same bar (silent-overwrite guard)', () => {
+    const e = expectError(barsChart(8, [
+      { id: 'j1', kind: 'jump', barId: 'b8', edge: 'end', from: 'capo', until: 'end' },
+      { id: 'j2', kind: 'jump', barId: 'b8', edge: 'end', from: 'capo', until: 'end' },
+    ]));
+    expect(e.reason).toMatch(/duplicate jump/);
+    expect(e.markerIds.sort()).toEqual(['j1', 'j2']);
+  });
+
+  it('rejects two repeatEnd markers on the same bar', () => {
+    expect(expectError(barsChart(8, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're1', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'rs', times: 2 },
+      { id: 're2', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ])).reason).toMatch(/duplicate repeatEnd/);
+  });
+
+  it('rejects two toCoda markers on the same bar', () => {
+    expect(expectError(barsChart(8, [
+      { id: 'coda', kind: 'coda', barId: 'b6', edge: 'start' },
+      { id: 'tc1', kind: 'toCoda', barId: 'b4', edge: 'end' },
+      { id: 'tc2', kind: 'toCoda', barId: 'b4', edge: 'end' },
+    ])).reason).toMatch(/duplicate toCoda/);
+  });
+
   it('#2 multiple Segno', () => {
     const e = expectError(barsChart(8, [
       { id: 's1', kind: 'segno', barId: 'b2', edge: 'start' },
@@ -1315,5 +1340,44 @@ describe('removeSystem — roadmap cascade pruning', () => {
     const c = twoSystemChart([]);
     const noRoadmap = { ...c, roadmap: undefined };
     expect(removeSystem(noRoadmap, 'sys2').roadmap).toBeUndefined();
+  });
+});
+
+describe('autoDistributeBars — roadmap cascade pruning', () => {
+  it('prunes markers referencing bars replaced by a new distribution', () => {
+    const sys: System = { id: 'sys1', page: 1, yTop: 0.1, yBottom: 0.3, xStart: 0, xEnd: 1 };
+    const bars: Bar[] = [
+      { id: 'b1', systemId: 'sys1', xStart: 0, xEnd: 0.5, absNumber: 1, sectionId: null },
+      { id: 'b2', systemId: 'sys1', xStart: 0.5, xEnd: 1, absNumber: 2, sectionId: null },
+    ];
+    const c: ChartCalibration = {
+      schemaVersion: CALIBRATION_SCHEMA_VERSION, status: 'verified',
+      sections: [{ id: 'sec', page: 1, x: 0.05, y: 0.05, label: 'A' }],
+      systems: [sys], bars,
+      roadmap: [{ id: 'seg', kind: 'segno', barId: 'b2', edge: 'start' }],
+    };
+    // The − N + stepper replaces sys1's bars with fresh ids → b2 vanishes.
+    const next = autoDistributeBars(c, 'sys1', 4);
+    expect(next.status).toBe('draft');
+    expect(next.roadmap).toEqual([]);
+    // No dangling FK ⇒ still structurally valid (the bug this fix prevents).
+    expect(isValidCalibration(next)).toBe(true);
+  });
+
+  it('keeps markers referencing bars in untouched systems', () => {
+    const sys1: System = { id: 'sys1', page: 1, yTop: 0.1, yBottom: 0.3, xStart: 0, xEnd: 1 };
+    const sys2: System = { id: 'sys2', page: 1, yTop: 0.4, yBottom: 0.6, xStart: 0, xEnd: 1 };
+    const bars: Bar[] = [
+      { id: 'a1', systemId: 'sys1', xStart: 0, xEnd: 1, absNumber: 1, sectionId: null },
+      { id: 'c1', systemId: 'sys2', xStart: 0, xEnd: 1, absNumber: 2, sectionId: null },
+    ];
+    const c: ChartCalibration = {
+      schemaVersion: CALIBRATION_SCHEMA_VERSION, status: 'draft',
+      sections: [{ id: 'sec', page: 1, x: 0.05, y: 0.05, label: 'A' }],
+      systems: [sys1, sys2], bars,
+      roadmap: [{ id: 'seg', kind: 'segno', barId: 'c1', edge: 'start' }],
+    };
+    const next = autoDistributeBars(c, 'sys1', 3);
+    expect(next.roadmap?.map((m) => m.id)).toEqual(['seg']);
   });
 });
