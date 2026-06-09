@@ -343,8 +343,12 @@ without it — "correction never exceeds creation" already makes calibration ~20
       back-compat read of v1 section-only rows.
    2. **Bar-level Perform renderer** — redline sweeps L→R within a system, snaps to next,
       crosses pages (read-only consume of bars).
-   3. **System-band gizmo + auto-distribute UI** + per-tick nudge for irregulars +
-      snap-to-printed-line (detector #2) + copy-system layout.
+   3. **System-band creation floor** — tap-to-drop full-width system bands, select +
+      drag-resize (y only), per-system `− N +` bar-count stepper (auto-distribute),
+      delete system. This is the minimum creation surface that makes chunk 2's renderer
+      usable. **Deferred to a later chunk (refinement, not creation):** per-tick nudge
+      for irregular bars, snap-to-printed-line (detector #2), copy-system layout, and
+      per-system x-bounds (bands are full-width 0..1 for now).
    4. **Nav graph** — repeats / 1st-2nd endings / D.S. / D.C. / Coda / Fine + the
       non-linear `(bar, pass)` timeline. **Needs a focused mini-spec first** (OQ #3:
       nested repeats, multiple endings, *D.S. al Coda al Fine*, contradictory-roadmap

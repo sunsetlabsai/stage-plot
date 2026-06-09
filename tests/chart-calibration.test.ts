@@ -759,6 +759,39 @@ describe('isValidCalibration', () => {
       schemaVersion: 1, status: 'draft', sections: [],
     })).toBe(true);
   });
+
+  it('rejects bars whose absNumber is not the dense 1..n reading order', () => {
+    const sys: System = { id: 's1', page: 1, yTop: 0.1, yBottom: 0.3, xStart: 0.0, xEnd: 1.0 };
+    // Two bars in reading order (b1 then b2) but absNumber has a gap (1, 3).
+    expect(isValidCalibration({
+      ...cal(), systems: [sys],
+      bars: [
+        { id: 'b1', systemId: 's1', xStart: 0.0, xEnd: 0.4, absNumber: 1, sectionId: null },
+        { id: 'b2', systemId: 's1', xStart: 0.5, xEnd: 0.9, absNumber: 3, sectionId: null },
+      ],
+    })).toBe(false);
+    // absNumber disagrees with xStart reading order (b1 left=2, b2 right=1).
+    expect(isValidCalibration({
+      ...cal(), systems: [sys],
+      bars: [
+        { id: 'b1', systemId: 's1', xStart: 0.0, xEnd: 0.4, absNumber: 2, sectionId: null },
+        { id: 'b2', systemId: 's1', xStart: 0.5, xEnd: 0.9, absNumber: 1, sectionId: null },
+      ],
+    })).toBe(false);
+  });
+
+  it('accepts bars whose absNumber matches reading order across systems', () => {
+    const s1: System = { id: 's1', page: 1, yTop: 0.1, yBottom: 0.3, xStart: 0.0, xEnd: 1.0 };
+    const s2: System = { id: 's2', page: 1, yTop: 0.4, yBottom: 0.6, xStart: 0.0, xEnd: 1.0 };
+    expect(isValidCalibration({
+      ...cal(), systems: [s1, s2],
+      bars: [
+        { id: 'b1', systemId: 's1', xStart: 0.0, xEnd: 0.4, absNumber: 1, sectionId: null },
+        { id: 'b2', systemId: 's1', xStart: 0.5, xEnd: 0.9, absNumber: 2, sectionId: null },
+        { id: 'b3', systemId: 's2', xStart: 0.0, xEnd: 0.4, absNumber: 3, sectionId: null },
+      ],
+    })).toBe(true);
+  });
 });
 
 // ── hashPdfBytes ────────────────────────────────────────────────────────────

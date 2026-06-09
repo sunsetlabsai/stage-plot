@@ -435,6 +435,13 @@ export function isValidCalibration(c: unknown): c is ChartCalibration {
       // sectionId FK (null is fine — unassigned).
       if (bar.sectionId !== null && !sectionIds.has(bar.sectionId)) return false;
     }
+
+    // absNumber must be the dense 1..n reading order (no gaps/dupes/misorder).
+    // Re-derive reading order and require absNumber === index + 1.
+    const ordered = barsInOrder(c as ChartCalibration);
+    for (let i = 0; i < ordered.length; i++) {
+      if (ordered[i].absNumber !== i + 1) return false;
+    }
   }
 
   return true;

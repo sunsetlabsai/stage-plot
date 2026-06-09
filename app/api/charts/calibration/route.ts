@@ -84,6 +84,12 @@ export async function GET(request: NextRequest) {
 
   const calibration = rowToCalibration(data);
 
+  // Fail closed on an unsupported (future) schema version. rowToCalibration
+  // upgrades known-old rows up to CALIBRATION_SCHEMA_VERSION; anything still
+  // above that is a row this build can't safely interpret, so serve nothing
+  // rather than risk driving the redline off a shape we don't understand.
+  if (calibration.schemaVersion !== CALIBRATION_SCHEMA_VERSION) return notFound;
+
   // Fail closed on a structurally invalid stored row (the hand-edited DB
   // boundary). isPerformable only checks status + labels, not geometry, so a
   // 'verified' row with garbage anchors could otherwise drive the redline —
