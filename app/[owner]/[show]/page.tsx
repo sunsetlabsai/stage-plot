@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { ReactNode, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
@@ -36,6 +36,7 @@ import type {
   SectionAnchor,
   System,
   Bar,
+  RoadmapMarker,
 } from '@/lib/types';
 import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf } from '@/lib/setlist';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
@@ -62,15 +63,19 @@ import {
   hashPdfBytes,
   tapToBar,
   findSystem,
-  firstBar,
-  nextBar,
-  prevBar,
+  barsInOrder,
+  resolveRoadmap,
+  enclosingRepeatStartId,
+  addRoadmapMarker,
+  removeRoadmapMarker,
+  summarizeTraversal,
   addSystem,
   removeSystem,
   resizeSystemBand,
   autoDistributeBars,
   systemsForPage,
 } from '@/lib/chart-calibration';
+import type { TraversalStep } from '@/lib/chart-calibration';
 import { useShow } from '@/lib/use-show';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { normalizeSongKeySafe, displayRole } from '@/lib/normalize';
@@ -79,6 +84,13 @@ import type { ChartRole } from '@/lib/normalize';
 // ─── Default band (imported at build time, used as fallback) ────────────────
 import { getBand } from '@/lib/bands';
 const fallbackBand = getBand();
+
+// Pass ordinal for the Perform transport readout ("2nd", "3rd" pass through a bar).
+function passOrdinal(n: number): string {
+  const v = n % 100;
+  const suffix = v >= 11 && v <= 13 ? 'th' : (['th', 'st', 'nd', 'rd'][n % 10] ?? 'th');
+  return `${n}${suffix}`;
+}
 
 // ─── Config shape stored in localStorage / URL ─────────────────────────────
 interface AppConfig {
@@ -1705,6 +1717,134 @@ function SystemBand({
   );
 }
 
+// Short, font-safe label for a placed roadmap marker glyph.
+function roadmapMarkerLabel(m: RoadmapMarker): string {
+  switch (m.kind) {
+    case 'repeatStart': return '|:';
+    case 'repeatEnd': return `:|\u00d7${m.times ?? 2}`;
+    case 'segno': return 'Segno';
+    case 'coda': return 'Coda';
+    case 'toCoda': return 'To Coda';
+    case 'fine': return 'Fine';
+    case 'jump': {
+      const head = m.from === 'capo' ? 'D.C.' : 'D.S.';
+      const tail = m.until === 'fine' ? ' al Fine' : m.until === 'coda' ? ' al Coda' : '';
+      return head + tail;
+    }
+    case 'ending': return `[${m.numbers.join(',')}]`;
+  }
+}
+
+// Roadmap-tool visual layer: faint system bands + bar dividers (so bars are
+// visible to tap), the selected-bar / ending-draft highlights, and a badge per
+// placed marker at its bar edge (red ring = part of the live-resolve error,
+// sky ring = selected for deletion). Bars are tapped through the overlay surface
+// (tapToBar); only the marker badges capture their own clicks. All visuals are
+// pointer-events:none except the badges.
+function RoadmapOverlayLayer({
+  calibration, box, page, selectedBarId, selectedMarkerId, endingBarIds, resolveErrorIds, onSelectMarker,
+}: {
+  calibration: ChartCalibration;
+  box: CanvasBox;
+  page: number;
+  selectedBarId: string | null;
+  selectedMarkerId: string | null;
+  endingBarIds: string[] | null;
+  resolveErrorIds: Set<string>;
+  onSelectMarker: (id: string) => void;
+}) {
+  const systems = systemsForPage(calibration, page);
+  const sysOnPage = new Set(systems.map((s) => s.id));
+  const bars = (calibration.bars ?? []).filter((b) => sysOnPage.has(b.systemId));
+  const barById = new Map((calibration.bars ?? []).map((b) => [b.id, b] as const));
+  const sysById = new Map((calibration.systems ?? []).map((s) => [s.id, s] as const));
+  const endingSet = new Set(endingBarIds ?? []);
+
+  // Screen geometry for one bar (or null if its system isn't on this page).
+  const barRect = (barId: string) => {
+    const b = barById.get(barId);
+    const s = b ? sysById.get(b.systemId) : null;
+    if (!b || !s || s.page !== page) return null;
+    return {
+      left: box.left + b.xStart * box.width,
+      right: box.left + b.xEnd * box.width,
+      top: box.top + s.yTop * box.height,
+      bottom: box.top + s.yBottom * box.height,
+    };
+  };
+
+  return (
+    <>
+      {/* Faint bands so the roadmap tool shows where bars are. */}
+      {systems.map((s) => (
+        <div
+          key={s.id}
+          className="absolute bg-zinc-400/5 ring-1 ring-zinc-600/40"
+          style={{
+            left: box.left + s.xStart * box.width,
+            top: box.top + s.yTop * box.height,
+            width: (s.xEnd - s.xStart) * box.width,
+            height: (s.yBottom - s.yTop) * box.height,
+            pointerEvents: 'none',
+          }}
+        />
+      ))}
+      {/* Bar dividers + selected / ending-draft highlights. */}
+      {bars.map((b) => {
+        const r = barRect(b.id);
+        if (!r) return null;
+        const highlight = b.id === selectedBarId ? 'bg-sky-500/20 ring-1 ring-sky-400'
+          : endingSet.has(b.id) ? 'bg-amber-500/20 ring-1 ring-amber-400'
+          : '';
+        return (
+          <div key={b.id} className={`absolute ${highlight}`}
+            style={{ left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top, pointerEvents: 'none' }}>
+            <div className="absolute top-0 bottom-0 left-0 w-px bg-zinc-500/50" />
+          </div>
+        );
+      })}
+      {/* Placed marker badges. */}
+      {(calibration.roadmap ?? []).map((m) => {
+        if (m.kind === 'ending') {
+          const first = barRect(m.barIds[0]);
+          const last = barRect(m.barIds[m.barIds.length - 1]);
+          if (!first || !last) return null;
+          const isErr = resolveErrorIds.has(m.id);
+          const isSel = m.id === selectedMarkerId;
+          return (
+            <button key={m.id} onClick={(e) => { e.stopPropagation(); onSelectMarker(m.id); }}
+              data-chart-overlay-interactive
+              className={`absolute text-[9px] font-bold rounded px-1 border-t-2 ${
+                isErr ? 'border-red-500 text-red-300 bg-red-950/60'
+                : isSel ? 'border-sky-400 text-sky-200 bg-sky-950/60'
+                : 'border-amber-400 text-amber-200 bg-zinc-900/80'}`}
+              style={{ left: first.left, top: first.top - 16, width: last.right - first.left, pointerEvents: 'auto' }}>
+              {roadmapMarkerLabel(m)}
+            </button>
+          );
+        }
+        const r = barRect(m.barId);
+        if (!r) return null;
+        const atStart = m.edge === 'start';
+        const x = atStart ? r.left : r.right;
+        const isErr = resolveErrorIds.has(m.id);
+        const isSel = m.id === selectedMarkerId;
+        return (
+          <button key={m.id} onClick={(e) => { e.stopPropagation(); onSelectMarker(m.id); }}
+            data-chart-overlay-interactive
+            className={`absolute text-[9px] font-bold rounded px-1 whitespace-nowrap -translate-x-1/2 ${
+              isErr ? 'ring-1 ring-red-500 text-red-300 bg-red-950/80'
+              : isSel ? 'ring-1 ring-sky-400 text-sky-200 bg-sky-950/80'
+              : 'ring-1 ring-zinc-600 text-zinc-200 bg-zinc-900/90'}`}
+            style={{ left: x, top: r.top - 16, pointerEvents: 'auto' }}>
+            {roadmapMarkerLabel(m)}
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
 // Absolutely fills the viewer container. In section-rail Perform the container
 // is pointer-events-none so taps between markers fall through to the page-turn
 // handler; markers re-enable pointer events on themselves. In Calibrate (and in
@@ -1717,12 +1857,14 @@ function CalibrationOverlay({
   barMode, barRedline, onBarTap,
   selectedSystemId, onDropSystem, onSelectSystem, onResizeSystem,
   onDrop, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
+  selectedBarId, selectedMarkerId, endingBarIds, resolveErrorIds,
+  onRoadmapBarTap, onSelectMarker,
 }: {
   calibration: ChartCalibration | null;
   box: CanvasBox;
   page: number;
   mode: 'perform' | 'calibrate';
-  calTool: 'sections' | 'bars';
+  calTool: 'sections' | 'bars' | 'roadmap';
   seekId: string | null;
   holdId: string | null;
   editingId: string | null;
@@ -1739,7 +1881,14 @@ function CalibrationOverlay({
   onRelabel: (id: string, label: string) => void;
   onDelete: (id: string) => void;
   onBeginEdit: (id: string | null) => void;
+  selectedBarId: string | null;
+  selectedMarkerId: string | null;
+  endingBarIds: string[] | null;
+  resolveErrorIds: Set<string>;
+  onRoadmapBarTap: (barId: string) => void;
+  onSelectMarker: (id: string) => void;
 }) {
+  const roadmapTool = mode === 'calibrate' && calTool === 'roadmap';
   // Which element types are live this frame. Sections show in section-rail
   // Perform and in the Sections calibrate tool; systems show in the Bars tool.
   const showSystems = mode === 'calibrate' && calTool === 'bars';
@@ -1797,6 +1946,14 @@ function CalibrationOverlay({
     const py = e.clientY - rect.top - box.top;
     if (px < 0 || py < 0 || px > box.width || py > box.height) return;
     if (barMode) { onBarTap(px / box.width, py / box.height); return; }
+    if (roadmapTool) {
+      // Tap a bar → select it for the palette (or extend the volta draft). A tap
+      // on empty space (no bar) is ignored. Marker badges capture their own taps.
+      if (!calibration) return;
+      const bar = tapToBar(calibration, page, px / box.width, py / box.height);
+      if (bar) onRoadmapBarTap(bar.id);
+      return;
+    }
     if (calTool === 'bars') {
       // A backdrop tap deselects if something's selected, else drops a new
       // full-width system band at the tap's height.
@@ -1824,6 +1981,18 @@ function CalibrationOverlay({
       className="absolute inset-0"
       style={{ pointerEvents: interactive ? 'auto' : 'none' }}
     >
+      {roadmapTool && calibration && (
+        <RoadmapOverlayLayer
+          calibration={calibration}
+          box={box}
+          page={page}
+          selectedBarId={selectedBarId}
+          selectedMarkerId={selectedMarkerId}
+          endingBarIds={endingBarIds}
+          resolveErrorIds={resolveErrorIds}
+          onSelectMarker={onSelectMarker}
+        />
+      )}
       {systemsOnPage.map((sys) => (
         <SystemBand
           key={sys.id}
@@ -1880,6 +2049,181 @@ function CalibrationOverlay({
   );
 }
 
+// A single marker-palette button (uniform styling; disables on duplicate kind
+// or unmet precondition).
+function PaletteBtn({ label, title, onClick, disabled }: {
+  label: string;
+  title?: string;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 font-bold hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+    >
+      {label}
+    </button>
+  );
+}
+
+// Inline −/+ number stepper (repeat-count ×N, ending number) with a floor.
+function NumStepper({ label, value, min, onChange }: {
+  label: string;
+  value: number;
+  min: number;
+  onChange: (n: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-0.5 shrink-0">
+      <span className="text-zinc-500">{label}</span>
+      <button
+        onClick={() => onChange(Math.max(min, value - 1))}
+        disabled={value <= min}
+        className="w-5 h-5 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
+      >
+        &minus;
+      </button>
+      <span className="w-4 text-center font-bold text-white">{value}</span>
+      <button onClick={() => onChange(value + 1)} className="w-5 h-5 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700">+</button>
+    </div>
+  );
+}
+
+// Roadmap-tool toolbar: the marker palette (acts on the selected bar), the
+// volta-bracket draw controls (while an ending is being drawn), a Delete button
+// (when a placed marker is selected), and the live-resolve readout (green play
+// order or red contradiction). Empty geometry shows a hint to add bars first.
+// Duplicate marker kinds disable; repeat-end and endings require an enclosing |:.
+function RoadmapToolbar({
+  hasBars, selectedBar, selectedMarkerId, markerKindsOnBar, globalSingletonsUsed, boundRepeatStartId,
+  endingDraft, nextTimes, nextUntil, playOrder, resolveError,
+  onSetTimes, onSetUntil, onRepeatStart, onRepeatEnd, onSegno, onCoda, onToCoda,
+  onFine, onJump, onBeginEnding, onConfirmEnding, onCancelEnding, onSetEndingNumber, onDeleteMarker,
+}: {
+  hasBars: boolean;
+  selectedBar: Bar | null;
+  selectedMarkerId: string | null;
+  markerKindsOnBar: Set<RoadmapMarker['kind']>;
+  globalSingletonsUsed: Set<RoadmapMarker['kind']>;
+  boundRepeatStartId: string | null;
+  endingDraft: { barIds: string[]; number: number } | null;
+  nextTimes: number;
+  nextUntil: 'end' | 'fine' | 'coda';
+  playOrder: string;
+  resolveError: string | null;
+  onSetTimes: (n: number) => void;
+  onSetUntil: (u: 'end' | 'fine' | 'coda') => void;
+  onRepeatStart: () => void;
+  onRepeatEnd: () => void;
+  onSegno: () => void;
+  onCoda: () => void;
+  onToCoda: () => void;
+  onFine: () => void;
+  onJump: (from: 'capo' | 'segno') => void;
+  onBeginEnding: () => void;
+  onConfirmEnding: () => void;
+  onCancelEnding: () => void;
+  onSetEndingNumber: (n: number) => void;
+  onDeleteMarker: (id: string) => void;
+}) {
+  const readout = resolveError ? (
+    <span className="text-red-400 truncate">&#10005; {resolveError}</span>
+  ) : playOrder ? (
+    <span className="text-emerald-400 truncate">plays: {playOrder}</span>
+  ) : null;
+
+  // No geometry yet — nothing to place markers on.
+  if (!hasBars) {
+    return (
+      <p className="text-[11px] text-zinc-400 truncate">
+        Add bars first (Bars tool), then tap a bar to place repeats, endings, and jumps.
+      </p>
+    );
+  }
+
+  // Volta-bracket draw: extend the run by tapping adjacent bars, set the ending
+  // number, confirm or cancel.
+  if (endingDraft) {
+    const n = endingDraft.barIds.length;
+    return (
+      <div className="flex items-center gap-2 text-[11px] text-zinc-300 min-w-0">
+        <span className="font-bold text-sky-300 shrink-0">Ending</span>
+        <span className="text-zinc-400 truncate">{n} bar{n === 1 ? '' : 's'} · tap adjacent bars</span>
+        <NumStepper label="#" value={endingDraft.number} min={1} onChange={onSetEndingNumber} />
+        <button
+          onClick={onConfirmEnding}
+          disabled={n === 0}
+          className="px-2 py-1 rounded bg-emerald-600 text-white font-bold hover:bg-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+        >
+          Confirm
+        </button>
+        <button onClick={onCancelEnding} className="px-2 py-1 rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 shrink-0">
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
+  // A placed marker is selected → delete-to-resolve escape hatch.
+  if (selectedMarkerId) {
+    return (
+      <div className="flex items-center gap-2 text-[11px] min-w-0">
+        <button
+          onClick={() => onDeleteMarker(selectedMarkerId)}
+          className="px-2 py-1 rounded bg-red-600 text-white font-bold hover:bg-red-500 shrink-0"
+        >
+          Delete marker
+        </button>
+        {readout}
+      </div>
+    );
+  }
+
+  // No bar selected → hint + current readout.
+  if (!selectedBar) {
+    return (
+      <div className="flex items-center gap-2 text-[11px] text-zinc-400 min-w-0">
+        <span className="truncate">Tap a bar to place a marker · tap a glyph to delete</span>
+        {readout}
+      </div>
+    );
+  }
+
+  // Bar selected → the marker palette.
+  const has = (k: RoadmapMarker['kind']) => markerKindsOnBar.has(k);
+  return (
+    <div className="flex items-center gap-1.5 text-[11px] min-w-0">
+      <span className="text-zinc-500 shrink-0">Bar {selectedBar.absNumber}</span>
+      <PaletteBtn label="|:" title="Repeat start" onClick={onRepeatStart} disabled={has('repeatStart')} />
+      <div className="flex items-center gap-1 shrink-0">
+        <PaletteBtn label=":|" title="Repeat end" onClick={onRepeatEnd} disabled={!boundRepeatStartId || has('repeatEnd')} />
+        <NumStepper label={'\u00d7'} value={nextTimes} min={2} onChange={onSetTimes} />
+      </div>
+      <PaletteBtn label="Ending" title="1st/2nd ending (volta)" onClick={onBeginEnding} disabled={!boundRepeatStartId} />
+      <PaletteBtn label="Segno" title="One per chart" onClick={onSegno} disabled={globalSingletonsUsed.has('segno')} />
+      <PaletteBtn label="Coda" title="One per chart" onClick={onCoda} disabled={globalSingletonsUsed.has('coda')} />
+      <PaletteBtn label="To Coda" onClick={onToCoda} disabled={has('toCoda')} />
+      <PaletteBtn label="Fine" title="One per chart" onClick={onFine} disabled={globalSingletonsUsed.has('fine')} />
+      <PaletteBtn label="D.C." title="Da Capo" onClick={() => onJump('capo')} disabled={has('jump')} />
+      <PaletteBtn label="D.S." title="Dal Segno" onClick={() => onJump('segno')} disabled={has('jump')} />
+      <select
+        value={nextUntil}
+        onChange={(e) => onSetUntil(e.target.value as 'end' | 'fine' | 'coda')}
+        title="Jump destination"
+        className="bg-zinc-800 text-zinc-200 rounded px-1 py-1 text-[11px] shrink-0"
+      >
+        <option value="end">(to end)</option>
+        <option value="fine">al Fine</option>
+        <option value="coda">al Coda</option>
+      </select>
+      {readout}
+    </div>
+  );
+}
+
 function ChartNavigator({
   setlist, currentIdx, roleFilter, allRoles, isOffline, accessToken, isOwner = false, onChangeIdx, onChangeRole, onClose,
 }: {
@@ -1913,10 +2257,22 @@ function ChartNavigator({
   const [sourceHash, setSourceHash] = useState<string | null>(null);
   const [seekId, setSeekId] = useState<string | null>(null);
   const [holdId, setHoldId] = useState<string | null>(null);
-  const [barSeekId, setBarSeekId] = useState<string | null>(null);
+  // Position in the PLAYED traversal (index, not bar id): a bar can recur across
+  // passes (repeats/voltas), so the index is what disambiguates which pass we're on.
+  const [barSeekIdx, setBarSeekIdx] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [calTool, setCalTool] = useState<'sections' | 'bars'>('sections');
+  const [calTool, setCalTool] = useState<'sections' | 'bars' | 'roadmap'>('sections');
   const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
+  // ── Roadmap tool state ──
+  // selectedBarId = the bar the marker palette acts on; selectedMarkerId = a
+  // placed marker tapped for deletion (delete-to-resolve). endingDraft = the
+  // multi-tap volta-bracket flow. nextTimes/nextUntil pre-set the value of the
+  // next :| / D.C.-D.S. placed (no marker-editing surface in v1 — change = delete + re-add).
+  const [selectedBarId, setSelectedBarId] = useState<string | null>(null);
+  const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null);
+  const [endingDraft, setEndingDraft] = useState<{ barIds: string[]; number: number } | null>(null);
+  const [nextTimes, setNextTimes] = useState(2);
+  const [nextUntil, setNextUntil] = useState<'end' | 'fine' | 'coda'>('end');
   const [canvasBox, setCanvasBox] = useState<CanvasBox | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
@@ -2018,35 +2374,137 @@ function ChartNavigator({
     ? (calibration?.bars ?? []).filter((b) => b.systemId === selectedSystem.id).length
     : 0;
 
+  // ── Roadmap tool (step 3: nav-graph authoring) ──
+  // Tap a bar → palette drops a marker on its start/end edge; tap a placed glyph
+  // → Delete (delete-to-resolve). Live-resolve runs resolveRoadmap on every edit
+  // and shows the play order or the contradiction. Geometry (systems/bars) must
+  // already exist — the tool reuses it, it doesn't create it.
+  const roadmapMarkers = calibration?.roadmap ?? [];
+  const selectedBar = selectedBarId ? (calibration?.bars ?? []).find((b) => b.id === selectedBarId) ?? null : null;
+  // Which marker kinds already sit on the selected bar's edges (the resolver
+  // rejects two of a kind on one bar, so the palette disables the duplicate).
+  const markerKindsOnBar = new Set(
+    roadmapMarkers
+      .filter((m) => m.kind !== 'ending' && m.barId === selectedBarId)
+      .map((m) => m.kind),
+  );
+  // Segno/Coda/Fine are v1 global singletons (resolveRoadmap §5 #2 rejects more
+  // than one of each), so their palette buttons disable once one exists ANYWHERE
+  // — not just on the selected bar — to keep authoring out of an avoidable error.
+  const globalSingletonsUsed = new Set(
+    roadmapMarkers
+      .filter((m) => m.kind === 'segno' || m.kind === 'coda' || m.kind === 'fine')
+      .map((m) => m.kind),
+  );
+  const boundRepeatStartId = calibration && selectedBarId ? enclosingRepeatStartId(calibration, selectedBarId) : null;
+  // Live resolve of the whole roadmap (also feeds the readout + error highlight).
+  const roadmapResolve = calibration ? resolveRoadmap(calibration) : null;
+  const playOrder = calibration && roadmapResolve?.ok ? summarizeTraversal(calibration, roadmapResolve.traversal) : '';
+  const resolveErrorIds = roadmapResolve && !roadmapResolve.ok ? new Set(roadmapResolve.error.markerIds) : new Set<string>();
+
+  const pushMarker = (marker: RoadmapMarker) => {
+    setCalibration((c) => (c ? addRoadmapMarker(c, marker) : c));
+    setSelectedMarkerId(null);
+  };
+  const newId = () => crypto.randomUUID();
+  const addRepeatStart = () => selectedBarId && pushMarker({ id: newId(), kind: 'repeatStart', barId: selectedBarId, edge: 'start' });
+  const addRepeatEnd = () => selectedBarId && boundRepeatStartId &&
+    pushMarker({ id: newId(), kind: 'repeatEnd', barId: selectedBarId, edge: 'end', repeatStartId: boundRepeatStartId, times: nextTimes });
+  const addSegno = () => selectedBarId && pushMarker({ id: newId(), kind: 'segno', barId: selectedBarId, edge: 'start' });
+  const addCoda = () => selectedBarId && pushMarker({ id: newId(), kind: 'coda', barId: selectedBarId, edge: 'start' });
+  const addToCoda = () => selectedBarId && pushMarker({ id: newId(), kind: 'toCoda', barId: selectedBarId, edge: 'end' });
+  const addFine = () => selectedBarId && pushMarker({ id: newId(), kind: 'fine', barId: selectedBarId, edge: 'end' });
+  const addJump = (from: 'capo' | 'segno') => selectedBarId &&
+    pushMarker({ id: newId(), kind: 'jump', barId: selectedBarId, edge: 'end', from, until: nextUntil });
+  const deleteMarker = (id: string) => {
+    setCalibration((c) => (c ? removeRoadmapMarker(c, id) : c));
+    setSelectedMarkerId(null);
+  };
+
+  // Volta-bracket draw: tap contiguous (reading-order-adjacent) bars to extend
+  // the run, then confirm to drop an `ending` bound to the enclosing repeat.
+  const beginEnding = () => { setEndingDraft({ barIds: selectedBarId ? [selectedBarId] : [], number: 1 }); setSelectedMarkerId(null); };
+  const toggleEndingBar = (barId: string) => {
+    setEndingDraft((d) => {
+      if (!d) return d;
+      if (d.barIds.includes(barId)) return d; // already in the run
+      if (d.barIds.length === 0) return { ...d, barIds: [barId] };
+      const order = calibration ? barsInOrder(calibration).map((b) => b.id) : [];
+      const firstPos = order.indexOf(d.barIds[0]);
+      const lastPos = order.indexOf(d.barIds[d.barIds.length - 1]);
+      const p = order.indexOf(barId);
+      // Only extend if adjacent to either end (keeps the bracket contiguous).
+      if (p === lastPos + 1) return { ...d, barIds: [...d.barIds, barId] };
+      if (p === firstPos - 1) return { ...d, barIds: [barId, ...d.barIds] };
+      return d;
+    });
+  };
+  const confirmEnding = () => {
+    if (!calibration || !endingDraft || endingDraft.barIds.length === 0) return;
+    const rsId = enclosingRepeatStartId(calibration, endingDraft.barIds[0]);
+    if (!rsId) return;
+    pushMarker({ id: newId(), kind: 'ending', repeatStartId: rsId, barIds: endingDraft.barIds, numbers: [endingDraft.number] });
+    setEndingDraft(null);
+  };
+  const cancelEnding = () => setEndingDraft(null);
+
+  // A roadmap-tool surface/marker tap: in ending-draw it extends the bracket;
+  // otherwise it selects the bar for the palette (clearing any marker selection).
+  const roadmapBarTap = (barId: string) => {
+    if (endingDraft) { toggleEndingBar(barId); return; }
+    setSelectedBarId(barId);
+    setSelectedMarkerId(null);
+  };
+  const selectMarker = (id: string) => {
+    if (endingDraft) return;
+    setSelectedMarkerId(id);
+    setSelectedBarId(null);
+  };
+
   // ── Bar-level Perform redline (step 2) ──
   // Active only when a performable calibration carries bar geometry. The redline
-  // sweeps L→R through barsInOrder: stepping advances within a system, snaps to
-  // the next system, and crosses pages (turning the page as it goes).
+  // follows the RESOLVED traversal (repeats, voltas, D.S./D.C., Coda, Fine) rather
+  // than raw reading order: stepping advances along the played order, snapping
+  // across systems and pages (turning the page as it goes). An absent/empty
+  // roadmap resolves to the linear order, so this is identical to before.
   const barMode = calMode === 'perform' && !!overlayCalibration && (overlayCalibration.bars?.length ?? 0) > 0;
   const barCal = barMode ? overlayCalibration : null;
-  const currentBar = barCal ? (barCal.bars ?? []).find((b) => b.id === barSeekId) ?? null : null;
+  // The played order as traversal steps ({barId, pass}). A performable calibration
+  // always resolves; if an owner is previewing a draft whose roadmap doesn't
+  // resolve, fall back to the linear order so the transport still works.
+  const traversal = useMemo<TraversalStep[]>(() => {
+    if (!barCal) return [];
+    const resolved = resolveRoadmap(barCal);
+    return resolved.ok ? resolved.traversal : barsInOrder(barCal).map((b) => ({ barId: b.id, pass: 1 }));
+  }, [barCal]);
+  // Effective (clamped) seek index: a stored index can fall out of range when the
+  // traversal shrinks under it (a roadmap/bar edit, or leaving perform for
+  // calibrate where the traversal is empty). Reading it as null when stale keeps
+  // the redline and the Next/Prev disabled logic correct at render time — no
+  // setState-in-effect, no flash of a vanished redline with Next stuck disabled.
+  const seekIdx = barSeekIdx !== null && barSeekIdx < traversal.length ? barSeekIdx : null;
+  const currentStep = barCal && seekIdx !== null ? traversal[seekIdx] : null;
+  const currentBar = currentStep && barCal ? (barCal.bars ?? []).find((b) => b.id === currentStep.barId) ?? null : null;
   const currentSystem = currentBar && barCal ? findSystem(barCal, currentBar.systemId) : null;
   const barRedline = currentBar && currentSystem ? { bar: currentBar, system: currentSystem } : null;
 
-  const goToBar = (bar: Bar | null) => {
-    if (!bar || !barCal) return;
-    setBarSeekId(bar.id);
-    const sys = findSystem(barCal, bar.systemId);
+  const seekToIndex = (idx: number) => {
+    if (!barCal || idx < 0 || idx >= traversal.length) return;
+    setBarSeekIdx(idx);
+    const bar = (barCal.bars ?? []).find((b) => b.id === traversal[idx].barId);
+    const sys = bar ? findSystem(barCal, bar.systemId) : null;
     if (sys && sys.page !== pageNum) setPageNum(sys.page);
   };
   const seekBarAt = (x: number, y: number) => {
     if (!barCal) return;
     const bar = tapToBar(barCal, pageNum, x, y);
-    if (bar) setBarSeekId(bar.id);
+    if (!bar) return;
+    // Tapping a bar jumps to its FIRST occurrence in the played order.
+    const idx = traversal.findIndex((t) => t.barId === bar.id);
+    if (idx !== -1) seekToIndex(idx);
   };
-  const stepNextBar = () => {
-    if (!barCal) return;
-    goToBar(currentBar ? nextBar(barCal, currentBar.id) : firstBar(barCal));
-  };
-  const stepPrevBar = () => {
-    if (!barCal || !currentBar) return;
-    goToBar(prevBar(barCal, currentBar.id));
-  };
+  const stepNextBar = () => seekToIndex(seekIdx === null ? 0 : seekIdx + 1);
+  const stepPrevBar = () => { if (seekIdx !== null) seekToIndex(seekIdx - 1); };
 
   const saveCalibration = async (promote: boolean) => {
     if (!calibration || !chartFileId || !sourceHash) return;
@@ -2076,10 +2534,13 @@ function ChartNavigator({
       setSourceHash(null);
       setSeekId(null);
       setHoldId(null);
-      setBarSeekId(null);
+      setBarSeekIdx(null);
       setEditingId(null);
       setCalTool('sections');
       setSelectedSystemId(null);
+      setSelectedBarId(null);
+      setSelectedMarkerId(null);
+      setEndingDraft(null);
       setCanvasBox(null);
     };
     if (!chartFileId) {
@@ -2297,7 +2758,7 @@ function ChartNavigator({
           {charts.map((c, i) => (
             <button
               key={`${c.role}-${c.fileId}`}
-              onClick={() => { setActiveChartIdx(i); setPageNum(1); }}
+              onClick={() => { setActiveChartIdx(i); setPageNum(1); setBarSeekIdx(null); }}
               className={`px-2 py-1 rounded text-xs font-bold shrink-0 transition-colors ${
                 i === activeChartIdx
                   ? 'bg-white text-black'
@@ -2361,6 +2822,12 @@ function ChartNavigator({
             onRelabel={relabel}
             onDelete={deleteSection}
             onBeginEdit={setEditingId}
+            selectedBarId={selectedBarId}
+            selectedMarkerId={selectedMarkerId}
+            endingBarIds={endingDraft?.barIds ?? null}
+            resolveErrorIds={resolveErrorIds}
+            onRoadmapBarTap={roadmapBarTap}
+            onSelectMarker={selectMarker}
           />
         )}
       </div>
@@ -2369,12 +2836,16 @@ function ChartNavigator({
       {calMode === 'calibrate' && (
         <div className="flex items-center justify-between gap-2 px-4 py-2 border-t border-zinc-800 bg-zinc-900">
           <div className="flex items-center gap-3 min-w-0">
-            {/* Tool toggle: Sections (rail) vs Bars (system/bar geometry). */}
+            {/* Tool toggle: Sections (rail) · Bars (geometry) · Roadmap (nav graph). */}
             <div className="flex rounded bg-zinc-800 p-0.5 shrink-0">
-              {(['sections', 'bars'] as const).map((tool) => (
+              {(['sections', 'bars', 'roadmap'] as const).map((tool) => (
                 <button
                   key={tool}
-                  onClick={() => { setCalTool(tool); setSelectedSystemId(null); setEditingId(null); }}
+                  onClick={() => {
+                    setCalTool(tool);
+                    setSelectedSystemId(null); setEditingId(null);
+                    setSelectedBarId(null); setSelectedMarkerId(null); setEndingDraft(null);
+                  }}
                   className={`px-2 py-1 rounded text-[11px] font-bold capitalize transition-colors ${
                     calTool === tool ? 'bg-sky-500 text-white' : 'text-zinc-400 hover:text-white'
                   }`}
@@ -2383,7 +2854,35 @@ function ChartNavigator({
                 </button>
               ))}
             </div>
-            {calTool === 'sections' ? (
+            {calTool === 'roadmap' ? (
+              <RoadmapToolbar
+                hasBars={(calibration?.bars?.length ?? 0) > 0}
+                selectedBar={selectedBar}
+                selectedMarkerId={selectedMarkerId}
+                markerKindsOnBar={markerKindsOnBar}
+                globalSingletonsUsed={globalSingletonsUsed}
+                boundRepeatStartId={boundRepeatStartId}
+                endingDraft={endingDraft}
+                nextTimes={nextTimes}
+                nextUntil={nextUntil}
+                playOrder={playOrder}
+                resolveError={roadmapResolve && !roadmapResolve.ok ? roadmapResolve.error.reason : null}
+                onSetTimes={setNextTimes}
+                onSetUntil={setNextUntil}
+                onRepeatStart={addRepeatStart}
+                onRepeatEnd={addRepeatEnd}
+                onSegno={addSegno}
+                onCoda={addCoda}
+                onToCoda={addToCoda}
+                onFine={addFine}
+                onJump={addJump}
+                onBeginEnding={beginEnding}
+                onConfirmEnding={confirmEnding}
+                onCancelEnding={cancelEnding}
+                onSetEndingNumber={(n) => setEndingDraft((d) => (d ? { ...d, number: n } : d))}
+                onDeleteMarker={deleteMarker}
+              />
+            ) : calTool === 'sections' ? (
               <p className="text-[11px] text-zinc-400 truncate">
                 Tap the page to drop a section · tap a pill to label or delete
                 {calibration && !canVerify(calibration) && (
@@ -2449,25 +2948,30 @@ function ChartNavigator({
         <div className="flex items-center justify-center gap-3 py-1.5 text-xs bg-zinc-900 border-t border-zinc-800">
           <button
             onClick={stepPrevBar}
-            disabled={!currentBar || (barCal ? prevBar(barCal, currentBar.id) === null : true)}
+            disabled={seekIdx === null || seekIdx <= 0}
             className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
           >
             &larr; Prev bar
           </button>
           <span className="text-zinc-400 min-w-[6rem] text-center">
             {currentBar
-              ? <>Bar <span className="font-bold text-red-400">{currentBar.absNumber}</span></>
+              ? <>
+                  Bar <span className="font-bold text-red-400">{currentBar.absNumber}</span>
+                  {currentStep && currentStep.pass > 1 && (
+                    <span className="text-zinc-500"> &middot; {passOrdinal(currentStep.pass)}</span>
+                  )}
+                </>
               : 'Tap a bar or step →'}
           </span>
           <button
             onClick={stepNextBar}
-            disabled={barCal ? (currentBar ? nextBar(barCal, currentBar.id) === null : firstBar(barCal) === null) : true}
+            disabled={traversal.length === 0 || (seekIdx !== null && seekIdx >= traversal.length - 1)}
             className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
           >
             Next bar &rarr;
           </button>
           {currentBar && (
-            <button onClick={() => setBarSeekId(null)} className="text-zinc-500 hover:text-white underline">
+            <button onClick={() => setBarSeekIdx(null)} className="text-zinc-500 hover:text-white underline">
               clear
             </button>
           )}
