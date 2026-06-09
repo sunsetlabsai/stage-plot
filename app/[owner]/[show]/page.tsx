@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { ReactNode, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
@@ -62,15 +62,15 @@ import {
   hashPdfBytes,
   tapToBar,
   findSystem,
-  firstBar,
-  nextBar,
-  prevBar,
+  barsInOrder,
+  resolveRoadmap,
   addSystem,
   removeSystem,
   resizeSystemBand,
   autoDistributeBars,
   systemsForPage,
 } from '@/lib/chart-calibration';
+import type { TraversalStep } from '@/lib/chart-calibration';
 import { useShow } from '@/lib/use-show';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { normalizeSongKeySafe, displayRole } from '@/lib/normalize';
@@ -79,6 +79,13 @@ import type { ChartRole } from '@/lib/normalize';
 // ─── Default band (imported at build time, used as fallback) ────────────────
 import { getBand } from '@/lib/bands';
 const fallbackBand = getBand();
+
+// Pass ordinal for the Perform transport readout ("2nd", "3rd" pass through a bar).
+function passOrdinal(n: number): string {
+  const v = n % 100;
+  const suffix = v >= 11 && v <= 13 ? 'th' : (['th', 'st', 'nd', 'rd'][n % 10] ?? 'th');
+  return `${n}${suffix}`;
+}
 
 // ─── Config shape stored in localStorage / URL ─────────────────────────────
 interface AppConfig {
@@ -1913,7 +1920,9 @@ function ChartNavigator({
   const [sourceHash, setSourceHash] = useState<string | null>(null);
   const [seekId, setSeekId] = useState<string | null>(null);
   const [holdId, setHoldId] = useState<string | null>(null);
-  const [barSeekId, setBarSeekId] = useState<string | null>(null);
+  // Position in the PLAYED traversal (index, not bar id): a bar can recur across
+  // passes (repeats/voltas), so the index is what disambiguates which pass we're on.
+  const [barSeekIdx, setBarSeekIdx] = useState<number | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [calTool, setCalTool] = useState<'sections' | 'bars'>('sections');
   const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
@@ -2020,33 +2029,42 @@ function ChartNavigator({
 
   // ── Bar-level Perform redline (step 2) ──
   // Active only when a performable calibration carries bar geometry. The redline
-  // sweeps L→R through barsInOrder: stepping advances within a system, snaps to
-  // the next system, and crosses pages (turning the page as it goes).
+  // follows the RESOLVED traversal (repeats, voltas, D.S./D.C., Coda, Fine) rather
+  // than raw reading order: stepping advances along the played order, snapping
+  // across systems and pages (turning the page as it goes). An absent/empty
+  // roadmap resolves to the linear order, so this is identical to before.
   const barMode = calMode === 'perform' && !!overlayCalibration && (overlayCalibration.bars?.length ?? 0) > 0;
   const barCal = barMode ? overlayCalibration : null;
-  const currentBar = barCal ? (barCal.bars ?? []).find((b) => b.id === barSeekId) ?? null : null;
+  // The played order as traversal steps ({barId, pass}). A performable calibration
+  // always resolves; if an owner is previewing a draft whose roadmap doesn't
+  // resolve, fall back to the linear order so the transport still works.
+  const traversal = useMemo<TraversalStep[]>(() => {
+    if (!barCal) return [];
+    const resolved = resolveRoadmap(barCal);
+    return resolved.ok ? resolved.traversal : barsInOrder(barCal).map((b) => ({ barId: b.id, pass: 1 }));
+  }, [barCal]);
+  const currentStep = barCal && barSeekIdx !== null ? traversal[barSeekIdx] ?? null : null;
+  const currentBar = currentStep && barCal ? (barCal.bars ?? []).find((b) => b.id === currentStep.barId) ?? null : null;
   const currentSystem = currentBar && barCal ? findSystem(barCal, currentBar.systemId) : null;
   const barRedline = currentBar && currentSystem ? { bar: currentBar, system: currentSystem } : null;
 
-  const goToBar = (bar: Bar | null) => {
-    if (!bar || !barCal) return;
-    setBarSeekId(bar.id);
-    const sys = findSystem(barCal, bar.systemId);
+  const seekToIndex = (idx: number) => {
+    if (!barCal || idx < 0 || idx >= traversal.length) return;
+    setBarSeekIdx(idx);
+    const bar = (barCal.bars ?? []).find((b) => b.id === traversal[idx].barId);
+    const sys = bar ? findSystem(barCal, bar.systemId) : null;
     if (sys && sys.page !== pageNum) setPageNum(sys.page);
   };
   const seekBarAt = (x: number, y: number) => {
     if (!barCal) return;
     const bar = tapToBar(barCal, pageNum, x, y);
-    if (bar) setBarSeekId(bar.id);
+    if (!bar) return;
+    // Tapping a bar jumps to its FIRST occurrence in the played order.
+    const idx = traversal.findIndex((t) => t.barId === bar.id);
+    if (idx !== -1) seekToIndex(idx);
   };
-  const stepNextBar = () => {
-    if (!barCal) return;
-    goToBar(currentBar ? nextBar(barCal, currentBar.id) : firstBar(barCal));
-  };
-  const stepPrevBar = () => {
-    if (!barCal || !currentBar) return;
-    goToBar(prevBar(barCal, currentBar.id));
-  };
+  const stepNextBar = () => seekToIndex(barSeekIdx === null ? 0 : barSeekIdx + 1);
+  const stepPrevBar = () => { if (barSeekIdx !== null) seekToIndex(barSeekIdx - 1); };
 
   const saveCalibration = async (promote: boolean) => {
     if (!calibration || !chartFileId || !sourceHash) return;
@@ -2076,7 +2094,7 @@ function ChartNavigator({
       setSourceHash(null);
       setSeekId(null);
       setHoldId(null);
-      setBarSeekId(null);
+      setBarSeekIdx(null);
       setEditingId(null);
       setCalTool('sections');
       setSelectedSystemId(null);
@@ -2449,25 +2467,30 @@ function ChartNavigator({
         <div className="flex items-center justify-center gap-3 py-1.5 text-xs bg-zinc-900 border-t border-zinc-800">
           <button
             onClick={stepPrevBar}
-            disabled={!currentBar || (barCal ? prevBar(barCal, currentBar.id) === null : true)}
+            disabled={barSeekIdx === null || barSeekIdx <= 0}
             className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
           >
             &larr; Prev bar
           </button>
           <span className="text-zinc-400 min-w-[6rem] text-center">
             {currentBar
-              ? <>Bar <span className="font-bold text-red-400">{currentBar.absNumber}</span></>
+              ? <>
+                  Bar <span className="font-bold text-red-400">{currentBar.absNumber}</span>
+                  {currentStep && currentStep.pass > 1 && (
+                    <span className="text-zinc-500"> &middot; {passOrdinal(currentStep.pass)}</span>
+                  )}
+                </>
               : 'Tap a bar or step →'}
           </span>
           <button
             onClick={stepNextBar}
-            disabled={barCal ? (currentBar ? nextBar(barCal, currentBar.id) === null : firstBar(barCal) === null) : true}
+            disabled={traversal.length === 0 || (barSeekIdx !== null && barSeekIdx >= traversal.length - 1)}
             className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
           >
             Next bar &rarr;
           </button>
           {currentBar && (
-            <button onClick={() => setBarSeekId(null)} className="text-zinc-500 hover:text-white underline">
+            <button onClick={() => setBarSeekIdx(null)} className="text-zinc-500 hover:text-white underline">
               clear
             </button>
           )}
