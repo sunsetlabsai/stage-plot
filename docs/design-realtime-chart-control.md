@@ -356,7 +356,10 @@ without it — "correction never exceeds creation" already makes calibration ~20
       OQ #3 (nested repeats, multiple endings, *D.S. al Coda al Fine*, contradictory-
       roadmap rejection). Awaiting Codex cross-check + sign-off before build.
    5. **Verify-by-playback (scrub/play)** as the primary review affordance + hybrid nav
-      badges + Edit/Perform weighting.
+      badges + Edit/Perform weighting. **+ Carried in from chunk 4 (Graham OQ-E,
+      signed off):** the **disable-an-unresolvable-jump → `holdPoint`** escape hatch
+      lands here (it needs the temporal layer's hold-point representation). Chunk 4
+      ships with delete/fix-the-marker only; chunk 5 adds disable-to-park. Do not lose.
 3. **Converter (fast-follow merge, right behind the editor)** — structural import pass →
    graph + per-element confidence + review queue. Makes creation cheap; not a gate.
 4. **B — leader/follower** over WebRTC discrete events (after the transport OQ resolves).

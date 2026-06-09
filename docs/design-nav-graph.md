@@ -324,24 +324,21 @@ low-confidence jumps) — **same markers, same resolver.**
 4. Merge as one coherent unit (per the branch convention). UAT after chunk 5 (or 4 —
    Graham's open call), since real testing needs the converter's auto-overlay anyway.
 
-## 11. Open questions for Codex / Graham
-- **OQ-A (labeled multiples):** v1 allows one `segno`/`coda`/`fine`; multiple = error.
-  Real charts occasionally have *Coda I / Coda II* or two segnos. Accept the v1 limit
-  (labeled-target extension later, no bump — markers already carry `id`)?
-- **OQ-B (repeat binding model):** repeats + voltas bind to their `repeatStart` by
-  **explicit `repeatStartId`** (set by the authoring UI / converter), not inferred from
-  geometry. Nested repeats each track their own `completedPasses`. Confirm explicit
-  binding is preferable to auto-inferring "innermost enclosing" (explicit is
-  buildable + unambiguous — the Codex BLOCKER-3 fix — at the cost of the UI having to
-  set the link).
-- **OQ-C (cache vs recompute):** persist **markers only**, recompute `traversal` on
-  load (pure, cheap, never stale) — *not* denormalizing the expanded list. Confirm.
-- **OQ-D (schema stamping):** **per-payload** — stamp v3 only when `roadmap` is present,
-  v2 otherwise (§8), so linear rows stay rollback-safe and only roadmap rows are fenced.
-  Confirm (vs. a global v3 stamp that 404s safe linear rows on old builds — rejected).
-- **OQ-E (temporal entanglement + disable):** chunk 4 is **order only**; the temporal
-  layer (parent §228, nullable tempo / hold points) still clocks *motion*, kept
-  separate. **Consequence:** the "disable a jump → `holdPoint`" escape hatch needs the
-  `holdPoint` representation, so it **defers to chunk 5**; chunk 4's escape hatch is
-  **delete/fix the marker** (§2). Confirm that split (vs. pulling a minimal
-  `holdPoint`/`disabled` flag into chunk 4 now).
+## 11. Open questions — **RESOLVED (Graham sign-off)**
+- **OQ-A (labeled multiples): ✅ SKIP for v1.** One `segno`/`coda`/`fine`; multiple =
+  error. *Coda I/II* etc. is a later labeled-target extension (no bump — markers carry
+  `id`).
+- **OQ-B (repeat binding model): ✅ EXPLICIT `repeatStartId`** (set by authoring UI /
+  converter), not geometry-inferred. Nested repeats each track their own
+  `completedPasses`. Buildable + unambiguous (the BLOCKER-3 fix), cost = UI sets the
+  link.
+- **OQ-C (cache vs recompute): ✅ RECOMPUTE** — persist markers only, recompute
+  `traversal` on load (pure, cheap, never stale). *Revisit at expert UAT if it ever
+  needs to be cached (Graham: "until I don't, which we'll surface in UAT").*
+- **OQ-D (schema stamping): ✅ PER-PAYLOAD** — v3 only when `roadmap` present, v2
+  otherwise (§8); linear rows stay rollback-safe, only roadmap rows fenced. (Global v3
+  stamp rejected.)
+- **OQ-E (temporal entanglement + disable): ✅ KEEP SEPARATE, DEFER disable→holdPoint
+  to chunk 5.** Chunk 4 is **order only**; temporal layer clocks motion. Chunk-4 escape
+  hatch = **delete/fix the marker**; disable-to-park lands in chunk 5 (anchored in
+  `design-realtime-chart-control.md` build-order item 5 so it isn't lost).
