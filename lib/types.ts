@@ -44,9 +44,33 @@ export interface Chart {
   url: string;            // any URL
   label?: string;         // optional e.g. "Bb transposition", "Chorus Only"
   dupeCount?: number;     // >1 = flag for review
-  fileId?: string;        // Drive file ID (for offline cache)
+  fileId?: string;        // Drive file ID (for offline cache); for library charts = chart_library.id (the calibration chart_id)
   mimeType?: string;      // original MIME type (for export detection)
   modifiedTime?: string;  // ISO timestamp (for cache invalidation)
+}
+
+// ── Chart Calibration (realtime chart control, step 1: sections-only rail) ──
+// A SectionAnchor marks a section head ("Intro", "Chorus", rehearsal letter "B")
+// on a PDF page. Coords are PDF-relative / normalized 0..1 so they survive zoom,
+// rotation, and device size. This is the coarse step-1 anchor tier; bar-level
+// System/Bar geometry is step-2 enrichment.
+export interface SectionAnchor {
+  id: string;
+  page: number;   // 1-based page index within the PDF
+  x: number;      // normalized 0..1, left→right within the page
+  y: number;      // normalized 0..1, top→bottom within the page
+  label: string;  // human label; required (non-blank) to verify the calibration
+}
+
+// The calibration sidecar payload (the navigation/timeline graph). Step 1 is a
+// pure section chain; nav edges + temporal layer are step-2+ enrichment and are
+// intentionally absent here. Persisted keyed by (chart_id, source_hash).
+//   status: Perform consumes ONLY 'verified' (a matching hash is necessary, not
+//   sufficient). 'draft' seeds the editor but never drives the live redline.
+export interface ChartCalibration {
+  schemaVersion: number;
+  status: 'draft' | 'verified';
+  sections: SectionAnchor[];
 }
 
 export interface SetlistSong {
