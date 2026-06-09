@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, MouseEvent as ReactMouseEvent } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { LogoMark } from '@/components/Logo';
@@ -32,6 +32,8 @@ import type {
   SetlistSong,
   GeneralNote,
   Chart,
+  ChartCalibration,
+  SectionAnchor,
 } from '@/lib/types';
 import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf } from '@/lib/setlist';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
@@ -46,6 +48,17 @@ import {
   type DownloadProgress,
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
+import {
+  emptyCalibration,
+  addSection,
+  removeSection,
+  relabelSection,
+  sectionsForPage,
+  canVerify,
+  verify,
+  isPerformable,
+  hashPdfBytes,
+} from '@/lib/chart-calibration';
 import { useShow } from '@/lib/use-show';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { normalizeSongKeySafe, displayRole } from '@/lib/normalize';
@@ -669,10 +682,10 @@ export default function Page() {
 
       {/* ── Content ────────────────────────────────────────────────────── */}
       {tab === 'perform' && (
-        <PerformTab setlist={config.setlist} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} chartCacheProgress={chartCacheProgress} />
+        <PerformTab setlist={config.setlist} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} chartCacheProgress={chartCacheProgress} />
       )}
       {tab === 'mix' && (
-        <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
+        <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
       {tab === 'config' && (
         <ConfigTab config={config} updateConfig={updateConfig} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
@@ -752,13 +765,14 @@ export default function Page() {
 // PERFORM TAB — musician's gig-day view
 // ════════════════════════════════════════════════════════════════════════════
 
-function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, chartCacheProgress }: {
+function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, isOwner, chartCacheProgress }: {
   setlist: SetlistSong[];
   showInfo: { bandName: string; eventDate: string; venue: string; showName?: string };
   isOffline: boolean;
   accessToken?: string;
   slug: string;
   owner: string;
+  isOwner: boolean;
   chartCacheProgress?: DownloadProgress | null;
 }) {
   // Role filter (per-show, owner-scoped to avoid cross-owner collisions)
@@ -903,6 +917,7 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, ch
           allRoles={allRoles}
           isOffline={isOffline}
           accessToken={accessToken}
+          isOwner={isOwner}
           onChangeIdx={setNavigatorSongIdx}
           onChangeRole={handleRoleChange}
           onClose={() => setNavigatorSongIdx(null)}
@@ -1128,7 +1143,7 @@ function DraggableStagePlotView({
   );
 }
 
-function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken, slug, owner, onReorder }: { band: BandConfig; setlist: SetlistSong[]; printSections: Record<string, boolean>; showInfo: { bandName: string; eventDate: string; venue: string; showName?: string }; isOffline: boolean; accessToken?: string; slug: string; owner: string; onReorder: (from: number, to: number) => void }) {
+function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken, slug, owner, isOwner, onReorder }: { band: BandConfig; setlist: SetlistSong[]; printSections: Record<string, boolean>; showInfo: { bandName: string; eventDate: string; venue: string; showName?: string }; isOffline: boolean; accessToken?: string; slug: string; owner: string; isOwner: boolean; onReorder: (from: number, to: number) => void }) {
   const colorMap = new Map<string, string>();
   if (band.setlist?.length) {
     band.setlist.forEach((s) => {
@@ -1472,6 +1487,7 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
                 allRoles={allRoles}
                 isOffline={isOffline}
                 accessToken={accessToken}
+                isOwner={isOwner}
                 onChangeIdx={setNavigatorSongIdx}
                 onChangeRole={handleRoleChange}
                 onClose={() => setNavigatorSongIdx(null)}
@@ -1490,8 +1506,198 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
 
 // Role colors removed — chart pill picker now uses active/inactive pattern
 
+// ── Calibration overlay (realtime chart control, step 1: section rail) ──
+// The canvas is max-w/max-h centered, so it's smaller than its container. A
+// CanvasBox mirrors the canvas's actual rendered rect (relative to the shared
+// container) so section anchors — stored normalized 0..1 in PDF space — land on
+// the printed page rather than the letterboxed container.
+interface CanvasBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+// Press-and-hold threshold: a quick tap seeks the redline to a section; a hold
+// "parks" it there (step 1 has no transport, so both just park — hold is the
+// forward-looking gesture for level-B follow).
+const LONG_PRESS_MS = 450;
+
+// A single section anchor: a modest label pill with a deliberately larger,
+// transparent hit target (touch-friendly, esp. in Perform). In Perform a tap
+// seeks and a long-press holds; in Calibrate a tap opens inline label editing.
+function SectionMarker({
+  section, box, mode, isSeeked, isHeld, isEditing, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
+}: {
+  section: SectionAnchor;
+  box: CanvasBox;
+  mode: 'perform' | 'calibrate';
+  isSeeked: boolean;
+  isHeld: boolean;
+  isEditing: boolean;
+  onSeek: () => void;
+  onHold: () => void;
+  onRelabel: (label: string) => void;
+  onDelete: () => void;
+  onBeginEdit: () => void;
+}) {
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heldRef = useRef(false);
+  const left = box.left + section.x * box.width;
+  const top = box.top + section.y * box.height;
+
+  const clearTimer = () => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+  };
+  const onPointerDown = () => {
+    if (mode !== 'perform') return;
+    heldRef.current = false;
+    clearTimer();
+    timerRef.current = setTimeout(() => { heldRef.current = true; onHold(); }, LONG_PRESS_MS);
+  };
+  const onPointerUp = () => {
+    if (mode !== 'perform') return;
+    clearTimer();
+    if (!heldRef.current) onSeek();
+  };
+
+  const pillState = isHeld
+    ? 'bg-red-500 text-white ring-2 ring-red-300'
+    : isSeeked
+      ? 'bg-red-600/90 text-white'
+      : mode === 'calibrate'
+        ? section.label.trim() === ''
+          ? 'bg-amber-500 text-black'
+          : 'bg-sky-600 text-white'
+        : 'bg-zinc-800/85 text-zinc-100 ring-1 ring-zinc-600';
+
+  return (
+    <div
+      data-chart-overlay-interactive
+      className="absolute -translate-x-1/2 -translate-y-1/2"
+      style={{ left, top, pointerEvents: 'auto' }}
+    >
+      {/* Larger transparent hit target centered on the anchor */}
+      <button
+        type="button"
+        aria-label={section.label || 'section'}
+        onPointerDown={onPointerDown}
+        onPointerUp={onPointerUp}
+        onPointerLeave={clearTimer}
+        onPointerCancel={clearTimer}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (mode === 'calibrate' && !isEditing) onBeginEdit();
+        }}
+        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full"
+        style={{ touchAction: 'manipulation' }}
+      />
+      {isEditing ? (
+        <div className="relative flex items-center gap-1 rounded bg-zinc-900 ring-1 ring-sky-500 px-1 py-0.5 shadow-lg">
+          <input
+            autoFocus
+            defaultValue={section.label}
+            onChange={(e) => onRelabel(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') onBeginEdit(); }}
+            placeholder="Label…"
+            className="w-24 bg-transparent text-xs text-white outline-none placeholder:text-zinc-500"
+          />
+          <button
+            type="button"
+            aria-label="Delete section"
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="text-zinc-400 hover:text-red-400 text-sm leading-none px-1"
+          >
+            ×
+          </button>
+        </div>
+      ) : (
+        <span
+          className={`relative block max-w-[8rem] truncate rounded px-1.5 py-0.5 text-[11px] font-bold shadow ${pillState}`}
+        >
+          {section.label.trim() === '' ? '(unlabeled)' : section.label}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Absolutely fills the viewer container. In Perform the container is
+// pointer-events-none so taps between markers fall through to the page-turn
+// handler; markers re-enable pointer events on themselves. In Calibrate the
+// container captures clicks (tagged interactive so the window page-turn handler
+// ignores it) — a click on empty page area drops a new section there.
+function CalibrationOverlay({
+  calibration, box, page, mode, seekId, holdId, editingId, onDrop, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
+}: {
+  calibration: ChartCalibration | null;
+  box: CanvasBox;
+  page: number;
+  mode: 'perform' | 'calibrate';
+  seekId: string | null;
+  holdId: string | null;
+  editingId: string | null;
+  onDrop: (x: number, y: number) => void;
+  onSeek: (id: string) => void;
+  onHold: (id: string) => void;
+  onRelabel: (id: string, label: string) => void;
+  onDelete: (id: string) => void;
+  onBeginEdit: (id: string | null) => void;
+}) {
+  const sections = calibration ? sectionsForPage(calibration, page) : [];
+  const seeked = calibration?.sections.find((s) => s.id === seekId) ?? null;
+  const redlineOnPage = seeked && seeked.page === page ? seeked : null;
+
+  const onBackdrop = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (mode !== 'calibrate') return;
+    if (editingId) { onBeginEdit(null); return; }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const px = e.clientX - rect.left - box.left;
+    const py = e.clientY - rect.top - box.top;
+    if (px < 0 || py < 0 || px > box.width || py > box.height) return;
+    onDrop(px / box.width, py / box.height);
+  };
+
+  return (
+    <div
+      data-chart-overlay-interactive={mode === 'calibrate' ? '' : undefined}
+      onClick={onBackdrop}
+      className="absolute inset-0"
+      style={{ pointerEvents: mode === 'calibrate' ? 'auto' : 'none' }}
+    >
+      {redlineOnPage && (
+        <div
+          className="absolute h-0.5 bg-red-600 shadow-[0_0_6px_rgba(220,38,38,0.8)]"
+          style={{
+            left: box.left,
+            top: box.top + redlineOnPage.y * box.height,
+            width: box.width,
+            pointerEvents: 'none',
+          }}
+        />
+      )}
+      {sections.map((s) => (
+        <SectionMarker
+          key={s.id}
+          section={s}
+          box={box}
+          mode={mode}
+          isSeeked={s.id === seekId}
+          isHeld={s.id === holdId}
+          isEditing={s.id === editingId}
+          onSeek={() => onSeek(s.id)}
+          onHold={() => onHold(s.id)}
+          onRelabel={(label) => onRelabel(s.id, label)}
+          onDelete={() => onDelete(s.id)}
+          onBeginEdit={() => onBeginEdit(editingId === s.id ? null : s.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
 function ChartNavigator({
-  setlist, currentIdx, roleFilter, allRoles, isOffline, accessToken, onChangeIdx, onChangeRole, onClose,
+  setlist, currentIdx, roleFilter, allRoles, isOffline, accessToken, isOwner = false, onChangeIdx, onChangeRole, onClose,
 }: {
   setlist: SetlistSong[];
   currentIdx: number;
@@ -1499,6 +1705,7 @@ function ChartNavigator({
   allRoles: string[];
   isOffline: boolean;
   accessToken?: string;
+  isOwner?: boolean;
   onChangeIdx: (idx: number) => void;
   onChangeRole: (role: string) => void;
   onClose: () => void;
@@ -1515,6 +1722,16 @@ function ChartNavigator({
   const containerRef = useRef<HTMLDivElement>(null);
   const docRef = useRef<import('pdfjs-dist').PDFDocumentProxy | null>(null);
   const prevSongIdxRef = useRef(currentIdx);
+
+  // ── Chart calibration (realtime chart control, step 1: section rail) ──
+  const [calMode, setCalMode] = useState<'perform' | 'calibrate'>('perform');
+  const [calibration, setCalibration] = useState<ChartCalibration | null>(null);
+  const [sourceHash, setSourceHash] = useState<string | null>(null);
+  const [seekId, setSeekId] = useState<string | null>(null);
+  const [holdId, setHoldId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [canvasBox, setCanvasBox] = useState<CanvasBox | null>(null);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   // Reset chart and page when song or available charts change
   useEffect(() => {
@@ -1534,12 +1751,93 @@ function ChartNavigator({
   const chartFileId = activeChart?.fileId;
   const chartModifiedTime = activeChart?.modifiedTime;
 
+  // A library chart's id is the calibration chart_id. fileId is overloaded (Drive
+  // charts also carry one), so we require BOTH a UUID-shaped id AND a Supabase
+  // storage URL — that pair only ever describes a chart_library row. Anyone (incl.
+  // non-owner performers on a shared show) fetches by this id; the GET enforces
+  // the Perform boundary (non-owners get only an isPerformable row, else 404).
+  const isLibraryChart = !!activeChart?.url?.includes('/storage/v1/object/public/');
+  const calibrationChartId =
+    isLibraryChart && !!chartFileId &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chartFileId)
+      ? chartFileId
+      : null;
+  // The Calibrate affordance (edit mode) is owner-only — the v1 source-scope
+  // boundary. Drive / static charts and non-owners never see it.
+  const calibratable = isOwner && !!calibrationChartId;
+  // Perform consumes a calibration only when it is verified (and hash-matched on
+  // load). overlayCalibration is what the overlay renders in each mode.
+  const overlayCalibration =
+    calMode === 'calibrate'
+      ? calibration
+      : calibration && isPerformable(calibration)
+        ? calibration
+        : null;
+
+  // Mirror the canvas's actual rendered rect (it's max-w/max-h centered, so
+  // smaller than its container) so the overlay aligns to the printed page.
+  const updateCanvasBox = () => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const width = parseFloat(c.style.width) || c.clientWidth;
+    const height = parseFloat(c.style.height) || c.clientHeight;
+    if (!width || !height) return;
+    setCanvasBox({ left: c.offsetLeft, top: c.offsetTop, width, height });
+  };
+
+  const dropSection = (x: number, y: number) => {
+    const base = calibration ?? emptyCalibration();
+    const next = addSection(base, pageNum, x, y);
+    setCalibration(next);
+    setEditingId(next.sections[next.sections.length - 1].id);
+  };
+  const relabel = (id: string, label: string) =>
+    setCalibration((c) => (c ? relabelSection(c, id, label) : c));
+  const deleteSection = (id: string) => {
+    setCalibration((c) => (c ? removeSection(c, id) : c));
+    setEditingId(null);
+    setSeekId((s) => (s === id ? null : s));
+    setHoldId((h) => (h === id ? null : h));
+  };
+  const seek = (id: string) => { setSeekId(id); setHoldId(null); };
+  const hold = (id: string) => { setSeekId(id); setHoldId(id); };
+
+  const saveCalibration = async (promote: boolean) => {
+    if (!calibration || !chartFileId || !sourceHash) return;
+    const payload = promote ? verify(calibration) : calibration;
+    setSaveState('saving');
+    try {
+      const res = await fetch('/api/charts/calibration', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chart_id: chartFileId, source_hash: sourceHash, calibration: payload }),
+      });
+      if (!res.ok) { setSaveState('error'); return; }
+      setCalibration(payload);
+      setSaveState('saved');
+      setTimeout(() => setSaveState('idle'), 1500);
+    } catch {
+      setSaveState('error');
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
+    // New chart ⇒ drop any prior calibration state (avoid cross-chart bleed).
+    const resetCalState = () => {
+      setCalMode('perform');
+      setCalibration(null);
+      setSourceHash(null);
+      setSeekId(null);
+      setHoldId(null);
+      setEditingId(null);
+      setCanvasBox(null);
+    };
     if (!chartFileId) {
       // Defer state reset to microtask to satisfy lint (no sync setState in effect)
       Promise.resolve().then(() => {
         if (cancelled) return;
+        resetCalState();
         docRef.current = null;
         setNumPages(0);
         setPageNum(1);
@@ -1548,6 +1846,7 @@ function ChartNavigator({
       return () => { cancelled = true; };
     }
     const load = async () => {
+      resetCalState();
       setLoading(true);
       try {
         const doc = await loadPdfDoc(activeChart!, accessToken);
@@ -1563,6 +1862,30 @@ function ChartNavigator({
         setPageNum(1);
         if (canvasRef.current) {
           await renderPage(doc, 1, canvasRef.current);
+          if (!cancelled) updateCanvasBox();
+        }
+        // Hash the exact rendered bytes; fetch the matching calibration. On any
+        // hashing/fetch failure ⇒ no redline (not best-effort). Library charts
+        // only (UUID id + storage URL); Drive ids never hit the endpoint. Owners
+        // get drafts back to edit; non-owners only ever get an isPerformable row.
+        if (calibrationChartId) {
+          try {
+            const bytes = await doc.getData();
+            if (cancelled) return;
+            const hash = await hashPdfBytes(bytes);
+            if (cancelled) return;
+            setSourceHash(hash);
+            const res = await fetch(
+              `/api/charts/calibration?chart_id=${encodeURIComponent(calibrationChartId)}&hash=${hash}`,
+            );
+            if (cancelled) return;
+            if (res.ok) {
+              const json = await res.json();
+              if (!cancelled) setCalibration(json.calibration as ChartCalibration);
+            }
+          } catch {
+            if (!cancelled) { setSourceHash(null); setCalibration(null); }
+          }
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -1572,12 +1895,19 @@ function ChartNavigator({
     return () => { cancelled = true; };
   }, [chartFileId, chartModifiedTime, accessToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-render on page change
+  // Re-render on page change (then re-measure the canvas for overlay alignment)
   useEffect(() => {
     if (docRef.current && canvasRef.current && pageNum >= 1 && pageNum <= numPages) {
-      renderPage(docRef.current, pageNum, canvasRef.current);
+      renderPage(docRef.current, pageNum, canvasRef.current).then(() => updateCanvasBox());
     }
   }, [pageNum, numPages]);
+
+  // Keep the overlay aligned to the canvas as the viewport resizes/rotates.
+  useEffect(() => {
+    const onResize = () => updateCanvasBox();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   // Prefetch N-1 and N+1
   useEffect(() => {
@@ -1627,6 +1957,11 @@ function ChartNavigator({
       if (dx > 10 || dy > 10) locked = dx > dy ? 'h' : 'v';
     };
     const onEnd = (e: TouchEvent) => {
+      // Taps/holds inside the calibration overlay (markers, or the calibrate-mode
+      // backdrop) own the gesture — never also turn the page or change song.
+      const target = e.target as HTMLElement | null;
+      if (target?.closest?.('[data-chart-overlay-interactive]')) return;
+
       const dx = e.changedTouches[0].clientX - startX;
       const dy = e.changedTouches[0].clientY - startY;
       const totalDisplacement = Math.abs(dx) + Math.abs(dy);
@@ -1676,6 +2011,18 @@ function ChartNavigator({
             <span className="px-2 py-0.5 bg-amber-900 text-amber-300 text-[10px] font-bold rounded">
               OFFLINE
             </span>
+          )}
+          {calibratable && (
+            <button
+              onClick={() => { setCalMode((m) => (m === 'calibrate' ? 'perform' : 'calibrate')); setEditingId(null); }}
+              className={`px-2 py-1 rounded text-xs font-bold transition-colors ${
+                calMode === 'calibrate'
+                  ? 'bg-sky-500 text-white'
+                  : 'bg-zinc-800 text-zinc-300 hover:text-white'
+              }`}
+            >
+              {calMode === 'calibrate' ? 'Done' : 'Calibrate'}
+            </button>
           )}
           <select
             value={roleFilter}
@@ -1735,7 +2082,70 @@ function ChartNavigator({
         ) : (
           <canvas ref={canvasRef} className="max-w-full max-h-full" />
         )}
+        {canvasBox && (calMode === 'calibrate' || overlayCalibration) && (
+          <CalibrationOverlay
+            calibration={calMode === 'calibrate' ? (calibration ?? emptyCalibration()) : overlayCalibration}
+            box={canvasBox}
+            page={pageNum}
+            mode={calMode}
+            seekId={seekId}
+            holdId={holdId}
+            editingId={editingId}
+            onDrop={dropSection}
+            onSeek={seek}
+            onHold={hold}
+            onRelabel={relabel}
+            onDelete={deleteSection}
+            onBeginEdit={setEditingId}
+          />
+        )}
       </div>
+
+      {/* Calibrate toolbar (owner-only, in calibrate mode) */}
+      {calMode === 'calibrate' && (
+        <div className="flex items-center justify-between gap-2 px-4 py-2 border-t border-zinc-800 bg-zinc-900">
+          <p className="text-[11px] text-zinc-400">
+            Tap the page to drop a section · tap a pill to label or delete
+            {calibration && !canVerify(calibration) && (
+              <span className="text-amber-400"> · every section needs a label to verify</span>
+            )}
+          </p>
+          <div className="flex items-center gap-2">
+            {saveState === 'saving' && <span className="text-[11px] text-zinc-500">Saving…</span>}
+            {saveState === 'saved' && <span className="text-[11px] text-emerald-400">Saved</span>}
+            {saveState === 'error' && <span className="text-[11px] text-red-400">Save failed</span>}
+            <button
+              onClick={() => saveCalibration(false)}
+              disabled={!calibration || calibration.sections.length === 0 || saveState === 'saving'}
+              className="px-3 py-1.5 text-xs font-bold rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Save draft
+            </button>
+            <button
+              onClick={() => saveCalibration(true)}
+              disabled={!calibration || !canVerify(calibration) || saveState === 'saving'}
+              className="px-3 py-1.5 text-xs font-bold rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              Verify &amp; save
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Perform seek status (a section is parked under the redline) */}
+      {calMode === 'perform' && seekId && overlayCalibration && (() => {
+        const s = overlayCalibration.sections.find((x) => x.id === seekId);
+        if (!s) return null;
+        return (
+          <div className="flex items-center justify-center gap-2 py-1.5 text-xs bg-zinc-900 border-t border-zinc-800">
+            <span className="text-zinc-400">{holdId === seekId ? 'Holding' : 'At'}</span>
+            <span className="font-bold text-red-400">{s.label || '(unlabeled)'}</span>
+            <button onClick={() => { setSeekId(null); setHoldId(null); }} className="text-zinc-500 hover:text-white underline">
+              clear
+            </button>
+          </div>
+        );
+      })()}
 
       {/* Page indicator */}
       {numPages > 1 && (
