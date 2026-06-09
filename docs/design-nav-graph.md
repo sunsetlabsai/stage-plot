@@ -96,6 +96,13 @@ Notes:
 - **D.C. = `{jump, from:'capo'}`**, **D.S. = `{jump, from:'segno'}`**. `until` encodes
   *al Fine* / *al Coda* / plain in one field — no combinatorial kinds.
 - **Voltas reference a bar *range*** (`barIds`) — a 1st ending is usually several bars.
+  An ending's `barIds` must be **contiguous in `barsInOrder`** (a real bracket spans
+  adjacent bars), and within a repeat the endings must be **sorted, non-overlapping,
+  with no bar shared across endings** — enforced by the resolver (§5), so the
+  "first bar / skip past / past the whole group" walk (§4 rule 1) is deterministic.
+- **Span ordering (resolver-checked, §5):** a `repeatStart` must precede its bound
+  `repeatEnd` and all its bound `ending` bars in reading order. These are
+  performability invariants (not structural), so a half-placed draft still saves.
 - At most **one** `segno`, **one** `coda`, **one** `fine` in v1 (labeled multiples
   = OQ-A below).
 
@@ -204,10 +211,18 @@ Generous on purpose; exceeding ⇒ `RoadmapError('does not terminate')`.
    endings claim a pass) ⇒ redline has nowhere to go.
 4. **Mixed repeat expression** — a `repeatStart` that has **both** a plain `repeatEnd`
    **and** `ending` markers bound to it (two ways to say the same thing — §3).
-5. **Dangling binding/FK** — `repeatStartId` references a non-`repeatStart` marker (or
+5. **Invalid span ordering (Codex R2 HIGH 1)** — a bound `repeatEnd` whose bar does NOT
+   come after its `repeatStart` (reading order), or an `ending` any of whose bars come
+   at/before the bound `repeatStart`. A musically-impossible inverted span that could
+   still "terminate."
+6. **Invalid ending ranges (Codex R2 HIGH 2)** — an `ending` whose `barIds` are **not
+   contiguous** in `barsInOrder`; or, within one repeat, endings that **overlap**,
+   **share a bar**, or are **not sorted** in reading order. Required so the volta walk
+   (§4 rule 1) is deterministic.
+7. **Dangling binding/FK** — `repeatStartId` references a non-`repeatStart` marker (or
    none), or `barId`/`barIds` references a non-existent bar (FK also caught
    structurally — §7).
-6. **Non-termination** — exceeds the length cap (§4 backstop; bug catcher only).
+8. **Non-termination** — exceeds the length cap (§4 backstop; bug catcher only).
 
 Lone `repeatStart` (no `repeatEnd`/volta bound to it) = **non-required warning**
 (no-op, cosmetic — does not block verify). Lone `repeatEnd` with no resolvable
@@ -276,6 +291,12 @@ schema_version_to_persist = (calibration.roadmap?.length ?? 0) > 0 ? 3 : 2
   cleanly.**
 - **Deploy order:** ship+deploy the chunk-4 build (v3-aware) **before** any v3
   (roadmap) row is authored. Drafts are safe regardless (Perform ignores drafts).
+- **PUT must accept incoming `schemaVersion` ∈ {1, 2, 3} (Codex R2 MED 3 — footgun).**
+  Today's PUT gate is `!== 1 && !== CALIBRATION_SCHEMA_VERSION`; naively bumping the
+  constant to 3 would accept only {1, 3} and **reject v2 payloads from old tabs /
+  no-roadmap clients.** The chunk-4 PUT gate must explicitly accept `1 | 2 | 3`
+  (`rowToCalibration` normalizes on read regardless). This is a compatibility fix, not
+  a model change.
 
 ## 9. Authoring UI (build, but design-locked now)
 
@@ -290,10 +311,12 @@ low-confidence jumps) — **same markers, same resolver.**
 ## 10. Build outline (after sign-off)
 1. Types + `resolveRoadmap` + `RoadmapError` (pure, exhaustively tested — §4/§5
    examples are the suite, incl. exact `completedPasses` counter, explicit
-   `repeatStartId` binding, plain-D.C. cap, nested repeats). **`isValidCalibration`
-   gains STRUCTURAL marker checks only (no resolver)**; `canVerify`/performability gain
-   the resolver gate; per-payload v2/v3 stamping (§8) + `rowToCalibration` upgrade +
-   cascade pruning. *(Foundational piece-parts — unit-tested; gated commit.)*
+   `repeatStartId` binding, plain-D.C. cap, nested repeats, §5 span-ordering +
+   ending-range invariants #5/#6). **`isValidCalibration` gains STRUCTURAL marker checks only (no
+   resolver)**; `canVerify`/performability gain the resolver gate; per-payload v2/v3
+   stamping (§8); **PUT gate widened to accept `schemaVersion ∈ {1,2,3}`** (§8 footgun);
+   `rowToCalibration` upgrade + cascade pruning. *(Foundational piece-parts —
+   unit-tested; gated commit.)*
 2. Perform consumption swap (traversal walk + pass readout) + GET performability gate
    runs `resolveRoadmap` on the non-owner/verified branch. *(Gated commit.)*
 3. Roadmap authoring tool + live-resolve UI (delete-to-resolve escape hatch).
