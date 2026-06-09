@@ -322,14 +322,43 @@ The doc-literal plan added `content_hash` / `page_count` / `page_dims` columns t
   conversion/import, admin audit/backfill, cross-device preflight). Premature for
   the minimal vertical slice.
 
-## Build order (when approved — separate build PR, not this doc)
+## Build order (revised — coherent units, not the original 1-6 split)
 
-1. **A — manual seek over a minimal hand-placed rail** (the bootstrap, resolves #1). This step is a *self-contained vertical slice*, not editor-free — it explicitly includes: (a) a **minimal marker-creation UI** (tap-to-drop **sections-only** markers over the PDF; no bar geometry, no converter, no vision), (b) **sidecar save/load** (the persistence model below — write the graph, read it back, hash-key it), and (c) **perform-mode overlay rendering** (draw the markers + redline on the PDF). Seek snaps to section heads; redline parks/advances coarsely. The **full** Calibration Editor (gizmos, auto-distribute, snap, hybrid nav, scrub-verify, bar ticks) is step 4 enrichment — *not* required here. Universal fallback (tap marker = seek, long-press = hold/loop).
-2. **Navigation-graph data model + bar-level overlay renderer** (adds bar-level `pdfBox` anchors + the sweep-within-system geometry; enriches step 1's coarse section rail).
-3. **Converter** (structural import pass → graph + per-element confidence) — makes creation cheap; *not* a gate for step 1.
-4. **Calibration Editor** (gizmos, auto-distribute, snap-to-printed-line / detector #2, hybrid nav, Edit/Perform weighting, scrub-preview, chart-scoped).
-5. **B — leader/follower** over WebRTC discrete events (after the transport OQ resolves).
-6. **C — deferred** (follow-leader audio; tempo-awareness first).
+**Revision (build-time, Graham's call):** the original split scattered the editing
+experience across steps 2–4, but **the overlay + auto-adjust is one coherent
+function** — fragmenting it would put a half-built editor in front of testers. So
+steps 2–4 collapse into **one Calibration Editor unit, built on a branch in
+gated/Codex-reviewed chunks but merged to main once (when coherent).** B and C stay
+separate later units. The converter rides as a **fast-follow merge** right behind the
+editor (highest-uncertainty piece; the manual auto-distributed editor is fully usable
+without it — "correction never exceeds creation" already makes calibration ~20s).
+
+1. **✅ SHIPPED — A: manual seek over a sections-only rail** (the bootstrap). Self-
+   contained vertical slice: tap-to-drop section markers, sidecar save/load (hash-keyed),
+   Perform overlay (markers + redline, seek/hold). On main (`beadf8b`).
+2. **Calibration Editor (coherent unit — one merge).** Built in internal chunks, each
+   gated + Codex-reviewed:
+   1. **Geometry model + persistence** — pure `System`/`Bar`/`PositionRef` + auto-
+      distribute + tap→bar helpers (tested); extend the graph JSON, `schema_version → 2`,
+      back-compat read of v1 section-only rows.
+   2. **Bar-level Perform renderer** — redline sweeps L→R within a system, snaps to next,
+      crosses pages (read-only consume of bars).
+   3. **System-band creation floor** — tap-to-drop full-width system bands, select +
+      drag-resize (y only), per-system `− N +` bar-count stepper (auto-distribute),
+      delete system. This is the minimum creation surface that makes chunk 2's renderer
+      usable. **Deferred to a later chunk (refinement, not creation):** per-tick nudge
+      for irregular bars, snap-to-printed-line (detector #2), copy-system layout, and
+      per-system x-bounds (bands are full-width 0..1 for now).
+   4. **Nav graph** — repeats / 1st-2nd endings / D.S. / D.C. / Coda / Fine + the
+      non-linear `(bar, pass)` timeline. **Needs a focused mini-spec first** (OQ #3:
+      nested repeats, multiple endings, *D.S. al Coda al Fine*, contradictory-roadmap
+      rejection) — not built blind.
+   5. **Verify-by-playback (scrub/play)** as the primary review affordance + hybrid nav
+      badges + Edit/Perform weighting.
+3. **Converter (fast-follow merge, right behind the editor)** — structural import pass →
+   graph + per-element confidence + review queue. Makes creation cheap; not a gate.
+4. **B — leader/follower** over WebRTC discrete events (after the transport OQ resolves).
+5. **C — deferred** (follow-leader audio; tempo-awareness first).
 
 Console export untouched throughout.
 

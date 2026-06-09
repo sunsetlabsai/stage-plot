@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { ReactNode, MouseEvent as ReactMouseEvent } from 'react';
+import type { ReactNode, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { LogoMark } from '@/components/Logo';
@@ -34,6 +34,8 @@ import type {
   Chart,
   ChartCalibration,
   SectionAnchor,
+  System,
+  Bar,
 } from '@/lib/types';
 import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf } from '@/lib/setlist';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
@@ -58,6 +60,16 @@ import {
   verify,
   isPerformable,
   hashPdfBytes,
+  tapToBar,
+  findSystem,
+  firstBar,
+  nextBar,
+  prevBar,
+  addSystem,
+  removeSystem,
+  resizeSystemBand,
+  autoDistributeBars,
+  systemsForPage,
 } from '@/lib/chart-calibration';
 import { useShow } from '@/lib/use-show';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
@@ -1624,21 +1636,103 @@ function SectionMarker({
   );
 }
 
-// Absolutely fills the viewer container. In Perform the container is
-// pointer-events-none so taps between markers fall through to the page-turn
-// handler; markers re-enable pointer events on themselves. In Calibrate the
-// container captures clicks (tagged interactive so the window page-turn handler
-// ignores it) — a click on empty page area drops a new section there.
+// A calibrated staff system: a translucent full-width band (the chunk-3
+// creation tier). Tap to select; when selected it shows top/bottom drag handles
+// (fit the band to the printed staff) and its barline ticks. Ticks are visual
+// only here — per-tick nudge is a later refinement.
+function SystemBand({
+  system, bars, box, selected, onSelect, onResizeStart,
+}: {
+  system: System;
+  bars: Bar[];
+  box: CanvasBox;
+  selected: boolean;
+  onSelect: () => void;
+  onResizeStart: (edge: 'top' | 'bottom', e: ReactPointerEvent<HTMLDivElement>) => void;
+}) {
+  const left = box.left + system.xStart * box.width;
+  const top = box.top + system.yTop * box.height;
+  const width = (system.xEnd - system.xStart) * box.width;
+  const height = (system.yBottom - system.yTop) * box.height;
+  const ordered = [...bars].sort((a, b) => a.xStart - b.xStart);
+
+  return (
+    <>
+      <div
+        data-chart-overlay-interactive
+        onClick={(e) => { e.stopPropagation(); onSelect(); }}
+        className={`absolute ${selected ? 'bg-sky-500/15 ring-2 ring-sky-400' : 'bg-zinc-400/10 ring-1 ring-zinc-500'}`}
+        style={{ left, top, width, height, pointerEvents: 'auto', touchAction: 'manipulation' }}
+      >
+        {selected && (
+          <span className="absolute -top-4 left-0 text-[10px] font-bold text-sky-300">
+            {ordered.length} bar{ordered.length === 1 ? '' : 's'}
+          </span>
+        )}
+      </div>
+      {/* Barline ticks (leading edge of each bar + the closing edge). */}
+      {ordered.map((b) => (
+        <div
+          key={b.id}
+          className="absolute w-px bg-sky-400/70"
+          style={{ left: box.left + b.xStart * box.width, top, height, pointerEvents: 'none' }}
+        />
+      ))}
+      {ordered.length > 0 && (
+        <div
+          className="absolute w-px bg-sky-400/70"
+          style={{ left: box.left + ordered[ordered.length - 1].xEnd * box.width, top, height, pointerEvents: 'none' }}
+        />
+      )}
+      {/* Top/bottom resize handles (selected only). */}
+      {selected && (['top', 'bottom'] as const).map((edge) => (
+        <div
+          key={edge}
+          data-chart-overlay-interactive
+          onPointerDown={(e) => onResizeStart(edge, e)}
+          onClick={(e) => e.stopPropagation()}
+          className="absolute h-3 -translate-y-1/2 cursor-ns-resize bg-sky-400/40 hover:bg-sky-400/70"
+          style={{
+            left,
+            top: edge === 'top' ? top : top + height,
+            width,
+            pointerEvents: 'auto',
+            touchAction: 'none',
+          }}
+        />
+      ))}
+    </>
+  );
+}
+
+// Absolutely fills the viewer container. In section-rail Perform the container
+// is pointer-events-none so taps between markers fall through to the page-turn
+// handler; markers re-enable pointer events on themselves. In Calibrate (and in
+// bar-level Perform) the container captures clicks (tagged interactive so the
+// window page-turn handler ignores it) — a calibrate Sections-tool click drops a
+// section, a Bars-tool click drops a staff system, and a bar-mode click seeks
+// the redline to the nearest bar.
 function CalibrationOverlay({
-  calibration, box, page, mode, seekId, holdId, editingId, onDrop, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
+  calibration, box, page, mode, calTool, seekId, holdId, editingId,
+  barMode, barRedline, onBarTap,
+  selectedSystemId, onDropSystem, onSelectSystem, onResizeSystem,
+  onDrop, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
 }: {
   calibration: ChartCalibration | null;
   box: CanvasBox;
   page: number;
   mode: 'perform' | 'calibrate';
+  calTool: 'sections' | 'bars';
   seekId: string | null;
   holdId: string | null;
   editingId: string | null;
+  barMode: boolean;
+  barRedline: { bar: Bar; system: System } | null;
+  onBarTap: (x: number, y: number) => void;
+  selectedSystemId: string | null;
+  onDropSystem: (y: number) => void;
+  onSelectSystem: (id: string | null) => void;
+  onResizeSystem: (id: string, yTop: number, yBottom: number) => void;
   onDrop: (x: number, y: number) => void;
   onSeek: (id: string) => void;
   onHold: (id: string) => void;
@@ -1646,27 +1740,101 @@ function CalibrationOverlay({
   onDelete: (id: string) => void;
   onBeginEdit: (id: string | null) => void;
 }) {
-  const sections = calibration ? sectionsForPage(calibration, page) : [];
+  // Which element types are live this frame. Sections show in section-rail
+  // Perform and in the Sections calibrate tool; systems show in the Bars tool.
+  const showSystems = mode === 'calibrate' && calTool === 'bars';
+  const showSectionMarkers = !barMode && (mode === 'perform' || calTool === 'sections');
+  const sections = showSectionMarkers && calibration ? sectionsForPage(calibration, page) : [];
+  const systemsOnPage = showSystems && calibration ? systemsForPage(calibration, page) : [];
+  const allBars = calibration?.bars ?? [];
   const seeked = calibration?.sections.find((s) => s.id === seekId) ?? null;
-  const redlineOnPage = seeked && seeked.page === page ? seeked : null;
+  const redlineOnPage = !barMode && seeked && seeked.page === page ? seeked : null;
+  const interactive = mode === 'calibrate' || barMode;
 
-  const onBackdrop = (e: ReactMouseEvent<HTMLDivElement>) => {
-    if (mode !== 'calibrate') return;
-    if (editingId) { onBeginEdit(null); return; }
+  // Drag-resize of a system band. The handler is subscribed once and reads the
+  // live box + callback through refs, so a re-render mid-drag (the calibration
+  // updates on every move) can't strand the listener or lose the gesture.
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ id: string; edge: 'top' | 'bottom'; other: number } | null>(null);
+  const boxRef = useRef(box);
+  const onResizeRef = useRef(onResizeSystem);
+  // Keep the drag-loop's refs current without re-subscribing the listener.
+  useEffect(() => { boxRef.current = box; onResizeRef.current = onResizeSystem; });
+  useEffect(() => {
+    const move = (e: globalThis.PointerEvent) => {
+      const d = dragRef.current;
+      const ov = overlayRef.current;
+      if (!d || !ov) return;
+      const b = boxRef.current;
+      if (!b.height) return;
+      const r = ov.getBoundingClientRect();
+      let ny = (e.clientY - r.top - b.top) / b.height;
+      ny = ny < 0 ? 0 : ny > 1 ? 1 : ny;
+      if (d.edge === 'top') onResizeRef.current(d.id, ny, d.other);
+      else onResizeRef.current(d.id, d.other, ny);
+    };
+    const up = () => { dragRef.current = null; };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+  }, []);
+
+  const beginResize = (sys: System, edge: 'top' | 'bottom', e: ReactPointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    dragRef.current = { id: sys.id, edge, other: edge === 'top' ? sys.yBottom : sys.yTop };
+    // Capture so a finger/cursor that slides off the thin handle keeps driving
+    // the drag (and pointerup still fires to end it).
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* unsupported */ }
+  };
+
+  const onSurface = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (!interactive) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const px = e.clientX - rect.left - box.left;
     const py = e.clientY - rect.top - box.top;
     if (px < 0 || py < 0 || px > box.width || py > box.height) return;
+    if (barMode) { onBarTap(px / box.width, py / box.height); return; }
+    if (calTool === 'bars') {
+      // A backdrop tap deselects if something's selected, else drops a new
+      // full-width system band at the tap's height.
+      if (selectedSystemId) { onSelectSystem(null); return; }
+      onDropSystem(py / box.height);
+      return;
+    }
+    // Sections tool: dismiss an open editor, else drop a section.
+    if (editingId) { onBeginEdit(null); return; }
     onDrop(px / box.width, py / box.height);
   };
 
+  // The current bar's region, rendered only when its system is on this page.
+  const barOnPage = barRedline && barRedline.system.page === page ? barRedline : null;
+  const barLeft = barOnPage ? box.left + barOnPage.bar.xStart * box.width : 0;
+  const barTop = barOnPage ? box.top + barOnPage.system.yTop * box.height : 0;
+  const barWidth = barOnPage ? (barOnPage.bar.xEnd - barOnPage.bar.xStart) * box.width : 0;
+  const barHeight = barOnPage ? (barOnPage.system.yBottom - barOnPage.system.yTop) * box.height : 0;
+
   return (
     <div
-      data-chart-overlay-interactive={mode === 'calibrate' ? '' : undefined}
-      onClick={onBackdrop}
+      ref={overlayRef}
+      data-chart-overlay-interactive={interactive ? '' : undefined}
+      onClick={onSurface}
       className="absolute inset-0"
-      style={{ pointerEvents: mode === 'calibrate' ? 'auto' : 'none' }}
+      style={{ pointerEvents: interactive ? 'auto' : 'none' }}
     >
+      {systemsOnPage.map((sys) => (
+        <SystemBand
+          key={sys.id}
+          system={sys}
+          box={box}
+          bars={allBars.filter((b) => b.systemId === sys.id)}
+          selected={sys.id === selectedSystemId}
+          onSelect={() => onSelectSystem(sys.id)}
+          onResizeStart={(edge, e) => beginResize(sys, edge, e)}
+        />
+      ))}
       {redlineOnPage && (
         <div
           className="absolute h-0.5 bg-red-600 shadow-[0_0_6px_rgba(220,38,38,0.8)]"
@@ -1677,6 +1845,20 @@ function CalibrationOverlay({
             pointerEvents: 'none',
           }}
         />
+      )}
+      {barOnPage && (
+        <>
+          {/* Current-bar highlight. */}
+          <div
+            className="absolute bg-red-500/15 ring-1 ring-red-500/40"
+            style={{ left: barLeft, top: barTop, width: barWidth, height: barHeight, pointerEvents: 'none' }}
+          />
+          {/* Leading-edge sweep cursor — moves L→R as the redline advances. */}
+          <div
+            className="absolute w-0.5 bg-red-600 shadow-[0_0_6px_rgba(220,38,38,0.8)]"
+            style={{ left: barLeft, top: barTop, height: barHeight, pointerEvents: 'none' }}
+          />
+        </>
       )}
       {sections.map((s) => (
         <SectionMarker
@@ -1731,7 +1913,10 @@ function ChartNavigator({
   const [sourceHash, setSourceHash] = useState<string | null>(null);
   const [seekId, setSeekId] = useState<string | null>(null);
   const [holdId, setHoldId] = useState<string | null>(null);
+  const [barSeekId, setBarSeekId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [calTool, setCalTool] = useState<'sections' | 'bars'>('sections');
+  const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
   const [canvasBox, setCanvasBox] = useState<CanvasBox | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
@@ -1807,6 +1992,62 @@ function ChartNavigator({
   const seek = (id: string) => { setSeekId(id); setHoldId(null); };
   const hold = (id: string) => { setSeekId(id); setHoldId(id); };
 
+  // ── Bar-level calibration (step 3: system/bar creation) ──
+  // Systems are full-width bands; a tap drops one ~6% tall centered on the tap
+  // height, then drag handles fit it to the printed staff and the stepper
+  // auto-distributes even bars.
+  const dropSystem = (y: number) => {
+    const base = calibration ?? emptyCalibration();
+    const next = addSystem(base, pageNum, y - 0.03, y + 0.03, 0, 1);
+    setCalibration(next);
+    const created = next.systems![next.systems!.length - 1];
+    setSelectedSystemId(created.id);
+  };
+  const resizeSystem = (id: string, yTop: number, yBottom: number) =>
+    setCalibration((c) => (c ? resizeSystemBand(c, id, yTop, yBottom) : c));
+  const setSystemBars = (id: string, count: number) =>
+    setCalibration((c) => (c ? autoDistributeBars(c, id, Math.max(0, count)) : c));
+  const deleteSystem = (id: string) => {
+    setCalibration((c) => (c ? removeSystem(c, id) : c));
+    setSelectedSystemId(null);
+  };
+  const selectedSystem = selectedSystemId
+    ? (calibration?.systems ?? []).find((s) => s.id === selectedSystemId) ?? null
+    : null;
+  const selectedBarCount = selectedSystem
+    ? (calibration?.bars ?? []).filter((b) => b.systemId === selectedSystem.id).length
+    : 0;
+
+  // ── Bar-level Perform redline (step 2) ──
+  // Active only when a performable calibration carries bar geometry. The redline
+  // sweeps L→R through barsInOrder: stepping advances within a system, snaps to
+  // the next system, and crosses pages (turning the page as it goes).
+  const barMode = calMode === 'perform' && !!overlayCalibration && (overlayCalibration.bars?.length ?? 0) > 0;
+  const barCal = barMode ? overlayCalibration : null;
+  const currentBar = barCal ? (barCal.bars ?? []).find((b) => b.id === barSeekId) ?? null : null;
+  const currentSystem = currentBar && barCal ? findSystem(barCal, currentBar.systemId) : null;
+  const barRedline = currentBar && currentSystem ? { bar: currentBar, system: currentSystem } : null;
+
+  const goToBar = (bar: Bar | null) => {
+    if (!bar || !barCal) return;
+    setBarSeekId(bar.id);
+    const sys = findSystem(barCal, bar.systemId);
+    if (sys && sys.page !== pageNum) setPageNum(sys.page);
+  };
+  const seekBarAt = (x: number, y: number) => {
+    if (!barCal) return;
+    const bar = tapToBar(barCal, pageNum, x, y);
+    if (bar) setBarSeekId(bar.id);
+  };
+  const stepNextBar = () => {
+    if (!barCal) return;
+    goToBar(currentBar ? nextBar(barCal, currentBar.id) : firstBar(barCal));
+  };
+  const stepPrevBar = () => {
+    if (!barCal || !currentBar) return;
+    goToBar(prevBar(barCal, currentBar.id));
+  };
+
   const saveCalibration = async (promote: boolean) => {
     if (!calibration || !chartFileId || !sourceHash) return;
     const payload = promote ? verify(calibration) : calibration;
@@ -1835,7 +2076,10 @@ function ChartNavigator({
       setSourceHash(null);
       setSeekId(null);
       setHoldId(null);
+      setBarSeekId(null);
       setEditingId(null);
+      setCalTool('sections');
+      setSelectedSystemId(null);
       setCanvasBox(null);
     };
     if (!chartFileId) {
@@ -2026,7 +2270,7 @@ function ChartNavigator({
           )}
           {calibratable && (
             <button
-              onClick={() => { setCalMode((m) => (m === 'calibrate' ? 'perform' : 'calibrate')); setEditingId(null); }}
+              onClick={() => { setCalMode((m) => (m === 'calibrate' ? 'perform' : 'calibrate')); setEditingId(null); setSelectedSystemId(null); }}
               className={`px-2 py-1 rounded text-xs font-bold transition-colors ${
                 calMode === 'calibrate'
                   ? 'bg-sky-500 text-white'
@@ -2100,9 +2344,17 @@ function ChartNavigator({
             box={canvasBox}
             page={pageNum}
             mode={calMode}
+            calTool={calTool}
             seekId={seekId}
             holdId={holdId}
             editingId={editingId}
+            barMode={barMode}
+            barRedline={barRedline}
+            onBarTap={seekBarAt}
+            selectedSystemId={selectedSystemId}
+            onDropSystem={dropSystem}
+            onSelectSystem={setSelectedSystemId}
+            onResizeSystem={resizeSystem}
             onDrop={dropSection}
             onSeek={seek}
             onHold={hold}
@@ -2116,19 +2368,67 @@ function ChartNavigator({
       {/* Calibrate toolbar (owner-only, in calibrate mode) */}
       {calMode === 'calibrate' && (
         <div className="flex items-center justify-between gap-2 px-4 py-2 border-t border-zinc-800 bg-zinc-900">
-          <p className="text-[11px] text-zinc-400">
-            Tap the page to drop a section · tap a pill to label or delete
-            {calibration && !canVerify(calibration) && (
-              <span className="text-amber-400"> · every section needs a label to verify</span>
+          <div className="flex items-center gap-3 min-w-0">
+            {/* Tool toggle: Sections (rail) vs Bars (system/bar geometry). */}
+            <div className="flex rounded bg-zinc-800 p-0.5 shrink-0">
+              {(['sections', 'bars'] as const).map((tool) => (
+                <button
+                  key={tool}
+                  onClick={() => { setCalTool(tool); setSelectedSystemId(null); setEditingId(null); }}
+                  className={`px-2 py-1 rounded text-[11px] font-bold capitalize transition-colors ${
+                    calTool === tool ? 'bg-sky-500 text-white' : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {tool}
+                </button>
+              ))}
+            </div>
+            {calTool === 'sections' ? (
+              <p className="text-[11px] text-zinc-400 truncate">
+                Tap the page to drop a section · tap a pill to label or delete
+                {calibration && !canVerify(calibration) && (
+                  <span className="text-amber-400"> · every section needs a label to verify</span>
+                )}
+              </p>
+            ) : selectedSystem ? (
+              <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+                <span>Bars</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setSystemBars(selectedSystem.id, selectedBarCount - 1)}
+                    disabled={selectedBarCount === 0}
+                    className="w-6 h-6 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    &minus;
+                  </button>
+                  <span className="w-6 text-center font-bold text-white">{selectedBarCount}</span>
+                  <button
+                    onClick={() => setSystemBars(selectedSystem.id, selectedBarCount + 1)}
+                    className="w-6 h-6 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
+                  >
+                    +
+                  </button>
+                </div>
+                <button
+                  onClick={() => deleteSystem(selectedSystem.id)}
+                  className="text-zinc-500 hover:text-red-400 underline"
+                >
+                  Delete system
+                </button>
+              </div>
+            ) : (
+              <p className="text-[11px] text-zinc-400 truncate">
+                Tap the page to drop a staff system · tap a band to select · drag its edges to fit
+              </p>
             )}
-          </p>
-          <div className="flex items-center gap-2">
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
             {saveState === 'saving' && <span className="text-[11px] text-zinc-500">Saving…</span>}
             {saveState === 'saved' && <span className="text-[11px] text-emerald-400">Saved</span>}
             {saveState === 'error' && <span className="text-[11px] text-red-400">Save failed</span>}
             <button
               onClick={() => saveCalibration(false)}
-              disabled={!calibration || calibration.sections.length === 0 || saveState === 'saving'}
+              disabled={!calibration || (calibration.sections.length === 0 && (calibration.systems?.length ?? 0) === 0) || saveState === 'saving'}
               className="px-3 py-1.5 text-xs font-bold rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
             >
               Save draft
@@ -2144,8 +2444,38 @@ function ChartNavigator({
         </div>
       )}
 
+      {/* Perform bar transport (redline sweeps L→R through the bars) */}
+      {calMode === 'perform' && barMode && (
+        <div className="flex items-center justify-center gap-3 py-1.5 text-xs bg-zinc-900 border-t border-zinc-800">
+          <button
+            onClick={stepPrevBar}
+            disabled={!currentBar || (barCal ? prevBar(barCal, currentBar.id) === null : true)}
+            className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            &larr; Prev bar
+          </button>
+          <span className="text-zinc-400 min-w-[6rem] text-center">
+            {currentBar
+              ? <>Bar <span className="font-bold text-red-400">{currentBar.absNumber}</span></>
+              : 'Tap a bar or step →'}
+          </span>
+          <button
+            onClick={stepNextBar}
+            disabled={barCal ? (currentBar ? nextBar(barCal, currentBar.id) === null : firstBar(barCal) === null) : true}
+            className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            Next bar &rarr;
+          </button>
+          {currentBar && (
+            <button onClick={() => setBarSeekId(null)} className="text-zinc-500 hover:text-white underline">
+              clear
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Perform seek status (a section is parked under the redline) */}
-      {calMode === 'perform' && seekId && overlayCalibration && (() => {
+      {calMode === 'perform' && !barMode && seekId && overlayCalibration && (() => {
         const s = overlayCalibration.sections.find((x) => x.id === seekId);
         if (!s) return null;
         return (
