@@ -79,6 +79,12 @@ export async function GET(request: NextRequest) {
 
   const calibration = rowToCalibration(data);
 
+  // Fail closed on a structurally invalid stored row (the hand-edited DB
+  // boundary). isPerformable only checks status + labels, not geometry, so a
+  // 'verified' row with garbage anchors could otherwise drive the redline —
+  // re-validate the full shape and serve nothing if it doesn't hold.
+  if (!isValidCalibration(calibration)) return notFound;
+
   // Perform boundary: non-owners only ever see a performable calibration.
   if (!isPerformable(calibration) && !(await isOwnerOfChart(chartId))) {
     return notFound;

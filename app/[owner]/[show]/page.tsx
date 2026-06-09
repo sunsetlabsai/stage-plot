@@ -1571,29 +1571,30 @@ function SectionMarker({
           : 'bg-sky-600 text-white'
         : 'bg-zinc-800/85 text-zinc-100 ring-1 ring-zinc-600';
 
+  // The wrapper IS the single hit element — its handlers fire anywhere in its
+  // box, and its p-2.5 padding makes that box larger than the visible pill (a
+  // touch-friendly target, esp. in Perform). The pill is pointer-events-none so
+  // it can never sit above the handlers and steal the tap; stopPropagation keeps
+  // a marker tap from bubbling to the calibrate backdrop (which would drop one).
   return (
     <div
       data-chart-overlay-interactive
-      className="absolute -translate-x-1/2 -translate-y-1/2"
-      style={{ left, top, pointerEvents: 'auto' }}
+      onPointerDown={onPointerDown}
+      onPointerUp={onPointerUp}
+      onPointerLeave={clearTimer}
+      onPointerCancel={clearTimer}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (mode === 'calibrate' && !isEditing) onBeginEdit();
+      }}
+      className="absolute -translate-x-1/2 -translate-y-1/2 p-2.5"
+      style={{ left, top, pointerEvents: 'auto', touchAction: 'manipulation' }}
     >
-      {/* Larger transparent hit target centered on the anchor */}
-      <button
-        type="button"
-        aria-label={section.label || 'section'}
-        onPointerDown={onPointerDown}
-        onPointerUp={onPointerUp}
-        onPointerLeave={clearTimer}
-        onPointerCancel={clearTimer}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (mode === 'calibrate' && !isEditing) onBeginEdit();
-        }}
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-11 h-11 rounded-full"
-        style={{ touchAction: 'manipulation' }}
-      />
       {isEditing ? (
-        <div className="relative flex items-center gap-1 rounded bg-zinc-900 ring-1 ring-sky-500 px-1 py-0.5 shadow-lg">
+        <div
+          className="flex items-center gap-1 rounded bg-zinc-900 ring-1 ring-sky-500 px-1 py-0.5 shadow-lg"
+          style={{ pointerEvents: 'auto' }}
+        >
           <input
             autoFocus
             defaultValue={section.label}
@@ -1613,7 +1614,8 @@ function SectionMarker({
         </div>
       ) : (
         <span
-          className={`relative block max-w-[8rem] truncate rounded px-1.5 py-0.5 text-[11px] font-bold shadow ${pillState}`}
+          className={`block max-w-[8rem] truncate rounded px-1.5 py-0.5 text-[11px] font-bold shadow ${pillState}`}
+          style={{ pointerEvents: 'none' }}
         >
           {section.label.trim() === '' ? '(unlabeled)' : section.label}
         </span>
@@ -1774,16 +1776,19 @@ function ChartNavigator({
         ? calibration
         : null;
 
-  // Mirror the canvas's actual rendered rect (it's max-w/max-h centered, so
-  // smaller than its container) so the overlay aligns to the printed page.
-  const updateCanvasBox = () => {
+  // Mirror the canvas's ACTUAL rendered rect (it's max-w/max-h clamped, so its
+  // painted size can be smaller than its style w/h) as a delta from the viewer
+  // container — the overlay fills the container, so markers land on the printed
+  // page regardless of letterboxing or layout shifts (e.g. the toolbar opening).
+  const updateCanvasBox = useCallback(() => {
     const c = canvasRef.current;
-    if (!c) return;
-    const width = parseFloat(c.style.width) || c.clientWidth;
-    const height = parseFloat(c.style.height) || c.clientHeight;
-    if (!width || !height) return;
-    setCanvasBox({ left: c.offsetLeft, top: c.offsetTop, width, height });
-  };
+    const cont = containerRef.current;
+    if (!c || !cont) return;
+    const cr = c.getBoundingClientRect();
+    const pr = cont.getBoundingClientRect();
+    if (!cr.width || !cr.height) return;
+    setCanvasBox({ left: cr.left - pr.left, top: cr.top - pr.top, width: cr.width, height: cr.height });
+  }, []);
 
   const dropSection = (x: number, y: number) => {
     const base = calibration ?? emptyCalibration();
@@ -1900,14 +1905,21 @@ function ChartNavigator({
     if (docRef.current && canvasRef.current && pageNum >= 1 && pageNum <= numPages) {
       renderPage(docRef.current, pageNum, canvasRef.current).then(() => updateCanvasBox());
     }
-  }, [pageNum, numPages]);
+  }, [pageNum, numPages, updateCanvasBox]);
 
-  // Keep the overlay aligned to the canvas as the viewport resizes/rotates.
+  // Keep the overlay aligned to the canvas across any layout change — viewport
+  // resize/rotate, the canvas re-clamping, or the calibrate toolbar opening
+  // (which shrinks the container). A ResizeObserver catches all of these; a
+  // window 'resize' listener would miss the layout-only shifts.
   useEffect(() => {
-    const onResize = () => updateCanvasBox();
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => updateCanvasBox());
+    const cont = containerRef.current;
+    const c = canvasRef.current;
+    if (cont) ro.observe(cont);
+    if (c) ro.observe(c);
+    return () => ro.disconnect();
+  }, [updateCanvasBox, activeChart, calMode]);
 
   // Prefetch N-1 and N+1
   useEffect(() => {
