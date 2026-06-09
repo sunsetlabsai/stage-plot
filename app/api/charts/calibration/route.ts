@@ -5,22 +5,32 @@ import {
   canVerify,
   isPerformable,
   isValidCalibration,
-  upgradeToV2,
+  upgradeCalibration,
   CALIBRATION_SCHEMA_VERSION,
 } from '@/lib/chart-calibration';
-import type { Bar, ChartCalibration, SectionAnchor, System } from '@/lib/types';
+import type { Bar, ChartCalibration, RoadmapMarker, SectionAnchor, System } from '@/lib/types';
+
+// A no-roadmap calibration is persisted at v2 so an old v2 build still serves it
+// (rollback-safe). Only a roadmap-bearing payload is stamped at the current
+// version and fenced from old readers by the GET version gate. See
+// docs/design-nav-graph.md §8.
+const LINEAR_SCHEMA_VERSION = 2;
+function schemaVersionToPersist(cal: ChartCalibration): number {
+  return (cal.roadmap?.length ?? 0) > 0 ? CALIBRATION_SCHEMA_VERSION : LINEAR_SCHEMA_VERSION;
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HASH_RE = /^[0-9a-f]{64}$/;
 
 // Reconstruct the client-facing ChartCalibration from a stored row. The status
 // and schema_version columns are authoritative for querying; graph holds the
-// section/system/bar payload. Always returns a v2 calibration (v1 rows are
-// upgraded on read — the DB row is NOT rewritten, just the response).
+// section/system/bar/roadmap payload. Normalizes any known-old (v1/v2) row up to
+// the in-memory v3 shape (the DB row is NOT rewritten, just the response). A
+// genuinely-future row keeps its version so the GET gate can fail it closed.
 function rowToCalibration(row: {
   schema_version: number;
   status: string;
-  graph: { sections?: SectionAnchor[]; systems?: System[]; bars?: Bar[] };
+  graph: { sections?: SectionAnchor[]; systems?: System[]; bars?: Bar[]; roadmap?: RoadmapMarker[] };
 }): ChartCalibration {
   const raw: ChartCalibration = {
     schemaVersion: row.schema_version,
@@ -28,8 +38,9 @@ function rowToCalibration(row: {
     sections: Array.isArray(row.graph?.sections) ? row.graph.sections : [],
     systems: Array.isArray(row.graph?.systems) ? row.graph.systems : undefined,
     bars: Array.isArray(row.graph?.bars) ? row.graph.bars : undefined,
+    roadmap: Array.isArray(row.graph?.roadmap) ? row.graph.roadmap : undefined,
   };
-  return upgradeToV2(raw);
+  return upgradeCalibration(raw);
 }
 
 async function isOwnerOfChart(chartId: string): Promise<boolean> {
@@ -138,8 +149,10 @@ export async function PUT(request: NextRequest) {
   if (!isValidCalibration(calibration)) {
     return Response.json({ error: 'invalid calibration payload' }, { status: 400 });
   }
-  // Accept v1 (sections-only) or v2 (sections + systems/bars). Persist as v2.
-  if (calibration.schemaVersion !== 1 && calibration.schemaVersion !== CALIBRATION_SCHEMA_VERSION) {
+  // Accept incoming schemaVersion ∈ {1, 2, 3}. (rowToCalibration normalizes on
+  // read regardless; we must keep accepting v2 payloads from old tabs /
+  // no-roadmap clients while supporting v3 roadmap payloads — §8 footgun.)
+  if (![1, 2, CALIBRATION_SCHEMA_VERSION].includes(calibration.schemaVersion)) {
     return Response.json({ error: 'unsupported calibration schema version' }, { status: 400 });
   }
   // Fail closed: never persist a 'verified' calibration that breaks the invariant.
@@ -159,8 +172,8 @@ export async function PUT(request: NextRequest) {
     return Response.json({ error: 'Chart not found or permission denied' }, { status: 403 });
   }
 
-  // Upgrade to v2 before persisting (a v1 client payload gets systems/bars=[]).
-  const toStore = upgradeToV2(calibration);
+  // Normalize to the in-memory v3 shape (a v1 client payload gets systems/bars=[]).
+  const toStore = upgradeCalibration(calibration);
 
   const { error } = await supabase
     .from('chart_calibration')
@@ -168,9 +181,16 @@ export async function PUT(request: NextRequest) {
       {
         chart_id: chartId,
         source_hash: hash,
-        schema_version: CALIBRATION_SCHEMA_VERSION,
+        // Per-payload stamp: v3 only when a roadmap is present, else v2
+        // (rollback-safe). The constant governs upgrade-on-read, not write. §8.
+        schema_version: schemaVersionToPersist(toStore),
         status: toStore.status,
-        graph: { sections: toStore.sections, systems: toStore.systems, bars: toStore.bars },
+        graph: {
+          sections: toStore.sections,
+          systems: toStore.systems,
+          bars: toStore.bars,
+          roadmap: toStore.roadmap,
+        },
       },
       { onConflict: 'chart_id,source_hash' },
     );

@@ -13,7 +13,9 @@ import {
   isPerformable,
   isValidSectionAnchor,
   isValidCalibration,
-  upgradeToV2,
+  isValidRoadmapMarkerShape,
+  upgradeCalibration,
+  resolveRoadmap,
   systemsInOrder,
   systemsForPage,
   addSystem,
@@ -31,38 +33,54 @@ import {
   nextBar,
   prevBar,
 } from '../lib/chart-calibration';
-import type { ChartCalibration, System, Bar } from '../lib/types';
+import type { ChartCalibration, System, Bar, RoadmapMarker } from '../lib/types';
 
 function cal(over: Partial<ChartCalibration> = {}): ChartCalibration {
   return { ...emptyCalibration(), ...over };
 }
 
-// ── v1 → v2 upgrade ────────────────────────────────────────────────────────
+// ── upgrade-on-read ─────────────────────────────────────────────────────────
 
-describe('upgradeToV2', () => {
-  it('adds systems/bars to a v1 calibration', () => {
+describe('upgradeCalibration', () => {
+  it('normalizes a v1 calibration up to the current shape', () => {
     const v1: ChartCalibration = { schemaVersion: 1, status: 'draft', sections: [] };
-    const v2 = upgradeToV2(v1);
-    expect(v2.schemaVersion).toBe(2);
-    expect(v2.systems).toEqual([]);
-    expect(v2.bars).toEqual([]);
-    expect(v2.sections).toEqual([]);
+    const up = upgradeCalibration(v1);
+    expect(up.schemaVersion).toBe(CALIBRATION_SCHEMA_VERSION);
+    expect(up.systems).toEqual([]);
+    expect(up.bars).toEqual([]);
+    expect(up.sections).toEqual([]);
+    expect(up.roadmap).toBeUndefined();
   });
 
-  it('is a no-op for v2 calibrations', () => {
-    const v2 = emptyCalibration();
-    expect(upgradeToV2(v2)).toBe(v2);
+  it('normalizes a v2 calibration up to the current shape', () => {
+    const v2: ChartCalibration = {
+      schemaVersion: 2, status: 'draft', sections: [], systems: [], bars: [],
+    };
+    const up = upgradeCalibration(v2);
+    expect(up.schemaVersion).toBe(CALIBRATION_SCHEMA_VERSION);
+    expect(up.roadmap).toBeUndefined();
   });
 
-  it('preserves existing sections', () => {
+  it('is a no-op for current-version calibrations', () => {
+    const cur = emptyCalibration();
+    expect(upgradeCalibration(cur)).toBe(cur);
+  });
+
+  it('leaves a genuinely-future row untouched (so the GET gate can fail it closed)', () => {
+    const future: ChartCalibration = { schemaVersion: 99, status: 'draft', sections: [] };
+    expect(upgradeCalibration(future)).toBe(future);
+    expect(upgradeCalibration(future).schemaVersion).toBe(99);
+  });
+
+  it('preserves existing sections and status', () => {
     const v1: ChartCalibration = {
       schemaVersion: 1,
       status: 'verified',
       sections: [{ id: 'a', page: 1, x: 0.5, y: 0.5, label: 'Intro' }],
     };
-    const v2 = upgradeToV2(v1);
-    expect(v2.sections).toEqual(v1.sections);
-    expect(v2.status).toBe('verified');
+    const up = upgradeCalibration(v1);
+    expect(up.sections).toEqual(v1.sections);
+    expect(up.status).toBe('verified');
   });
 });
 
@@ -814,5 +832,488 @@ describe('hashPdfBytes', () => {
     const a = await hashPdfBytes(new TextEncoder().encode('a'));
     const b = await hashPdfBytes(new TextEncoder().encode('b'));
     expect(a).not.toBe(b);
+  });
+});
+
+// ── Roadmap resolver (nav graph) ────────────────────────────────────────────
+
+// A single-system chart of `n` bars: ids b1..bn, dense reading order.
+function barsChart(n: number, roadmap?: RoadmapMarker[]): ChartCalibration {
+  const sys: System = { id: 'sys1', page: 1, yTop: 0.1, yBottom: 0.3, xStart: 0, xEnd: 1 };
+  const bars: Bar[] = [];
+  for (let i = 0; i < n; i++) {
+    bars.push({
+      id: `b${i + 1}`, systemId: 'sys1',
+      xStart: i / n, xEnd: (i + 1) / n,
+      absNumber: i + 1, sectionId: null,
+    });
+  }
+  return {
+    schemaVersion: CALIBRATION_SCHEMA_VERSION,
+    status: 'draft',
+    sections: [{ id: 'sec', page: 1, x: 0.05, y: 0.05, label: 'A' }],
+    systems: [sys], bars, roadmap,
+  };
+}
+
+// Flatten a successful resolve to a bar-id play order (throws on error so a
+// mis-specified test fails loudly with the reason).
+function order(c: ChartCalibration): string[] {
+  const r = resolveRoadmap(c);
+  if (!r.ok) throw new Error(`expected resolve ok, got error: ${r.error.reason}`);
+  return r.traversal.map((t) => t.barId);
+}
+
+function expectError(c: ChartCalibration): { markerIds: string[]; reason: string } {
+  const r = resolveRoadmap(c);
+  if (r.ok) throw new Error('expected a RoadmapError but resolve succeeded');
+  return r.error;
+}
+
+describe('resolveRoadmap — degenerate / linear', () => {
+  it('empty roadmap ⇒ linear barsInOrder, each pass 1 (back-compat)', () => {
+    const c = barsChart(4, []);
+    const r = resolveRoadmap(c);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.traversal).toEqual([
+        { barId: 'b1', pass: 1 }, { barId: 'b2', pass: 1 },
+        { barId: 'b3', pass: 1 }, { barId: 'b4', pass: 1 },
+      ]);
+    }
+  });
+
+  it('absent roadmap ⇒ linear', () => {
+    expect(order(barsChart(3))).toEqual(['b1', 'b2', 'b3']);
+  });
+});
+
+describe('resolveRoadmap — repeats', () => {
+  it('simple repeat (times:2) plays the span exactly twice', () => {
+    const c = barsChart(8, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    expect(order(c)).toEqual([
+      'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8',
+      'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8',
+    ]);
+  });
+
+  it('records pass numbers (1 then 2) across the repeat', () => {
+    const c = barsChart(2, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b2', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    const r = resolveRoadmap(c);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.traversal).toEqual([
+        { barId: 'b1', pass: 1 }, { barId: 'b2', pass: 1 },
+        { barId: 'b1', pass: 2 }, { barId: 'b2', pass: 2 },
+      ]);
+    }
+  });
+
+  it('times defaults to 2 when omitted', () => {
+    const c = barsChart(4, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b4', edge: 'end', repeatStartId: 'rs' },
+    ]);
+    expect(order(c)).toEqual(['b1', 'b2', 'b3', 'b4', 'b1', 'b2', 'b3', 'b4']);
+  });
+
+  it('times:3 plays the span exactly three times (exact counter)', () => {
+    const c = barsChart(2, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b2', edge: 'end', repeatStartId: 'rs', times: 3 },
+    ]);
+    expect(order(c)).toEqual(['b1', 'b2', 'b1', 'b2', 'b1', 'b2']);
+  });
+
+  it('a lone repeatStart is a cosmetic no-op (linear)', () => {
+    const c = barsChart(3, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b2', edge: 'start' },
+    ]);
+    expect(order(c)).toEqual(['b1', 'b2', 'b3']);
+  });
+
+  it('nested repeats: inner replays in full on every outer pass', () => {
+    const c = barsChart(16, [
+      { id: 'out', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'outE', kind: 'repeatEnd', barId: 'b16', edge: 'end', repeatStartId: 'out', times: 2 },
+      { id: 'inn', kind: 'repeatStart', barId: 'b5', edge: 'start' },
+      { id: 'innE', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'inn', times: 2 },
+    ]);
+    const ids = (n: number[]) => n.map((x) => `b${x}`);
+    expect(order(c)).toEqual([
+      ...ids([1, 2, 3, 4, 5, 6, 7, 8, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+      ...ids([1, 2, 3, 4, 5, 6, 7, 8, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
+    ]);
+  });
+});
+
+describe('resolveRoadmap — voltas (1st/2nd/3rd endings)', () => {
+  it('plays common section then each ending in turn', () => {
+    const c = barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b5', 'b6'], numbers: [1] },
+      { id: 'e2', kind: 'ending', repeatStartId: 'rs', barIds: ['b7', 'b8'], numbers: [2] },
+      { id: 'e3', kind: 'ending', repeatStartId: 'rs', barIds: ['b9', 'b10'], numbers: [3] },
+    ]);
+    const ids = (n: number[]) => n.map((x) => `b${x}`);
+    expect(order(c)).toEqual([
+      ...ids([1, 2, 3, 4, 5, 6]),
+      ...ids([1, 2, 3, 4, 7, 8]),
+      ...ids([1, 2, 3, 4, 9, 10]),
+    ]);
+  });
+
+  it('supports an ending that covers multiple passes (numbers:[1,3])', () => {
+    const c = barsChart(8, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b5', 'b6'], numbers: [1, 3] },
+      { id: 'e2', kind: 'ending', repeatStartId: 'rs', barIds: ['b7', 'b8'], numbers: [2] },
+    ]);
+    const ids = (n: number[]) => n.map((x) => `b${x}`);
+    expect(order(c)).toEqual([
+      ...ids([1, 2, 3, 4, 5, 6]),
+      ...ids([1, 2, 3, 4, 7, 8]),
+      ...ids([1, 2, 3, 4, 5, 6]),
+    ]);
+  });
+});
+
+describe('resolveRoadmap — D.C./D.S./Coda/Fine', () => {
+  it('plain D.C. (from capo) replays the whole piece once, no repeats needed', () => {
+    const c = barsChart(16, [
+      { id: 'dc', kind: 'jump', barId: 'b16', edge: 'end', from: 'capo', until: 'end' },
+    ]);
+    const ids = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => `b${a + i}`);
+    expect(order(c)).toEqual([...ids(1, 16), ...ids(1, 16)]);
+  });
+
+  it('D.S. al Coda al Fine: jumps to segno, arms coda, takes To Coda, ignores Fine', () => {
+    const c = barsChart(20, [
+      { id: 'segno', kind: 'segno', barId: 'b5', edge: 'start' },
+      { id: 'tc', kind: 'toCoda', barId: 'b12', edge: 'end' },
+      { id: 'coda', kind: 'coda', barId: 'b20', edge: 'start' },
+      { id: 'fine', kind: 'fine', barId: 'b16', edge: 'end' },
+      { id: 'ds', kind: 'jump', barId: 'b16', edge: 'end', from: 'segno', until: 'coda' },
+    ]);
+    const ids = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => `b${a + i}`);
+    expect(order(c)).toEqual([...ids(1, 16), ...ids(5, 12), 'b20']);
+  });
+
+  it('D.C. al Fine stops at Fine on the return pass', () => {
+    const c = barsChart(16, [
+      { id: 'fine', kind: 'fine', barId: 'b8', edge: 'end' },
+      { id: 'dc', kind: 'jump', barId: 'b16', edge: 'end', from: 'capo', until: 'fine' },
+    ]);
+    const ids = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => `b${a + i}`);
+    // 1..16, then capo 1..8 and stop at Fine (bar 8 end).
+    expect(order(c)).toEqual([...ids(1, 16), ...ids(1, 8)]);
+  });
+
+  it('To Coda is inert before the al Coda jump arms it', () => {
+    // First pass through bar 12 must NOT divert — only the post-jump pass does.
+    const c = barsChart(20, [
+      { id: 'segno', kind: 'segno', barId: 'b5', edge: 'start' },
+      { id: 'tc', kind: 'toCoda', barId: 'b12', edge: 'end' },
+      { id: 'coda', kind: 'coda', barId: 'b20', edge: 'start' },
+      { id: 'ds', kind: 'jump', barId: 'b16', edge: 'end', from: 'segno', until: 'coda' },
+    ]);
+    const ids = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => `b${a + i}`);
+    expect(order(c)).toEqual([...ids(1, 16), ...ids(5, 12), 'b20']);
+  });
+});
+
+describe('resolveRoadmap — contradiction rejection (§5)', () => {
+  it('#1 D.S. with no Segno', () => {
+    expect(expectError(barsChart(8, [
+      { id: 'ds', kind: 'jump', barId: 'b8', edge: 'end', from: 'segno', until: 'end' },
+    ])).reason).toMatch(/Segno/);
+  });
+
+  it('#1 al Coda with no Coda', () => {
+    expect(expectError(barsChart(8, [
+      { id: 'ds', kind: 'jump', barId: 'b8', edge: 'end', from: 'capo', until: 'coda' },
+    ])).reason).toMatch(/Coda/);
+  });
+
+  it('#1 al Coda with no To Coda departure', () => {
+    expect(expectError(barsChart(8, [
+      { id: 'coda', kind: 'coda', barId: 'b6', edge: 'start' },
+      { id: 'ds', kind: 'jump', barId: 'b8', edge: 'end', from: 'capo', until: 'coda' },
+    ])).reason).toMatch(/To Coda/);
+  });
+
+  it('#1 al Fine with no Fine', () => {
+    expect(expectError(barsChart(8, [
+      { id: 'ds', kind: 'jump', barId: 'b8', edge: 'end', from: 'capo', until: 'fine' },
+    ])).reason).toMatch(/Fine/);
+  });
+
+  it('#1 To Coda with no Coda', () => {
+    expect(expectError(barsChart(8, [
+      { id: 'tc', kind: 'toCoda', barId: 'b6', edge: 'end' },
+    ])).reason).toMatch(/Coda/);
+  });
+
+  it('#2 multiple Segno', () => {
+    const e = expectError(barsChart(8, [
+      { id: 's1', kind: 'segno', barId: 'b2', edge: 'start' },
+      { id: 's2', kind: 'segno', barId: 'b4', edge: 'start' },
+    ]));
+    expect(e.reason).toMatch(/multiple Segno/);
+    expect(e.markerIds).toEqual(['s1', 's2']);
+  });
+
+  it('#3 volta passes do not partition (gap)', () => {
+    expect(expectError(barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b5', 'b6'], numbers: [1] },
+      { id: 'e3', kind: 'ending', repeatStartId: 'rs', barIds: ['b7', 'b8'], numbers: [3] },
+    ])).reason).toMatch(/partition/);
+  });
+
+  it('#3 volta passes overlap', () => {
+    expect(expectError(barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b5', 'b6'], numbers: [1] },
+      { id: 'e2', kind: 'ending', repeatStartId: 'rs', barIds: ['b7', 'b8'], numbers: [1, 2] },
+    ])).reason).toMatch(/overlap/);
+  });
+
+  it('#4 mixed expression (plain repeatEnd AND volta on one repeat)', () => {
+    expect(expectError(barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'rs', times: 2 },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b9', 'b10'], numbers: [1] },
+    ])).reason).toMatch(/both/);
+  });
+
+  it('#4 multiple repeatEnd bound to one repeatStart', () => {
+    expect(expectError(barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're1', kind: 'repeatEnd', barId: 'b6', edge: 'end', repeatStartId: 'rs', times: 2 },
+      { id: 're2', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ])).reason).toMatch(/multiple repeatEnd/);
+  });
+
+  it('#5 repeatEnd precedes its repeatStart (inverted span)', () => {
+    expect(expectError(barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b8', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b4', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ])).reason).toMatch(/precedes/);
+  });
+
+  it('#5 volta bar precedes its repeatStart', () => {
+    expect(expectError(barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b6', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b2', 'b3'], numbers: [1] },
+      { id: 'e2', kind: 'ending', repeatStartId: 'rs', barIds: ['b7', 'b8'], numbers: [2] },
+    ])).reason).toMatch(/precedes/);
+  });
+
+  it('#6 ending bars not contiguous', () => {
+    expect(expectError(barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b5', 'b7'], numbers: [1] },
+      { id: 'e2', kind: 'ending', repeatStartId: 'rs', barIds: ['b8', 'b9'], numbers: [2] },
+    ])).reason).toMatch(/contiguous/);
+  });
+
+  it('#6 endings overlap / share a bar', () => {
+    expect(expectError(barsChart(10, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b5', 'b6'], numbers: [1] },
+      { id: 'e2', kind: 'ending', repeatStartId: 'rs', barIds: ['b6', 'b7'], numbers: [2] },
+    ])).reason).toMatch(/overlap|share/);
+  });
+
+  it('#7 marker references a missing bar (defensive)', () => {
+    expect(expectError(barsChart(4, [
+      { id: 'rs', kind: 'repeatStart', barId: 'bZ', edge: 'start' },
+    ])).reason).toMatch(/missing bar/);
+  });
+
+  it('#7 repeatEnd not bound to a real repeatStart (defensive)', () => {
+    expect(expectError(barsChart(8, [
+      { id: 're', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'ghost', times: 2 },
+    ])).reason).toMatch(/repeatStart/);
+  });
+
+  it('#8 a deeply nested LEGAL roadmap stays under the cap and resolves', () => {
+    // 3 levels of x2 repeats = ×8 expansion; the multiplicative cap must not
+    // false-positive a legal traversal (additive cap would).
+    const c = barsChart(12, [
+      { id: 'r1', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'r1e', kind: 'repeatEnd', barId: 'b12', edge: 'end', repeatStartId: 'r1', times: 2 },
+      { id: 'r2', kind: 'repeatStart', barId: 'b3', edge: 'start' },
+      { id: 'r2e', kind: 'repeatEnd', barId: 'b10', edge: 'end', repeatStartId: 'r2', times: 2 },
+      { id: 'r3', kind: 'repeatStart', barId: 'b5', edge: 'start' },
+      { id: 'r3e', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'r3', times: 2 },
+    ]);
+    const r = resolveRoadmap(c);
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe('isValidRoadmapMarkerShape (structural)', () => {
+  it('accepts each well-formed marker kind', () => {
+    const good: RoadmapMarker[] = [
+      { id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'b', kind: 'repeatEnd', barId: 'b2', edge: 'end', repeatStartId: 'a', times: 2 },
+      { id: 'c', kind: 'ending', repeatStartId: 'a', barIds: ['b3'], numbers: [1] },
+      { id: 'd', kind: 'segno', barId: 'b1', edge: 'start' },
+      { id: 'e', kind: 'coda', barId: 'b1', edge: 'start' },
+      { id: 'f', kind: 'toCoda', barId: 'b1', edge: 'end' },
+      { id: 'g', kind: 'fine', barId: 'b1', edge: 'end' },
+      { id: 'h', kind: 'jump', barId: 'b1', edge: 'end', from: 'segno', until: 'coda' },
+    ];
+    expect(good.every(isValidRoadmapMarkerShape)).toBe(true);
+  });
+
+  it('accepts an optional finite confidence', () => {
+    expect(isValidRoadmapMarkerShape(
+      { id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: 0.4 },
+    )).toBe(true);
+  });
+
+  it('rejects unknown kinds, wrong edge, bad enums, NaN confidence', () => {
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'nope', barId: 'b1' })).toBe(false);
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'end' })).toBe(false);
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'jump', barId: 'b1', edge: 'end', from: 'x', until: 'end' })).toBe(false);
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: NaN })).toBe(false);
+    expect(isValidRoadmapMarkerShape({ id: '', kind: 'segno', barId: 'b1', edge: 'start' })).toBe(false);
+  });
+
+  it('rejects an ending with empty barIds or numbers', () => {
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'ending', repeatStartId: 'r', barIds: [], numbers: [1] })).toBe(false);
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'ending', repeatStartId: 'r', barIds: ['b1'], numbers: [] })).toBe(false);
+  });
+});
+
+describe('isValidCalibration — roadmap (structural)', () => {
+  const base = () => barsChart(8);
+
+  it('accepts a well-formed roadmap', () => {
+    const c = barsChart(8, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    expect(isValidCalibration(c)).toBe(true);
+  });
+
+  it('rejects a roadmap with no bars', () => {
+    const c = base();
+    expect(isValidCalibration({
+      ...c, bars: [], roadmap: [{ id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' }],
+    })).toBe(false);
+  });
+
+  it('rejects a marker referencing a non-existent bar', () => {
+    expect(isValidCalibration({
+      ...base(), roadmap: [{ id: 'rs', kind: 'repeatStart', barId: 'ghost', edge: 'start' }],
+    })).toBe(false);
+  });
+
+  it('rejects a repeatEnd bound to a non-repeatStart marker', () => {
+    expect(isValidCalibration({
+      ...base(),
+      roadmap: [
+        { id: 'seg', kind: 'segno', barId: 'b1', edge: 'start' },
+        { id: 're', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'seg', times: 2 },
+      ],
+    })).toBe(false);
+  });
+
+  it('rejects duplicate marker ids', () => {
+    expect(isValidCalibration({
+      ...base(),
+      roadmap: [
+        { id: 'dup', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+        { id: 'dup', kind: 'segno', barId: 'b2', edge: 'start' },
+      ],
+    })).toBe(false);
+  });
+
+  it('STRUCTURALLY accepts a draft that does NOT resolve (BLOCKER-1: no authoring lockout)', () => {
+    // A D.S. dropped before its Segno is a temporary contradiction: structurally
+    // valid (persists/reloads), but resolveRoadmap fails (cannot verify).
+    const c = barsChart(8, [
+      { id: 'ds', kind: 'jump', barId: 'b8', edge: 'end', from: 'segno', until: 'end' },
+    ]);
+    expect(isValidCalibration(c)).toBe(true);
+    expect(resolveRoadmap(c).ok).toBe(false);
+  });
+});
+
+describe('canVerify — roadmap promotion gate', () => {
+  it('blocks verify when a present roadmap does not resolve', () => {
+    const c = barsChart(8, [
+      { id: 'ds', kind: 'jump', barId: 'b8', edge: 'end', from: 'segno', until: 'end' },
+    ]);
+    expect(canVerify(c)).toBe(false);
+  });
+
+  it('allows verify when the roadmap resolves', () => {
+    const c = barsChart(8, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b8', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    expect(canVerify(c)).toBe(true);
+  });
+
+  it('is unaffected for a no-roadmap chart with labeled sections', () => {
+    expect(canVerify(barsChart(4))).toBe(true);
+  });
+});
+
+describe('removeSystem — roadmap cascade pruning', () => {
+  // Two systems on one page: sys1 = b1..b4, sys2 = b5..b8.
+  function twoSystemChart(roadmap: RoadmapMarker[]): ChartCalibration {
+    const sys1: System = { id: 'sys1', page: 1, yTop: 0.1, yBottom: 0.3, xStart: 0, xEnd: 1 };
+    const sys2: System = { id: 'sys2', page: 1, yTop: 0.4, yBottom: 0.6, xStart: 0, xEnd: 1 };
+    const bars: Bar[] = [];
+    for (let i = 0; i < 4; i++) {
+      bars.push({ id: `b${i + 1}`, systemId: 'sys1', xStart: i / 4, xEnd: (i + 1) / 4, absNumber: i + 1, sectionId: null });
+    }
+    for (let i = 0; i < 4; i++) {
+      bars.push({ id: `b${i + 5}`, systemId: 'sys2', xStart: i / 4, xEnd: (i + 1) / 4, absNumber: i + 5, sectionId: null });
+    }
+    return {
+      schemaVersion: CALIBRATION_SCHEMA_VERSION, status: 'verified',
+      sections: [{ id: 'sec', page: 1, x: 0.05, y: 0.05, label: 'A' }],
+      systems: [sys1, sys2], bars, roadmap,
+    };
+  }
+
+  it('prunes markers whose bars vanish and resets to draft', () => {
+    const c = twoSystemChart([
+      { id: 'seg', kind: 'segno', barId: 'b2', edge: 'start' },
+      { id: 'coda', kind: 'coda', barId: 'b6', edge: 'start' },
+    ]);
+    const next = removeSystem(c, 'sys2');
+    expect(next.status).toBe('draft');
+    expect(next.roadmap?.map((m) => m.id)).toEqual(['seg']);
+  });
+
+  it('drops an ending/repeatEnd orphaned when its repeatStart is pruned', () => {
+    const c = twoSystemChart([
+      // repeatStart in sys2 (b5); its repeatEnd in sys1 (b4) would orphan.
+      { id: 'rs', kind: 'repeatStart', barId: 'b5', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b4', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    const next = removeSystem(c, 'sys2');
+    // rs removed (bar gone) ⇒ re must be dropped too (dangling binding).
+    expect(next.roadmap).toEqual([]);
+  });
+
+  it('leaves the roadmap undefined when there was none', () => {
+    const c = twoSystemChart([]);
+    const noRoadmap = { ...c, roadmap: undefined };
+    expect(removeSystem(noRoadmap, 'sys2').roadmap).toBeUndefined();
   });
 });

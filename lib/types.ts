@@ -93,6 +93,41 @@ export type PositionRef =
   | string                              // sectionId (coarse, step-1 rail)
   | { barId: string; pass: number };    // bar-level (fine, step-2+)
 
+// ── Roadmap markers (nav graph: repeats, endings, D.S./D.C./Coda/Fine) ───────
+// We persist the printed symbols (the "roadmap"), not a pre-expanded timeline.
+// A pure resolver (resolveRoadmap) derives the played traversal from these, so
+// the model matches the page 1:1 and a converter can later detect glyphs →
+// markers. Each marker attaches to a bar EDGE (start | end) of a referenced bar.
+// `confidence` is converter forward-compat (no future schema bump).
+interface RoadmapMarkerBase {
+  id: string;
+  confidence?: number; // 0..1; populated by the auto-converter later
+}
+
+export type RoadmapMarker =
+  // |:  — return target for repeats AND voltas.
+  | (RoadmapMarkerBase & { kind: 'repeatStart'; barId: string; edge: 'start' })
+  // :|  PLAIN repeat (no voltas). times = total passes (default 2). Binds to its |:.
+  | (RoadmapMarkerBase & { kind: 'repeatEnd'; barId: string; edge: 'end'; repeatStartId: string; times?: number })
+  // volta bracket bound to its |:; barIds = the bracket's (contiguous) bars; numbers = e.g. [1] or [2,3].
+  | (RoadmapMarkerBase & { kind: 'ending'; repeatStartId: string; barIds: string[]; numbers: number[] })
+  // 𝄋 Segno target.
+  | (RoadmapMarkerBase & { kind: 'segno'; barId: string; edge: 'start' })
+  // ⊕ Coda jump-to target.
+  | (RoadmapMarkerBase & { kind: 'coda'; barId: string; edge: 'start' })
+  // "To Coda" departure.
+  | (RoadmapMarkerBase & { kind: 'toCoda'; barId: string; edge: 'end' })
+  // end point for al Fine.
+  | (RoadmapMarkerBase & { kind: 'fine'; barId: string; edge: 'end' })
+  // D.C. (from:'capo') vs D.S. (from:'segno'); until encodes plain | al Fine | al Coda.
+  | (RoadmapMarkerBase & {
+      kind: 'jump';
+      barId: string;
+      edge: 'end';
+      from: 'capo' | 'segno';
+      until: 'end' | 'fine' | 'coda';
+    });
+
 // The calibration sidecar payload (the navigation/timeline graph). Persisted
 // keyed by (chart_id, source_hash). Step 1 = section chain; step 2 adds
 // system/bar geometry. Nav edges + temporal layer are later enrichment.
@@ -104,6 +139,7 @@ export interface ChartCalibration {
   sections: SectionAnchor[];
   systems?: System[];   // step-2+ enrichment; absent in v1 payloads
   bars?: Bar[];         // step-2+ enrichment; absent in v1 payloads
+  roadmap?: RoadmapMarker[]; // v3 nav graph; absent ⇒ linear playback (back-compat)
 }
 
 export interface SetlistSong {
