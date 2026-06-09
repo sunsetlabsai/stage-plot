@@ -142,6 +142,16 @@ describe('verify / isPerformable', () => {
     // Defensive: status alone never drives Perform without sections.
     expect(isPerformable(cal({ status: 'verified', sections: [] }))).toBe(false);
   });
+
+  it('isPerformable fails closed on a verified payload that breaks the invariant', () => {
+    // DB/hand-edited boundary: a 'verified' status carrying a blank-labeled
+    // section must NOT drive the redline — re-checks canVerify, not the flag.
+    const tampered = cal({
+      status: 'verified',
+      sections: [{ id: 'a', page: 1, x: 0.1, y: 0.1, label: '  ' }],
+    });
+    expect(isPerformable(tampered)).toBe(false);
+  });
 });
 
 describe('hashPdfBytes', () => {

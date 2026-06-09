@@ -105,8 +105,12 @@ export function verify(cal: ChartCalibration): ChartCalibration {
 // Perform mode consumes a calibration only when it is verified AND its stored
 // source_hash matches the live PDF's hash. This expresses the second boundary
 // (hash match is necessary, not sufficient) given an already-matched hash.
+// Fails closed at the DB boundary: a payload whose status is 'verified' but
+// whose sections no longer satisfy the invariant (e.g. a hand-edited row with a
+// blank label) does NOT drive the redline — re-check canVerify, never trust the
+// stored flag alone.
 export function isPerformable(cal: ChartCalibration): boolean {
-  return cal.status === 'verified' && cal.sections.length > 0;
+  return cal.status === 'verified' && canVerify(cal);
 }
 
 // sha256 hex of PDF bytes — the de-facto chart version (the library has no
