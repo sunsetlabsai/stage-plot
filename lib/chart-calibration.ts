@@ -294,6 +294,40 @@ function yDistToSystem(y: number, sys: System): number {
   return Math.min(Math.abs(y - sys.yTop), Math.abs(y - sys.yBottom));
 }
 
+// ── Bar-level Perform transport (step-2 renderer) ───────────────────────────
+// Walking these in order produces the redline sweep: consecutive bars advance
+// L→R within a system, snap down to the next system, and cross pages (the next
+// bar's system can be on a different page — the caller turns the page).
+
+export function findSystem(cal: ChartCalibration, systemId: string): System | null {
+  return (cal.systems ?? []).find((s) => s.id === systemId) ?? null;
+}
+
+// Bars on a given page, in reading order (left→right within each system band).
+export function barsForPage(cal: ChartCalibration, page: number): Bar[] {
+  const pageSystemIds = new Set(systemsForPage(cal, page).map((s) => s.id));
+  return barsInOrder(cal).filter((b) => pageSystemIds.has(b.systemId));
+}
+
+// The first bar in global reading order (the redline's starting position).
+export function firstBar(cal: ChartCalibration): Bar | null {
+  return barsInOrder(cal)[0] ?? null;
+}
+
+// The next/previous bar in global reading order, or null at the ends (or when
+// the current bar isn't found).
+export function nextBar(cal: ChartCalibration, currentBarId: string): Bar | null {
+  const ordered = barsInOrder(cal);
+  const i = ordered.findIndex((b) => b.id === currentBarId);
+  return i === -1 ? null : ordered[i + 1] ?? null;
+}
+
+export function prevBar(cal: ChartCalibration, currentBarId: string): Bar | null {
+  const ordered = barsInOrder(cal);
+  const i = ordered.findIndex((b) => b.id === currentBarId);
+  return i <= 0 ? null : ordered[i - 1];
+}
+
 // ── Payload validation (untrusted boundary: API + hand-edited DB rows) ─────
 
 export function isValidSectionAnchor(s: unknown): s is SectionAnchor {

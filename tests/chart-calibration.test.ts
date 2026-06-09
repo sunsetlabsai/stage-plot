@@ -24,6 +24,11 @@ import {
   isValidSystem,
   isValidBar,
   hashPdfBytes,
+  findSystem,
+  barsForPage,
+  firstBar,
+  nextBar,
+  prevBar,
 } from '../lib/chart-calibration';
 import type { ChartCalibration, System, Bar } from '../lib/types';
 
@@ -427,6 +432,103 @@ describe('tapToBar', () => {
     const bar = tapToBar(c, 1, 0.24, 0.15);
     expect(bar).not.toBeNull();
     expect(bar!.absNumber).toBe(1);
+  });
+});
+
+describe('findSystem', () => {
+  it('returns the system by id, or null when absent', () => {
+    const c = addSystem(emptyCalibration(), 1, 0.0, 0.2, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    expect(findSystem(c, sysId)).toBe(c.systems![0]);
+    expect(findSystem(c, 'nope')).toBeNull();
+    expect(findSystem(emptyCalibration(), 'nope')).toBeNull();
+  });
+});
+
+describe('barsForPage', () => {
+  it('returns only the bars whose system is on the page, in reading order', () => {
+    let c = addSystem(emptyCalibration(), 1, 0.0, 0.2, 0.0, 1.0);
+    c = addSystem(c, 2, 0.0, 0.2, 0.0, 1.0);
+    const sysP1 = c.systems![0].id;
+    const sysP2 = c.systems![1].id;
+    c = autoDistributeBars(c, sysP1, 3);
+    c = autoDistributeBars(c, sysP2, 2);
+
+    const p1 = barsForPage(c, 1);
+    expect(p1).toHaveLength(3);
+    expect(p1.every((b) => b.systemId === sysP1)).toBe(true);
+    expect(p1.map((b) => b.absNumber)).toEqual([1, 2, 3]);
+
+    const p2 = barsForPage(c, 2);
+    expect(p2).toHaveLength(2);
+    expect(p2.every((b) => b.systemId === sysP2)).toBe(true);
+  });
+
+  it('returns empty for a page with no systems', () => {
+    expect(barsForPage(emptyCalibration(), 1)).toEqual([]);
+  });
+});
+
+describe('firstBar / nextBar / prevBar (redline transport)', () => {
+  // Two systems on page 1 (top, bottom) + one on page 2 → exercises the sweep:
+  // L→R within a system, snap to next system, cross pages.
+  function threeSystemChart() {
+    let c = addSystem(emptyCalibration(), 1, 0.1, 0.2, 0.0, 1.0); // top of p1
+    c = addSystem(c, 1, 0.5, 0.6, 0.0, 1.0); // bottom of p1
+    c = addSystem(c, 2, 0.1, 0.2, 0.0, 1.0); // p2
+    const top = c.systems![0].id;
+    const bottom = c.systems![1].id;
+    const p2 = c.systems![2].id;
+    c = autoDistributeBars(c, top, 2);
+    c = autoDistributeBars(c, bottom, 2);
+    c = autoDistributeBars(c, p2, 2);
+    return { c, top, bottom, p2 };
+  }
+
+  it('firstBar is bar 1 in reading order', () => {
+    const { c, top } = threeSystemChart();
+    const b = firstBar(c);
+    expect(b).not.toBeNull();
+    expect(b!.absNumber).toBe(1);
+    expect(b!.systemId).toBe(top);
+  });
+
+  it('firstBar is null with no bars', () => {
+    expect(firstBar(emptyCalibration())).toBeNull();
+  });
+
+  it('nextBar advances L→R, snaps to next system, then crosses to the next page', () => {
+    const { c, top, bottom, p2 } = threeSystemChart();
+    const ordered = barsInOrder(c);
+    // bar1 → bar2 stays in top system (L→R)
+    const b2 = nextBar(c, ordered[0].id);
+    expect(b2!.absNumber).toBe(2);
+    expect(b2!.systemId).toBe(top);
+    // bar2 → bar3 snaps to the bottom system (same page)
+    const b3 = nextBar(c, ordered[1].id);
+    expect(b3!.systemId).toBe(bottom);
+    // bar4 → bar5 crosses to the page-2 system
+    const b5 = nextBar(c, ordered[3].id);
+    expect(b5!.systemId).toBe(p2);
+  });
+
+  it('nextBar returns null at the last bar', () => {
+    const { c } = threeSystemChart();
+    const ordered = barsInOrder(c);
+    expect(nextBar(c, ordered[ordered.length - 1].id)).toBeNull();
+  });
+
+  it('prevBar steps backward and returns null at the first bar', () => {
+    const { c } = threeSystemChart();
+    const ordered = barsInOrder(c);
+    expect(prevBar(c, ordered[2].id)!.absNumber).toBe(2);
+    expect(prevBar(c, ordered[0].id)).toBeNull();
+  });
+
+  it('nextBar / prevBar return null for an unknown bar id', () => {
+    const { c } = threeSystemChart();
+    expect(nextBar(c, 'nope')).toBeNull();
+    expect(prevBar(c, 'nope')).toBeNull();
   });
 });
 

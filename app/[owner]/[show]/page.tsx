@@ -34,6 +34,8 @@ import type {
   Chart,
   ChartCalibration,
   SectionAnchor,
+  System,
+  Bar,
 } from '@/lib/types';
 import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf } from '@/lib/setlist';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
@@ -58,6 +60,11 @@ import {
   verify,
   isPerformable,
   hashPdfBytes,
+  tapToBar,
+  findSystem,
+  firstBar,
+  nextBar,
+  prevBar,
 } from '@/lib/chart-calibration';
 import { useShow } from '@/lib/use-show';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
@@ -1624,13 +1631,16 @@ function SectionMarker({
   );
 }
 
-// Absolutely fills the viewer container. In Perform the container is
-// pointer-events-none so taps between markers fall through to the page-turn
-// handler; markers re-enable pointer events on themselves. In Calibrate the
-// container captures clicks (tagged interactive so the window page-turn handler
-// ignores it) — a click on empty page area drops a new section there.
+// Absolutely fills the viewer container. In section-rail Perform the container
+// is pointer-events-none so taps between markers fall through to the page-turn
+// handler; markers re-enable pointer events on themselves. In Calibrate (and in
+// bar-level Perform) the container captures clicks (tagged interactive so the
+// window page-turn handler ignores it) — a calibrate click drops a section; a
+// bar-mode click seeks the redline to the nearest bar.
 function CalibrationOverlay({
-  calibration, box, page, mode, seekId, holdId, editingId, onDrop, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
+  calibration, box, page, mode, seekId, holdId, editingId,
+  barMode, barRedline, onBarTap,
+  onDrop, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
 }: {
   calibration: ChartCalibration | null;
   box: CanvasBox;
@@ -1639,6 +1649,9 @@ function CalibrationOverlay({
   seekId: string | null;
   holdId: string | null;
   editingId: string | null;
+  barMode: boolean;
+  barRedline: { bar: Bar; system: System } | null;
+  onBarTap: (x: number, y: number) => void;
   onDrop: (x: number, y: number) => void;
   onSeek: (id: string) => void;
   onHold: (id: string) => void;
@@ -1646,26 +1659,39 @@ function CalibrationOverlay({
   onDelete: (id: string) => void;
   onBeginEdit: (id: string | null) => void;
 }) {
-  const sections = calibration ? sectionsForPage(calibration, page) : [];
+  // Bar-level Perform takes over the surface: no section pills, a vertical
+  // sweep cursor + bar highlight instead of the horizontal section redline.
+  const sections = barMode || !calibration ? [] : sectionsForPage(calibration, page);
   const seeked = calibration?.sections.find((s) => s.id === seekId) ?? null;
-  const redlineOnPage = seeked && seeked.page === page ? seeked : null;
+  const redlineOnPage = !barMode && seeked && seeked.page === page ? seeked : null;
+  const interactive = mode === 'calibrate' || barMode;
 
-  const onBackdrop = (e: ReactMouseEvent<HTMLDivElement>) => {
-    if (mode !== 'calibrate') return;
-    if (editingId) { onBeginEdit(null); return; }
+  const onSurface = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (!interactive) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const px = e.clientX - rect.left - box.left;
     const py = e.clientY - rect.top - box.top;
     if (px < 0 || py < 0 || px > box.width || py > box.height) return;
+    if (barMode) { onBarTap(px / box.width, py / box.height); return; }
+    // Calibrate: a click off the markers either dismisses an open editor or
+    // drops a new section.
+    if (editingId) { onBeginEdit(null); return; }
     onDrop(px / box.width, py / box.height);
   };
 
+  // The current bar's region, rendered only when its system is on this page.
+  const barOnPage = barRedline && barRedline.system.page === page ? barRedline : null;
+  const barLeft = barOnPage ? box.left + barOnPage.bar.xStart * box.width : 0;
+  const barTop = barOnPage ? box.top + barOnPage.system.yTop * box.height : 0;
+  const barWidth = barOnPage ? (barOnPage.bar.xEnd - barOnPage.bar.xStart) * box.width : 0;
+  const barHeight = barOnPage ? (barOnPage.system.yBottom - barOnPage.system.yTop) * box.height : 0;
+
   return (
     <div
-      data-chart-overlay-interactive={mode === 'calibrate' ? '' : undefined}
-      onClick={onBackdrop}
+      data-chart-overlay-interactive={interactive ? '' : undefined}
+      onClick={onSurface}
       className="absolute inset-0"
-      style={{ pointerEvents: mode === 'calibrate' ? 'auto' : 'none' }}
+      style={{ pointerEvents: interactive ? 'auto' : 'none' }}
     >
       {redlineOnPage && (
         <div
@@ -1677,6 +1703,20 @@ function CalibrationOverlay({
             pointerEvents: 'none',
           }}
         />
+      )}
+      {barOnPage && (
+        <>
+          {/* Current-bar highlight. */}
+          <div
+            className="absolute bg-red-500/15 ring-1 ring-red-500/40"
+            style={{ left: barLeft, top: barTop, width: barWidth, height: barHeight, pointerEvents: 'none' }}
+          />
+          {/* Leading-edge sweep cursor — moves L→R as the redline advances. */}
+          <div
+            className="absolute w-0.5 bg-red-600 shadow-[0_0_6px_rgba(220,38,38,0.8)]"
+            style={{ left: barLeft, top: barTop, height: barHeight, pointerEvents: 'none' }}
+          />
+        </>
       )}
       {sections.map((s) => (
         <SectionMarker
@@ -1731,6 +1771,7 @@ function ChartNavigator({
   const [sourceHash, setSourceHash] = useState<string | null>(null);
   const [seekId, setSeekId] = useState<string | null>(null);
   const [holdId, setHoldId] = useState<string | null>(null);
+  const [barSeekId, setBarSeekId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [canvasBox, setCanvasBox] = useState<CanvasBox | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -1807,6 +1848,36 @@ function ChartNavigator({
   const seek = (id: string) => { setSeekId(id); setHoldId(null); };
   const hold = (id: string) => { setSeekId(id); setHoldId(id); };
 
+  // ── Bar-level Perform redline (step 2) ──
+  // Active only when a performable calibration carries bar geometry. The redline
+  // sweeps L→R through barsInOrder: stepping advances within a system, snaps to
+  // the next system, and crosses pages (turning the page as it goes).
+  const barMode = calMode === 'perform' && !!overlayCalibration && (overlayCalibration.bars?.length ?? 0) > 0;
+  const barCal = barMode ? overlayCalibration : null;
+  const currentBar = barCal ? (barCal.bars ?? []).find((b) => b.id === barSeekId) ?? null : null;
+  const currentSystem = currentBar && barCal ? findSystem(barCal, currentBar.systemId) : null;
+  const barRedline = currentBar && currentSystem ? { bar: currentBar, system: currentSystem } : null;
+
+  const goToBar = (bar: Bar | null) => {
+    if (!bar || !barCal) return;
+    setBarSeekId(bar.id);
+    const sys = findSystem(barCal, bar.systemId);
+    if (sys && sys.page !== pageNum) setPageNum(sys.page);
+  };
+  const seekBarAt = (x: number, y: number) => {
+    if (!barCal) return;
+    const bar = tapToBar(barCal, pageNum, x, y);
+    if (bar) setBarSeekId(bar.id);
+  };
+  const stepNextBar = () => {
+    if (!barCal) return;
+    goToBar(currentBar ? nextBar(barCal, currentBar.id) : firstBar(barCal));
+  };
+  const stepPrevBar = () => {
+    if (!barCal || !currentBar) return;
+    goToBar(prevBar(barCal, currentBar.id));
+  };
+
   const saveCalibration = async (promote: boolean) => {
     if (!calibration || !chartFileId || !sourceHash) return;
     const payload = promote ? verify(calibration) : calibration;
@@ -1835,6 +1906,7 @@ function ChartNavigator({
       setSourceHash(null);
       setSeekId(null);
       setHoldId(null);
+      setBarSeekId(null);
       setEditingId(null);
       setCanvasBox(null);
     };
@@ -2103,6 +2175,9 @@ function ChartNavigator({
             seekId={seekId}
             holdId={holdId}
             editingId={editingId}
+            barMode={barMode}
+            barRedline={barRedline}
+            onBarTap={seekBarAt}
             onDrop={dropSection}
             onSeek={seek}
             onHold={hold}
@@ -2144,8 +2219,38 @@ function ChartNavigator({
         </div>
       )}
 
+      {/* Perform bar transport (redline sweeps L→R through the bars) */}
+      {calMode === 'perform' && barMode && (
+        <div className="flex items-center justify-center gap-3 py-1.5 text-xs bg-zinc-900 border-t border-zinc-800">
+          <button
+            onClick={stepPrevBar}
+            disabled={!currentBar || (barCal ? prevBar(barCal, currentBar.id) === null : true)}
+            className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            &larr; Prev bar
+          </button>
+          <span className="text-zinc-400 min-w-[6rem] text-center">
+            {currentBar
+              ? <>Bar <span className="font-bold text-red-400">{currentBar.absNumber}</span></>
+              : 'Tap a bar or step →'}
+          </span>
+          <button
+            onClick={stepNextBar}
+            disabled={barCal ? (currentBar ? nextBar(barCal, currentBar.id) === null : firstBar(barCal) === null) : true}
+            className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            Next bar &rarr;
+          </button>
+          {currentBar && (
+            <button onClick={() => setBarSeekId(null)} className="text-zinc-500 hover:text-white underline">
+              clear
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Perform seek status (a section is parked under the redline) */}
-      {calMode === 'perform' && seekId && overlayCalibration && (() => {
+      {calMode === 'perform' && !barMode && seekId && overlayCalibration && (() => {
         const s = overlayCalibration.sections.find((x) => x.id === seekId);
         if (!s) return null;
         return (
