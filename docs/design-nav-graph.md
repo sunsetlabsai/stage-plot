@@ -1,6 +1,8 @@
 # Nav graph — repeats, endings, D.S./D.C./Coda/Fine (chunk 4 mini-spec)
 
-**Status:** DESIGN — awaiting Codex cross-check + Graham sign-off **before any build.**
+**Status:** DESIGN **SIGNED OFF & BUILD-READY** — Codex R1/R2/R3 clear (R3 "green for
+build"); Graham OQ-A..E resolved (§11). Build per §10 (3 gated commits, feature-branch
+PR). Earlier Codex rounds landed on `main` (`beadf8b..bcc98c8`); sign-off via PR #80.
 **Parent:** `design-realtime-chart-control.md` (resolves its OQ #3 + the "Navigation
 (logic)" layer at §162-168). **Builds on:** the *merged* calibration editor
 (chunks 1-3, main `162e65d`) — `System`/`Bar`/`PositionRef`, hash-keyed sidecar,
