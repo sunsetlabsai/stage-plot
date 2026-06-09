@@ -18,6 +18,7 @@ import {
   systemsForPage,
   addSystem,
   removeSystem,
+  resizeSystemBand,
   autoDistributeBars,
   barsInOrder,
   tapToBar,
@@ -292,6 +293,42 @@ describe('systemsInOrder / systemsForPage', () => {
     expect(systemsForPage(c, 1)).toHaveLength(2);
     expect(systemsForPage(c, 2)).toHaveLength(1);
     expect(systemsForPage(c, 3)).toHaveLength(0);
+  });
+});
+
+describe('resizeSystemBand', () => {
+  it('updates the band y-extent, ordering and clamping the edges', () => {
+    const c0 = addSystem(emptyCalibration(), 1, 0.2, 0.3, 0.0, 1.0);
+    const id = c0.systems![0].id;
+    // Pass edges out of order + out of range — they get sorted and clamped.
+    const c = resizeSystemBand(c0, id, 0.6, 0.1);
+    expect(c.systems![0].yTop).toBe(0.1);
+    expect(c.systems![0].yBottom).toBe(0.6);
+    expect(c.status).toBe('draft');
+  });
+
+  it('renumbers bars when a resize changes systems reading order', () => {
+    let c = addSystem(emptyCalibration(), 1, 0.1, 0.2, 0.0, 1.0); // top
+    c = addSystem(c, 1, 0.5, 0.6, 0.0, 1.0); // bottom
+    const top = c.systems![0].id;
+    const bottom = c.systems![1].id;
+    c = autoDistributeBars(c, top, 2); // bars 1-2
+    c = autoDistributeBars(c, bottom, 2); // bars 3-4
+
+    // Drag the (currently bottom) system above the top one → it now reads first.
+    c = resizeSystemBand(c, bottom, 0.0, 0.05);
+    const ordered = barsInOrder(c);
+    expect(ordered[0].systemId).toBe(bottom);
+    expect(ordered[0].absNumber).toBe(1);
+    expect(ordered[2].systemId).toBe(top);
+    expect(ordered[2].absNumber).toBe(3);
+  });
+
+  it('ignores a degenerate (zero-height) band and an unknown id', () => {
+    const c0 = addSystem(emptyCalibration(), 1, 0.2, 0.3, 0.0, 1.0);
+    const id = c0.systems![0].id;
+    expect(resizeSystemBand(c0, id, 0.4, 0.4)).toBe(c0);
+    expect(resizeSystemBand(c0, 'nope', 0.1, 0.5)).toBe(c0);
   });
 });
 

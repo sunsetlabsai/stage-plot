@@ -158,6 +158,30 @@ export function removeSystem(cal: ChartCalibration, id: string): ChartCalibratio
   };
 }
 
+// Resize a system's vertical band (drag the top/bottom edges to fit the printed
+// staff). yTop/yBottom are normalized; they're ordered + clamped here. Because a
+// y change can reorder systems in reading order, bars are renumbered. A
+// degenerate (zero-height) band is rejected. Resets to draft.
+export function resizeSystemBand(
+  cal: ChartCalibration,
+  id: string,
+  yTop: number,
+  yBottom: number,
+): ChartCalibration {
+  const systems = cal.systems ?? [];
+  if (!systems.some((s) => s.id === id)) return cal;
+  const top = clamp01(Math.min(yTop, yBottom));
+  const bot = clamp01(Math.max(yTop, yBottom));
+  if (top >= bot) return cal; // degenerate band — ignore
+  const nextSystems = systems.map((s) => (s.id === id ? { ...s, yTop: top, yBottom: bot } : s));
+  return {
+    ...cal,
+    status: 'draft',
+    systems: nextSystems,
+    bars: renumberBars(cal.bars ?? [], nextSystems),
+  };
+}
+
 // ── Bar helpers ─────────────────────────────────────────────────────────────
 
 // Global reading order for bars: systems in reading order, then bars within
