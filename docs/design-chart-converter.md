@@ -3,7 +3,8 @@
 Status: **DRAFT for review** · Branch `opus/design-chart-converter` · Owner: Graham (sign-off gate)
 · Codex R1 addressed (hash rule decided; insert-on-conflict guard; route limits; dropped-vs-surfaced
 reconciled; confidence validation+lifecycle) · Codex R2 addressed (v1 PDF-only end-to-end, typed
-image no-op; magic-byte MIME classify; insert-result via RETURNING)
+image no-op; magic-byte MIME classify; insert-result via RETURNING) · **Codex R3 = UNBLOCKED for
+spec/design, no block/high remain** (R3 cleanup folded: per-reason UI copy; open-Q numbering)
 
 ## Why now
 
@@ -88,7 +89,13 @@ uploadChart(file, songTitle, role):           // shared helper (lib/chart-upload
 - `/api/charts/convert` runs the vision call **within its own request**, guarded for idempotency.
   Owner-only. This is a *bounded* slow request, not an unbounded one — see **Limits & timeout** below.
 - Failure or timeout on step 2 is **non-fatal**: the chart still uploaded; the overlay is simply absent
-  (manual rail). The UI reports "couldn't auto-generate — calibrate manually."
+  (manual rail). UI copy distinguishes the cause by `reason`:
+  - `failed` (vision error/timeout) → *"Couldn't auto-generate — calibrate manually."* (a hiccup; a
+    retry might work).
+  - `too_large` → *"Chart too large to auto-generate — calibrate manually."*
+  - `unsupported_type` (non-PDF source) → *"Auto-overlay supports PDF charts only — calibrate
+    manually."* (expected, not a failure; never framed as an error).
+  - `exists` is silent (a draft/verified overlay is already present — nothing to report).
 
 ### `/api/charts/convert` (new route)
 1. **Auth:** authenticated owner of `chart_id` (RLS + pre-check), else 403.
@@ -249,10 +256,10 @@ ArrayBuffer neutralizes most, but flag any residual.
 
 1. **Vision coordinate quality / iteration.** How rough is acceptable? Likely an iterate-on-real-charts
    loop with the ~25 backfill set as the test corpus. Prompt + few-shot may need tuning.
-3. **Cost / latency per chart.** Multimodal PDF calls cost tokens and run seconds; multi-page charts
+2. **Cost / latency per chart.** Multimodal PDF calls cost tokens and run seconds; multi-page charts
    scale up. Acceptable at this volume; note for future high-volume.
-4. **Confidence thresholds** for the review queue — start values + per-element-type tuning.
-5. **Model choice** — latest capable multimodal Claude for structure extraction (cost/quality tradeoff).
+3. **Confidence thresholds** for the review queue — start values + per-element-type tuning.
+4. **Model choice** — latest capable multimodal Claude for structure extraction (cost/quality tradeoff).
 
 ## Out of scope / future
 
