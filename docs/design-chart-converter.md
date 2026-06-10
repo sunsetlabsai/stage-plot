@@ -1,6 +1,8 @@
 # Design — Chart Converter (auto-overlay)
 
 Status: **DRAFT for review** · Branch `opus/design-chart-converter` · Owner: Graham (sign-off gate)
+· Codex gate R1 addressed (hash rule decided; insert-on-conflict guard; PDF+image; route limits;
+dropped-vs-surfaced reconciled; confidence validation+lifecycle)
 
 ## Why now
 
@@ -22,6 +24,13 @@ The converter is **generate-once and edit-safe**:
 - The converter is **idempotent + guarded**: it writes a draft overlay **only when no calibration row
   exists** for that `(chart_id, source_hash)`. If a row already exists — a draft a human has edited, or
   a `verified` one — the converter is a **no-op**. It never clobbers manual work.
+- **The guard is the WRITE, not a pre-check.** Vision runs for seconds; a human could save a manual
+  draft for the same `(chart_id, source_hash)` *during* that window. A pre-vision existence check alone
+  loses that race (check → [human saves] → overwrite). So the authoritative guard is an **insert-only,
+  conflict-as-no-op** write: `INSERT … ON CONFLICT (chart_id, source_hash) DO NOTHING`. If anything
+  landed in the interim, the converter's insert no-ops and its result is **discarded**. The pre-vision
+  existence check stays as a *cost optimization* (skip the expensive vision call when a row already
+  exists), but correctness never depends on it. The converter NEVER issues an UPDATE/upsert.
 - Manual adjustments are sacrosanct. The converter seeds the *first* draft; from then on the human (and
   the verify flow) owns that `(chart_id, source_hash)` row.
 
@@ -31,6 +40,11 @@ The converter is **generate-once and edit-safe**:
    PDFs, chord charts, handwriting) for structural PDF parsing alone. Vision generalizes; rough coords
    are fine — precision comes from human nudge + the later on-demand edge-snap detector.
 2. **Execution = async, persisted, never-regenerate, never-lose-edits** (the guarantee above).
+3. **Source types = PDF + image (PNG/JPG).** Upload accepts PDF *and* image charts, so the converter
+   must too — Claude multimodal takes both natively (a PDF **document** block, or an **image** block for
+   PNG/JPG). The route branches on the stored object's MIME type: PDF → document block (all pages);
+   PNG/JPG → image block (single page → `page: 1`, full-image `systems`/coords). Any other/unknown MIME
+   → **no-op degrade** (no overlay, manual rail), never an error.
 
 ## Goals
 
@@ -65,30 +79,47 @@ uploadChart(file, songTitle, role):           // shared helper (lib/chart-upload
 - **Both** ADD paths — the new library Manage-Charts modal **and** the in-show `ChartNavigator`
   `onChartUpload` — call this one helper, so no ADD path can skip overlay creation. (This is the
   `triggerOverlayCreate` seam named in `design-library-chart-management.md`, now concrete.)
-- `/api/charts/convert` runs the vision call **within its own request** (a normal slow request →
-  Vercel-safe), guarded for idempotency. Owner-only.
+- `/api/charts/convert` runs the vision call **within its own request**, guarded for idempotency.
+  Owner-only. This is a *bounded* slow request, not an unbounded one — see **Limits & timeout** below.
 - Failure or timeout on step 2 is **non-fatal**: the chart still uploaded; the overlay is simply absent
   (manual rail). The UI reports "couldn't auto-generate — calibrate manually."
 
 ### `/api/charts/convert` (new route)
 1. **Auth:** authenticated owner of `chart_id` (RLS + pre-check), else 403.
-2. **Fetch bytes:** load the chart blob from Supabase Storage (the stored file).
-3. **Hash:** compute `source_hash` server-side. ⚠ **Must equal** the viewer's
-   `hashPdfBytes(doc.getData())` lookup key (Open Q1).
-4. **Idempotency guard:** if a `chart_calibration` row exists for `(chart_id, source_hash)` → **return
-   no-op** (`{ generated: false, reason: 'exists' }`). Never overwrite.
-5. **Vision extract:** send the PDF to Claude (multimodal — Claude accepts PDF document blocks natively,
-   so **no server-side rasterization** needed) with a structured-output prompt → JSON.
+2. **Fetch bytes:** download the chart blob from Supabase Storage via the **authoritative storage API**
+   (not the CDN/public URL — see Hash rule), capturing its MIME type.
+3. **Hash:** compute `source_hash` from the **fetched object bytes** (see Hash rule — decided).
+4. **Pre-check (cost optimization only):** if a `chart_calibration` row already exists for
+   `(chart_id, source_hash)` → short-circuit `{ generated: false, reason: 'exists' }` to skip the
+   vision spend. This is an optimization; correctness rests on step 7's insert-on-conflict.
+5. **Vision extract:** send the chart to Claude — PDF as a **document** block (all pages, no
+   server-side rasterization), PNG/JPG as an **image** block — with a structured-output prompt → JSON.
+   Other MIME → no-op degrade.
 6. **Build + validate:** map JSON → `ChartCalibration` (`status: 'draft'`, normalized 0..1 coords,
-   per-element confidence, schemaVersion stamped by presence of roadmap). Run `isValidCalibration`;
-   on invalid/empty, write **nothing** (degrade to manual).
-7. **Persist:** insert the draft row keyed `(chart_id, source_hash)`.
-8. **Return:** `{ generated: true, calibration }` so the client can show it immediately.
+   per-element confidence, schemaVersion stamped by presence of roadmap). Drop structurally-unbindable
+   roadmap markers (no FK target), then run `isValidCalibration`; on invalid/empty, write **nothing**
+   (degrade to manual).
+7. **Persist (the real guard):** `INSERT … ON CONFLICT (chart_id, source_hash) DO NOTHING`. If a manual
+   draft/verified row landed during steps 5–6, the insert no-ops and the converter result is discarded
+   (manual work wins). Re-read the row to learn whether *this* call wrote it.
+8. **Return:** `{ generated: <didInsert>, calibration }` so the client can show a freshly-written draft
+   immediately (and treat a no-op insert as `{ generated: false, reason: 'exists' }`).
+
+### Limits & timeout (bounding the "slow request")
+The convert request is slow but must be **bounded** so it stays within Vercel's function ceiling and
+fails predictably:
+- **`maxDuration`** set explicitly on the route (within the deployment plan's function limit); the
+  Anthropic call uses an **abort timeout** comfortably under it so the route always returns a clean
+  degrade rather than a platform 504.
+- **File-size cap** and **page cap** (PDFs): oversized files / very long charts → skip vision, degrade
+  to manual (`reason: 'too_large'`). Caps are constants (config), tuned against the backfill corpus.
+- Any vision timeout/abort/error → **no overlay written**, `{ generated: false, reason: 'failed' }`,
+  UI shows "couldn't auto-generate." Upload itself is already committed and unaffected.
 
 ## Vision contract
 
-- **Input:** the chart PDF (all pages) as a Claude document block + a prompt asking for the chart's
-  structure as JSON.
+- **Input:** the chart as a Claude **document** block (PDF, all pages) or **image** block (PNG/JPG,
+  single page) + a prompt asking for the chart's structure as JSON.
 - **Output JSON** (a subset/shape of `ChartCalibration`):
   - `systems[]`: `{ page, yTop, yBottom, xStart, xEnd, confidence }` (full-width default xStart=0/xEnd=1,
     matching chunk-3's deliberate full-width systems).
@@ -97,7 +128,7 @@ uploadChart(file, songTitle, role):           // shared helper (lib/chart-upload
   - `sections[]`: `{ page, x, y, label, confidence }` (e.g. "Intro", "Verse", "Chorus").
   - `roadmap[]`: detected markers (`|: :|`, voltas, Segno, Coda, To Coda, Fine, D.C./D.S.) bound to
     bars/edges, each with `confidence`. Bindings (e.g. `repeatStartId`) resolved server-side from
-    detected positions; anything the resolver can't bind is dropped (degrade, not error).
+    detected positions.
 - The model already carries `confidence?` on roadmap markers. **Small additive model change:** add
   optional `confidence?: number` to `SectionAnchor`, `System`, `Bar` (no schema bump — additive +
   optional, like the marker field) so the review queue can flag geometry too.
@@ -105,12 +136,40 @@ uploadChart(file, songTitle, role):           // shared helper (lib/chart-upload
   validity is NOT required (drafts persist even if roadmap doesn't yet resolve — same as manual drafts,
   BLOCKER-1 rule).
 
+### Two distinct "can't bind" cases (no contradiction)
+A marker that "can't bind" means one of two different things; the converter treats them differently:
+1. **Structurally unbindable** — the marker references a target that does not exist (e.g. a `:|` with
+   no `|:` anywhere, a volta with no enclosing repeat). It would fail `isValidCalibration`'s FK checks,
+   so it **cannot be persisted**. These are **dropped at build time** (step 6), silently — degrade, not
+   error. They are NOT in the saved draft, so they cannot appear in the review queue.
+2. **Structurally bound but the roadmap doesn't *resolve*** — all FKs exist (valid draft, persists fine
+   per BLOCKER-1) but `resolveRoadmap` returns an error (e.g. contradictory jumps). These markers
+   **are persisted** and **are surfaced** in the review queue for the human to fix/delete. (Same state
+   a hand-authored unresolvable draft can be in today.)
+
+So: *dropped* = couldn't even be stored (no FK target); *surfaced* = stored but flagged (resolve error
+or low confidence). The two never describe the same marker.
+
+### Confidence — validation & lifecycle
+- **Validation:** `confidence`, where present, must be a finite number in `[0,1]` — enforced in
+  `isValidSectionAnchor`/`isValidSystem`/`isValidBar` (and the existing marker check) at the DB
+  boundary. Absent is always valid (the field is optional; manual elements carry none).
+- **Lifecycle:** `confidence` is **converter-seeded metadata**, not a verify gate. When a human edits an
+  element (move/resize/relabel/re-bind), that element's `confidence` is **cleared** (the existing
+  authoring helpers already reset `status → draft`; clearing confidence is the same edit-owns-it move),
+  so it drops out of the review queue — it's now human-owned. `verify`/`canVerify` never read
+  `confidence`. Promotion to `verified` does not require confidences to be high, only that the human has
+  signed off (labeled sections + resolving roadmap, unchanged).
+
 ## Review queue (human cleanup)
 
-- After generation, the calibrate UI surfaces **only flagged elements** (confidence below a threshold,
-  or roadmap markers the resolver couldn't bind). Everything else is accepted silently.
-- The human reviews flagged items, nudges geometry, fixes/deletes markers, then **Verify** (existing
-  flow). Verify still requires labeled sections + a resolving roadmap (`canVerify`).
+- After generation, the calibrate UI surfaces **only flagged elements** — those with `confidence` below
+  a threshold, **plus** any roadmap markers implicated in a `resolveRoadmap` error (the *surfaced* case
+  above). Structurally-unbindable markers were dropped pre-persist, so they never appear here.
+  Everything else is accepted silently.
+- The human reviews flagged items, nudges geometry, fixes/deletes markers (each edit clears that
+  element's `confidence` and resets `status → draft`), then **Verify** (existing flow). Verify still
+  requires labeled sections + a resolving roadmap (`canVerify`) — never a confidence threshold.
 - Threshold value(s) = tunable; start conservative (flag generously) and tighten with real charts.
 
 ## Replace semantics (no lost edits)
@@ -133,26 +192,50 @@ A standalone node script (run once, locally / against prod Supabase + Anthropic)
 
 ## Build outline (gated chunks → one PR per the standing process)
 
-1. **Model + helper seam:** add optional `confidence` to SectionAnchor/System/Bar; `lib/chart-upload.ts`
-   shared `uploadChart()` + `triggerOverlayCreate` calling the convert route; refactor in-show
-   `onChartUpload` to use it (no behavior change yet — convert route returns no-op until chunk 2). Tests.
-2. **`/api/charts/convert` route:** auth, fetch bytes, server hash, idempotency guard, vision call
-   (Claude multimodal), JSON→calibration map + validate + persist, graceful degrade. Tests for the
-   guard + the map/validate (mock the vision response).
-3. **Review queue UI:** flag low-confidence/unbound elements in calibrate mode; "Generating…" /
-   "couldn't auto-generate" states in the upload flow.
-4. **A2 backfill script.**
+1. **Model + helper seam + hash refactor:** add optional `confidence` to SectionAnchor/System/Bar with
+   `[0,1]` validation in the `isValid*` helpers + clear-on-edit in the authoring helpers; the **hash-rule
+   refactor** (viewer/`loadPdfDoc` → fetch bytes → hash ArrayBuffer → pass `{ data }` to pdf.js;
+   cache-bust on `updated_at`); `lib/chart-upload.ts` shared `uploadChart()` + `triggerOverlayCreate`
+   calling the convert route; refactor in-show `onChartUpload` to use it (no behavior change yet —
+   convert route returns no-op until chunk 2). Tests (validation, clear-on-edit, hash parity).
+2. **`/api/charts/convert` route:** auth, fetch authoritative bytes + MIME, server hash, pre-check, vision
+   call (PDF document **or** image block), JSON→calibration map (drop unbindable markers) + validate +
+   **insert-on-conflict-do-nothing** persist, limits/timeout/degrade. Tests for the map/validate, the
+   unbindable-drop, the conflict no-op, and the degrade paths (mock the vision response).
+3. **Review queue UI:** flag low-confidence + resolve-error markers in calibrate mode; "Generating…" /
+   "couldn't auto-generate" / "too large" states in the upload flow.
+4. **A2 backfill script** (idempotent; same convert logic + insert-on-conflict; per-chart log).
 
 Gate (`npx tsc --noEmit && npm run lint && npm test && npm run build`) + commit per chunk.
 
+## Hash rule (DECIDED — was Open Q1)
+
+Build-critical: the viewer looks up the overlay by hash, the converter writes it by hash; they **must**
+agree or the generated overlay is never found. Today the viewer hashes `doc.getData()` (pdf.js's
+internal bytes, page.tsx:2583), which is **not guaranteed** to byte-equal the stored object (pdf.js may
+re-serialize). Rather than gamble on that equality, we make both sides hash the **same canonical bytes
+by construction**:
+
+1. **Hash the fetched object bytes, not `doc.getData()`.** Refactor the viewer/`loadPdfDoc` path to
+   `fetch` the chart blob, hash that **ArrayBuffer**, then hand the *same* bytes to pdf.js as `{ data }`.
+   The converter hashes the bytes it downloads from the **authoritative Supabase storage API** (not the
+   CDN/public URL). Both sides now hash identical bytes — pdf.js internals are out of the equation.
+2. **Keep client-side hashing** (do NOT switch to a server-stored hash column). This preserves the
+   load-bearing safety property: an overlay applies **only** if the bytes you are viewing match the
+   bytes it was built for. A stored-hash shortcut would re-introduce silent-apply-under-mismatch.
+3. **Handle replace + caching (the sneaky edge).** Upsert reuses the storage path → the URL is stable
+   but the bytes change on replace → a CDN/browser/offline cache can serve **stale** bytes, so the
+   viewer would hash the old file and miss the new overlay. Mitigations: the converter hashes the
+   authoritative storage object (download API, not CDN); the viewer **cache-busts on `updated_at`** /
+   `modifiedTime` (already on `Chart`) and the offline cache invalidates on it.
+
+Open for Codex confirmation only: any pdf.js/Supabase-transport byte-mutation wrinkle (content-encoding
+gzip, range-request reassembly) that could still mutate bytes after fetch — hashing the fetched
+ArrayBuffer neutralizes most, but flag any residual.
+
 ## Open questions (for Codex / build)
 
-1. **★ Hash parity (build-critical).** Viewer looks up the overlay by
-   `hashPdfBytes(doc.getData())` (pdf.js bytes, page.tsx:2583). The converter hashes the stored blob
-   server-side. These **must** produce the same hash or the generated overlay is never found. Need to
-   confirm `doc.getData()` === uploaded bytes; if not, align by hashing the **fetched blob** on the
-   viewer side too (preferred — hash the exact stored bytes everywhere). *Resolve before chunk 2 ships.*
-2. **Vision coordinate quality / iteration.** How rough is acceptable? Likely an iterate-on-real-charts
+1. **Vision coordinate quality / iteration.** How rough is acceptable? Likely an iterate-on-real-charts
    loop with the ~25 backfill set as the test corpus. Prompt + few-shot may need tuning.
 3. **Cost / latency per chart.** Multimodal PDF calls cost tokens and run seconds; multi-page charts
    scale up. Acceptable at this volume; note for future high-volume.
