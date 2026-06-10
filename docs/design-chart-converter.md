@@ -1,8 +1,9 @@
 # Design — Chart Converter (auto-overlay)
 
 Status: **DRAFT for review** · Branch `opus/design-chart-converter` · Owner: Graham (sign-off gate)
-· Codex gate R1 addressed (hash rule decided; insert-on-conflict guard; PDF+image; route limits;
-dropped-vs-surfaced reconciled; confidence validation+lifecycle)
+· Codex R1 addressed (hash rule decided; insert-on-conflict guard; route limits; dropped-vs-surfaced
+reconciled; confidence validation+lifecycle) · Codex R2 addressed (v1 PDF-only end-to-end, typed
+image no-op; magic-byte MIME classify; insert-result via RETURNING)
 
 ## Why now
 
@@ -40,11 +41,16 @@ The converter is **generate-once and edit-safe**:
    PDFs, chord charts, handwriting) for structural PDF parsing alone. Vision generalizes; rough coords
    are fine — precision comes from human nudge + the later on-demand edge-snap detector.
 2. **Execution = async, persisted, never-regenerate, never-lose-edits** (the guarantee above).
-3. **Source types = PDF + image (PNG/JPG).** Upload accepts PDF *and* image charts, so the converter
-   must too — Claude multimodal takes both natively (a PDF **document** block, or an **image** block for
-   PNG/JPG). The route branches on the stored object's MIME type: PDF → document block (all pages);
-   PNG/JPG → image block (single page → `page: 1`, full-image `systems`/coords). Any other/unknown MIME
-   → **no-op degrade** (no overlay, manual rail), never an error.
+3. **Source types = PDF only for v1; PNG/JPG = typed no-op (not error).** Upload accepts images too, but
+   the calibration path is **PDF-canvas end-to-end** — the in-show viewer renders PDF pages, the hash
+   rule hashes PDF bytes handed to pdf.js, and the overlay coords are placed over that canvas. Generating
+   an overlay for a PNG/JPG would produce something that **cannot be viewed, calibrated, verified, or
+   used** — a generate-but-unusable trap. So the converter **classifies the stored object and, for any
+   non-PDF (PNG/JPG/unknown), no-ops cleanly** (`{ generated: false, reason: 'unsupported_type' }`,
+   manual rail), never an error. **End-to-end image support is a future feature** — it needs its own
+   chunk adding viewer image-render + image-hash + overlay-on-image to the calibrate/verify path, not a
+   converter-only half-measure. (This reverses R1's converter-only image block, which Codex R2 correctly
+   flagged as asymmetric.)
 
 ## Goals
 
@@ -87,23 +93,28 @@ uploadChart(file, songTitle, role):           // shared helper (lib/chart-upload
 ### `/api/charts/convert` (new route)
 1. **Auth:** authenticated owner of `chart_id` (RLS + pre-check), else 403.
 2. **Fetch bytes:** download the chart blob from Supabase Storage via the **authoritative storage API**
-   (not the CDN/public URL — see Hash rule), capturing its MIME type.
-3. **Hash:** compute `source_hash` from the **fetched object bytes** (see Hash rule — decided).
-4. **Pre-check (cost optimization only):** if a `chart_calibration` row already exists for
+   (not the CDN/public URL — see Hash rule).
+3. **Classify type (don't trust the label):** determine the source type by **sniffing the leading
+   magic bytes** of the fetched object (PDF = `%PDF-` header), NOT the upload's claimed MIME/extension
+   (which can be wrong or spoofed). Non-PDF (PNG `\x89PNG`, JPG `\xFF\xD8`, or anything else) →
+   **typed no-op** `{ generated: false, reason: 'unsupported_type' }`, no vision spend. PDF-only v1.
+4. **Hash:** compute `source_hash` from the **fetched object bytes** (see Hash rule — decided).
+5. **Pre-check (cost optimization only):** if a `chart_calibration` row already exists for
    `(chart_id, source_hash)` → short-circuit `{ generated: false, reason: 'exists' }` to skip the
-   vision spend. This is an optimization; correctness rests on step 7's insert-on-conflict.
-5. **Vision extract:** send the chart to Claude — PDF as a **document** block (all pages, no
-   server-side rasterization), PNG/JPG as an **image** block — with a structured-output prompt → JSON.
-   Other MIME → no-op degrade.
-6. **Build + validate:** map JSON → `ChartCalibration` (`status: 'draft'`, normalized 0..1 coords,
+   vision spend. This is an optimization; correctness rests on step 8's insert-on-conflict.
+6. **Vision extract:** send the PDF to Claude as a **document** block (all pages, no server-side
+   rasterization) with a structured-output prompt → JSON.
+7. **Build + validate:** map JSON → `ChartCalibration` (`status: 'draft'`, normalized 0..1 coords,
    per-element confidence, schemaVersion stamped by presence of roadmap). Drop structurally-unbindable
    roadmap markers (no FK target), then run `isValidCalibration`; on invalid/empty, write **nothing**
    (degrade to manual).
-7. **Persist (the real guard):** `INSERT … ON CONFLICT (chart_id, source_hash) DO NOTHING`. If a manual
-   draft/verified row landed during steps 5–6, the insert no-ops and the converter result is discarded
-   (manual work wins). Re-read the row to learn whether *this* call wrote it.
-8. **Return:** `{ generated: <didInsert>, calibration }` so the client can show a freshly-written draft
-   immediately (and treat a no-op insert as `{ generated: false, reason: 'exists' }`).
+8. **Persist (the real guard):** `INSERT … ON CONFLICT (chart_id, source_hash) DO NOTHING **RETURNING ***`.
+   The `RETURNING` row is present **iff this statement actually inserted**; on conflict (a manual
+   draft/verified row landed during steps 6–7) it returns **no row** → the converter's result is
+   discarded (manual work wins). So `generated` is derived from *whether RETURNING yielded a row*, not a
+   separate re-read/compare. (A re-read could observe a *different* concurrent row and misattribute it.)
+9. **Return:** `{ generated, calibration }` — `generated: true` with the just-inserted draft when
+   RETURNING yielded a row; otherwise `{ generated: false, reason: 'exists' }`.
 
 ### Limits & timeout (bounding the "slow request")
 The convert request is slow but must be **bounded** so it stays within Vercel's function ceiling and
@@ -118,8 +129,8 @@ fails predictably:
 
 ## Vision contract
 
-- **Input:** the chart as a Claude **document** block (PDF, all pages) or **image** block (PNG/JPG,
-  single page) + a prompt asking for the chart's structure as JSON.
+- **Input:** the chart PDF (all pages) as a Claude **document** block + a prompt asking for the chart's
+  structure as JSON. (v1 is PDF-only; non-PDF sources are typed no-ops — see Decisions #3.)
 - **Output JSON** (a subset/shape of `ChartCalibration`):
   - `systems[]`: `{ page, yTop, yBottom, xStart, xEnd, confidence }` (full-width default xStart=0/xEnd=1,
     matching chunk-3's deliberate full-width systems).
@@ -198,10 +209,11 @@ A standalone node script (run once, locally / against prod Supabase + Anthropic)
    cache-bust on `updated_at`); `lib/chart-upload.ts` shared `uploadChart()` + `triggerOverlayCreate`
    calling the convert route; refactor in-show `onChartUpload` to use it (no behavior change yet —
    convert route returns no-op until chunk 2). Tests (validation, clear-on-edit, hash parity).
-2. **`/api/charts/convert` route:** auth, fetch authoritative bytes + MIME, server hash, pre-check, vision
-   call (PDF document **or** image block), JSON→calibration map (drop unbindable markers) + validate +
-   **insert-on-conflict-do-nothing** persist, limits/timeout/degrade. Tests for the map/validate, the
-   unbindable-drop, the conflict no-op, and the degrade paths (mock the vision response).
+2. **`/api/charts/convert` route:** auth, fetch authoritative bytes, **magic-byte type classify**
+   (non-PDF → typed no-op), server hash, pre-check, vision call (PDF document block), JSON→calibration
+   map (drop unbindable markers) + validate + **insert-on-conflict-do-nothing RETURNING** persist
+   (`generated` from RETURNING), limits/timeout/degrade. Tests for the type-classify no-op, the
+   map/validate, the unbindable-drop, the conflict no-op, and the degrade paths (mock the vision response).
 3. **Review queue UI:** flag low-confidence + resolve-error markers in calibrate mode; "Generating…" /
    "couldn't auto-generate" / "too large" states in the upload flow.
 4. **A2 backfill script** (idempotent; same convert logic + insert-on-conflict; per-chart log).
@@ -244,6 +256,8 @@ ArrayBuffer neutralizes most, but flag any residual.
 
 ## Out of scope / future
 
+- **End-to-end image (PNG/JPG) charts** — needs its own chunk adding viewer image-render + image-hash +
+  overlay-on-image to the calibrate/verify path. v1 converter typed-no-ops non-PDF sources.
 - Edge-snap raster precision detector (a later calibration chunk).
 - Carry-forward of prior-hash manual anchors onto a replaced file.
 - Background-worker generation infra (only if volume grows beyond client-driven sync).
