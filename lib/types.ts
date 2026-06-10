@@ -60,6 +60,7 @@ export interface SectionAnchor {
   x: number;      // normalized 0..1, left→right within the page
   y: number;      // normalized 0..1, top→bottom within the page
   label: string;  // human label; required (non-blank) to verify the calibration
+  confidence?: number; // 0..1; populated by the auto-converter, cleared on manual edit
 }
 
 // ── Step-2 enrichment: bar-level geometry ────────────────────────────────────
@@ -73,6 +74,7 @@ export interface System {
   yBottom: number;  // normalized 0..1 (bottom edge; yBottom > yTop)
   xStart: number;   // normalized 0..1 (left edge)
   xEnd: number;     // normalized 0..1 (right edge; xEnd > xStart)
+  confidence?: number; // 0..1; populated by the auto-converter, cleared on manual edit
 }
 
 // A Bar is a barline-delimited region within a System. absNumber is the global
@@ -85,6 +87,7 @@ export interface Bar {
   xEnd: number;           // normalized 0..1 within the page (xEnd > xStart)
   absNumber: number;      // 1-based global bar number in reading order
   sectionId: string | null; // FK to SectionAnchor.id; null until assignment
+  confidence?: number;    // 0..1; populated by the auto-converter, cleared on manual edit
 }
 
 // A position reference — used by nav/temporal layers so they never assume bar

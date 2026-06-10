@@ -54,6 +54,16 @@ function clamp01(n: number): number {
   return n < 0 ? 0 : n > 1 ? 1 : n;
 }
 
+// A manual edit takes ownership of an element, so drop any converter-seeded
+// confidence (design: confidence is machine metadata, not a verify gate — once a
+// human touches the element it leaves the review queue). No-op when absent.
+function withoutConfidence<T extends { confidence?: number }>(o: T): T {
+  if (o.confidence === undefined) return o;
+  const next = { ...o };
+  delete next.confidence;
+  return next;
+}
+
 export function addSection(
   cal: ChartCalibration,
   page: number,
@@ -91,7 +101,7 @@ export function relabelSection(
   return {
     ...cal,
     status: 'draft',
-    sections: cal.sections.map((s) => (s.id === id ? { ...s, label } : s)),
+    sections: cal.sections.map((s) => (s.id === id ? withoutConfidence({ ...s, label }) : s)),
   };
 }
 
@@ -106,7 +116,7 @@ export function moveSection(
     ...cal,
     status: 'draft',
     sections: cal.sections.map((s) =>
-      s.id === id ? { ...s, x: clamp01(x), y: clamp01(y) } : s,
+      s.id === id ? withoutConfidence({ ...s, x: clamp01(x), y: clamp01(y) }) : s,
     ),
   };
 }
@@ -272,7 +282,7 @@ export function resizeSystemBand(
   const top = clamp01(Math.min(yTop, yBottom));
   const bot = clamp01(Math.max(yTop, yBottom));
   if (top >= bot) return cal; // degenerate band — ignore
-  const nextSystems = systems.map((s) => (s.id === id ? { ...s, yTop: top, yBottom: bot } : s));
+  const nextSystems = systems.map((s) => (s.id === id ? withoutConfidence({ ...s, yTop: top, yBottom: bot }) : s));
   return {
     ...cal,
     status: 'draft',
@@ -795,6 +805,12 @@ export function summarizeTraversal(cal: ChartCalibration, traversal: TraversalSt
 
 // ── Payload validation (untrusted boundary: API + hand-edited DB rows) ─────
 
+// Optional converter confidence: absent is valid (manual elements carry none);
+// when present it must be a finite number in [0,1].
+function isValidConfidence(c: unknown): boolean {
+  return c === undefined || (typeof c === 'number' && Number.isFinite(c) && c >= 0 && c <= 1);
+}
+
 export function isValidSectionAnchor(s: unknown): s is SectionAnchor {
   if (!s || typeof s !== 'object') return false;
   const a = s as Record<string, unknown>;
@@ -803,7 +819,8 @@ export function isValidSectionAnchor(s: unknown): s is SectionAnchor {
     typeof a.page === 'number' && Number.isInteger(a.page) && a.page >= 1 &&
     typeof a.x === 'number' && Number.isFinite(a.x) && a.x >= 0 && a.x <= 1 &&
     typeof a.y === 'number' && Number.isFinite(a.y) && a.y >= 0 && a.y <= 1 &&
-    typeof a.label === 'string'
+    typeof a.label === 'string' &&
+    isValidConfidence(a.confidence)
   );
 }
 
@@ -818,7 +835,8 @@ export function isValidSystem(s: unknown): s is System {
     sys.yTop < sys.yBottom &&
     typeof sys.xStart === 'number' && Number.isFinite(sys.xStart) && sys.xStart >= 0 && sys.xStart <= 1 &&
     typeof sys.xEnd === 'number' && Number.isFinite(sys.xEnd) && sys.xEnd >= 0 && sys.xEnd <= 1 &&
-    sys.xStart < sys.xEnd
+    sys.xStart < sys.xEnd &&
+    isValidConfidence(sys.confidence)
   );
 }
 
@@ -832,7 +850,8 @@ export function isValidBar(b: unknown): b is Bar {
     typeof bar.xEnd === 'number' && Number.isFinite(bar.xEnd) && bar.xEnd >= 0 && bar.xEnd <= 1 &&
     bar.xStart < bar.xEnd &&
     typeof bar.absNumber === 'number' && Number.isInteger(bar.absNumber) && bar.absNumber >= 1 &&
-    (bar.sectionId === null || (typeof bar.sectionId === 'string' && bar.sectionId.length > 0))
+    (bar.sectionId === null || (typeof bar.sectionId === 'string' && bar.sectionId.length > 0)) &&
+    isValidConfidence(bar.confidence)
   );
 }
 

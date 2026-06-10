@@ -1,6 +1,7 @@
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 import type { Chart } from './types';
-import { getCachedChartUrl } from './chart-cache';
+import { getCachedChartBlob } from './chart-cache';
+import { hashPdfBytes } from './chart-calibration';
 
 // Lazy-init pdf.js to avoid SSR issues
 let pdfjsLib: typeof import('pdfjs-dist') | null = null;
@@ -18,8 +19,17 @@ async function getPdfjs() {
 
 interface CachedDoc {
   doc: PDFDocumentProxy;
-  blobUrl: string | null; // non-null if we created a blob URL (network path)
+  sourceHash: string; // SHA-256 of the fetched bytes — the calibration key
   lastAccess: number;
+}
+
+// What loadPdfDoc resolves to: the parsed PDF plus the SHA-256 of the exact
+// bytes it was parsed from. The hash is computed BEFORE the bytes are handed to
+// pdf.js (which detaches the buffer), and is the same hash the converter uses,
+// so viewer and converter agree on calibration identity.
+export interface LoadedPdf {
+  doc: PDFDocumentProxy;
+  sourceHash: string;
 }
 
 const docCache = new Map<string, CachedDoc>();
@@ -43,12 +53,42 @@ function evictOldest() {
   if (oldest) {
     const entry = docCache.get(oldest)!;
     entry.doc.destroy();
-    if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
     docCache.delete(oldest);
   }
 }
 
-export async function loadPdfDoc(chart: Chart, accessToken?: string): Promise<PDFDocumentProxy | null> {
+// Fetch the chart's raw bytes — offline cache first, then network (Supabase
+// public URL direct, or the Drive proxy). Returns the ArrayBuffer the document
+// will be parsed from, so the hash and the parse share identical bytes.
+async function fetchChartBytes(chart: Chart, accessToken?: string): Promise<ArrayBuffer | null> {
+  const cachedBlob = await getCachedChartBlob(chart);
+  if (cachedBlob) return await cachedBlob.arrayBuffer();
+
+  try {
+    let res: Response;
+
+    // Supabase Storage charts have a direct public URL — fetch directly
+    if (chart.url && chart.url.includes('/storage/v1/object/public/')) {
+      res = await fetch(chart.url);
+    } else {
+      // Legacy Drive charts — go through the proxy
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+      res = await fetch('/api/drive/download', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ fileId: chart.fileId, mimeType: chart.mimeType }),
+      });
+    }
+
+    if (!res.ok) return null;
+    return await res.arrayBuffer();
+  } catch {
+    return null;
+  }
+}
+
+export async function loadPdfDoc(chart: Chart, accessToken?: string): Promise<LoadedPdf | null> {
   if (!chart.fileId) return null;
 
   const key = cacheKey(chart);
@@ -59,62 +99,30 @@ export async function loadPdfDoc(chart: Chart, accessToken?: string): Promise<PD
   const cached = docCache.get(key);
   if (cached) {
     cached.lastAccess = Date.now();
-    return cached.doc;
+    return { doc: cached.doc, sourceHash: cached.sourceHash };
   }
 
-  // Try offline cache first
-  let blobUrl = await getCachedChartUrl(chart);
-  let ownsBlobUrl = false;
-
-  // Fall back to network fetch
-  if (!blobUrl) {
-    try {
-      let res: Response;
-
-      // Supabase Storage charts have a direct public URL — fetch directly
-      if (chart.url && chart.url.includes('/storage/v1/object/public/')) {
-        res = await fetch(chart.url);
-      } else {
-        // Legacy Drive charts — go through the proxy
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-        res = await fetch('/api/drive/download', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ fileId: chart.fileId, mimeType: chart.mimeType }),
-        });
-      }
-
-      if (res.ok) {
-        const blob = await res.blob();
-        blobUrl = URL.createObjectURL(blob);
-        ownsBlobUrl = true;
-      }
-    } catch {
-      return null;
-    }
-  }
-
-  if (!blobUrl) {
+  const bytes = await fetchChartBytes(chart, accessToken);
+  if (!bytes) {
     failedKeys.add(key);
     return null;
   }
 
+  // Hash the fetched bytes BEFORE handing them to pdf.js (getDocument detaches
+  // the buffer). hashPdfBytes slices internally, so the parse below still sees
+  // the full data. This is the shared viewer/converter calibration key.
+  const sourceHash = await hashPdfBytes(bytes);
+
   try {
     const pdfjs = await getPdfjs();
-    const loadingTask = pdfjs.getDocument(blobUrl);
+    const loadingTask = pdfjs.getDocument({ data: new Uint8Array(bytes) });
     const doc = await loadingTask.promise;
 
     evictOldest();
-    docCache.set(key, {
-      doc,
-      blobUrl: ownsBlobUrl ? blobUrl : null,
-      lastAccess: Date.now(),
-    });
+    docCache.set(key, { doc, sourceHash, lastAccess: Date.now() });
 
-    return doc;
+    return { doc, sourceHash };
   } catch {
-    if (ownsBlobUrl) URL.revokeObjectURL(blobUrl);
     return null;
   }
 }
@@ -176,7 +184,6 @@ export function destroyAllDocs() {
   }
   for (const entry of docCache.values()) {
     entry.doc.destroy();
-    if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
   }
   docCache.clear();
   failedKeys.clear();

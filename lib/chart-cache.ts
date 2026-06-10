@@ -19,15 +19,14 @@ export async function isChartCached(chart: Chart): Promise<boolean> {
   return !!match;
 }
 
-/** Get the cached blob URL for a chart, or null if not cached. */
-export async function getCachedChartUrl(chart: Chart): Promise<string | null> {
+/** Get the cached chart bytes (as a Blob), or null if not cached. */
+export async function getCachedChartBlob(chart: Chart): Promise<Blob | null> {
   const key = chartCacheKey(chart);
   if (!key) return null;
   const cache = await caches.open(CACHE_NAME);
   const match = await cache.match(key);
   if (!match) return null;
-  const blob = await match.blob();
-  return URL.createObjectURL(blob);
+  return await match.blob();
 }
 
 /** Store a downloaded chart in the cache. */
