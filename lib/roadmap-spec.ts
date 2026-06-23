@@ -47,6 +47,12 @@ export interface ChordHit {
 
 // ── v1 vocabulary (design §"NNS scope" / Open Q5) ────────────────────────────
 
+// The only RoadmapSpec version this build understands. The validator is the DB
+// boundary, so it FAILS CLOSED on any other version — a future/AI-produced v2
+// payload must not slip past today's validator into a renderer with v1 semantics.
+// Bump in lockstep with a migration when the spec shape changes.
+export const ROADMAP_SPEC_VERSION = 1;
+
 // Time-signature lower number (the beat unit). Whole..sixteenth.
 export const TIME_SIG_UNITS: readonly number[] = [1, 2, 4, 8, 16];
 
@@ -96,8 +102,8 @@ export function validateRoadmapSpec(input: unknown): SpecValidation {
   }
   const s = input as Record<string, unknown>;
 
-  if (!isInt(s.version) || (s.version as number) < 1) {
-    errors.push('version must be an integer >= 1');
+  if (s.version !== ROADMAP_SPEC_VERSION) {
+    errors.push(`version must be ${ROADMAP_SPEC_VERSION} (unsupported spec version)`);
   }
 
   // Time signature.

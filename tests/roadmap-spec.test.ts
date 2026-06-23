@@ -79,9 +79,10 @@ describe('validateRoadmapSpec — top-level shape', () => {
     expectError(42, 'spec must be an object');
   });
 
-  it('rejects a bad version', () => {
-    expectError({ ...baseSpec(), version: 0 }, 'version must be an integer >= 1');
-    expectError({ ...baseSpec(), version: 1.5 }, 'version must be an integer >= 1');
+  it('fails closed on an unsupported version', () => {
+    expectError({ ...baseSpec(), version: 0 }, 'unsupported spec version');
+    expectError({ ...baseSpec(), version: 2 }, 'unsupported spec version');
+    expectError({ ...baseSpec(), version: 1.5 }, 'unsupported spec version');
   });
 
   it('rejects a missing or malformed time signature', () => {
