@@ -3,10 +3,14 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { getAdminConfig } from '@/lib/admin-config';
-import { CALIBRATION_SCHEMA_VERSION, hashPdfBytes } from '@/lib/chart-calibration';
-import { MAX_PDF_BYTES, buildCalibrationFromVision, sniffPdf } from '@/lib/chart-converter';
+import { hashPdfBytes } from '@/lib/chart-calibration';
+import {
+  MAX_PDF_BYTES,
+  buildCalibrationFromVision,
+  schemaVersionToPersist,
+  sniffPdf,
+} from '@/lib/chart-converter';
 import { extractChartVision, VISION_TIMEOUT_MS } from '@/lib/chart-vision';
-import type { ChartCalibration } from '@/lib/types';
 import type { ConvertReason, ConvertResult } from '@/lib/chart-upload';
 
 // The Anthropic call (VISION_TIMEOUT_MS = 50s) is aborted comfortably under this
@@ -15,15 +19,6 @@ export const maxDuration = 60;
 export const runtime = 'nodejs';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// A no-roadmap calibration persists at v2 so an old v2 build still serves it
-// (rollback-safe); a roadmap-bearing payload is stamped at the current version
-// and fenced from old readers by the GET version gate. Mirrors the calibration
-// PUT route — see docs/design-nav-graph.md §8.
-const LINEAR_SCHEMA_VERSION = 2;
-function schemaVersionToPersist(cal: ChartCalibration): number {
-  return (cal.roadmap?.length ?? 0) > 0 ? CALIBRATION_SCHEMA_VERSION : LINEAR_SCHEMA_VERSION;
-}
 
 // Typed degrade: a non-error outcome the client can act on (manual rail / re-add).
 // Always 200 so the seam's triggerOverlayCreate gets the reason rather than null.
