@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
+  LINEAR_SCHEMA_VERSION,
   MAX_PDF_BYTES,
   buildCalibrationFromVision,
+  schemaVersionToPersist,
   sniffPdf,
   type VisionChart,
 } from '../lib/chart-converter';
-import { isValidCalibration } from '../lib/chart-calibration';
+import { CALIBRATION_SCHEMA_VERSION, isValidCalibration } from '../lib/chart-calibration';
 import type { RoadmapMarker } from '../lib/types';
 
 // A complete, valid vision payload (one page, one system, two bars).
@@ -310,5 +312,22 @@ describe('buildCalibrationFromVision — defensive input', () => {
     expect(cal).not.toBeNull();
     expect(cal!.sections).toHaveLength(1);
     expect(cal!.sections[0].label).toBe('Chorus');
+  });
+});
+
+describe('schemaVersionToPersist', () => {
+  it('stamps a roadmap-bearing calibration at the current schema version', () => {
+    const v = baseVision();
+    v.roadmap = [{ kind: 'segno', barIndex: 0 }];
+    const cal = buildCalibrationFromVision(v)!;
+    expect(cal.roadmap && cal.roadmap.length).toBeGreaterThan(0);
+    expect(schemaVersionToPersist(cal)).toBe(CALIBRATION_SCHEMA_VERSION);
+  });
+
+  it('stamps a no-roadmap calibration at the rollback-safe linear version', () => {
+    const cal = buildCalibrationFromVision(baseVision())!;
+    expect(cal.roadmap).toBeUndefined();
+    expect(schemaVersionToPersist(cal)).toBe(LINEAR_SCHEMA_VERSION);
+    expect(LINEAR_SCHEMA_VERSION).toBeLessThan(CALIBRATION_SCHEMA_VERSION);
   });
 });

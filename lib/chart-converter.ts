@@ -343,3 +343,15 @@ export function buildCalibrationFromVision(vision: VisionChart): ChartCalibratio
   // Final DB-boundary gate. Any residual contradiction → nothing.
   return isValidCalibration(calibration) ? calibration : null;
 }
+
+// ─── Persisted schema version (shared by the convert route + backfill script) ──
+// A no-roadmap calibration persists at v2 so an old v2 build still serves it
+// (rollback-safe); a roadmap-bearing payload is stamped at the current version
+// and fenced from old readers by the GET version gate. Mirrors the calibration
+// PUT route — see docs/design-nav-graph.md §8. Shared here so the route and the
+// A2 backfill can never drift on the version they stamp (a mismatch would mis-gate
+// backfilled rows).
+export const LINEAR_SCHEMA_VERSION = 2;
+export function schemaVersionToPersist(cal: ChartCalibration): number {
+  return (cal.roadmap?.length ?? 0) > 0 ? CALIBRATION_SCHEMA_VERSION : LINEAR_SCHEMA_VERSION;
+}
