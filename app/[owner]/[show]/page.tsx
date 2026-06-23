@@ -52,6 +52,7 @@ import {
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
 import { uploadChart, ChartUploadError } from '@/lib/chart-upload';
+import type { ConvertReason } from '@/lib/chart-upload';
 import {
   emptyCalibration,
   addSection,
@@ -76,6 +77,8 @@ import {
   systemsForPage,
 } from '@/lib/chart-calibration';
 import type { TraversalStep } from '@/lib/chart-calibration';
+import { reviewFlags } from '@/lib/chart-review';
+import type { FlaggedRef } from '@/lib/chart-review';
 import { useShow } from '@/lib/use-show';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { normalizeSongKeySafe, displayRole } from '@/lib/normalize';
@@ -1551,11 +1554,12 @@ const LONG_PRESS_MS = 450;
 // transparent hit target (touch-friendly, esp. in Perform). In Perform a tap
 // seeks and a long-press holds; in Calibrate a tap opens inline label editing.
 function SectionMarker({
-  section, box, mode, isSeeked, isHeld, isEditing, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
+  section, box, mode, isSeeked, isHeld, isEditing, flagged, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
 }: {
   section: SectionAnchor;
   box: CanvasBox;
   mode: 'perform' | 'calibrate';
+  flagged: boolean;
   isSeeked: boolean;
   isHeld: boolean;
   isEditing: boolean;
@@ -1638,9 +1642,12 @@ function SectionMarker({
         </div>
       ) : (
         <span
-          className={`block max-w-[8rem] truncate rounded px-1.5 py-0.5 text-[11px] font-bold shadow ${pillState}`}
+          className={`block max-w-[8rem] truncate rounded px-1.5 py-0.5 text-[11px] font-bold shadow ${pillState} ${
+            flagged ? 'outline-dashed outline-2 outline-offset-1 outline-amber-400' : ''
+          }`}
           style={{ pointerEvents: 'none' }}
         >
+          {flagged && <span aria-hidden className="mr-0.5">&#9873;</span>}
           {section.label.trim() === '' ? '(unlabeled)' : section.label}
         </span>
       )}
@@ -1653,12 +1660,13 @@ function SectionMarker({
 // (fit the band to the printed staff) and its barline ticks. Ticks are visual
 // only here — per-tick nudge is a later refinement.
 function SystemBand({
-  system, bars, box, selected, onSelect, onResizeStart,
+  system, bars, box, selected, flagged, onSelect, onResizeStart,
 }: {
   system: System;
   bars: Bar[];
   box: CanvasBox;
   selected: boolean;
+  flagged: boolean;
   onSelect: () => void;
   onResizeStart: (edge: 'top' | 'bottom', e: ReactPointerEvent<HTMLDivElement>) => void;
 }) {
@@ -1673,13 +1681,18 @@ function SystemBand({
       <div
         data-chart-overlay-interactive
         onClick={(e) => { e.stopPropagation(); onSelect(); }}
-        className={`absolute ${selected ? 'bg-sky-500/15 ring-2 ring-sky-400' : 'bg-zinc-400/10 ring-1 ring-zinc-500'}`}
+        className={`absolute ${selected ? 'bg-sky-500/15 ring-2 ring-sky-400' : 'bg-zinc-400/10 ring-1 ring-zinc-500'} ${
+          flagged ? 'outline-dashed outline-2 outline-offset-1 outline-amber-400' : ''
+        }`}
         style={{ left, top, width, height, pointerEvents: 'auto', touchAction: 'manipulation' }}
       >
         {selected && (
           <span className="absolute -top-4 left-0 text-[10px] font-bold text-sky-300">
             {ordered.length} bar{ordered.length === 1 ? '' : 's'}
           </span>
+        )}
+        {flagged && (
+          <span aria-hidden className="absolute -top-3 right-0 text-[11px] font-bold text-amber-400">&#9873;</span>
         )}
       </div>
       {/* Barline ticks (leading edge of each bar + the closing edge). */}
@@ -1742,7 +1755,7 @@ function roadmapMarkerLabel(m: RoadmapMarker): string {
 // (tapToBar); only the marker badges capture their own clicks. All visuals are
 // pointer-events:none except the badges.
 function RoadmapOverlayLayer({
-  calibration, box, page, selectedBarId, selectedMarkerId, endingBarIds, resolveErrorIds, onSelectMarker,
+  calibration, box, page, selectedBarId, selectedMarkerId, endingBarIds, resolveErrorIds, flaggedMarkerIds, onSelectMarker,
 }: {
   calibration: ChartCalibration;
   box: CanvasBox;
@@ -1751,6 +1764,7 @@ function RoadmapOverlayLayer({
   selectedMarkerId: string | null;
   endingBarIds: string[] | null;
   resolveErrorIds: Set<string>;
+  flaggedMarkerIds: Set<string>;
   onSelectMarker: (id: string) => void;
 }) {
   const systems = systemsForPage(calibration, page);
@@ -1811,14 +1825,17 @@ function RoadmapOverlayLayer({
           if (!first || !last) return null;
           const isErr = resolveErrorIds.has(m.id);
           const isSel = m.id === selectedMarkerId;
+          const isFlagged = !isErr && !isSel && flaggedMarkerIds.has(m.id);
           return (
             <button key={m.id} onClick={(e) => { e.stopPropagation(); onSelectMarker(m.id); }}
               data-chart-overlay-interactive
               className={`absolute text-[9px] font-bold rounded px-1 border-t-2 ${
                 isErr ? 'border-red-500 text-red-300 bg-red-950/60'
                 : isSel ? 'border-sky-400 text-sky-200 bg-sky-950/60'
+                : isFlagged ? 'border-amber-400 text-amber-200 bg-zinc-900/80 outline-dashed outline-2 outline-offset-1 outline-amber-400'
                 : 'border-amber-400 text-amber-200 bg-zinc-900/80'}`}
               style={{ left: first.left, top: first.top - 16, width: last.right - first.left, pointerEvents: 'auto' }}>
+              {isFlagged && <span aria-hidden className="mr-0.5">&#9873;</span>}
               {roadmapMarkerLabel(m)}
             </button>
           );
@@ -1829,14 +1846,17 @@ function RoadmapOverlayLayer({
         const x = atStart ? r.left : r.right;
         const isErr = resolveErrorIds.has(m.id);
         const isSel = m.id === selectedMarkerId;
+        const isFlagged = !isErr && !isSel && flaggedMarkerIds.has(m.id);
         return (
           <button key={m.id} onClick={(e) => { e.stopPropagation(); onSelectMarker(m.id); }}
             data-chart-overlay-interactive
             className={`absolute text-[9px] font-bold rounded px-1 whitespace-nowrap -translate-x-1/2 ${
               isErr ? 'ring-1 ring-red-500 text-red-300 bg-red-950/80'
               : isSel ? 'ring-1 ring-sky-400 text-sky-200 bg-sky-950/80'
+              : isFlagged ? 'ring-1 ring-zinc-600 text-zinc-200 bg-zinc-900/90 outline-dashed outline-2 outline-offset-1 outline-amber-400'
               : 'ring-1 ring-zinc-600 text-zinc-200 bg-zinc-900/90'}`}
             style={{ left: x, top: r.top - 16, pointerEvents: 'auto' }}>
+            {isFlagged && <span aria-hidden className="mr-0.5">&#9873;</span>}
             {roadmapMarkerLabel(m)}
           </button>
         );
@@ -1858,6 +1878,7 @@ function CalibrationOverlay({
   selectedSystemId, onDropSystem, onSelectSystem, onResizeSystem,
   onDrop, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
   selectedBarId, selectedMarkerId, endingBarIds, resolveErrorIds,
+  flaggedSectionIds, flaggedSystemIds, flaggedMarkerIds,
   onRoadmapBarTap, onSelectMarker,
 }: {
   calibration: ChartCalibration | null;
@@ -1885,6 +1906,9 @@ function CalibrationOverlay({
   selectedMarkerId: string | null;
   endingBarIds: string[] | null;
   resolveErrorIds: Set<string>;
+  flaggedSectionIds: Set<string>;
+  flaggedSystemIds: Set<string>;
+  flaggedMarkerIds: Set<string>;
   onRoadmapBarTap: (barId: string) => void;
   onSelectMarker: (id: string) => void;
 }) {
@@ -1990,6 +2014,7 @@ function CalibrationOverlay({
           selectedMarkerId={selectedMarkerId}
           endingBarIds={endingBarIds}
           resolveErrorIds={resolveErrorIds}
+          flaggedMarkerIds={flaggedMarkerIds}
           onSelectMarker={onSelectMarker}
         />
       )}
@@ -2000,6 +2025,7 @@ function CalibrationOverlay({
           box={box}
           bars={allBars.filter((b) => b.systemId === sys.id)}
           selected={sys.id === selectedSystemId}
+          flagged={flaggedSystemIds.has(sys.id)}
           onSelect={() => onSelectSystem(sys.id)}
           onResizeStart={(edge, e) => beginResize(sys, edge, e)}
         />
@@ -2038,6 +2064,7 @@ function CalibrationOverlay({
           isSeeked={s.id === seekId}
           isHeld={s.id === holdId}
           isEditing={s.id === editingId}
+          flagged={flaggedSectionIds.has(s.id)}
           onSeek={() => onSeek(s.id)}
           onHold={() => onHold(s.id)}
           onRelabel={(label) => onRelabel(s.id, label)}
@@ -2275,6 +2302,13 @@ function ChartNavigator({
   const [nextUntil, setNextUntil] = useState<'end' | 'fine' | 'coda'>('end');
   const [canvasBox, setCanvasBox] = useState<CanvasBox | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  // ── Review queue (converter chunk 3) ──
+  // reviewIdx = position in the page→top→left walk of flagged elements; the
+  // everReviewed latch lets the chip show "✓ Reviewed" once a draft that DID
+  // have flags has been cleared to zero (vs. a hand-built calibration that never
+  // had any — which shows nothing). Reset when the chart changes.
+  const [reviewIdx, setReviewIdx] = useState(0);
+  const [everReviewed, setEverReviewed] = useState(false);
 
   // Reset chart and page when song or available charts change
   useEffect(() => {
@@ -2401,6 +2435,39 @@ function ChartNavigator({
   const roadmapResolve = calibration ? resolveRoadmap(calibration) : null;
   const playOrder = calibration && roadmapResolve?.ok ? summarizeTraversal(calibration, roadmapResolve.traversal) : '';
   const resolveErrorIds = roadmapResolve && !roadmapResolve.ok ? new Set(roadmapResolve.error.markerIds) : new Set<string>();
+
+  // ── Review queue (converter chunk 3) ──
+  // The pure flagging seam decides which elements the human should look at
+  // (low-confidence ∪ resolve-error). Editing any element clears its confidence,
+  // so flags self-clear and the queue shrinks as the human works through it.
+  const reviewFlagSet = useMemo(() => (calibration ? reviewFlags(calibration) : null), [calibration]);
+  const reviewCount = reviewFlagSet?.count ?? 0;
+  // (The everReviewed latch is set at calibration load — see the load effect —
+  // and cleared on chart change, so the chip can distinguish "cleared to done"
+  // from a hand-built calibration that never had flags.)
+  const emptyIds = useMemo(() => new Set<string>(), []);
+  const flaggedSectionIds = reviewFlagSet?.sectionIds ?? emptyIds;
+  const flaggedSystemIds = reviewFlagSet?.systemIds ?? emptyIds;
+  const flaggedMarkerIds = reviewFlagSet?.markerIds ?? emptyIds;
+
+  // Step the review stepper: switch tool + page + select the flagged element so
+  // the human lands on it ready to fix. Selection is type-specific (system band,
+  // marker badge, or section pill editor); all other selections clear.
+  const stepReview = (dir: 1 | -1) => {
+    const ordered: FlaggedRef[] = reviewFlagSet?.ordered ?? [];
+    const n = ordered.length;
+    if (n === 0) return;
+    const next = (((reviewIdx + dir) % n) + n) % n;
+    setReviewIdx(next);
+    const ref = ordered[next];
+    setCalTool(ref.tool);
+    setPageNum(ref.page);
+    setSelectedSystemId(ref.type === 'system' ? ref.id : null);
+    setSelectedMarkerId(ref.type === 'marker' ? ref.id : null);
+    setSelectedBarId(null);
+    setEndingDraft(null);
+    setEditingId(ref.type === 'section' ? ref.id : null);
+  };
 
   const pushMarker = (marker: RoadmapMarker) => {
     setCalibration((c) => (c ? addRoadmapMarker(c, marker) : c));
@@ -2542,6 +2609,8 @@ function ChartNavigator({
       setSelectedMarkerId(null);
       setEndingDraft(null);
       setCanvasBox(null);
+      setReviewIdx(0);
+      setEverReviewed(false);
     };
     if (!chartFileId) {
       // Defer state reset to microtask to satisfy lint (no sync setState in effect)
@@ -2589,7 +2658,13 @@ function ChartNavigator({
             if (cancelled) return;
             if (res.ok) {
               const json = await res.json();
-              if (!cancelled) setCalibration(json.calibration as ChartCalibration);
+              if (!cancelled) {
+                const loadedCal = json.calibration as ChartCalibration;
+                setCalibration(loadedCal);
+                // Latch the review-done indicator if the loaded draft carries
+                // any model flags (low-confidence ∪ resolve-error).
+                if (reviewFlags(loadedCal).count > 0) setEverReviewed(true);
+              }
             }
           } catch {
             if (!cancelled) { setSourceHash(null); setCalibration(null); }
@@ -2824,6 +2899,9 @@ function ChartNavigator({
             selectedMarkerId={selectedMarkerId}
             endingBarIds={endingDraft?.barIds ?? null}
             resolveErrorIds={resolveErrorIds}
+            flaggedSectionIds={flaggedSectionIds}
+            flaggedSystemIds={flaggedSystemIds}
+            flaggedMarkerIds={flaggedMarkerIds}
             onRoadmapBarTap={roadmapBarTap}
             onSelectMarker={selectMarker}
           />
@@ -2920,6 +2998,31 @@ function ChartNavigator({
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {/* Review stepper: walk the model-flagged elements (low-confidence ∪
+                resolve-error) page→top→left. Disappears once the queue clears;
+                "✓ Reviewed" shows only if it ever had flags. */}
+            {reviewCount > 0 ? (
+              <div className="flex items-center gap-1 rounded bg-amber-500/15 ring-1 ring-amber-500/40 px-1.5 py-0.5">
+                <span aria-hidden className="text-amber-400">&#9873;</span>
+                <span className="text-[11px] font-bold text-amber-300">{reviewCount} to review</span>
+                <button
+                  onClick={() => stepReview(-1)}
+                  aria-label="Previous flagged element"
+                  className="w-5 h-5 rounded text-amber-200 hover:bg-amber-500/20"
+                >
+                  &lsaquo;
+                </button>
+                <button
+                  onClick={() => stepReview(1)}
+                  aria-label="Next flagged element"
+                  className="w-5 h-5 rounded text-amber-200 hover:bg-amber-500/20"
+                >
+                  &rsaquo;
+                </button>
+              </div>
+            ) : everReviewed ? (
+              <span className="text-[11px] font-bold text-emerald-400">&#10003; Reviewed</span>
+            ) : null}
             {saveState === 'saving' && <span className="text-[11px] text-zinc-500">Saving…</span>}
             {saveState === 'saved' && <span className="text-[11px] text-emerald-400">Saved</span>}
             {saveState === 'error' && <span className="text-[11px] text-red-400">Save failed</span>}
@@ -3280,7 +3383,7 @@ function AddSongFromLibrary({
 // ════════════════════════════════════════════════════════════════════════════
 
 function SetupSetlistTable({
-  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, ownerId, isEditor, onChartUpload, onChartDelete,
+  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, ownerId, isEditor, overlayStatus, onChartUpload, onChartDelete,
 }: {
   setlist: SetlistSong[];
   canResolveCharts: boolean;
@@ -3291,6 +3394,7 @@ function SetupSetlistTable({
   isOwner: boolean;
   ownerId: string | null;
   isEditor?: boolean;
+  overlayStatus?: Record<string, 'generating' | ConvertReason>;
   onChartUpload?: (songTitle: string) => void;
   onChartDelete?: (chartId: string, songTitle: string, role: string) => void;
 }) {
@@ -3341,6 +3445,7 @@ function SetupSetlistTable({
                     onMoveUp={() => onReorder(idx, idx - 1)}
                     onMoveDown={() => onReorder(idx, idx + 1)}
                     isOwner={isOwner}
+                    overlayStatus={overlayStatus?.[song.title]}
                     onChartUpload={onChartUpload}
                     onChartDelete={onChartDelete}
                   />
@@ -3359,7 +3464,7 @@ const inputCls = 'w-full px-2 py-2.5 sm:py-1.5 text-sm border border-gray-300 ro
 const arrowBtn = 'px-1 py-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-20 disabled:cursor-not-allowed';
 
 function SetupSortableRow({
-  song, idx, total, canResolveCharts, onUpdate, onDelete, onMoveUp, onMoveDown, isOwner, onChartUpload, onChartDelete,
+  song, idx, total, canResolveCharts, onUpdate, onDelete, onMoveUp, onMoveDown, isOwner, overlayStatus, onChartUpload, onChartDelete,
 }: {
   song: SetlistSong;
   idx: number;
@@ -3370,6 +3475,7 @@ function SetupSortableRow({
   onMoveUp: () => void;
   onMoveDown: () => void;
   isOwner: boolean;
+  overlayStatus?: 'generating' | ConvertReason;
   onChartUpload?: (songTitle: string) => void;
   onChartDelete?: (chartId: string, songTitle: string, role: string) => void;
 }) {
@@ -3418,6 +3524,17 @@ function SetupSortableRow({
             <button onClick={() => onChartUpload(song.title)} className="text-xs text-gray-400 hover:text-gray-600">+</button>
           )}
         </div>
+        {/* Auto-overlay status (converter chunk 3): transient per-song feedback
+            while the converter runs, then a one-line reason on non-silent fails. */}
+        {overlayStatus === 'generating' ? (
+          <p className="mt-1 text-[11px] text-gray-400">Generating overlay…</p>
+        ) : overlayStatus === 'failed' ? (
+          <p className="mt-1 text-[11px] text-amber-600">Couldn&rsquo;t auto-generate — calibrate manually.</p>
+        ) : overlayStatus === 'too_large' ? (
+          <p className="mt-1 text-[11px] text-amber-600">Chart too large to auto-generate — calibrate manually.</p>
+        ) : overlayStatus === 'unsupported_type' ? (
+          <p className="mt-1 text-[11px] text-amber-600">Auto-overlay supports PDF charts only — calibrate manually.</p>
+        ) : null}
       </td>
       <td className="px-1 py-1">
         <div className="flex flex-col items-center">
@@ -4406,6 +4523,11 @@ function ConfigTab({
   const [folderIdInput, setFolderIdInput] = useState(config.chartsRootFolderId ?? '');
   const [chartsResolving, setChartsResolving] = useState(false);
   const [chartsError, setChartsError] = useState('');
+  // ── Auto-overlay status (converter chunk 3) ──
+  // Per-song transient status for the upload flow: 'generating' while the
+  // converter runs, then a ConvertReason copy on the non-silent failure modes
+  // (failed / too_large / unsupported_type). Generated / exists / null clear it.
+  const [overlayStatus, setOverlayStatus] = useState<Record<string, 'generating' | ConvertReason>>({});
 
   // Count songs with resolved charts
   const chartsMatchCount = config.setlist.filter((s) => s.charts && s.charts.length > 0).length;
@@ -5021,6 +5143,7 @@ function ConfigTab({
               }
             }}
             isEditor={isEditor}
+            overlayStatus={overlayStatus}
             onChartUpload={(songTitle) => {
               const input = document.createElement('input');
               input.type = 'file';
@@ -5034,10 +5157,11 @@ function ConfigTab({
                 for (const r of roles) { if (nameLower.includes(r.toLowerCase())) { detected = r; break; } }
                 const role = prompt(`Chart role for "${songTitle}":`, detected);
                 if (!role) return;
+                setOverlayStatus((prev) => ({ ...prev, [songTitle]: 'generating' }));
                 try {
-                  // Shared add path: uploads, then fires overlay creation (no-op
-                  // until the converter route ships). Overlay failure is swallowed.
-                  const { chart } = await uploadChart(file, songTitle, role);
+                  // Shared add path: uploads, then fires overlay creation. The
+                  // overlay result drives the per-song auto-overlay status badge.
+                  const { chart, overlay } = await uploadChart(file, songTitle, role);
                   updateConfig((prev) => ({
                     ...prev,
                     setlist: prev.setlist.map((s) =>
@@ -5046,7 +5170,28 @@ function ConfigTab({
                         : s
                     ),
                   }));
+                  // Surface only the non-silent failure reasons; a generated
+                  // overlay (or a pre-existing one, or no converter) clears.
+                  const reason = overlay?.reason;
+                  const clearStatus = () => setOverlayStatus((prev) => {
+                    if (!(songTitle in prev)) return prev;
+                    const next = { ...prev };
+                    delete next[songTitle];
+                    return next;
+                  });
+                  if (reason === 'failed' || reason === 'too_large' || reason === 'unsupported_type') {
+                    setOverlayStatus((prev) => ({ ...prev, [songTitle]: reason }));
+                    setTimeout(clearStatus, 6000);
+                  } else {
+                    clearStatus();
+                  }
                 } catch (e) {
+                  setOverlayStatus((prev) => {
+                    if (!(songTitle in prev)) return prev;
+                    const next = { ...prev };
+                    delete next[songTitle];
+                    return next;
+                  });
                   if (e instanceof ChartUploadError) {
                     alert(e.status === 401
                       ? 'Chart upload failed — you need to sign in first.'

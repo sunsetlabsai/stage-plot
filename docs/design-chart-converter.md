@@ -227,6 +227,108 @@ A standalone node script (run once, locally / against prod Supabase + Anthropic)
 
 Gate (`npx tsc --noEmit && npm run lint && npm test && npm run build`) + commit per chunk.
 
+## Chunk 3 — Review queue UI (build spec)
+
+Chunks 1–2 already shipped everything the queue needs: `confidence?` on every element
+(`types.ts` SectionAnchor/System/Bar/marker), `[0,1]` validation in the `isValid*` helpers,
+clear-on-edit (`withoutConfidence` on relabel/move/resize in `chart-calibration.ts`), and
+resolve-error markers already render with a **red ring** in `RoadmapOverlayLayer`
+(`page.tsx:1812/1830`, fed by `resolveErrorIds` = `resolveRoadmap(...).error.markerIds`,
+`page.tsx:2403`). So chunk 3 adds **no model/DB change** — it is a pure flagging helper + its
+in-canvas surfacing + the upload-flow states. The chunk-1 confidence lifecycle means a flag
+**self-clears the instant the human touches the element** (edit → confidence cleared → drops out
+of the queue), so the queue can never strand a "reviewed but still flagged" item.
+
+### What gets flagged (the pure seam — `lib/chart-review.ts`)
+
+A new pure module (testable under vitest `env=node`; the UI itself is not unit-testable here):
+
+```
+REVIEW_CONFIDENCE_THRESHOLD = 0.8        // start conservative — flag generously; one-line tune
+reviewFlags(calibration): {
+  sectionIds: Set<string>;
+  systemIds:  Set<string>;               // a band is flagged if it OR any of its bars is low-confidence
+  markerIds:  Set<string>;               // low-confidence  ∪  resolveRoadmap error markerIds
+  count: number;                         // total distinct flagged elements
+  ordered: FlaggedRef[];                 // page→top→left walk order for the stepper
+}
+```
+
+- **Low confidence** = `confidence !== undefined && confidence < REVIEW_CONFIDENCE_THRESHOLD`.
+  Absent confidence is **never** flagged (manual elements carry none — already human-owned).
+- **Bars roll up to their system band.** Bars are authored by count (the band's +/- stepper rebuilds
+  all of them — `page.tsx:2895`), not placed individually, so a per-tick flag isn't actionable. A band
+  is flagged if the system *or any child bar* is low-confidence; the human fixes it by nudging the band
+  / adjusting the count, which clears it.
+- **Markers** = low-confidence **∪** the existing resolve-error set. Resolve-error keeps its red
+  treatment (higher priority); low-confidence-only markers get the review treatment below.
+- Threshold is a single named constant (per-element-type split deferred — answers **open-Q3**; becomes a
+  `Record<kind, number>` one-liner once we have real charts). No magic numbers in the UI.
+
+### In-canvas treatment (unified "needs review")
+
+One visual idiom across all three element types, so the human reads it the same everywhere:
+a **dashed amber outline** (`outline-dashed outline-2 outline-amber-400`) + a small **⚑** corner glyph.
+Dashed-outline is deliberately distinct from the existing solid **rings** and **fills** so it never
+collides with what those already mean:
+
+| element | normal (today) | selected | resolve-error | **+ review flag (new)** |
+|---|---|---|---|---|
+| section pill (`SectionMarker` `page.tsx:1588`) | sky fill / amber if unlabeled | — | — | dashed amber outline + ⚑ |
+| system band (`SystemBand` `page.tsx:1676`) | zinc ring | sky ring | — | dashed amber outline + ⚑ |
+| roadmap badge (`RoadmapOverlayLayer` `page.tsx:1817/1835`) | amber border | sky ring | **red ring (kept)** | dashed amber outline + ⚑ |
+
+Precedence: **resolve-error (red) > selected (sky) > review-flag (dashed amber)**. The flag still counts
+toward the queue total even while an element is selected/in-error; it only leaves the count when *edited*.
+Flags show only in **calibrate** mode and only in the **tool that owns that element type** (sections →
+pills, bars → bands, roadmap → badges), matching the existing per-tool visibility (`page.tsx:1893-1897`).
+
+### Review stepper (makes the count actionable — no dead end)
+
+A chip in the calibrate toolbar's right (status) cluster, beside the save-state indicators:
+
+- **`⚑ N to review`** with **‹ ›** steppers. Stepping selects the next/prev `ordered` flagged element,
+  **switching `calTool`** to the one that shows it and **paging** to its page, then selecting it (reusing
+  the existing select state — `selectedSystemId` / `editingId` / `selectedMarkerId`). So every flagged
+  item is reachable in one tap regardless of which page/tool it lives on.
+- At **N = 0** the chip reads **`✓ Reviewed`** — a clear terminal state, shown only once the draft has
+  *had* flags and they were all cleared (a monotonic `everReviewed` latch, set when a flagged calibration
+  loads and reset when the chart changes). A hand-built calibration that never had flags shows nothing.
+- This does **not** gate Verify. `canVerify` is unchanged (labeled sections + resolving roadmap only);
+  the queue is guidance, never a wall (design §"Confidence — validation & lifecycle").
+
+### Upload-flow states (the convert result surfaced)
+
+`uploadChart()` already returns `{ chart, overlay }` (`chart-upload.ts:68`); the in-show add handler
+currently destructures only `chart` and ignores `overlay` (`page.tsx:5040`). Chunk 3 consumes it:
+
+- A lightweight per-song transient status (`Map<songTitle, 'generating' | { reason }>`) rendered inline
+  under that song's chart chips — **no native `alert()`/`prompt()`** for the overlay step (upload errors
+  keep their existing handling).
+- While `triggerOverlayCreate` is in flight: **"Generating overlay…"** (with the existing spinner idiom).
+- On result, by `reason` (exact copy from the Execution-model section):
+  - `failed` → *"Couldn't auto-generate — calibrate manually."*
+  - `too_large` → *"Chart too large to auto-generate — calibrate manually."*
+  - `unsupported_type` → *"Auto-overlay supports PDF charts only — calibrate manually."*
+  - `generated: true`, `exists`, or `null` → **silent** (clear the status; the draft loads on next
+    viewer open via the existing hash-keyed load effect `page.tsx:2583`).
+- Messages auto-dismiss (~5 s) or on the next chart action. Single integration point: the page's one
+  `onChartUpload` (`page.tsx:5024`). The library Manage-Charts modal inherits this for free when it
+  ships (it routes through the same `uploadChart`).
+
+### Tests (builder-written; vitest env=node)
+
+`tests/chart-review.test.ts` covers the pure seam only (UI is out of jsdom reach):
+threshold boundary (0.8 in/out, absent-confidence never flagged), bar→band roll-up, marker union with
+resolve-error ids, `ordered` page→top→left walk, count of distinct elements. Report the test-count delta.
+
+### Out of scope (chunk 3)
+
+- Per-element-type threshold tuning (deferred; one-line once real charts exist — open-Q3).
+- Any change to `canVerify` / the verify flow, the model, or the DB.
+- The library Manage-Charts modal surface (separate library chunk; it reuses `uploadChart` so upload
+  states come along automatically).
+
 ## Hash rule (DECIDED — was Open Q1)
 
 Build-critical: the viewer looks up the overlay by hash, the converter writes it by hash; they **must**
