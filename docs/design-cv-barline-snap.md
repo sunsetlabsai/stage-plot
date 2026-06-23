@@ -1,10 +1,13 @@
 # Design — CV Barline Snap (auto-align bars to the printed lines)
 
-Status: DESIGN — awaiting Graham sign-off, then Codex. Build-on-GO only.
+Status: DESIGN — decisions 1-8 LOCKED by Graham (all yes; #3 = option A).
+Revised after Codex round-1 (order-aware matching contract, honest no-regression
+claim, dedicated offscreen render helper). Build-on-GO only, after Codex re-review.
 Scope: the **automated** refinement that sits between `autoDistributeBars`
 (even floor) and the manual barline-tick drag (`moveBarBoundary`, shipped in
-PR #94). Does NOT touch the converter VLM, the Roadmap Builder, or conductor
-authority.
+PR #94). Cardinality reconciliation (add/remove a barline) is its companion —
+see `docs/design-barline-add-remove.md`. Does NOT touch the converter VLM, the
+Roadmap Builder, or conductor authority.
 
 ## Why this exists
 
@@ -31,9 +34,16 @@ CV barline snap      aligns to real lines on engraved/clean scans
 moveBarBoundary      the floor every other mechanism falls back to
 ```
 
-Snap must **never make things worse than auto-distribute**: a chart it can't
-read (handwritten, low-contrast, heavy scan noise) yields few/no detections and
-snap is a partial or full no-op. It is purely additive.
+**Honest guarantee (Codex R1 #2):** snap is **geometry-safe**, not infallible.
+Because it applies only through `moveBarBoundary`, it can never produce an
+*invalid* calibration — no crossings, inversions, or sub-`MIN_BAR_W` bars,
+reading order/`absNumber` preserved. It can still *mis-position* a boundary onto
+the wrong vertical stroke (a false-positive line), since geometry can't know
+which stroke is semantically a barline. So snap is **gated** (strength floor +
+unambiguous ordinal match, below) to make that rare, and every result stays
+human-correctable via the #94 drag or a stepper re-distribute. On a chart it
+can't read it degrades to a partial/full no-op. The claim is "never an invalid
+calibration," **not** "never mis-positioned."
 
 ## Architecture — pure core + thin DOM adapter
 
@@ -49,8 +59,14 @@ One function: turn a selected system's band into a 1-D darkness profile.
    `pdf.js` doc (`docRef.current`) at a fixed detection scale (proposed
    `SNAP_RENDER_SCALE` so the band is ≥ ~1000px wide regardless of on-screen
    fit — the on-screen canvas may be letterboxed/downscaled and is unreliable
-   for thin-line detection). Reuse `renderPage`'s viewport math; render once,
-   reuse for every system on the page.
+   for thin-line detection). **Do NOT call `renderPage` (Codex R1):** it sizes
+   the viewport from `canvas.parentElement` (`pdf-viewer.ts:153`) and shares a
+   module-global `activeRenderTask` (`pdf-viewer.ts:135`), so reusing it would
+   cancel the visible render or fail on a detached offscreen canvas. Add a
+   dedicated, self-contained helper `renderPageOffscreen(doc, pageNum, scale):
+   Promise<HTMLCanvasElement>` that takes an explicit scale, owns a local render
+   task (no module global), needs no DOM parent, and is independent of the
+   on-screen render path. Render once per page, reuse for every system on it.
 2. `getImageData` over the band's pixel rect: x ∈ `[xStart, xEnd]`,
    y ∈ `[yTop, yBottom]` (system-normalized → pixel via the offscreen
    viewport). No cross-origin taint — the PDF is same-origin (Supabase public
@@ -110,25 +126,47 @@ Given the system's N bars → N+1 boundaries (same model as #94: tick `0` =
 
 1. Map each band-space line to **page space**:
    `pageX = system.xStart + line.x × (system.xEnd − system.xStart)`.
-2. **Match** boundaries → lines, left-to-right, **monotonic** (a line already
-   consumed by an earlier boundary can't be reused; assignment order is
-   preserved so reading order can't invert):
-   - For each boundary in order, take the nearest unconsumed line within
-     `SNAP_TOL` (normalized page units, proposed `0.02`) that also lies inside
-     the boundary's legal window (the same neighbor-tick + own-edge clamp #94
-     enforces). No line in tolerance → boundary **unchanged**.
-3. **Apply** each match through the existing `moveBarBoundary(cal, systemId,
-   boundaryIndex, pageX)` — so all the #94 invariants (no sibling crossing, no
-   bar inversion, MIN_BAR_W floor, renumber) are inherited for free and there is
-   **one** mutation path. Fold sequentially (each call returns a new cal).
+2. **Match — order-aware, NOT nearest-within-tolerance (Codex R1 #1).**
+   The naive "snap each boundary to the nearest line within `SNAP_TOL`" fails the
+   main workflow: a full-width system from `autoDistributeBars` puts boundary 0 at
+   `system.xStart` (the page edge) and boundary N at `system.xEnd`, but the first
+   printed barline sits *after* the clef/key-sig — often far more than 2% in — so
+   a tiny tolerance leaves the very margins #94 introduced unsnapped. The match
+   must therefore be **ordinal** (position-in-sequence), not proximity:
+   - Let `B` = the N+1 boundary positions (page-space, ascending) and `L` = the
+     detected line positions (page-space, ascending).
+   - **Counts equal (`|L| == N+1`):** assign by ordinal — `L[i] → boundary i`.
+     Edges anchor by their place in the sequence, so boundary 0 → the first line
+     and boundary N → the last line **however far** they are from the band edge.
+   - **Counts differ:** run a **monotone alignment** (order-preserving) of `B` to
+     `L` and apply only **gated** matches:
+     - **Mutual-nearest:** apply `L[j] → boundary i` only when `L[j]` is the
+       nearest line to boundary `i` *and* boundary `i` is the nearest boundary to
+       `L[j]` — so two boundaries can't fight over one line and a boundary can't
+       reach across a bar.
+     - **Strength floor:** `L[j].strength ≥ MIN_STRENGTH`.
+     - **Displacement guard `MAX_PULL`:** cap the pull at a fraction of the
+       *local bar width* (proposed `0.5 × min(adjacent bar widths)`), **not** a
+       fixed page-fraction. Bar-width-relative is what lets boundary 0 reclaim a
+       wide clef margin while still refusing a cross-bar yank. (This replaces the
+       old fixed `SNAP_TOL = 0.02` — see decision 4.)
+     - Unmatched boundaries stay put; surplus lines are reported, never forced
+       (Count mismatch, below).
+3. **Apply** each accepted match through the existing `moveBarBoundary(cal,
+   systemId, boundaryIndex, pageX)` — so all the #94 invariants (no sibling
+   crossing, no inversion, MIN_BAR_W floor, renumber) are inherited and there is
+   **one** mutation path. Fold left-to-right; `moveBarBoundary`'s own clamp keeps
+   the sequence monotone even if two accepted targets are close.
 
-**Count mismatch is expected and handled:** detections rarely equal N+1.
-- More lines than boundaries → the unmatched lines are ignored (auto-distribute
-  owns cardinality; snap only *positions*, never adds/removes bars — that's the
-  count stepper's job, consistent with #94's "out of scope: adding/removing
-  bars by drag").
-- Fewer lines → only the matched boundaries move; the rest keep their even
-  spacing. Strictly an improvement, never a regression.
+**Count mismatch — surfaced, never silently forced (decision 2 = positions
+only):** detections rarely equal N+1. Snap never adds or removes a bar.
+- More lines than boundaries → extra lines ignored by the matcher.
+- Fewer lines → only gated boundaries move; the rest keep even spacing.
+- When `|L| ≠ N+1`, snap returns its best positions **and the UI flags the
+  delta** ("detected M lines vs N bars — Add/Remove to reconcile"), routing the
+  user to the cardinality primitive in `docs/design-barline-add-remove.md`.
+  That companion is what makes a wrong count locally fixable without a
+  destructive stepper re-distribute (the gap Graham hit in #94 UAT).
 
 ## Confidence semantics (decision — see below)
 
@@ -161,31 +199,31 @@ coloring) surfaces weak snaps for human glance. Two options, Graham picks:
 - **Optional later: "Snap all systems"** on the page — same core per system in a
   loop. Out of scope for v1; per-selected-system matches the manual model.
 
-## Decisions to confirm (Graham)
+## Decisions — LOCKED by Graham (all yes; #3 = A)
 
 1. **Pixel source = offscreen re-render at fixed scale** (not the on-screen
-   canvas), so detection quality is independent of viewport size. Recommend
-   **yes** (thin lines need resolution). Confirm `SNAP_RENDER_SCALE` target
-   (~1000px band width).
-2. **Snap positions only, never changes bar count** — count stays the stepper's
-   job. Recommend **yes** (keeps cardinality in one place; #94-consistent).
-3. **Confidence: option (A) treat-as-manual for v1** (reuse `moveBarBoundary`,
-   clears confidence). Recommend **yes**, defer (B) to tick-coloring work.
-4. **`SNAP_TOL = 0.02`** (≈2% page width max pull). Confirm or tune.
-5. **`MIN_COVERAGE = 0.6`, `DARK_LUMA`, `MIN_STRENGTH`, `MAX_LINE_FRAC`,
-   `NMS_PX`** — accept the named-constant set (tunable post-UAT) vs. you want
-   specific starting values pinned now.
-6. **Per-selected-system v1** ("Snap all" deferred). Recommend **yes**.
-7. **Pure JS projection, no OpenCV/wasm dep.** Column-darkness projection is
-   enough for engraved/clean scans and adds **zero dependencies**
-   (no-undeclared-deps). Real CV (opencv.js, ~8MB wasm) is rejected as
-   over-engineering for v1 — revisit only if projection proves insufficient on
-   real charts. Recommend **yes**.
-8. **Leading/trailing edge (boundary 0 / N) participate in snap** — the first
-   printed barline (after clef/key-sig) and the final barline are detectable
-   lines like any other. Risk: a clef/time-sig is dark but should be rejected by
-   the thinness + coverage filters. Recommend **yes, with the filter as the
-   guard**; flag for Codex scrutiny.
+   canvas). ✅ via the dedicated `renderPageOffscreen` helper above.
+   `SNAP_RENDER_SCALE` targets ~1000px band width.
+2. **Snap positions only, never changes bar count.** ✅ Cardinality is the
+   stepper's (rough-in) and the new add/remove primitive's (local fix). Snap
+   flags count deltas, never forces them.
+3. **Confidence: option (A) treat-as-manual** (reuse `moveBarBoundary`, clears
+   confidence, status → draft). ✅ (B) carry-strength deferred to tick-coloring.
+4. **Displacement guard = `MAX_PULL` scaled to local bar width** (proposed
+   `0.5 × min(adjacent bar widths)`). ✅ Replaces the rejected fixed
+   `SNAP_TOL = 0.02`, which couldn't reclaim a wide clef margin (Codex R1 #1).
+5. **Named-constant set** (`MIN_COVERAGE = 0.6`, `DARK_LUMA`, `MIN_STRENGTH`,
+   `MAX_LINE_FRAC`, `NMS_PX`, `MAX_PULL`, `SNAP_RENDER_SCALE`) — accepted,
+   tunable post-UAT. ✅
+6. **Per-selected-system v1** ("Snap all" deferred). ✅
+7. **Pure JS projection, no OpenCV/wasm dep.** ✅ Zero deps; real CV rejected as
+   over-engineering for v1, revisit only if projection underperforms on real
+   charts.
+8. **Leading/trailing edge participate via ordinal anchoring.** ✅ The first
+   printed barline (after clef/key-sig) and final barline anchor to boundary 0/N
+   by sequence position (not proximity), so wide margins snap. The thinness +
+   coverage filters keep the clef/time-sig from registering as a line — flagged
+   for Codex scrutiny on real charts.
 
 ## Test plan (builder writes tests — pure core only)
 
@@ -200,17 +238,22 @@ coloring) surfaces weak snaps for human glance. Two options, Graham picks:
 - strengths are 0..1 and monotone with coverage; output sorted by x
 
 `snapBarsToLines`
-- 4 even bars + 3 interior lines slightly off the even grid → each interior
-  boundary snaps to its nearest line; leading/trailing unchanged if no edge line
-- a line outside SNAP_TOL of every boundary → that boundary unchanged
-- more lines than boundaries → extras ignored, no bar added
-- fewer lines than boundaries → only matched boundaries move
-- monotonic assignment: two boundaries can't both grab the same line; reading
-  order / absNumber preserved (inherits #94's clamp)
-- band→page x mapping correct for an indented system (xStart ≠ 0)
+- **equal counts:** 4 even bars (5 boundaries) + 5 lines → ordinal `L[i]→bnd i`;
+  boundary 0 pulls to the **first** line even when it sits well right of the band
+  edge (the clef-margin case — the Codex R1 #1 regression test)
+- boundary N anchors to the **last** line, however far from `system.xEnd`
+- **unequal counts:** more lines than boundaries → extras ignored, no bar added;
+  fewer lines → only gated boundaries move, the rest keep even spacing
+- mutual-nearest gate: two boundaries can't both grab one line; a line nearer to
+  a different boundary is not stolen
+- `MAX_PULL` guard: a line beyond `0.5 × local bar width` from its ordinal
+  boundary is refused (no cross-bar yank); one within it is applied
+- `MIN_STRENGTH` gate: a weak line is not applied
+- monotone result: reading order / `absNumber` preserved (inherits #94's clamp)
+- band→page x mapping correct for an indented system (`xStart ≠ 0`)
 - option (A): snapped bars' confidence cleared, status → draft (delegates to
-  moveBarBoundary); unknown systemId / empty lines → input unchanged
-- degenerate: empty `lines` → returns input identity
+  moveBarBoundary); unknown systemId → input unchanged
+- degenerate: empty `lines` → returns input **identity** (`toBe`)
 
 DOM adapter (offscreen render + getImageData + column projection) has no jsdom
 in this repo → validated by manual UAT on real charts, same posture as the #94
@@ -218,8 +261,10 @@ drag gizmo and the band-resize handles. Report test-count delta on the PR.
 
 ## Out of scope (explicit)
 
-- Detecting **bar count** from the image (adding/removing bars) — the count
-  stepper owns cardinality; snap only positions existing boundaries.
+- Detecting **bar count** from the image (adding/removing bars) — snap only
+  positions existing boundaries. Local cardinality fixes (add/remove a barline)
+  are the companion primitive in `docs/design-barline-add-remove.md`; the count
+  stepper remains the rough-in.
 - System (staff) detection / y-band fitting — separate concern; snap operates
   within an already-placed system band.
 - Roadmap-marker / repeat / volta detection from pixels — that's the VLM's job.
