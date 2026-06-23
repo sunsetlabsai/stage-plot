@@ -154,7 +154,7 @@ export default function LibraryPage() {
         />
         {isOwner && (
           <button
-            onClick={() => { setAddingNew(true); setEditingId(null); }}
+            onClick={() => { setAddingNew(true); setEditingId(null); setDuplicating(null); }}
             className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 transition-colors"
           >
             + Add Song
@@ -212,7 +212,7 @@ export default function LibraryPage() {
                 key={song.id}
                 song={song}
                 isOwner={isOwner}
-                onEdit={() => { setEditingId(song.id); setAddingNew(false); }}
+                onEdit={() => { setEditingId(song.id); setAddingNew(false); setDuplicating(null); }}
                 onDelete={() => handleDelete(song.id, song.title, song.show_count ?? 0)}
                 onManageCharts={() => setManagingId(song.id)}
                 onDuplicate={() => handleDuplicate(song)}

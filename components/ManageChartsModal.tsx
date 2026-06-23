@@ -27,12 +27,16 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [addRole, setAddRole] = useState<ChartRole | ''>('');
-  const [preview, setPreview] = useState<Chart | null>(null);
+  // Track the previewed chart by id and derive the chart from the latest list:
+  // Replace preserves chart_library.id but swaps the file, so deriving keeps the
+  // pane in sync with a re-uploaded chart instead of pinning a stale object.
+  const [previewId, setPreviewId] = useState<string | null>(null);
   const addFileRef = useRef<HTMLInputElement>(null);
   const replaceRoleRef = useRef<string | null>(null);
   const replaceFileRef = useRef<HTMLInputElement>(null);
 
   const free = availableRoles(charts);
+  const preview = charts.find((c) => c.fileId === previewId) ?? null;
 
   async function doUpload(file: File, role: string) {
     setBusy(true);
@@ -110,7 +114,7 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
         return;
       }
       onChartsChanged(removeChartById(charts, chartId));
-      if (preview?.fileId === chartId) setPreview(null);
+      if (previewId === chartId) setPreviewId(null);
     } catch {
       setError('Delete failed.');
     } finally {
@@ -157,7 +161,7 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
                   <p className="text-xs text-zinc-500 truncate">{c.label}</p>
                 </div>
                 <button
-                  onClick={() => setPreview(c)}
+                  onClick={() => setPreviewId(c.fileId ?? null)}
                   className="text-xs text-zinc-400 hover:text-blue-400"
                 >
                   Preview
@@ -218,7 +222,7 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
           {/* Right: preview pane */}
           <div className="p-4 min-h-[240px] md:min-h-0 flex items-center justify-center bg-zinc-950">
             {preview ? (
-              <ChartPreview key={preview.fileId} chart={preview} />
+              <ChartPreview key={`${preview.fileId}:${preview.url}`} chart={preview} />
             ) : (
               <p className="text-sm text-zinc-600">Select a chart to preview.</p>
             )}
