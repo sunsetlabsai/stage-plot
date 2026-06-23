@@ -6,8 +6,22 @@ const SW_TIMEOUT = 5000;
 /** Synthetic cache key for a chart file. Not a real URL — only used as Cache API key. */
 export function chartCacheKey(chart: Chart): string | null {
   if (!chart.fileId || !chart.modifiedTime) return null;
-  const epoch = Math.floor(new Date(chart.modifiedTime).getTime() / 1000);
-  return `/api/chart-cache/${chart.fileId}/${epoch}`;
+  // Full-millisecond precision so same-second replaces don't collide on one key.
+  const version = new Date(chart.modifiedTime).getTime();
+  if (!Number.isFinite(version)) return null;
+  return `/api/chart-cache/${chart.fileId}/${version}`;
+}
+
+/** Version-stamp a Supabase public chart URL so browser/CDN caches bust when the
+ * underlying object is replaced (the storage path is stable + uploaded with
+ * upsert). Keeps the viewer's fetched bytes in parity with the authoritative
+ * object the converter hashes. Returns the url unchanged when there's no
+ * modifiedTime to stamp with. */
+export function versionedChartUrl(chart: Chart): string {
+  const version = chart.modifiedTime ? new Date(chart.modifiedTime).getTime() : NaN;
+  if (!Number.isFinite(version)) return chart.url;
+  const sep = chart.url.includes('?') ? '&' : '?';
+  return `${chart.url}${sep}v=${version}`;
 }
 
 /** Check if a specific chart is cached. */
@@ -19,15 +33,14 @@ export async function isChartCached(chart: Chart): Promise<boolean> {
   return !!match;
 }
 
-/** Get the cached blob URL for a chart, or null if not cached. */
-export async function getCachedChartUrl(chart: Chart): Promise<string | null> {
+/** Get the cached chart bytes (as a Blob), or null if not cached. */
+export async function getCachedChartBlob(chart: Chart): Promise<Blob | null> {
   const key = chartCacheKey(chart);
   if (!key) return null;
   const cache = await caches.open(CACHE_NAME);
   const match = await cache.match(key);
   if (!match) return null;
-  const blob = await match.blob();
-  return URL.createObjectURL(blob);
+  return await match.blob();
 }
 
 /** Store a downloaded chart in the cache. */
@@ -109,8 +122,8 @@ export async function downloadAllCharts(
       let res: Response;
 
       if (chart.url?.includes('/storage/v1/object/public/')) {
-        // Supabase Storage — public URL, no auth needed
-        res = await fetch(chart.url, { signal });
+        // Supabase Storage — public URL, no auth needed (version-stamped to bust caches)
+        res = await fetch(versionedChartUrl(chart), { signal });
       } else if (accessToken) {
         // Google Drive — proxy through /api/drive/download
         res = await fetch('/api/drive/download', {

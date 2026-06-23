@@ -51,6 +51,7 @@ import {
   type DownloadProgress,
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
+import { uploadChart, ChartUploadError } from '@/lib/chart-upload';
 import {
   emptyCalibration,
   addSection,
@@ -60,7 +61,6 @@ import {
   canVerify,
   verify,
   isPerformable,
-  hashPdfBytes,
   tapToBar,
   findSystem,
   barsInOrder,
@@ -2559,14 +2559,15 @@ function ChartNavigator({
       resetCalState();
       setLoading(true);
       try {
-        const doc = await loadPdfDoc(activeChart!, accessToken);
+        const loaded = await loadPdfDoc(activeChart!, accessToken);
         if (cancelled) return;
-        if (!doc) {
+        if (!loaded) {
           docRef.current = null;
           setNumPages(0);
           setPageNum(1);
           return;
         }
+        const { doc, sourceHash: loadedHash } = loaded;
         docRef.current = doc;
         setNumPages(doc.numPages);
         setPageNum(1);
@@ -2574,19 +2575,16 @@ function ChartNavigator({
           await renderPage(doc, 1, canvasRef.current);
           if (!cancelled) updateCanvasBox();
         }
-        // Hash the exact rendered bytes; fetch the matching calibration. On any
-        // hashing/fetch failure ⇒ no redline (not best-effort). Library charts
-        // only (UUID id + storage URL); Drive ids never hit the endpoint. Owners
-        // get drafts back to edit; non-owners only ever get an isPerformable row.
+        // loadPdfDoc already hashed the exact fetched bytes (shared with the
+        // converter). Fetch the matching calibration. On any fetch failure ⇒ no
+        // redline (not best-effort). Library charts only (UUID id + storage
+        // URL); Drive ids never hit the endpoint. Owners get drafts back to
+        // edit; non-owners only ever get an isPerformable row.
         if (calibrationChartId) {
           try {
-            const bytes = await doc.getData();
-            if (cancelled) return;
-            const hash = await hashPdfBytes(bytes);
-            if (cancelled) return;
-            setSourceHash(hash);
+            setSourceHash(loadedHash);
             const res = await fetch(
-              `/api/charts/calibration?chart_id=${encodeURIComponent(calibrationChartId)}&hash=${hash}`,
+              `/api/charts/calibration?chart_id=${encodeURIComponent(calibrationChartId)}&hash=${loadedHash}`,
             );
             if (cancelled) return;
             if (res.ok) {
@@ -5037,29 +5035,27 @@ function ConfigTab({
                 const role = prompt(`Chart role for "${songTitle}":`, detected);
                 if (!role) return;
                 try {
-                  const formData = new FormData();
-                  formData.append('file', file);
-                  formData.append('song_title', songTitle);
-                  formData.append('role', role);
-                  const res = await fetch('/api/charts/upload', { method: 'POST', body: formData });
-                  if (res.ok) {
-                    const chart = await res.json();
-                    updateConfig((prev) => ({
-                      ...prev,
-                      setlist: prev.setlist.map((s) =>
-                        s.title === songTitle
-                          ? { ...s, charts: [...(s.charts || []).filter((c) => c.role !== chart.role), { role: chart.role, url: chart.url, fileId: chart.id, mimeType: chart.mime_type, modifiedTime: chart.updated_at, label: chart.file_name }] }
-                          : s
-                      ),
-                    }));
-                  } else {
-                    const err = await res.json().catch(() => ({ error: 'Upload failed' }));
-                    alert(res.status === 401
+                  // Shared add path: uploads, then fires overlay creation (no-op
+                  // until the converter route ships). Overlay failure is swallowed.
+                  const { chart } = await uploadChart(file, songTitle, role);
+                  updateConfig((prev) => ({
+                    ...prev,
+                    setlist: prev.setlist.map((s) =>
+                      s.title === songTitle
+                        ? { ...s, charts: [...(s.charts || []).filter((c) => c.role !== chart.role), { role: chart.role, url: chart.url, fileId: chart.id, mimeType: chart.mime_type, modifiedTime: chart.updated_at, label: chart.file_name }] }
+                        : s
+                    ),
+                  }));
+                } catch (e) {
+                  if (e instanceof ChartUploadError) {
+                    alert(e.status === 401
                       ? 'Chart upload failed — you need to sign in first.'
-                      : `Chart upload failed: ${err.error || 'Unknown error'}`);
+                      : e.status === 0
+                        ? 'Chart upload failed — network error.'
+                        : `Chart upload failed: ${e.message}`);
+                  } else {
+                    alert('Chart upload failed — network error.');
                   }
-                } catch {
-                  alert('Chart upload failed — network error.');
                 }
               };
               input.click();

@@ -171,6 +171,20 @@ describe('removeSection / relabelSection / moveSection', () => {
     expect(relabelSection(base, 'nope', 'x')).toBe(base);
     expect(moveSection(base, 'nope', 0.5, 0.5)).toBe(base);
   });
+
+  it('relabelSection clears converter confidence (manual edit)', () => {
+    const seeded = { ...base, sections: base.sections.map((s) => ({ ...s, confidence: 0.4 })) };
+    const r = relabelSection(seeded, idA, 'Verse');
+    expect(r.sections[0].confidence).toBeUndefined();
+    expect(r.sections[1].confidence).toBe(0.4); // untouched section keeps its confidence
+  });
+
+  it('moveSection clears converter confidence (manual edit)', () => {
+    const seeded = { ...base, sections: base.sections.map((s) => ({ ...s, confidence: 0.4 })) };
+    const r = moveSection(seeded, idA, 0.5, 0.5);
+    expect(r.sections[0].confidence).toBeUndefined();
+    expect(r.sections[1].confidence).toBe(0.4);
+  });
 });
 
 describe('sectionsInOrder / sectionsForPage', () => {
@@ -351,6 +365,18 @@ describe('resizeSystemBand', () => {
     const id = c0.systems![0].id;
     expect(resizeSystemBand(c0, id, 0.4, 0.4)).toBe(c0);
     expect(resizeSystemBand(c0, 'nope', 0.1, 0.5)).toBe(c0);
+  });
+
+  it('clears converter confidence on the resized system (manual edit)', () => {
+    let c = addSystem(emptyCalibration(), 1, 0.2, 0.3, 0.0, 1.0);
+    c = addSystem(c, 1, 0.5, 0.6, 0.0, 1.0);
+    c = { ...c, systems: c.systems!.map((s) => ({ ...s, confidence: 0.4 })) };
+    const id = c.systems![0].id;
+    const r = resizeSystemBand(c, id, 0.1, 0.25);
+    const resized = r.systems!.find((s) => s.id === id)!;
+    const other = r.systems!.find((s) => s.id !== id)!;
+    expect(resized.confidence).toBeUndefined();
+    expect(other.confidence).toBe(0.4);
   });
 });
 
@@ -619,6 +645,16 @@ describe('isValidSectionAnchor', () => {
     expect(isValidSectionAnchor({ ...ok, x: NaN })).toBe(false);
     expect(isValidSectionAnchor({ ...ok, y: Infinity })).toBe(false);
   });
+
+  it('accepts absent or in-range confidence, rejects out-of-range/non-finite', () => {
+    expect(isValidSectionAnchor({ ...ok, confidence: 0 })).toBe(true);
+    expect(isValidSectionAnchor({ ...ok, confidence: 1 })).toBe(true);
+    expect(isValidSectionAnchor({ ...ok, confidence: 0.5 })).toBe(true);
+    expect(isValidSectionAnchor({ ...ok, confidence: -0.01 })).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, confidence: 1.01 })).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, confidence: NaN })).toBe(false);
+    expect(isValidSectionAnchor({ ...ok, confidence: '1' })).toBe(false);
+  });
 });
 
 describe('isValidSystem', () => {
@@ -652,6 +688,14 @@ describe('isValidSystem', () => {
     expect(isValidSystem({ ...ok, page: 1.5 })).toBe(false);
     expect(isValidSystem({ ...ok, page: 0 })).toBe(false);
   });
+
+  it('accepts absent or in-range confidence, rejects out-of-range/non-finite', () => {
+    expect(isValidSystem({ ...ok, confidence: 0 })).toBe(true);
+    expect(isValidSystem({ ...ok, confidence: 1 })).toBe(true);
+    expect(isValidSystem({ ...ok, confidence: -0.01 })).toBe(false);
+    expect(isValidSystem({ ...ok, confidence: 1.01 })).toBe(false);
+    expect(isValidSystem({ ...ok, confidence: NaN })).toBe(false);
+  });
 });
 
 describe('isValidBar', () => {
@@ -681,6 +725,14 @@ describe('isValidBar', () => {
   it('rejects empty id or systemId', () => {
     expect(isValidBar({ ...ok, id: '' })).toBe(false);
     expect(isValidBar({ ...ok, systemId: '' })).toBe(false);
+  });
+
+  it('accepts absent or in-range confidence, rejects out-of-range/non-finite', () => {
+    expect(isValidBar({ ...ok, confidence: 0 })).toBe(true);
+    expect(isValidBar({ ...ok, confidence: 1 })).toBe(true);
+    expect(isValidBar({ ...ok, confidence: -0.01 })).toBe(false);
+    expect(isValidBar({ ...ok, confidence: 1.01 })).toBe(false);
+    expect(isValidBar({ ...ok, confidence: NaN })).toBe(false);
   });
 });
 
@@ -1204,17 +1256,25 @@ describe('isValidRoadmapMarkerShape (structural)', () => {
     expect(good.every(isValidRoadmapMarkerShape)).toBe(true);
   });
 
-  it('accepts an optional finite confidence', () => {
+  it('accepts an optional confidence in [0,1]', () => {
     expect(isValidRoadmapMarkerShape(
       { id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: 0.4 },
     )).toBe(true);
+    expect(isValidRoadmapMarkerShape(
+      { id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: 0 },
+    )).toBe(true);
+    expect(isValidRoadmapMarkerShape(
+      { id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: 1 },
+    )).toBe(true);
   });
 
-  it('rejects unknown kinds, wrong edge, bad enums, NaN confidence', () => {
+  it('rejects unknown kinds, wrong edge, bad enums, out-of-range/NaN confidence', () => {
     expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'nope', barId: 'b1' })).toBe(false);
     expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'end' })).toBe(false);
     expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'jump', barId: 'b1', edge: 'end', from: 'x', until: 'end' })).toBe(false);
     expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: NaN })).toBe(false);
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: 1.01 })).toBe(false);
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: -0.01 })).toBe(false);
     expect(isValidRoadmapMarkerShape({ id: '', kind: 'segno', barId: 'b1', edge: 'start' })).toBe(false);
   });
 
