@@ -191,12 +191,12 @@ export default function LibraryPage() {
         </div>
       ) : (
         <div className="space-y-1">
-          <div className="grid grid-cols-[1fr_80px_120px_60px_60px_auto] gap-2 px-4 py-2 text-xs text-zinc-500 uppercase tracking-wide">
+          <div className="grid grid-cols-[1fr_80px_120px_60px_60px_150px] gap-2 px-4 py-2 border border-transparent text-xs text-zinc-500 uppercase tracking-wide">
             <span>Title</span>
             <span>Key</span>
             <span>Lead</span>
-            <span className="text-center">Charts</span>
-            <span className="text-center">Shows</span>
+            <span className="text-center" title="Number of role charts (guitar, keys, lyrics…) in your library for this song">Charts</span>
+            <span className="text-center" title="Number of your shows whose setlist includes this song">Shows</span>
             <span></span>
           </div>
           {filtered.map((song) =>
@@ -256,7 +256,7 @@ function SongRow({
   const canManage = isOwner || count > 0;
 
   return (
-    <div className="grid grid-cols-[1fr_80px_120px_60px_60px_auto] gap-2 items-center px-4 py-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors">
+    <div className="grid grid-cols-[1fr_80px_120px_60px_60px_150px] gap-2 items-center px-4 py-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors">
       <span className="font-medium truncate">{song.title}</span>
       <span>
         {song.key && (
