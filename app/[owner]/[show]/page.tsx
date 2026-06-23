@@ -51,8 +51,8 @@ import {
   type DownloadProgress,
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
-import { uploadChart, ChartUploadError } from '@/lib/chart-upload';
-import type { ConvertReason } from '@/lib/chart-upload';
+import ManageChartsModal from '@/components/ManageChartsModal';
+import { updateSetlistCharts } from '@/lib/chart-management';
 import {
   emptyCalibration,
   addSection,
@@ -3387,7 +3387,7 @@ function AddSongFromLibrary({
 // ════════════════════════════════════════════════════════════════════════════
 
 function SetupSetlistTable({
-  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, ownerId, isEditor, overlayStatus, onChartUpload, onChartDelete,
+  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, ownerId, isEditor, onManageCharts,
 }: {
   setlist: SetlistSong[];
   canResolveCharts: boolean;
@@ -3398,9 +3398,7 @@ function SetupSetlistTable({
   isOwner: boolean;
   ownerId: string | null;
   isEditor?: boolean;
-  overlayStatus?: Record<string, 'generating' | ConvertReason>;
-  onChartUpload?: (songTitle: string) => void;
-  onChartDelete?: (chartId: string, songTitle: string, role: string) => void;
+  onManageCharts?: (songTitle: string) => void;
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -3449,9 +3447,7 @@ function SetupSetlistTable({
                     onMoveUp={() => onReorder(idx, idx - 1)}
                     onMoveDown={() => onReorder(idx, idx + 1)}
                     isOwner={isOwner}
-                    overlayStatus={overlayStatus?.[song.title]}
-                    onChartUpload={onChartUpload}
-                    onChartDelete={onChartDelete}
+                    onManageCharts={onManageCharts}
                   />
                 ))}
               </tbody>
@@ -3468,7 +3464,7 @@ const inputCls = 'w-full px-2 py-2.5 sm:py-1.5 text-sm border border-gray-300 ro
 const arrowBtn = 'px-1 py-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-20 disabled:cursor-not-allowed';
 
 function SetupSortableRow({
-  song, idx, total, canResolveCharts, onUpdate, onDelete, onMoveUp, onMoveDown, isOwner, overlayStatus, onChartUpload, onChartDelete,
+  song, idx, total, canResolveCharts, onUpdate, onDelete, onMoveUp, onMoveDown, isOwner, onManageCharts,
 }: {
   song: SetlistSong;
   idx: number;
@@ -3479,9 +3475,7 @@ function SetupSortableRow({
   onMoveUp: () => void;
   onMoveDown: () => void;
   isOwner: boolean;
-  overlayStatus?: 'generating' | ConvertReason;
-  onChartUpload?: (songTitle: string) => void;
-  onChartDelete?: (chartId: string, songTitle: string, role: string) => void;
+  onManageCharts?: (songTitle: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: song.id! });
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
@@ -3519,26 +3513,16 @@ function SetupSortableRow({
           {(song.charts || []).map((c) => (
             <span key={c.role} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-xs rounded bg-blue-50 text-blue-700">
               {displayRole(c.role as ChartRole)}
-              {isOwner && onChartDelete && (
-                <button onClick={() => onChartDelete(c.fileId!, song.title, c.role)} className="text-blue-400 hover:text-red-500 ml-0.5 leading-none">&times;</button>
-              )}
             </span>
           ))}
-          {isOwner && onChartUpload && (
-            <button onClick={() => onChartUpload(song.title)} className="text-xs text-gray-400 hover:text-gray-600">+</button>
+          {/* Owners manage (add/replace/delete/preview) via the shared modal;
+              collaborators get a read-only preview when charts exist. */}
+          {onManageCharts && (isOwner || (song.charts?.length ?? 0) > 0) && (
+            <button onClick={() => onManageCharts(song.title)} className="text-xs text-gray-400 hover:text-gray-600">
+              {(song.charts?.length ?? 0) > 0 ? 'Manage' : '+'}
+            </button>
           )}
         </div>
-        {/* Auto-overlay status (converter chunk 3): transient per-song feedback
-            while the converter runs, then a one-line reason on non-silent fails. */}
-        {overlayStatus === 'generating' ? (
-          <p className="mt-1 text-[11px] text-gray-400">Generating overlay…</p>
-        ) : overlayStatus === 'failed' ? (
-          <p className="mt-1 text-[11px] text-amber-600">Couldn&rsquo;t auto-generate — calibrate manually.</p>
-        ) : overlayStatus === 'too_large' ? (
-          <p className="mt-1 text-[11px] text-amber-600">Chart too large to auto-generate — calibrate manually.</p>
-        ) : overlayStatus === 'unsupported_type' ? (
-          <p className="mt-1 text-[11px] text-amber-600">Auto-overlay supports PDF charts only — calibrate manually.</p>
-        ) : null}
       </td>
       <td className="px-1 py-1">
         <div className="flex flex-col items-center">
@@ -4527,11 +4511,8 @@ function ConfigTab({
   const [folderIdInput, setFolderIdInput] = useState(config.chartsRootFolderId ?? '');
   const [chartsResolving, setChartsResolving] = useState(false);
   const [chartsError, setChartsError] = useState('');
-  // ── Auto-overlay status (converter chunk 3) ──
-  // Per-song transient status for the upload flow: 'generating' while the
-  // converter runs, then a ConvertReason copy on the non-silent failure modes
-  // (failed / too_large / unsupported_type). Generated / exists / null clear it.
-  const [overlayStatus, setOverlayStatus] = useState<Record<string, 'generating' | ConvertReason>>({});
+  // Title of the song whose charts the shared Manage-Charts modal is open for.
+  const [manageChartsSong, setManageChartsSong] = useState<string | null>(null);
 
   // Count songs with resolved charts
   const chartsMatchCount = config.setlist.filter((s) => s.charts && s.charts.length > 0).length;
@@ -5147,87 +5128,22 @@ function ConfigTab({
               }
             }}
             isEditor={isEditor}
-            overlayStatus={overlayStatus}
-            onChartUpload={(songTitle) => {
-              const input = document.createElement('input');
-              input.type = 'file';
-              input.accept = '.pdf,.png,.jpg,.jpeg';
-              input.onchange = async () => {
-                const file = input.files?.[0];
-                if (!file) return;
-                const roles = ['Guitar', 'Lyrics', 'Keys', 'Bass', 'Horns', 'Drums'];
-                const nameLower = file.name.toLowerCase();
-                let detected = 'Other';
-                for (const r of roles) { if (nameLower.includes(r.toLowerCase())) { detected = r; break; } }
-                const role = prompt(`Chart role for "${songTitle}":`, detected);
-                if (!role) return;
-                setOverlayStatus((prev) => ({ ...prev, [songTitle]: 'generating' }));
-                try {
-                  // Shared add path: uploads, then fires overlay creation. The
-                  // overlay result drives the per-song auto-overlay status badge.
-                  const { chart, overlay } = await uploadChart(file, songTitle, role);
-                  updateConfig((prev) => ({
-                    ...prev,
-                    setlist: prev.setlist.map((s) =>
-                      s.title === songTitle
-                        ? { ...s, charts: [...(s.charts || []).filter((c) => c.role !== chart.role), { role: chart.role, url: chart.url, fileId: chart.id, mimeType: chart.mime_type, modifiedTime: chart.updated_at, label: chart.file_name }] }
-                        : s
-                    ),
-                  }));
-                  // Surface only the non-silent failure reasons; a generated
-                  // overlay (or a pre-existing one, or no converter) clears.
-                  const reason = overlay?.reason;
-                  const clearStatus = () => setOverlayStatus((prev) => {
-                    if (!(songTitle in prev)) return prev;
-                    const next = { ...prev };
-                    delete next[songTitle];
-                    return next;
-                  });
-                  if (reason === 'failed' || reason === 'too_large' || reason === 'unsupported_type') {
-                    setOverlayStatus((prev) => ({ ...prev, [songTitle]: reason }));
-                    setTimeout(clearStatus, 6000);
-                  } else {
-                    clearStatus();
-                  }
-                } catch (e) {
-                  setOverlayStatus((prev) => {
-                    if (!(songTitle in prev)) return prev;
-                    const next = { ...prev };
-                    delete next[songTitle];
-                    return next;
-                  });
-                  if (e instanceof ChartUploadError) {
-                    alert(e.status === 401
-                      ? 'Chart upload failed — you need to sign in first.'
-                      : e.status === 0
-                        ? 'Chart upload failed — network error.'
-                        : `Chart upload failed: ${e.message}`);
-                  } else {
-                    alert('Chart upload failed — network error.');
-                  }
-                }
-              };
-              input.click();
-            }}
-            onChartDelete={async (chartId, songTitle, role) => {
-              if (!confirm(`Delete ${role} chart for "${songTitle}"?`)) return;
-              const res = await fetch('/api/charts/delete', {
-                method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chart_id: chartId }),
-              });
-              if (res.ok) {
+            onManageCharts={(songTitle) => setManageChartsSong(songTitle)}
+          />
+          {manageChartsSong && (
+            <ManageChartsModal
+              songTitle={manageChartsSong}
+              charts={config.setlist.find((s) => s.title === manageChartsSong)?.charts ?? []}
+              isOwner={isOwner}
+              onClose={() => setManageChartsSong(null)}
+              onChartsChanged={(charts) =>
                 updateConfig((prev) => ({
                   ...prev,
-                  setlist: prev.setlist.map((s) =>
-                    s.title === songTitle
-                      ? { ...s, charts: (s.charts || []).filter((c) => c.fileId !== chartId) }
-                      : s
-                  ),
-                }));
+                  setlist: updateSetlistCharts(prev.setlist, manageChartsSong, () => charts),
+                }))
               }
-            }}
-          />
+            />
+          )}
         </section>
 
         {/* ── 6. Google Drive Charts (legacy — only when no Supabase show) ── */}

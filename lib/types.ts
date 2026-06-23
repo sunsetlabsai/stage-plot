@@ -169,6 +169,7 @@ export interface Song {
   updated_at: string;
   chart_count?: number;
   show_count?: number;
+  charts?: Chart[];       // owner's library charts for this song (from GET /api/songs)
 }
 
 export interface BandConfig {
