@@ -2306,8 +2306,10 @@ function ChartNavigator({
   // reviewIdx = position in the page→top→left walk of flagged elements; the
   // everReviewed latch lets the chip show "✓ Reviewed" once a draft that DID
   // have flags has been cleared to zero (vs. a hand-built calibration that never
-  // had any — which shows nothing). Reset when the chart changes.
-  const [reviewIdx, setReviewIdx] = useState(0);
+  // had any — which shows nothing). Reset when the chart changes. Starts at -1
+  // ("nothing selected yet") so the first Next lands on item 0 and the first
+  // Previous lands on the last item, rather than skipping the first.
+  const [reviewIdx, setReviewIdx] = useState(-1);
   const [everReviewed, setEverReviewed] = useState(false);
 
   // Reset chart and page when song or available charts change
@@ -2457,7 +2459,9 @@ function ChartNavigator({
     const ordered: FlaggedRef[] = reviewFlagSet?.ordered ?? [];
     const n = ordered.length;
     if (n === 0) return;
-    const next = (((reviewIdx + dir) % n) + n) % n;
+    // From the unselected start (-1), Next lands on 0 and Previous on the last
+    // item; thereafter step with wraparound.
+    const next = reviewIdx < 0 ? (dir === 1 ? 0 : n - 1) : (((reviewIdx + dir) % n) + n) % n;
     setReviewIdx(next);
     const ref = ordered[next];
     setCalTool(ref.tool);
@@ -2609,7 +2613,7 @@ function ChartNavigator({
       setSelectedMarkerId(null);
       setEndingDraft(null);
       setCanvasBox(null);
-      setReviewIdx(0);
+      setReviewIdx(-1);
       setEverReviewed(false);
     };
     if (!chartFileId) {
