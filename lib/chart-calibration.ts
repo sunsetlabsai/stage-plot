@@ -427,8 +427,20 @@ export function moveBarBoundary(
   // converter bars overlap (bars[k-1].xEnd > bars[k].xStart).
   const tickX = (i: number): number =>
     i === 0 ? sysBars[0].xStart : i === n ? sysBars[n - 1].xEnd : sysBars[i].xStart;
-  const lower = boundaryIndex === 0 ? system.xStart : tickX(boundaryIndex - 1) + MIN_BAR_W;
-  const upper = boundaryIndex === n ? system.xEnd : tickX(boundaryIndex + 1) - MIN_BAR_W;
+  // Two independent floors per side, take the tighter:
+  //  - the adjacent sibling TICK (so a boundary can't cross a neighbor), and
+  //  - the moved bar's OWN opposite edge (so a gapped converter bar can't invert,
+  //    e.g. moving a right bar's xStart past its fixed xEnd).
+  // For contiguous bars the tick and the moved bar's edge coincide; they only
+  // diverge when converter input has gaps/overlaps.
+  const lower =
+    boundaryIndex === 0
+      ? system.xStart
+      : Math.max(tickX(boundaryIndex - 1), sysBars[boundaryIndex - 1].xStart) + MIN_BAR_W;
+  const upper =
+    boundaryIndex === n
+      ? system.xEnd
+      : Math.min(tickX(boundaryIndex + 1), sysBars[boundaryIndex].xEnd) - MIN_BAR_W;
   if (lower >= upper) return cal; // degenerate window — ignore the drag (no mutation)
 
   const target = Math.min(Math.max(clamp01(x), lower), upper);

@@ -702,6 +702,32 @@ describe('moveBarBoundary', () => {
     expect(bars[1].xStart).toBeCloseTo(0.55); // gap closed — edges unified
   });
 
+  it('never inverts a gapped moved bar — upper also respects its own far edge', () => {
+    let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    c = autoDistributeBars(c, sysId, 3);
+    const ids = (c.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    // Gapped converter input: bars [0,.4], [.6,.7], [.9,1]. Interior boundary 1's
+    // right bar ([.6,.7]) ends BEFORE the next tick (bar2.xStart=.9), so clamping
+    // only to the tick would shove bar2's xStart past its xEnd (.7) and invert it.
+    c = {
+      ...c,
+      bars: [
+        { ...ids[0], xStart: 0.0, xEnd: 0.4 },
+        { ...ids[1], xStart: 0.6, xEnd: 0.7 },
+        { ...ids[2], xStart: 0.9, xEnd: 1.0 },
+      ],
+    };
+    const next = moveBarBoundary(c, sysId, 1, 0.85); // beyond the right bar's xEnd
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    // Clamped to min(tick=.9, rightBar.xEnd=.7) - MIN_BAR_W = .7 - MIN_BAR_W.
+    expect(bars[1].xStart).toBeCloseTo(0.7 - MIN_BAR_W);
+    expect(bars[1].xEnd).toBeCloseTo(0.7);
+    expect(bars[1].xEnd - bars[1].xStart).toBeGreaterThanOrEqual(MIN_BAR_W - 1e-9); // valid, not inverted
+    expect(bars[0].xEnd).toBeCloseTo(0.7 - MIN_BAR_W);
+    expect(bars[2].xStart).toBeCloseTo(0.9); // bar 3 untouched
+  });
+
   it('exposes sane constants', () => {
     expect(MIN_BAR_W).toBeGreaterThan(0);
     expect(TAP_TOL).toBeGreaterThan(0);
