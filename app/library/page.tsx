@@ -2,7 +2,9 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import type { Song } from '@/lib/types';
+import type { Chart, Song } from '@/lib/types';
+import ManageChartsModal from '@/components/ManageChartsModal';
+import { suggestDuplicateTitle } from '@/lib/chart-management';
 
 export default function LibraryPage() {
   const [songs, setSongs] = useState<Song[]>([]);
@@ -11,6 +13,8 @@ export default function LibraryPage() {
   const [search, setSearch] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [addingNew, setAddingNew] = useState(false);
+  const [managingId, setManagingId] = useState<string | null>(null);
+  const [duplicating, setDuplicating] = useState<{ title: string; key: string; lead: string; notes: string } | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -83,6 +87,36 @@ export default function LibraryPage() {
     }
   }
 
+  // Charts mutated in the Manage Charts modal — update that song in place and
+  // keep chart_count in parity with the new array length (add +1 / replace 0 /
+  // delete -1 all fall out of length).
+  function handleChartsChanged(songId: string, charts: Chart[]) {
+    setSongs((prev) =>
+      prev.map((s) => (s.id === songId ? { ...s, charts, chart_count: charts.length } : s)),
+    );
+  }
+
+  // Duplicate-with-edit: copy metadata only (no charts) into a pre-filled create
+  // form so the owner can make a key variant ("Song X (Bb)") with its own charts.
+  function handleDuplicate(song: Song) {
+    setDuplicating({
+      title: suggestDuplicateTitle(song.title, songs.map((s) => s.title)),
+      key: song.key ?? '',
+      lead: song.lead ?? '',
+      notes: song.notes ?? '',
+    });
+    setAddingNew(false);
+    setEditingId(null);
+  }
+
+  async function handleDuplicateSave(title: string, key: string, lead: string, notes: string) {
+    const err = await handleCreate(title, key, lead, notes);
+    if (!err) setDuplicating(null);
+    return err;
+  }
+
+  const managingSong = managingId ? songs.find((s) => s.id === managingId) ?? null : null;
+
   const filtered = search
     ? songs.filter((s) => s.title.toLowerCase().includes(search.toLowerCase()))
     : songs;
@@ -135,6 +169,15 @@ export default function LibraryPage() {
         />
       )}
 
+      {duplicating && (
+        <SongForm
+          initial={duplicating}
+          submitLabel="Create"
+          onSave={handleDuplicateSave}
+          onCancel={() => setDuplicating(null)}
+        />
+      )}
+
       {filtered.length === 0 ? (
         <div className="text-center py-16 text-zinc-500">
           {songs.length === 0 ? (
@@ -171,10 +214,22 @@ export default function LibraryPage() {
                 isOwner={isOwner}
                 onEdit={() => { setEditingId(song.id); setAddingNew(false); }}
                 onDelete={() => handleDelete(song.id, song.title, song.show_count ?? 0)}
+                onManageCharts={() => setManagingId(song.id)}
+                onDuplicate={() => handleDuplicate(song)}
               />
             ),
           )}
         </div>
+      )}
+
+      {managingSong && (
+        <ManageChartsModal
+          songTitle={managingSong.title}
+          charts={managingSong.charts ?? []}
+          isOwner={isOwner}
+          onClose={() => setManagingId(null)}
+          onChartsChanged={(charts) => handleChartsChanged(managingSong.id, charts)}
+        />
       )}
     </div>
   );
@@ -185,12 +240,21 @@ function SongRow({
   isOwner,
   onEdit,
   onDelete,
+  onManageCharts,
+  onDuplicate,
 }: {
   song: Song;
   isOwner: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  onManageCharts: () => void;
+  onDuplicate: () => void;
 }) {
+  const count = song.chart_count ?? 0;
+  // Owners can always manage (incl. add to an empty song); collaborators can open
+  // only to preview when charts exist.
+  const canManage = isOwner || count > 0;
+
   return (
     <div className="grid grid-cols-[1fr_80px_120px_60px_60px_auto] gap-2 items-center px-4 py-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors">
       <span className="font-medium truncate">{song.title}</span>
@@ -202,7 +266,18 @@ function SongRow({
         )}
       </span>
       <span className="text-sm text-zinc-400 truncate">{song.lead || '—'}</span>
-      <span className="text-sm text-zinc-500 text-center">{song.chart_count ?? 0}</span>
+      <span className="text-center">
+        {canManage ? (
+          <button
+            onClick={onManageCharts}
+            className="text-sm text-zinc-400 hover:text-blue-400 transition-colors"
+          >
+            {count > 0 ? `${count} ›` : '+ Add'}
+          </button>
+        ) : (
+          <span className="text-sm text-zinc-500">{count}</span>
+        )}
+      </span>
       <span className="text-sm text-zinc-500 text-center">{song.show_count ?? 0}</span>
       <div className="flex gap-2">
         {isOwner && (
@@ -212,6 +287,12 @@ function SongRow({
               className="text-xs text-zinc-600 hover:text-blue-400 transition-colors"
             >
               Edit
+            </button>
+            <button
+              onClick={onDuplicate}
+              className="text-xs text-zinc-600 hover:text-blue-400 transition-colors"
+            >
+              Duplicate
             </button>
             <button
               onClick={onDelete}
@@ -230,10 +311,12 @@ function SongForm({
   initial,
   onSave,
   onCancel,
+  submitLabel,
 }: {
   initial?: { title: string; key: string | null; lead: string; notes: string };
   onSave: (title: string, key: string, lead: string, notes: string) => Promise<string | null>;
   onCancel: () => void;
+  submitLabel?: string;
 }) {
   const [title, setTitle] = useState(initial?.title ?? '');
   const [key, setKey] = useState(initial?.key ?? '');
@@ -310,7 +393,7 @@ function SongForm({
           disabled={!title.trim() || saving}
           className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
         >
-          {saving ? 'Saving...' : (initial ? 'Update' : 'Create')}
+          {saving ? 'Saving...' : (submitLabel ?? (initial ? 'Update' : 'Create'))}
         </button>
       </div>
     </form>
