@@ -611,18 +611,46 @@ describe('moveBarBoundary', () => {
     expect(bars[0].xEnd - bars[0].xStart).toBeGreaterThanOrEqual(MIN_BAR_W - 1e-9);
   });
 
-  it('returns the input on a degenerate window', () => {
+  it('returns the exact input (no mutation) on a degenerate window', () => {
     // A bar already at the MIN_BAR_W floor: dragging boundary 0 has no room.
     let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
     const sysId = c.systems![0].id;
     c = autoDistributeBars(c, sysId, 1); // single bar 0-1
     // Shrink to a near-minimal bar via the trailing edge first.
     c = moveBarBoundary(c, sysId, 1, MIN_BAR_W); // bar 1 = [0, MIN_BAR_W]
-    const before = c.bars;
-    const next = moveBarBoundary(c, sysId, 0, 0.0); // lower=0, upper=MIN_BAR_W-MIN_BAR_W=0
-    // window [0,0] is non-degenerate (lower==upper) → target 0, no real change.
-    expect(next.bars![0].xStart).toBeCloseTo(0.0);
-    void before;
+    // Seed confidence + verified to prove a degenerate drag clears NOTHING.
+    c = { ...c, status: 'verified', bars: (c.bars ?? []).map((b) => ({ ...b, confidence: 0.5 })) };
+    // boundary 0: lower=system.xStart=0; upper=tick(1)-MIN_BAR_W=MIN_BAR_W-MIN_BAR_W=0.
+    // lower >= upper → degenerate → return the input unchanged.
+    const next = moveBarBoundary(c, sysId, 0, 0.0);
+    expect(next).toBe(c); // identity: no new object, no draft, no cleared confidence
+    expect(next.status).toBe('verified');
+    expect(next.bars![0].confidence).toBe(0.5);
+  });
+
+  it('clamps an interior boundary to the next TICK, not the right bar far edge (overlapping converter bars)', () => {
+    let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    c = autoDistributeBars(c, sysId, 3);
+    const ids = (c.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    // Overlapping converter input: bars [0,.70], [.30,.80], [.60,1].
+    c = {
+      ...c,
+      bars: [
+        { ...ids[0], xStart: 0.0, xEnd: 0.7 },
+        { ...ids[1], xStart: 0.3, xEnd: 0.8 },
+        { ...ids[2], xStart: 0.6, xEnd: 1.0 },
+      ],
+    };
+    // Boundary 1 (between bar0 and bar1) dragged to .75 must stop at the NEXT TICK
+    // (bar2.xStart = .60) minus MIN_BAR_W — NOT bar1's far edge (.80). Otherwise
+    // it crosses bar2's tick, the xStart order flips, and renumber corrupts absNumber.
+    const next = moveBarBoundary(c, sysId, 1, 0.75);
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars[0].xEnd).toBeCloseTo(0.6 - MIN_BAR_W);
+    expect(bars[1].xStart).toBeCloseTo(0.6 - MIN_BAR_W);
+    expect(bars[2].xStart).toBeCloseTo(0.6); // bar 3 untouched, no crossing
+    expect(bars.map((b) => b.absNumber)).toEqual([1, 2, 3]); // reading order preserved
   });
 
   it('no-ops on unknown system or out-of-range boundary index', () => {

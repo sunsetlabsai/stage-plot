@@ -417,21 +417,19 @@ export function moveBarBoundary(
   if (n === 0) return cal;
   if (!Number.isInteger(boundaryIndex) || boundaryIndex < 0 || boundaryIndex > n) return cal;
 
-  // The window the boundary may move within, derived from the moved bars' own
-  // opposite (unchanged) edges and the system bounds.
-  let lower: number;
-  let upper: number;
-  if (boundaryIndex === 0) {
-    lower = system.xStart;
-    upper = sysBars[0].xEnd - MIN_BAR_W;
-  } else if (boundaryIndex === n) {
-    lower = sysBars[n - 1].xStart + MIN_BAR_W;
-    upper = system.xEnd;
-  } else {
-    lower = sysBars[boundaryIndex - 1].xStart + MIN_BAR_W;
-    upper = sysBars[boundaryIndex].xEnd - MIN_BAR_W;
-  }
-  if (lower > upper) return cal; // degenerate window — ignore the drag
+  // The window the boundary may move within, bounded by the adjacent visible
+  // tick positions (NOT a moved bar's far edge, which only coincides with the
+  // next tick when bars are contiguous). Reading-order tick i is:
+  //   0     -> bars[0].xStart       (leading edge)
+  //   n     -> bars[n-1].xEnd       (trailing edge)
+  //   1..n-1-> bars[i].xStart       (right bar's xStart — the drawn interior tick)
+  // Using the tick keeps a boundary from crossing its siblings even when
+  // converter bars overlap (bars[k-1].xEnd > bars[k].xStart).
+  const tickX = (i: number): number =>
+    i === 0 ? sysBars[0].xStart : i === n ? sysBars[n - 1].xEnd : sysBars[i].xStart;
+  const lower = boundaryIndex === 0 ? system.xStart : tickX(boundaryIndex - 1) + MIN_BAR_W;
+  const upper = boundaryIndex === n ? system.xEnd : tickX(boundaryIndex + 1) - MIN_BAR_W;
+  if (lower >= upper) return cal; // degenerate window — ignore the drag (no mutation)
 
   const target = Math.min(Math.max(clamp01(x), lower), upper);
 
