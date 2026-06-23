@@ -53,8 +53,11 @@ export async function extractChartVision(
   const response = await client.messages.create(
     {
       model: MODEL,
+      // Bar/system geometry is the bottleneck: 'low' effort gives imprecise
+      // coordinates. 'high' spends more reasoning on spatial localization, which
+      // is the part the model is weakest at. (Watch VISION_TIMEOUT_MS=50s.)
       max_tokens: 16000,
-      output_config: { effort: 'low' },
+      output_config: { effort: 'high' },
       system: SYSTEM_PROMPT,
       messages: [
         {
