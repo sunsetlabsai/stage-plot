@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
+import { getAdminConfig } from '@/lib/admin-config';
 import { CALIBRATION_SCHEMA_VERSION, hashPdfBytes } from '@/lib/chart-calibration';
 import { MAX_PDF_BYTES, buildCalibrationFromVision, sniffPdf } from '@/lib/chart-converter';
 import { extractChartVision, VISION_TIMEOUT_MS } from '@/lib/chart-vision';
@@ -100,12 +101,20 @@ export async function POST(request: NextRequest) {
     .maybeSingle();
   if (existing) return degrade('exists');
 
-  // 6. Vision extract, aborted under maxDuration so we degrade rather than 504.
+  // 6. Resolve the Anthropic key from the SAME source as the agent-assist route
+  //    (Redis admin:claude_tryit_key, env CLAUDE_TRYIT_KEY fallback) so the
+  //    converter reuses the already-provisioned platform key — no separate
+  //    ANTHROPIC_API_KEY env needed. (Per-owner BYOA resolves here later.)
+  //    Unconfigured key ⟹ degrade to manual, never error.
+  const apiKey = await getAdminConfig('claude_tryit_key');
+  if (!apiKey) return degrade('failed');
+
+  // 7. Vision extract, aborted under maxDuration so we degrade rather than 504.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VISION_TIMEOUT_MS);
   let vision;
   try {
-    vision = await extractChartVision(bytes, controller.signal);
+    vision = await extractChartVision(bytes, apiKey, controller.signal);
   } catch (err) {
     // An over-limit PDF (too many pages for the vision API) surfaces as a 400 →
     // too_large; anything else (timeout, transport, auth) is a generic failure.
@@ -115,12 +124,12 @@ export async function POST(request: NextRequest) {
     clearTimeout(timer);
   }
 
-  // 7. Map + validate. null = nothing usable extracted → degrade to manual rail.
+  // 8. Map + validate. null = nothing usable extracted → degrade to manual rail.
   if (!vision) return degrade('failed');
   const calibration = buildCalibrationFromVision(vision);
   if (!calibration) return degrade('failed');
 
-  // 8. Persist (the real guard): INSERT … ON CONFLICT (chart_id, source_hash) DO
+  // 9. Persist (the real guard): INSERT … ON CONFLICT (chart_id, source_hash) DO
   //    NOTHING RETURNING *. ignoreDuplicates makes the upsert a pure insert-or-skip;
   //    .select() returns the row IFF this call inserted it. RLS enforces owner write.
   const { data: inserted, error: insertError } = await supabase

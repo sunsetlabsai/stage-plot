@@ -41,9 +41,13 @@ function stripFences(text: string): string {
 // returns null only when the model returns unparseable / non-object output.
 export async function extractChartVision(
   pdfBytes: Uint8Array,
+  apiKey: string,
   signal?: AbortSignal,
 ): Promise<VisionChart | null> {
-  const client = new Anthropic();
+  // Key is resolved + passed by the caller (the convert route) so key SOURCING
+  // — the shared platform key today, per-owner BYOA later — stays the route's
+  // concern and this stays a pure "given a key + bytes, call Claude".
+  const client = new Anthropic({ apiKey });
   const base64 = Buffer.from(pdfBytes).toString('base64');
 
   const response = await client.messages.create(
