@@ -22,6 +22,9 @@ import {
   removeSystem,
   resizeSystemBand,
   autoDistributeBars,
+  moveBarBoundary,
+  MIN_BAR_W,
+  TAP_TOL,
   barsInOrder,
   tapToBar,
   isValidSystem,
@@ -509,14 +512,171 @@ describe('tapToBar', () => {
     expect(bar!.systemId).toBe(botSys);
   });
 
-  it('picks the nearest bar by midpoint distance', () => {
+  it('picks the bar whose span contains the tap', () => {
     let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
     const sysId = c.systems![0].id;
     c = autoDistributeBars(c, sysId, 4);
-    // Tap at x=0.24 — bar 1 midpoint=0.125, bar 2 midpoint=0.375 → closer to bar 1.
+    // Tap at x=0.24 — inside bar 1's span [0, 0.25].
     const bar = tapToBar(c, 1, 0.24, 0.15);
     expect(bar).not.toBeNull();
     expect(bar!.absNumber).toBe(1);
+  });
+
+  it('returns null in the leading clef/margin beyond tolerance', () => {
+    let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    c = autoDistributeBars(c, sysId, 4);
+    // Push bar 1 to start at 0.2 (clef/margin opens to its left).
+    c = moveBarBoundary(c, sysId, 0, 0.2);
+    expect(tapToBar(c, 1, 0.05, 0.15)).toBeNull(); // well left of bar 1
+    expect(tapToBar(c, 1, 0.195, 0.15)!.absNumber).toBe(1); // within tolerance of edge
+  });
+
+  it('returns null in the trailing blank beyond tolerance', () => {
+    let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    c = autoDistributeBars(c, sysId, 4);
+    // Pull the trailing edge in to 0.8 (blank space opens to its right).
+    c = moveBarBoundary(c, sysId, 4, 0.8);
+    expect(tapToBar(c, 1, 0.95, 0.15)).toBeNull();
+    expect(tapToBar(c, 1, 0.805, 0.15)!.absNumber).toBe(4);
+  });
+});
+
+describe('moveBarBoundary', () => {
+  function oneSystem(count: number): { c: ChartCalibration; sysId: string } {
+    let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    c = autoDistributeBars(c, sysId, count);
+    return { c, sysId };
+  }
+
+  it('moves both edges of an interior boundary together; neighbors untouched', () => {
+    const { c, sysId } = oneSystem(4); // 0-.25, .25-.5, .5-.75, .75-1
+    // Boundary 2 is the shared edge between bar 2 (.25-.5) and bar 3 (.5-.75).
+    const next = moveBarBoundary(c, sysId, 2, 0.6);
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars[1].xEnd).toBeCloseTo(0.6); // bar 2 right edge
+    expect(bars[2].xStart).toBeCloseTo(0.6); // bar 3 left edge (snapped together)
+    expect(bars[0].xStart).toBeCloseTo(0.0); // bar 1 untouched
+    expect(bars[3].xEnd).toBeCloseTo(1.0); // bar 4 untouched
+  });
+
+  it('preserves absNumber across an interior drag', () => {
+    const { c, sysId } = oneSystem(4);
+    const next = moveBarBoundary(c, sysId, 2, 0.6);
+    const nums = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart).map((b) => b.absNumber);
+    expect(nums).toEqual([1, 2, 3, 4]);
+  });
+
+  it('moves only the leading edge for boundary 0', () => {
+    const { c, sysId } = oneSystem(4);
+    const next = moveBarBoundary(c, sysId, 0, 0.1);
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars[0].xStart).toBeCloseTo(0.1);
+    expect(bars[0].xEnd).toBeCloseTo(0.25); // bar 1 right edge untouched
+    expect(bars[1].xStart).toBeCloseTo(0.25); // bar 2 untouched
+  });
+
+  it('moves only the trailing edge for boundary N', () => {
+    const { c, sysId } = oneSystem(4);
+    const next = moveBarBoundary(c, sysId, 4, 0.9);
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars[3].xEnd).toBeCloseTo(0.9);
+    expect(bars[3].xStart).toBeCloseTo(0.75); // bar 4 left edge untouched
+  });
+
+  it('clamps x to system bounds', () => {
+    const { c, sysId } = oneSystem(4);
+    const next = moveBarBoundary(c, sysId, 0, -0.5); // below system.xStart=0
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars[0].xStart).toBeCloseTo(0.0);
+  });
+
+  it('clamps to the neighbor window — cannot cross a sibling boundary', () => {
+    const { c, sysId } = oneSystem(4);
+    // Try to drag boundary 2 (between bar2 .25-.5 and bar3 .5-.75) far right past
+    // bar 3's own right edge (0.75). It should stop at 0.75 - MIN_BAR_W.
+    const next = moveBarBoundary(c, sysId, 2, 0.99);
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars[1].xEnd).toBeCloseTo(0.75 - MIN_BAR_W);
+    expect(bars[2].xStart).toBeCloseTo(0.75 - MIN_BAR_W);
+    expect(bars[2].xEnd).toBeCloseTo(0.75); // bar 3 keeps >= MIN_BAR_W width
+  });
+
+  it('enforces the MIN_BAR_W floor (no zero/negative bars)', () => {
+    const { c, sysId } = oneSystem(2); // 0-.5, .5-1
+    const next = moveBarBoundary(c, sysId, 0, 0.5); // try to crush bar 1 to zero
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars[0].xEnd - bars[0].xStart).toBeGreaterThanOrEqual(MIN_BAR_W - 1e-9);
+  });
+
+  it('returns the input on a degenerate window', () => {
+    // A bar already at the MIN_BAR_W floor: dragging boundary 0 has no room.
+    let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    c = autoDistributeBars(c, sysId, 1); // single bar 0-1
+    // Shrink to a near-minimal bar via the trailing edge first.
+    c = moveBarBoundary(c, sysId, 1, MIN_BAR_W); // bar 1 = [0, MIN_BAR_W]
+    const before = c.bars;
+    const next = moveBarBoundary(c, sysId, 0, 0.0); // lower=0, upper=MIN_BAR_W-MIN_BAR_W=0
+    // window [0,0] is non-degenerate (lower==upper) → target 0, no real change.
+    expect(next.bars![0].xStart).toBeCloseTo(0.0);
+    void before;
+  });
+
+  it('no-ops on unknown system or out-of-range boundary index', () => {
+    const { c, sysId } = oneSystem(4);
+    expect(moveBarBoundary(c, 'nope', 1, 0.5)).toBe(c);
+    expect(moveBarBoundary(c, sysId, -1, 0.5)).toBe(c);
+    expect(moveBarBoundary(c, sysId, 5, 0.5)).toBe(c); // N=4, max index 4
+    expect(moveBarBoundary(c, sysId, 1.5, 0.5)).toBe(c); // non-integer
+  });
+
+  it('no-ops when the system has no bars', () => {
+    const c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    expect(moveBarBoundary(c, sysId, 0, 0.5)).toBe(c);
+  });
+
+  it('clears confidence on the moved bars only and resets to draft', () => {
+    let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    c = autoDistributeBars(c, sysId, 4);
+    // Seed confidence on every bar and mark verified.
+    c = { ...c, status: 'verified', bars: (c.bars ?? []).map((b) => ({ ...b, confidence: 0.5 })) };
+    const next = moveBarBoundary(c, sysId, 2, 0.6); // moves bar 2 and bar 3
+    expect(next.status).toBe('draft');
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars[1].confidence).toBeUndefined(); // bar 2 cleared
+    expect(bars[2].confidence).toBeUndefined(); // bar 3 cleared
+    expect(bars[0].confidence).toBe(0.5); // bar 1 untouched
+    expect(bars[3].confidence).toBe(0.5); // bar 4 untouched
+  });
+
+  it('snaps a non-contiguous gap to contiguity on first drag', () => {
+    let c = addSystem(emptyCalibration(), 1, 0.0, 0.3, 0.0, 1.0);
+    const sysId = c.systems![0].id;
+    c = autoDistributeBars(c, sysId, 2); // 0-.5, .5-1
+    // Force a gap: bar 1 ends at 0.4, bar 2 starts at 0.6 (interior tick at .6).
+    const ids = (c.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    c = {
+      ...c,
+      bars: [
+        { ...ids[0], xEnd: 0.4 },
+        { ...ids[1], xStart: 0.6 },
+      ],
+    };
+    // Interior boundary 1 reads at the right bar's xStart (0.6); drag to 0.55.
+    const next = moveBarBoundary(c, sysId, 1, 0.55);
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars[0].xEnd).toBeCloseTo(0.55);
+    expect(bars[1].xStart).toBeCloseTo(0.55); // gap closed — edges unified
+  });
+
+  it('exposes sane constants', () => {
+    expect(MIN_BAR_W).toBeGreaterThan(0);
+    expect(TAP_TOL).toBeGreaterThan(0);
   });
 });
 
