@@ -74,8 +74,12 @@ component** and open it from both the library row and the in-show "+" chip. This
    current `prompt()`.
 
 ### Manage Charts modal (shared component)
-Props: the song (`title`, `charts[]`), `isOwner`, and an `onCharts Changed` callback so each caller
-updates its own local state (library `songs[i].charts` + `chart_count`; in-show `setlist[i].charts`).
+Props: the song (`title`, `charts[]`), `isOwner`, and an `onChartsChanged` callback so each caller
+updates its own local state. Library: the one `songs[i].charts` + `chart_count`. In-show: **every
+setlist row whose normalized title matches** (not just the clicked row) — a song can legitimately
+appear in a setlist more than once, and charts are title-keyed authority, so all matching rows must
+reflect the change. This mirrors the existing prompt-flow update (`page.tsx` `setlist.map((s) =>
+s.title === songTitle ? … : s)`).
 Header: song title. Body: a list of **role slots**:
 - **Filled role** → `displayRole(role)`, file name (`chart.label`), **Preview**, **Replace** (re-upload
   same role), **Delete** (owner only).
@@ -123,8 +127,10 @@ title.
 
 `/library` already loads `songs[]` with `charts[]` embedded; the in-show page holds `setlist[]` with
 `charts[]`. The shared modal never refetches — it mutates the caller's local array via the
-`onChartsChanged` callback (same pattern as the existing create/update/delete handlers). Duplicate
-inserts a new `Song` into the library list (re-sorted by title).
+`onChartsChanged` callback (same pattern as the existing create/update/delete handlers). The library
+caller updates the single matching `Song`; the in-show caller updates **all** setlist rows sharing the
+normalized title (title-keyed authority). Duplicate inserts a new `Song` into the library list
+(re-sorted by title).
 
 ## Resolved questions
 
