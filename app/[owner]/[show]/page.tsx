@@ -73,6 +73,7 @@ import {
   addSystem,
   removeSystem,
   resizeSystemBand,
+  moveBarBoundary,
   autoDistributeBars,
   systemsForPage,
 } from '@/lib/chart-calibration';
@@ -1657,10 +1658,11 @@ function SectionMarker({
 
 // A calibrated staff system: a translucent full-width band (the chunk-3
 // creation tier). Tap to select; when selected it shows top/bottom drag handles
-// (fit the band to the printed staff) and its barline ticks. Ticks are visual
-// only here — per-tick nudge is a later refinement.
+// (fit the band to the printed staff) and its barline ticks. When selected, each
+// barline tick (N bars → N+1 boundaries) gets a wide invisible hit-strip so it
+// can be dragged horizontally onto the real printed barline.
 function SystemBand({
-  system, bars, box, selected, flagged, onSelect, onResizeStart,
+  system, bars, box, selected, flagged, onSelect, onResizeStart, onBoundaryResizeStart,
 }: {
   system: System;
   bars: Bar[];
@@ -1669,12 +1671,19 @@ function SystemBand({
   flagged: boolean;
   onSelect: () => void;
   onResizeStart: (edge: 'top' | 'bottom', e: ReactPointerEvent<HTMLDivElement>) => void;
+  onBoundaryResizeStart: (index: number, e: ReactPointerEvent<HTMLDivElement>) => void;
 }) {
   const left = box.left + system.xStart * box.width;
   const top = box.top + system.yTop * box.height;
   const width = (system.xEnd - system.xStart) * box.width;
   const height = (system.yBottom - system.yTop) * box.height;
   const ordered = [...bars].sort((a, b) => a.xStart - b.xStart);
+  // Boundary x-positions: each bar's leading edge, plus the last bar's closing
+  // edge. Index aligns with moveBarBoundary's boundaryIndex (0..N).
+  const boundaries =
+    ordered.length > 0
+      ? [...ordered.map((b) => b.xStart), ordered[ordered.length - 1].xEnd]
+      : [];
 
   return (
     <>
@@ -1709,6 +1718,24 @@ function SystemBand({
           style={{ left: box.left + ordered[ordered.length - 1].xEnd * box.width, top, height, pointerEvents: 'none' }}
         />
       )}
+      {/* Grabbable barline hit-strips (selected only): drag a tick onto the
+          real printed barline. Wide invisible target over the thin visual line. */}
+      {selected && boundaries.map((bx, i) => (
+        <div
+          key={`b${i}`}
+          data-chart-overlay-interactive
+          onPointerDown={(e) => onBoundaryResizeStart(i, e)}
+          onClick={(e) => e.stopPropagation()}
+          className="absolute w-3.5 -translate-x-1/2 cursor-ew-resize hover:bg-sky-400/20"
+          style={{
+            left: box.left + bx * box.width,
+            top,
+            height,
+            pointerEvents: 'auto',
+            touchAction: 'none',
+          }}
+        />
+      ))}
       {/* Top/bottom resize handles (selected only). */}
       {selected && (['top', 'bottom'] as const).map((edge) => (
         <div
@@ -1875,7 +1902,7 @@ function RoadmapOverlayLayer({
 function CalibrationOverlay({
   calibration, box, page, mode, calTool, seekId, holdId, editingId,
   barMode, barRedline, onBarTap,
-  selectedSystemId, onDropSystem, onSelectSystem, onResizeSystem,
+  selectedSystemId, onDropSystem, onSelectSystem, onResizeSystem, onMoveBoundary,
   onDrop, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
   selectedBarId, selectedMarkerId, endingBarIds, resolveErrorIds,
   flaggedSectionIds, flaggedSystemIds, flaggedMarkerIds,
@@ -1896,6 +1923,7 @@ function CalibrationOverlay({
   onDropSystem: (y: number) => void;
   onSelectSystem: (id: string | null) => void;
   onResizeSystem: (id: string, yTop: number, yBottom: number) => void;
+  onMoveBoundary: (systemId: string, boundaryIndex: number, x: number) => void;
   onDrop: (x: number, y: number) => void;
   onSeek: (id: string) => void;
   onHold: (id: string) => void;
@@ -1924,27 +1952,45 @@ function CalibrationOverlay({
   const redlineOnPage = !barMode && seeked && seeked.page === page ? seeked : null;
   const interactive = mode === 'calibrate' || barMode;
 
-  // Drag-resize of a system band. The handler is subscribed once and reads the
-  // live box + callback through refs, so a re-render mid-drag (the calibration
-  // updates on every move) can't strand the listener or lose the gesture.
+  // Drag of a calibration gizmo: a system band's top/bottom edge (vertical) or a
+  // barline boundary within a selected system (horizontal). The handler is
+  // subscribed once and reads the live box + callbacks through refs, so a
+  // re-render mid-drag (the calibration updates on every move) can't strand the
+  // listener or lose the gesture.
   const overlayRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ id: string; edge: 'top' | 'bottom'; other: number } | null>(null);
+  const dragRef = useRef<
+    | { kind: 'band'; id: string; edge: 'top' | 'bottom'; other: number }
+    | { kind: 'boundary'; systemId: string; index: number }
+    | null
+  >(null);
   const boxRef = useRef(box);
   const onResizeRef = useRef(onResizeSystem);
+  const onMoveBoundaryRef = useRef(onMoveBoundary);
   // Keep the drag-loop's refs current without re-subscribing the listener.
-  useEffect(() => { boxRef.current = box; onResizeRef.current = onResizeSystem; });
+  useEffect(() => {
+    boxRef.current = box;
+    onResizeRef.current = onResizeSystem;
+    onMoveBoundaryRef.current = onMoveBoundary;
+  });
   useEffect(() => {
     const move = (e: globalThis.PointerEvent) => {
       const d = dragRef.current;
       const ov = overlayRef.current;
       if (!d || !ov) return;
       const b = boxRef.current;
-      if (!b.height) return;
       const r = ov.getBoundingClientRect();
-      let ny = (e.clientY - r.top - b.top) / b.height;
-      ny = ny < 0 ? 0 : ny > 1 ? 1 : ny;
-      if (d.edge === 'top') onResizeRef.current(d.id, ny, d.other);
-      else onResizeRef.current(d.id, d.other, ny);
+      if (d.kind === 'band') {
+        if (!b.height) return;
+        let ny = (e.clientY - r.top - b.top) / b.height;
+        ny = ny < 0 ? 0 : ny > 1 ? 1 : ny;
+        if (d.edge === 'top') onResizeRef.current(d.id, ny, d.other);
+        else onResizeRef.current(d.id, d.other, ny);
+      } else {
+        if (!b.width) return;
+        let nx = (e.clientX - r.left - b.left) / b.width;
+        nx = nx < 0 ? 0 : nx > 1 ? 1 : nx;
+        onMoveBoundaryRef.current(d.systemId, d.index, nx);
+      }
     };
     const up = () => { dragRef.current = null; };
     window.addEventListener('pointermove', move);
@@ -1957,9 +2003,15 @@ function CalibrationOverlay({
 
   const beginResize = (sys: System, edge: 'top' | 'bottom', e: ReactPointerEvent<HTMLDivElement>) => {
     e.stopPropagation();
-    dragRef.current = { id: sys.id, edge, other: edge === 'top' ? sys.yBottom : sys.yTop };
+    dragRef.current = { kind: 'band', id: sys.id, edge, other: edge === 'top' ? sys.yBottom : sys.yTop };
     // Capture so a finger/cursor that slides off the thin handle keeps driving
     // the drag (and pointerup still fires to end it).
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* unsupported */ }
+  };
+
+  const beginBoundary = (sys: System, index: number, e: ReactPointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    dragRef.current = { kind: 'boundary', systemId: sys.id, index };
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* unsupported */ }
   };
 
@@ -2028,6 +2080,7 @@ function CalibrationOverlay({
           flagged={flaggedSystemIds.has(sys.id)}
           onSelect={() => onSelectSystem(sys.id)}
           onResizeStart={(edge, e) => beginResize(sys, edge, e)}
+          onBoundaryResizeStart={(index, e) => beginBoundary(sys, index, e)}
         />
       ))}
       {redlineOnPage && (
@@ -2397,6 +2450,8 @@ function ChartNavigator({
   };
   const resizeSystem = (id: string, yTop: number, yBottom: number) =>
     setCalibration((c) => (c ? resizeSystemBand(c, id, yTop, yBottom) : c));
+  const moveBoundary = (systemId: string, boundaryIndex: number, x: number) =>
+    setCalibration((c) => (c ? moveBarBoundary(c, systemId, boundaryIndex, x) : c));
   const setSystemBars = (id: string, count: number) =>
     setCalibration((c) => (c ? autoDistributeBars(c, id, Math.max(0, count)) : c));
   const deleteSystem = (id: string) => {
@@ -2891,6 +2946,7 @@ function ChartNavigator({
             onBarTap={seekBarAt}
             selectedSystemId={selectedSystemId}
             onDropSystem={dropSystem}
+            onMoveBoundary={moveBoundary}
             onSelectSystem={setSelectedSystemId}
             onResizeSystem={resizeSystem}
             onDrop={dropSection}

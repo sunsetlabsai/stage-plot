@@ -387,8 +387,94 @@ export function autoDistributeBars(
   };
 }
 
-// Find the bar nearest to a tap at (page, x, y). Returns null if no bars exist
-// on the page or no system's y-range contains the tap point.
+// Minimum bar width in normalized page units — a barline drag can't crush a bar
+// below this. Also the edge-grace tolerance for span-aware tap resolution.
+export const MIN_BAR_W = 0.01;
+export const TAP_TOL = 0.01;
+
+// Drag one barline boundary within a system to align it with the printed line.
+// For N bars in reading order there are N+1 boundaries:
+//   index 0   → leading edge   (bars[0].xStart — after clef/key-sig/margin)
+//   index k   → shared edge between bars[k-1] and bars[k]  (1..N-1)
+//   index N   → trailing edge  (bars[N-1].xEnd)
+// An interior drag moves BOTH adjacent edges to x together (snapping any
+// pre-existing gap/overlap from converter input to contiguity). x is clamped to
+// the system bounds and to each moved bar's opposite edge (MIN_BAR_W floor), so
+// a boundary can never cross its siblings or invert a bar. Manual edit clears
+// confidence on the touched bars and resets to draft. No-op on bad inputs.
+export function moveBarBoundary(
+  cal: ChartCalibration,
+  systemId: string,
+  boundaryIndex: number,
+  x: number,
+): ChartCalibration {
+  const system = (cal.systems ?? []).find((s) => s.id === systemId);
+  if (!system) return cal;
+  const sysBars = (cal.bars ?? [])
+    .filter((b) => b.systemId === systemId)
+    .sort((a, b) => a.xStart - b.xStart);
+  const n = sysBars.length;
+  if (n === 0) return cal;
+  if (!Number.isInteger(boundaryIndex) || boundaryIndex < 0 || boundaryIndex > n) return cal;
+
+  // The window the boundary may move within, bounded by the adjacent visible
+  // tick positions (NOT a moved bar's far edge, which only coincides with the
+  // next tick when bars are contiguous). Reading-order tick i is:
+  //   0     -> bars[0].xStart       (leading edge)
+  //   n     -> bars[n-1].xEnd       (trailing edge)
+  //   1..n-1-> bars[i].xStart       (right bar's xStart — the drawn interior tick)
+  // Using the tick keeps a boundary from crossing its siblings even when
+  // converter bars overlap (bars[k-1].xEnd > bars[k].xStart).
+  const tickX = (i: number): number =>
+    i === 0 ? sysBars[0].xStart : i === n ? sysBars[n - 1].xEnd : sysBars[i].xStart;
+  // Two independent floors per side, take the tighter:
+  //  - the adjacent sibling TICK (so a boundary can't cross a neighbor), and
+  //  - the moved bar's OWN opposite edge (so a gapped converter bar can't invert,
+  //    e.g. moving a right bar's xStart past its fixed xEnd).
+  // For contiguous bars the tick and the moved bar's edge coincide; they only
+  // diverge when converter input has gaps/overlaps.
+  const lower =
+    boundaryIndex === 0
+      ? system.xStart
+      : Math.max(tickX(boundaryIndex - 1), sysBars[boundaryIndex - 1].xStart) + MIN_BAR_W;
+  const upper =
+    boundaryIndex === n
+      ? system.xEnd
+      : Math.min(tickX(boundaryIndex + 1), sysBars[boundaryIndex].xEnd) - MIN_BAR_W;
+  if (lower >= upper) return cal; // degenerate window — ignore the drag (no mutation)
+
+  const target = Math.min(Math.max(clamp01(x), lower), upper);
+
+  // Apply: leading edge moves bars[0].xStart; trailing moves bars[n-1].xEnd; an
+  // interior boundary snaps bars[k-1].xEnd and bars[k].xStart together.
+  const movedIds = new Set<string>();
+  const nextSysBars = sysBars.map((b) => ({ ...b }));
+  if (boundaryIndex < n) {
+    nextSysBars[boundaryIndex].xStart = target;
+    movedIds.add(sysBars[boundaryIndex].id);
+  }
+  if (boundaryIndex > 0) {
+    nextSysBars[boundaryIndex - 1].xEnd = target;
+    movedIds.add(sysBars[boundaryIndex - 1].id);
+  }
+
+  const others = (cal.bars ?? []).filter((b) => b.systemId !== systemId);
+  const merged = [...others, ...nextSysBars].map((b) =>
+    movedIds.has(b.id) ? withoutConfidence(b) : b,
+  );
+  return {
+    ...cal,
+    status: 'draft',
+    bars: renumberBars(merged, cal.systems ?? []),
+  };
+}
+
+// Find the bar at a tap (page, x, y). Picks the nearest system by y, then the
+// bar whose [xStart, xEnd] span contains x. Returns null when x falls outside
+// every bar span (leading clef/margin, trailing blank, or a not-yet-normalized
+// gap between converter bars) — except within TAP_TOL of the nearest bar edge,
+// which snaps to that bar so a graze still lands. Returns null if no bars exist
+// on the page or in the chosen system.
 export function tapToBar(
   cal: ChartCalibration,
   page: number,
@@ -409,21 +495,24 @@ export function tapToBar(
     }
   }
 
-  // Find the bar in that system closest to the tap x (by midpoint).
   const sysBars = (cal.bars ?? []).filter((b) => b.systemId === bestSys.id);
   if (sysBars.length === 0) return null;
 
-  let bestBar = sysBars[0];
-  let bestBarDist = Math.abs(x - (bestBar.xStart + bestBar.xEnd) / 2);
+  // Span containment: the bar whose [xStart, xEnd] holds x.
+  const contained = sysBars.find((b) => x >= b.xStart && x <= b.xEnd);
+  if (contained) return contained;
+
+  // Otherwise snap to the nearest bar edge only within tolerance; else no bar.
+  let nearest = sysBars[0];
+  let nearestDist = Math.min(Math.abs(x - nearest.xStart), Math.abs(x - nearest.xEnd));
   for (let i = 1; i < sysBars.length; i++) {
-    const mid = (sysBars[i].xStart + sysBars[i].xEnd) / 2;
-    const d = Math.abs(x - mid);
-    if (d < bestBarDist) {
-      bestBarDist = d;
-      bestBar = sysBars[i];
+    const d = Math.min(Math.abs(x - sysBars[i].xStart), Math.abs(x - sysBars[i].xEnd));
+    if (d < nearestDist) {
+      nearestDist = d;
+      nearest = sysBars[i];
     }
   }
-  return bestBar;
+  return nearestDist <= TAP_TOL ? nearest : null;
 }
 
 function yDistToSystem(y: number, sys: System): number {
