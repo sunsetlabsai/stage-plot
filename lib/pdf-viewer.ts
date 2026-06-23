@@ -1,6 +1,6 @@
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 import type { Chart } from './types';
-import { getCachedChartBlob } from './chart-cache';
+import { getCachedChartBlob, versionedChartUrl } from './chart-cache';
 import { hashPdfBytes } from './chart-calibration';
 
 // Lazy-init pdf.js to avoid SSR issues
@@ -68,8 +68,10 @@ async function fetchChartBytes(chart: Chart, accessToken?: string): Promise<Arra
     let res: Response;
 
     // Supabase Storage charts have a direct public URL — fetch directly
+    // (version-stamped so CDN/browser caches bust on object replace, keeping
+    // the hashed bytes in parity with the authoritative object).
     if (chart.url && chart.url.includes('/storage/v1/object/public/')) {
-      res = await fetch(chart.url);
+      res = await fetch(versionedChartUrl(chart));
     } else {
       // Legacy Drive charts — go through the proxy
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };

@@ -1256,17 +1256,25 @@ describe('isValidRoadmapMarkerShape (structural)', () => {
     expect(good.every(isValidRoadmapMarkerShape)).toBe(true);
   });
 
-  it('accepts an optional finite confidence', () => {
+  it('accepts an optional confidence in [0,1]', () => {
     expect(isValidRoadmapMarkerShape(
       { id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: 0.4 },
     )).toBe(true);
+    expect(isValidRoadmapMarkerShape(
+      { id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: 0 },
+    )).toBe(true);
+    expect(isValidRoadmapMarkerShape(
+      { id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: 1 },
+    )).toBe(true);
   });
 
-  it('rejects unknown kinds, wrong edge, bad enums, NaN confidence', () => {
+  it('rejects unknown kinds, wrong edge, bad enums, out-of-range/NaN confidence', () => {
     expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'nope', barId: 'b1' })).toBe(false);
     expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'end' })).toBe(false);
     expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'jump', barId: 'b1', edge: 'end', from: 'x', until: 'end' })).toBe(false);
     expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: NaN })).toBe(false);
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: 1.01 })).toBe(false);
+    expect(isValidRoadmapMarkerShape({ id: 'a', kind: 'repeatStart', barId: 'b1', edge: 'start', confidence: -0.01 })).toBe(false);
     expect(isValidRoadmapMarkerShape({ id: '', kind: 'segno', barId: 'b1', edge: 'start' })).toBe(false);
   });
 

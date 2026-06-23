@@ -862,10 +862,7 @@ export function isValidRoadmapMarkerShape(m: unknown): m is RoadmapMarker {
   if (!m || typeof m !== 'object') return false;
   const k = m as Record<string, unknown>;
   if (typeof k.id !== 'string' || k.id.length === 0) return false;
-  if (k.confidence !== undefined &&
-      !(typeof k.confidence === 'number' && Number.isFinite(k.confidence))) {
-    return false;
-  }
+  if (!isValidConfidence(k.confidence)) return false;
   const barId = (): boolean => typeof k.barId === 'string' && k.barId.length > 0;
   switch (k.kind) {
     case 'repeatStart':
