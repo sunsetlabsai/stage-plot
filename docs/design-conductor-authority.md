@@ -1,6 +1,6 @@
 # Conductor authority — live roadmap broadcast across N charts (design)
 
-**Status:** Proposed **v3** — v2 closed Codex R1 NO-GO (9 findings → 3 roots → one move; §0); v3 closes the Codex R2 GO-WITH-NITS items (§3.3 counter mechanics, §3.4 exit determinism, §3.1 extracted-VM-core MED, OQ-2 provenance → §2.2.1). Design-only; no build.
+**Status:** **v3.1 — APPROVED to build chunks 1–2.** v2 closed Codex R1 NO-GO (9 findings → 3 roots → one move; §0); v3 closed the R2 GO-WITH-NITS items (§3.3/§3.4/§3.1 MED, OQ-2 provenance §2.2.1) → **Codex R3 = GO**; v3.1 closes the two chunk-1/2 gating decisions (§2.2.0 alignment ambiguity, §2.3.1 `barOffset` span-equivalence). Remaining open items gate later chunks only (§8.2).
 **Date:** 2026-06-22
 **Branch:** `opus/design-conductor-authority` (PR #87)
 **Parent:** `design-realtime-chart-control.md` — detailed design of its **Concept B** (networked seek) + the tractable tier of **Concept C** (tempo-awareness). Resolves parent OQ #1 (B transport) + the C-tier split.
@@ -21,7 +21,9 @@ Codex R1 (correct NO-GO) found that cross-chart identity and live-traversal sema
 | 6, 7, 8 — hidden second writer; `seq` underspecified; split-brain | **C: authority/state** | §4 epoch + single seq-issuer + listener-as-telemetry; §5 relay-as-baton-arbiter; §6 deterministic MD-owned state machine |
 | 9 — boundary enforcement hooks | (kept) | §7 explicit |
 
-**v3 (Codex R2 GO-WITH-NITS) closes:** §3.3 "another round" is now a code-grounded clamp (`completedPasses := times-1`, a reachable VM state — never a freeze); §3.4 needs no separate exit computation (the extracted resolver's forward walk *is* the default exit); the "resumable resolver" MED is accepted as an **extracted VM core** (§3.1); OQ-2 provenance resolved to the hybrid model (§2.2.1). Architecture was signed off in R2; these were the pre-chunk-1/2 closures.
+**v3 (Codex R2 GO-WITH-NITS) closes:** §3.3 "another round" is now a code-grounded clamp (`completedPasses := times-1`, a reachable VM state — never a freeze); §3.4 needs no separate exit computation (the extracted resolver's forward walk *is* the default exit); the "resumable resolver" MED is accepted as an **extracted VM core** (§3.1); OQ-2 provenance resolved to the hybrid model (§2.2.1). Architecture was signed off in R2; these were the pre-chunk-1/2 closures. **Codex R3 = GO.**
+
+**v3.1 closes the two chunk-1/2 gating decisions:** §2.2.0 (partial alignment `local | tacet | unmapped`, degrade-precision-not-honesty) and §2.3.1 (`barOffset` honored only in a `bar-isomorphic` span). Plus the two R3 test-nuances folded into chunk 1/2 (§9): stable-id-preserving re-key, and inert already-`fired` D.S./D.C. on redirect. **Chunks 1–2 are GO.**
 
 ---
 
@@ -41,6 +43,14 @@ A single MD makes a realtime change — "another round of the solo," "back to th
 - **Per-chart `alignment`** (on each chart's calibration): `localNode → canonicalNode` map (sections and, where structure matches, bars). Each chart **declares how it maps into the canonical structure.**
 - **Authoring:** the converter *suggests* the alignment (label+ordinal + bar-count heuristics are the **seed**, not the authority); ambiguous mappings surface in the **existing review-queue pattern** for human confirm. A chart can't be a conductor *follower* for a song until its alignment is confirmed (else it self-navigates — §7).
 
+### 2.2.0 Partial alignment — `tacet` vs `unmapped` (resolves §8.2-1)
+**The governing spine for resolution: degrade *precision*, never *honesty* — bar → section → tacet → self-nav, but never land on a node the alignment didn't confirm.** Charts routinely disagree on section count (a horn tacets the bridge; a part omits a tag). So **alignment is per-section and may be partial.** Each canonical node maps to exactly one of:
+- **`local`** — a confirmed local node. Resolves to local coords normally.
+- **`tacet` (declared-absent)** — the player genuinely doesn't play that section. This is a **resolved** outcome, *not* an error: render "tacet — Bridge, back at Outro," hold position, **re-home at the next present section** when the cursor moves past. Musically exactly right (the horn rests, re-enters at the outro). Quiet/expected UI.
+- **`unmapped` (ambiguous)** — the converter/owner genuinely can't place a local section (an extra repeat, an unidentifiable region). Goes to the **review queue**; until resolved, refs touching that region make **that member self-navigate** (§7). **Loud** UI — we honestly don't know where they go.
+
+**Never block the whole chart:** a chart follows for every ref it can resolve (`local` or `tacet`); only `unmapped` refs trigger that one member's self-nav. **No auto-snap for `unmapped`** — a wrong guess is worse than honest self-nav. The *one* coarsening allowed is dropping bar-precision to section-precision **inside a confirmed alignment** (§2.3), which is degrading precision within a node we *did* confirm — not fabricating one.
+
 ### 2.2.1 Provenance of `SongStructure` (hybrid — resolves OQ-2)
 The canonical structure is **not** authored from nothing, nor live-merged across charts. It's a **converter-proposed, owner-confirmed, once** entity:
 1. **Converter proposes.** On first import for a song, the converter extracts a candidate canonical roadmap (its per-chart structural read becomes the seed).
@@ -49,8 +59,13 @@ The canonical structure is **not** authored from nothing, nor live-merged across
 - **Re-key on owner edit = best-effort auto-remap, flag-the-breaks.** When the owner edits `SongStructure`, existing chart alignments are **auto-remapped by stable canonical-section id**; only alignments that **break** (a referenced canonical node removed/split) are flagged for re-review. We do **not** invalidate every alignment on every edit. Stable canonical ids (not labels/ordinals) are what make this safe.
 
 ### 2.3 The wire carries canonical refs; the screen carries local coords
-- **Backend / wire = `CanonicalRef`** (a node in `SongStructure`): `pieceStart | segno | coda | fine | { section: canonicalSectionId } | { repeatStart: canonicalMarkerId }`, with an optional **`barOffset` valid only inside a span the alignment proves equivalent** (span-equivalence metadata; never a free portable bar number — finding 4).
-- **Frontend = local resolve + local label.** Each device maps `CanonicalRef → localNode` (via its alignment) → its own coords, renders locally, and labels in **its own** terms (MD reads "→ B / bar 17"; the bassist lands wherever B sits on the bass chart). A chart that can't resolve a ref (unaligned/structure-differs) **does not guess** — it surfaces "structure differs" and that member self-navigates (§7). Never silent mis-home.
+- **Backend / wire = `CanonicalRef`** (a node in `SongStructure`): `pieceStart | segno | coda | fine | { section: canonicalSectionId } | { repeatStart: canonicalMarkerId }`, with an optional **`barOffset` valid only inside a span the alignment flags `bar-isomorphic`** (§2.3.1; never a free portable bar number — finding 4).
+- **Frontend = local resolve + local label.** Each device maps `CanonicalRef → localNode` (via its alignment) → its own coords, renders locally, and labels in **its own** terms (MD reads "→ B / bar 17"; the bassist lands wherever B sits on the bass chart). A chart that can't resolve a ref (`unmapped`/structure-differs) **does not guess** — it surfaces "structure differs" and that member self-navigates (§7). Never silent mis-home.
+
+### 2.3.1 `barOffset` span-equivalence (resolves §8.2-2)
+`barOffset` only matters for mid-section targets ("start at bar 5 of the solo"), and raw bar numbers are non-portable (finding 4: written-out repeats, pickups, multirests). So:
+> **A `barOffset` is honored only inside a span the alignment flags `bar-isomorphic`: equal bar count AND no intervening structural divergence (a structurally-flat run — no repeat/ending/jump boundary one chart writes out and the other doesn't, so bar *k* canonical ↔ bar *k* local 1:1).** The converter seeds the flag; it's part of confirmed alignment.
+- **Fallback when not `bar-isomorphic`:** **drop the `barOffset` → resolve to the span/section head**, label "(bar-position approximate)," and surface to the MD that this follower coarsened. **Never** resolve to a non-isomorphic bar. This makes `barOffset` a bounded, *proven* convenience that degrades cleanly to structural granularity — it cannot reintroduce finding-4 fragility.
 
 ### 2.4 Worked example (the divergence case)
 Guitar chart writes the repeat out (physical bars 1–16); horn chart uses `|: 1.|2. :|` (physical bars 1–10). Same music. Both align their *Solo* section to canonical `Solo#1`. MD broadcasts `CanonicalRef{section: Solo#1}`. Guitar resolves → its bar 17; horn → its bar 11; each labels from its own page. **No shared bar number was ever required.** v1's "broadcast bar 17" would have landed the horn wrong.
@@ -183,11 +198,14 @@ Closed by v2: v1's §8.1 (continuation — §3.4), §8.2 (resync pass-state — 
 ### 8.1 Resolved this round
 - **OQ-2 `SongStructure` provenance → hybrid (model #3).** The converter **proposes** a canonical structure on first import; the **song owner confirms/edits it once** → it becomes authoritative; later charts **align to the confirmed structure** (ambiguities → the existing review queue). One human-confirmed source of truth → **no live N-way merge**, reusing the converter-suggest + review-queue pattern. **Re-key on owner edit → (b) best-effort auto-remap** by **stable canonical-section id**, **flagging only the breaks** for re-review (vs. invalidating all alignments). Folded into §2.2.
 
-### 8.2 Still open (gate chunks as noted)
-1. **Alignment authoring + ambiguity (§2.2) [gates chunks 1–2]:** the converter-seeded `localNode → canonicalNode` confirm flow; what happens when two charts genuinely disagree on section *count* (a part omits a tag) — block alignment, or allow a partial alignment that resolves coarse refs only? How loud is "structure differs," and is coarse-fallback (snap to nearest aligned section) ever wanted over self-navigate?
-2. **`barOffset` span-equivalence (§2.3) [gates chunk 1]:** what metadata proves a local span equivalent to a canonical span (bar-count + no intervening structure?), and the exact fallback when it can't.
-3. **Listener placement + clock latency (§5.1) [gates chunk 5]:** dedicated node vs. MD device; phase alignment across relay latency (likely invisible at bar granularity — confirm); clock behavior when the listener drops.
-4. **Failover + session discovery on a backhaul-less relay (§4/§5) [gates chunk 3 transport]:** the `claim` protocol details (how a new MD is discovered + accepted post-MD-death), room discovery (QR to relay / mDNS / room code).
+### 8.2 Status
+**Closed by v3.1 (the chunk-1/2 gate):**
+- **§8.2-1 alignment ambiguity → §2.2.0.** Partial alignment with per-node `local` | `tacet` | `unmapped`; tacet is resolved (rest + re-home), unmapped is loud + self-nav; never block the whole chart; no auto-snap. Spine: degrade precision, never honesty.
+- **§8.2-2 `barOffset` span-equivalence → §2.3.1.** Honored only in a `bar-isomorphic` span (equal bar count + no intervening structural divergence); else drop to span head, label approximate.
+
+**Still open (gate later chunks only — not architecture, not chunks 1–2):**
+1. **Listener placement + clock latency (§5.1) [gates chunk 5]:** dedicated node vs. MD device; phase alignment across relay latency (likely invisible at bar granularity — confirm); clock behavior when the listener drops.
+2. **Failover + session discovery on a backhaul-less relay (§4/§5) [gates chunk 3 transport]:** the `claim` protocol details (how a new MD is discovered + accepted post-MD-death), room discovery (QR to relay / mDNS / room code).
 
 ---
 
@@ -195,19 +213,20 @@ Closed by v2: v1's §8.1 (continuation — §3.4), §8.2 (resync pass-state — 
 
 Gated commits, Codex per chunk. Sequenced so each layer is demonstrable.
 
-1. **`SongStructure` + alignment model** (pure, tested): canonical roadmap type, `localNode → canonicalNode` alignment, `resolveRef(alignment, CanonicalRef) → {localNode}|unresolved`, label+ordinal/bar-count **seeding** heuristics, span-equivalence guard for `barOffset`. The §2.4 divergence is the test.
-2. **Resumable canonical VM (B2)** (pure, tested): stepwise `resolveRoadmap` that yields transitions + accepts `{ jumpTo, hold?, exit? }` overrides; the §3.3 counter policy + §3.4 exit precedence. Drive from a local mock MD.
+1. **`SongStructure` + alignment model** (pure, tested): canonical roadmap type, per-node alignment `local | tacet | unmapped` (§2.2.0), `resolveRef(alignment, CanonicalRef) → {localNode} | tacet | unresolved`, label+ordinal/bar-count **seeding** heuristics, `bar-isomorphic` guard for `barOffset` (§2.3.1). **Tests:** §2.4 divergence; a tacet section (rest + re-home); an unmapped section (self-nav, no snap); a non-isomorphic `barOffset` (drop to head). **Re-key test:** owner rename/reorder preserves stable ids → alignments survive; split/replace mints new ids → only those flagged (§2.2.1).
+2. **Resumable canonical VM (B2)** (pure, tested): extracted VM core — stepwise `resolveRoadmap` (externalized `completedPasses`/`fired`/flags/`passCount`/`cursor` + precomputed marker indexes) that yields transitions + accepts `{ jumpTo, hold?, exit? }` overrides; the §3.3 counter policy + §3.4 exit. Drive from a local mock MD. **Tests:** "another round" clamp on 2x/3x/non-contiguous-volta/nested; the four §3.4 exit cases; **a redirect landing before an already-`fired` D.S./D.C. leaves it inert unless MD explicitly resets** (Codex R3 nuance).
 3. **State machine + local relay:** `ConductorState`, directives, `(epoch, seq)` idempotency, claim/arbitration, late-join pull, detach/resync. Own-AP WebSocket relay; PWA. Single-writer + epoch enforced.
 4. **Change-marker UI + gated commit (§3.5):** place/arm/telegraph on all charts; go-tap default, gated auto-fire.
 5. **Clock layer + audio-tempo listener (§5.1):** ladder + telemetry→MD→broadcast; confidence gating. Audio-tempo designed-in, on-after-validation.
 
-OQ-2 (provenance) closed (§2.2.1). Remaining: §8.2-1 (alignment ambiguity) + §8.2-2 (`barOffset` span-equivalence) must close before chunks 1–2; §8.2-3 (listener/clock) before chunk 5; §8.2-4 (failover/discovery) before chunk 3's transport.
+**Chunks 1–2 are now unblocked** (provenance §2.2.1, alignment §2.2.0, `barOffset` §2.3.1 all closed; Codex R3 = GO). Remaining open items gate later chunks only: §8.2-1 (listener/clock) before chunk 5; §8.2-2 (failover/discovery) before chunk 3's transport.
 
 ---
 
-## 10. Decisions locked (v3)
+## 10. Decisions locked (v3.1)
 
-- **Identity = a canonical `SongStructure` + per-chart alignment;** the wire carries `CanonicalRef`, each chart renders local coords + local label. Label+ordinal is a **seed**, not the authority. `barOffset` only within a span-equivalent region (§2).
+- **Identity = a canonical `SongStructure` + per-chart alignment;** the wire carries `CanonicalRef`, each chart renders local coords + local label. Label+ordinal is a **seed**, not the authority.
+- **Alignment is per-node `local | tacet | unmapped`;** tacet = resolved (rest + re-home), unmapped = loud + self-nav, never block the whole chart, no auto-snap. **Spine: degrade precision (bar→section→tacet→self-nav), never honesty** (§2.2.0). **`barOffset` honored only in a `bar-isomorphic` span;** else drop to span head, label approximate (§2.3.1).
 - **`SongStructure` provenance = hybrid (#3):** converter proposes → owner confirms once → later charts align in; re-key on edit = best-effort auto-remap by stable canonical id, flag-the-breaks (§2.2.1).
 - **One canonical VM, MD-owned;** the live layer is **B2 (default + override)** over a resumable, **extracted-core** `resolveRoadmap` (§3.1). **"Another round" = clamp `completedPasses := times-1`** (reachable natural state, §3.3). **No separate exit computation — the resolver's forward walk from the post-redirect state *is* the default exit; MD `exit` overrides** (§3.4).
 - **Change marker telegraphs + fires; go-tap is the default/floor, auto-fire only behind a position-confidence gate** (§3.5).
