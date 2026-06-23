@@ -1,7 +1,8 @@
 # Design — Roadmap Builder (AI-copiloted chart authoring)
 
 Status: **DRAFT for review** · Branch `opus/design-roadmap-builder` · Owner: Graham (sign-off gate)
-· Awaiting Codex R1
+· Codex R1 addressed (HIGH transposition/storage overclaim → honest key-dimension phasing; MED
+source_spec lifecycle + server-owned save route; LOW born-verified-still-gated) — awaiting Codex R2
 
 ## Why now
 
@@ -50,13 +51,21 @@ The result: the overlay is **never "off"**, because the same code drew the page 
 3. **AI is copilot, not author.** The LLM proposes a spec; a **deterministic validator** gates it (bar
    math reconciles, section counts sum, repeats/endings balance, degrees are valid) — same posture as the
    converter's `isValidCalibration` boundary. The human reviews/edits the spec, not pixel coordinates.
-4. **Nashville Number System is key-agnostic → transposition is free.** Changes are stored as scale
-   **degrees + quality** (`1`, `4`, `5`, `6m`, `2m7`, `5/7` …), not absolute chords. The same spec renders
-   in **any key** by applying the song's key at render time. This **collapses the deferred
-   "duplicate-per-key" problem** (`Song X (G)` vs `(Bb)`) into one transposable source — a strategic win
-   on its own.
-5. **Born `verified`.** Geometry is exact; the only thing the author owns is whether they described the
-   song correctly — the same responsibility they'd have hand-drawing a chart. No draft/queue.
+4. **Nashville Number System is key-agnostic → cheap re-key now, true multi-key later.** Changes are
+   stored as scale **degrees + quality** (`1`, `4`, `5`, `6m`, `2m7`, `5/7` …), not absolute chords, so a
+   spec can render in *any* key. **But the current pipeline is key-blind** (see §"Transposition & the key
+   dimension"): shows resolve **one** static chart per `(owner, normalized title, role)` with no key
+   dimension (`app/api/shows/[owner]/[show]/route.ts:94` ignores `SetlistSong.key`). So v1 delivers
+   **cheap re-key of the single artifact** (the spec carries a `renderKey`; transpose = re-render +
+   replace), **not** concurrent G-and-Bb served to different shows from one spec. Truly collapsing the
+   per-key-duplicate problem requires key-aware resolution + per-key derived renders — a clearly-scoped
+   **future** enhancement, not a v1 claim. (Corrects the original "transposition is free / one spec many
+   keys" overclaim — Codex R1 HIGH.)
+5. **Born `verified` — but still gated by the server boundary.** Geometry is exact, so no draft/queue; the
+   only thing the author owns is whether they described the song correctly (same responsibility as
+   hand-drawing). The emitted calibration is **still run through `isValidCalibration` and must satisfy
+   `canVerify`/`resolveRoadmap`** before it is persisted as `verified` — identical to the existing
+   server-side verify boundary. The renderer can never emit a calibration the manual path couldn't.
 
 ## Goals
 
@@ -65,7 +74,8 @@ The result: the overlay is **never "off"**, because the same code drew the page 
 - The saved chart is a **PDF substrate + verified calibration**, indistinguishable downstream from an
   import (viewer, offline, Perform, conductor broadcast all "just work").
 - **Re-editable**: re-open the spec, tweak (sections, counts, changes, key), re-render.
-- **Transposable**: render the same spec in any key.
+- **Cheap re-key (v1)**: change the spec's `renderKey` → re-render → replace the single artifact. (True
+  concurrent multi-key per show is a future enhancement — see §"Transposition & the key dimension".)
 - Works for **rock/pop and jazz** (NNS with 7ths/extensions/minor/diminished covers jazz changes).
 
 ## Non-goals (this design)
@@ -79,6 +89,8 @@ The result: the overlay is **never "off"**, because the same code drew the page 
   (held) and basic split bars are in; the rest is v2.
 - Replacing the converter. Both paths coexist; builder is the high-confidence one for songs without an
   existing chart.
+- **Concurrent multi-key serving** (one spec rendering G to show A and Bb to show B simultaneously). v1 is
+  a single static artifact per `(owner, title, role)`; key-aware resolution is deferred (see below).
 
 ## Data model (proposed)
 
@@ -91,7 +103,8 @@ A new persisted artifact — the editable source — keyed to the existing chart
 interface RoadmapSpec {
   version: number;
   timeSig: { beats: number; unit: number };   // e.g. { beats: 4, unit: 4 }
-  defaultKey: string;                          // render key when none chosen, e.g. "G"
+  renderKey: string;                           // the key THIS artifact is rendered in, e.g. "G"
+                                               // (v1: re-key = change this + re-render + replace)
   barsPerLine?: number;                        // layout hint (default 4)
   sections: RoadmapSection[];                  // ordered; the song form
 }
@@ -116,9 +129,21 @@ interface BarChange {
 - **Rendering** maps `RoadmapSection` → `SectionAnchor`, expands bar counts → `System`/`Bar` geometry on
   the grid, and `repeat`/`endings` → existing `RoadmapMarker`s (`lib/types.ts`) — so the **nav-graph
   resolver (`resolveRoadmap`) and conductor mode consume builder charts with zero new plumbing**.
-- **Storage**: builder charts are normal `chart_library` rows; the `RoadmapSpec` rides alongside (Open
-  Q2). Imports leave it null. This also dovetails with BYOS/git storage — a spec is far more diff-friendly
-  than a PDF (cf. `design-storage-notation.md` Phase 3 .md-first direction).
+- **Storage**: builder charts are normal `chart_library` rows; the `RoadmapSpec` rides alongside in a
+  nullable `source_spec jsonb` column (Open Q2). Imports leave it null. This also dovetails with BYOS/git
+  storage — a spec is far more diff-friendly than a PDF (cf. `design-storage-notation.md` Phase 3 .md-first
+  direction).
+- **`source_spec` lifecycle (explicit — Codex R1 MED).** The upload upsert preserves unspecified columns
+  (`app/api/charts/upload/route.ts:70`), so the column must be written on **every** path that can change a
+  chart's provenance, or a builder spec would orphan onto an imported file:
+  - **Builder save / re-render** → `source_spec = <spec>` (and a builder chart's PDF is regenerated, never
+    user-uploaded).
+  - **Import upload / replace** (the normal `uploadChart` path) → **must explicitly set `source_spec =
+    NULL`**, because replacing a builder chart with a PDF makes it an import; a stale spec would
+    mis-classify it (the edit UX uses spec-presence as the builder-vs-import signal) and let a later
+    re-render clobber the imported file. This requires adding an explicit `source_spec: null` to the
+    import upsert's column list.
+  - **Delete** → row removed; spec goes with it.
 
 ## Architecture / flow
 
@@ -140,8 +165,45 @@ NL text ──▶ [AI parse route]  ──▶ RoadmapSpec ──▶ [validator] 
   `isValidCalibration`).
 - **Renderer** (`lib/roadmap-render.ts`, pure-ish): `RoadmapSpec` + key → `{ pdfBytes, calibration }`.
   Deterministic grid layout; exact coords.
-- **Save**: render → upload PDF as a chart (reuse the upload route's upsert; preserves `chart_library.id`
-  on edit) → persist spec → write `verified` calibration for the new `source_hash`.
+- **Save = one server-owned route** (`/api/charts/roadmap/save`, proposed) — NOT loose client steps
+  (Codex R1 MED). The client posts `{ chart_id?, role, songTitle, spec }`; the route owns the whole
+  transaction:
+  1. **Validate** the spec (reject 4xx on invalid — never persist an unvalidated spec).
+  2. **Render** `spec → { pdfBytes, calibration }` (deterministic).
+  3. **Compute `source_hash`** from `pdfBytes` (same hashing the viewer/calibration path uses).
+  4. **Upload/replace** the PDF in storage and **upsert `chart_library`** on `(owner_id, song_key, role)`
+     — preserving `chart_library.id` on edit — **setting `source_spec = spec`** in the same write.
+  5. **Gate + upsert calibration**: run the rendered calibration through `isValidCalibration` /
+     `canVerify`; if it passes, upsert it as `verified` keyed `(chart_id, source_hash)`. (Born-verified,
+     but still gated — Decision #5.)
+  - **Do NOT call the `uploadChart()` helper** — it fires the converter (`triggerOverlayCreate`), which
+    would race a `draft` overlay against our `verified` one for the same `(chart_id, source_hash)`. The
+    builder writes its calibration directly and never invokes the converter.
+  - **Failure behavior**: storage upload fails → abort, surface error, no DB writes. Calibration gate
+    fails (should be impossible for renderer output, but defend the boundary) → keep the chart+spec, skip
+    the calibration write, log; the chart degrades to the manual rail rather than persisting a bad overlay.
+    On re-render replacing an existing artifact, only commit the new `source_hash` calibration after the
+    new file is stored (old-hash calibration lingers harmlessly, as with converter Replace semantics).
+
+## Transposition & the key dimension (Codex R1 HIGH)
+
+The headline "one spec, many keys" must be reconciled with the **key-blind** chart pipeline. Today a show
+resolves exactly **one** static chart artifact per `(owner, normalized title, role)`
+(`app/api/shows/[owner]/[show]/route.ts:94`); `SetlistSong.key` exists but **chart resolution ignores
+it**. So re-rendering a spec in Bb would *replace the single artifact for every show that uses that title*,
+not serve G to one show and Bb to another. The design must pick a rung:
+
+| Option | Behavior | Pipeline change | Verdict |
+|---|---|---|---|
+| **(a) Single static artifact, cheap re-key** | Spec carries `renderKey`; transpose = re-render + replace the one artifact. Author re-keys in a click instead of redrawing. | **None** — fits today's resolution. | **v1 (recommended).** |
+| (b) Retain per-key duplicate charts | Keep `Song X (Bb)` as separate library charts (today's workaround). | None | Rejected — defeats the point. |
+| (c) Key-aware multi-render | Derived render cache keyed `(chart_id, render_key)`, each with its own PDF/`source_hash`/`verified` calibration; **chart resolution becomes key-aware**, picking the render that matches `SetlistSong.key`. | **Significant** — new derived-render table/cache + resolution change at the cited route. | **Future enhancement.** Delivers true concurrent multi-key and finally collapses per-key dupes. |
+
+**Recommendation:** ship **(a)** in v1 (real workflow win: author once in NNS, retune the printed key on
+demand, pipeline-compatible), and design `RoadmapSpec` so it is forward-compatible with **(c)** — the spec
+is key-agnostic; only the *render+resolution* layer needs the later table/cache. v1 explicitly does **not**
+claim concurrent multi-key. Display-time transposition in the viewer is rejected: the substrate is a static
+PDF by Decision #1, and a live-transposing viewer would require a native NNS renderer, forking the pipeline.
 
 ## NNS scope (v1 → v2)
 
@@ -169,9 +231,10 @@ differentiator (and, per Graham, likely a current market gap).
 2. **AI parse route**: NL → `RoadmapSpec`; validator-gated; deterministic-fixture tests with a mocked
    model (per the repo's node-env vitest posture).
 3. **Builder UI**: NL input + structured editor + live preview + save into the library (role pick).
-4. **Transposition**: key selector → re-render; verify degree→chord mapping across keys.
+4. **Re-key (v1 transposition)**: key selector → re-render → replace the single artifact; verify
+   degree→chord mapping across keys. (Concurrent multi-key = deferred option (c).)
 5. **Edit loop**: re-open spec from a saved builder chart → re-render → replace file + rewrite verified
-   calibration.
+   calibration (via the save route; sets `source_spec`).
 
 ## UX flow (no dead ends)
 
@@ -182,8 +245,9 @@ differentiator (and, per Graham, likely a current market gap).
   The chart row needs a way to tell the two apart (Open Q2's stored spec is the signal).
 - **Delete / Duplicate**: normal chart CRUD (delete via existing route; Duplicate could clone the spec —
   e.g. a key variant — superseding the metadata-only duplicate for builder charts).
-- **Transpose**: key control in the builder; saving a different key is just a re-render (one spec, many
-  keys), so we generally do **not** create per-key duplicate charts anymore.
+- **Transpose (v1 = re-key)**: a key control in the builder re-renders and **replaces the single
+  artifact** for that title/role. This re-keys the chart everywhere it's used; it does not yet serve
+  different keys to different shows (that's the deferred option (c) — see §Transposition).
 
 ## Conductor-mode synergy (strategic)
 
@@ -205,7 +269,16 @@ overlay out. Worth weighing when sequencing that epic.
 3. **Auto-verify stance.** Confirm builder calibrations are born `verified` (proposed) — geometry is
    exact, so the only error class is "author described it wrong," which review wouldn't catch any better
    than the author's own preview. (Converter charts stay `draft`; the distinction is provenance.)
-4. **Quality vocabulary breadth for jazz.** Lock the v1 `quality` whitelist (triads + common 7ths +
+   Note (per Decision #5 / Codex R1 LOW): born-`verified` does **not** bypass the server boundary — the
+   save route still runs `isValidCalibration` / `canVerify` and the calibration must round-trip
+   `resolveRoadmap` before it is persisted as `verified`. Construction makes verification trivially pass,
+   it does not skip it.
+4. **Transposition rung for v1.** Ship option (a) — single static rendered artifact + cheap re-render to
+   re-key (forward-compatible with (c)) — and defer concurrent multi-key serving? Or pull (c) (derived
+   render cache keyed `(chart_id, render_key)` + key-aware resolution) forward into v1? **Recommendation:**
+   (a) for v1; (c) is a clean additive follow-up once a real multi-key need lands. See "Transposition & the
+   key dimension."
+5. **Quality vocabulary breadth for jazz.** Lock the v1 `quality` whitelist (triads + common 7ths +
    dim/sus). Full reharm/altered-dominant taxonomy is a rabbit hole — defer.
 
 ## Cross-references
