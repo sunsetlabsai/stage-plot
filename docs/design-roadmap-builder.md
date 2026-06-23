@@ -2,7 +2,10 @@
 
 Status: **DRAFT for review** · Branch `opus/design-roadmap-builder` · Owner: Graham (sign-off gate)
 · Codex R1 addressed (HIGH transposition/storage overclaim → honest key-dimension phasing; MED
-source_spec lifecycle + server-owned save route; LOW born-verified-still-gated) — awaiting Codex R2
+source_spec lifecycle + server-owned save route; LOW born-verified-still-gated)
+· Codex R2: no BLOCK/HIGH — addressed MED (non-atomic storage↔DB save ordering: stage-new-hash → DB
+commit → cleanup) + LOW (list APIs return `is_builder` flag; full spec via owner-only edit route).
+**Directionally ready; awaiting Graham sign-off.**
 
 ## Why now
 
@@ -144,6 +147,13 @@ interface BarChange {
     re-render clobber the imported file. This requires adding an explicit `source_spec: null` to the
     import upsert's column list.
   - **Delete** → row removed; spec goes with it.
+- **Provenance exposure to the client (Codex R2 LOW).** Current chart-list payloads expose neither
+  `source_spec` nor an `is_builder` flag, so the edit UX can't yet tell builder from import. Don't ship the
+  raw spec in list responses (heavier, and an owner-only concern). Instead the list APIs return a small,
+  safe boolean — `is_builder` (derived server-side as `source_spec IS NOT NULL`) — that drives the
+  Edit-roadmap-vs-Replace-PDF affordance; the **full spec is fetched lazily, owner-only, by the builder
+  edit route** (`GET /api/charts/roadmap/[id]`, proposed) when the author actually opens the builder. Keeps
+  list payloads lean and the spec behind the same ownership gate as the save route.
 
 ## Architecture / flow
 
@@ -179,11 +189,26 @@ NL text ──▶ [AI parse route]  ──▶ RoadmapSpec ──▶ [validator] 
   - **Do NOT call the `uploadChart()` helper** — it fires the converter (`triggerOverlayCreate`), which
     would race a `draft` overlay against our `verified` one for the same `(chart_id, source_hash)`. The
     builder writes its calibration directly and never invokes the converter.
-  - **Failure behavior**: storage upload fails → abort, surface error, no DB writes. Calibration gate
-    fails (should be impossible for renderer output, but defend the boundary) → keep the chart+spec, skip
-    the calibration write, log; the chart degrades to the manual rail rather than persisting a bad overlay.
-    On re-render replacing an existing artifact, only commit the new `source_hash` calibration after the
-    new file is stored (old-hash calibration lingers harmlessly, as with converter Replace semantics).
+  - **Ordering for the non-atomic storage↔DB boundary (Codex R2 MED).** Storage write and DB upsert are
+    not one transaction, and the dangerous case is *storage succeeds, then the `chart_library`/`source_spec`/
+    calibration DB write fails* — especially on **replace**, where overwriting the live path in place would
+    change the served bytes while DB metadata + calibration still describe the prior artifact (broken overlay
+    until the next successful save). Avoid in-place overwrite. The renderer is deterministic, so a re-render
+    yields a **new `source_hash`** → stage the new PDF at a **new, hash-addressed object path** (never the
+    old live path), *then* run the DB writes that flip the `chart_library` row to point at the new path and
+    upsert the new-hash `verified` calibration. Commit order: **(1)** stage new object → **(2)** DB upsert
+    (row pointer + `source_spec` + calibration) as the single commit point → **(3)** best-effort cleanup of
+    the now-orphaned old object.
+  - **Failure behavior** at each step:
+    - Stage (storage) fails → abort, surface error, **no DB writes**, nothing changed (old artifact still
+      live).
+    - DB upsert fails after staging → the live row still points at the **old** object (untouched), so the
+      chart keeps serving the prior valid artifact; surface error; the just-staged new object is orphaned
+      and swept by the same cleanup pass (a periodic GC of hash-addressed objects with no referencing row).
+      No partial/torn state is ever served.
+    - Calibration gate fails (should be impossible for renderer output, but defend the boundary) → keep the
+      chart+spec pointer, skip the calibration write, log; the chart degrades to the manual rail rather than
+      persisting a bad overlay.
 
 ## Transposition & the key dimension (Codex R1 HIGH)
 
