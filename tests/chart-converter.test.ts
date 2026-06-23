@@ -222,6 +222,30 @@ describe('buildCalibrationFromVision — roadmap binding', () => {
     expect(cal.roadmap!.some((m) => m.kind === 'ending')).toBe(false);
   });
 
+  it('DROPS (never narrows) an ending with a partially-unresolvable barIndices', () => {
+    // bar index 99 does not exist; the whole ending must be rejected, not
+    // silently shrunk into a one-bar ending over bar 2.
+    const cal = buildCalibrationFromVision(
+      withRoadmap([
+        { kind: 'repeatStart', barIndex: 0 },
+        { kind: 'ending', repeatStartBarIndex: 0, barIndices: [2, 99], numbers: [1] },
+      ]),
+    )!;
+    expect(cal.roadmap!.some((m) => m.kind === 'ending')).toBe(false);
+  });
+
+  it('DROPS (never narrows) an ending with a partially-invalid numbers list', () => {
+    // 0 is not a valid volta number; rejecting the marker avoids mutating which
+    // pass it plays on ([1,0] must not become [1]).
+    const cal = buildCalibrationFromVision(
+      withRoadmap([
+        { kind: 'repeatStart', barIndex: 0 },
+        { kind: 'ending', repeatStartBarIndex: 0, barIndices: [2, 3], numbers: [1, 0] },
+      ]),
+    )!;
+    expect(cal.roadmap!.some((m) => m.kind === 'ending')).toBe(false);
+  });
+
   it('binds segno/coda/toCoda/fine to their bars', () => {
     const cal = buildCalibrationFromVision(
       withRoadmap([

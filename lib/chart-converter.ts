@@ -278,15 +278,30 @@ export function buildCalibrationFromVision(vision: VisionChart): ChartCalibratio
       case 'ending': {
         const startBid = barId(rm.repeatStartBarIndex);
         const repeatStartId = startBid ? repeatStartIdByBarId.get(startBid) : undefined;
-        const barIds = Array.isArray(rm.barIndices)
-          ? rm.barIndices.map((i) => barId(i)).filter((x): x is string => !!x)
-          : [];
-        const numbers = Array.isArray(rm.numbers)
-          ? rm.numbers.filter((n) => isFiniteNum(n) && Number.isInteger(n) && n >= 1)
-          : [];
-        if (!repeatStartId || barIds.length === 0 || numbers.length === 0) break;
+        // DROP, never NARROW: an ending is structurally unbindable unless EVERY
+        // referenced bar resolves AND every volta number is valid. Filtering out
+        // the bad members would silently mutate the marker into a DIFFERENT valid
+        // one (e.g. barIndices [2,99] → a one-bar ending over bar 2, or numbers
+        // [2,3] → [2]) that isValidCalibration can't catch. So if any member is
+        // unresolved/invalid, reject the whole ending.
+        const rawBarIndices = Array.isArray(rm.barIndices) ? rm.barIndices : [];
+        const barIds = rawBarIndices.map((i) => barId(i));
+        const rawNumbers = Array.isArray(rm.numbers) ? rm.numbers : [];
+        const numbersValid = rawNumbers.every((n) => isFiniteNum(n) && Number.isInteger(n) && n >= 1);
+        if (
+          !repeatStartId ||
+          barIds.length === 0 ||
+          !barIds.every((x): x is string => !!x) ||
+          rawNumbers.length === 0 ||
+          !numbersValid
+        ) {
+          break;
+        }
         roadmap.push(
-          withConfidence({ id: nextId(), kind: 'ending', repeatStartId, barIds, numbers }, conf),
+          withConfidence(
+            { id: nextId(), kind: 'ending', repeatStartId, barIds: barIds as string[], numbers: rawNumbers },
+            conf,
+          ),
         );
         break;
       }
