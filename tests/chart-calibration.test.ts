@@ -1849,6 +1849,28 @@ describe('addBarline — geometry & cardinality', () => {
     const c = barsChart(4);
     expect(addBarline(c, 'nope', 0.3)).toBe(c);
   });
+
+  it('touches only the target system; global absNumber stays dense', () => {
+    const c: ChartCalibration = {
+      schemaVersion: CALIBRATION_SCHEMA_VERSION, status: 'verified',
+      sections: [{ id: 'sec', page: 1, x: 0.05, y: 0.05, label: 'A' }],
+      systems: [
+        { id: 'sys1', page: 1, yTop: 0.1, yBottom: 0.3, xStart: 0, xEnd: 1 },
+        { id: 'sys2', page: 1, yTop: 0.4, yBottom: 0.6, xStart: 0, xEnd: 1 },
+      ],
+      bars: [
+        { id: 'a1', systemId: 'sys1', xStart: 0, xEnd: 0.5, absNumber: 1, sectionId: null },
+        { id: 'a2', systemId: 'sys1', xStart: 0.5, xEnd: 1, absNumber: 2, sectionId: null },
+        { id: 'c1', systemId: 'sys2', xStart: 0, xEnd: 0.5, absNumber: 3, sectionId: null },
+        { id: 'c2', systemId: 'sys2', xStart: 0.5, xEnd: 1, absNumber: 4, sectionId: null },
+      ],
+    };
+    const next = addBarline(c, 'sys1', 0.25); // split a1 only
+    const s2 = next.bars!.filter((b) => b.systemId === 'sys2').sort((a, b) => a.xStart - b.xStart);
+    expect(s2.map((b) => [b.id, b.xStart, b.xEnd])).toEqual([['c1', 0, 0.5], ['c2', 0.5, 1]]);
+    const dense = next.bars!.map((b) => b.absNumber).sort((a, b) => a - b);
+    expect(dense).toEqual([1, 2, 3, 4, 5]); // global, contiguous, no gap
+  });
 });
 
 describe('addBarline — roadmap remap (non-destructive)', () => {
@@ -1945,6 +1967,29 @@ describe('removeBarline — geometry & cardinality', () => {
     const one = barsChart(1);
     expect(removeBarline(one, 'sys1', 1)).toBe(one);
   });
+
+  it('touches only the target system; global absNumber stays dense', () => {
+    const c: ChartCalibration = {
+      schemaVersion: CALIBRATION_SCHEMA_VERSION, status: 'verified',
+      sections: [{ id: 'sec', page: 1, x: 0.05, y: 0.05, label: 'A' }],
+      systems: [
+        { id: 'sys1', page: 1, yTop: 0.1, yBottom: 0.3, xStart: 0, xEnd: 1 },
+        { id: 'sys2', page: 1, yTop: 0.4, yBottom: 0.6, xStart: 0, xEnd: 1 },
+      ],
+      bars: [
+        { id: 'a1', systemId: 'sys1', xStart: 0, xEnd: 0.33, absNumber: 1, sectionId: null },
+        { id: 'a2', systemId: 'sys1', xStart: 0.33, xEnd: 0.66, absNumber: 2, sectionId: null },
+        { id: 'a3', systemId: 'sys1', xStart: 0.66, xEnd: 1, absNumber: 3, sectionId: null },
+        { id: 'c1', systemId: 'sys2', xStart: 0, xEnd: 0.5, absNumber: 4, sectionId: null },
+        { id: 'c2', systemId: 'sys2', xStart: 0.5, xEnd: 1, absNumber: 5, sectionId: null },
+      ],
+    };
+    const next = removeBarline(c, 'sys1', 1); // merge a1 + a2 only
+    const s2 = next.bars!.filter((b) => b.systemId === 'sys2').sort((a, b) => a.xStart - b.xStart);
+    expect(s2.map((b) => [b.id, b.xStart, b.xEnd])).toEqual([['c1', 0, 0.5], ['c2', 0.5, 1]]);
+    const dense = next.bars!.map((b) => b.absNumber).sort((a, b) => a - b);
+    expect(dense).toEqual([1, 2, 3, 4]); // global, contiguous after N-1
+  });
 });
 
 describe('removeBarline — roadmap remap', () => {
@@ -1991,6 +2036,20 @@ describe('removeBarline — roadmap remap', () => {
     expect(next.roadmap![0]).toMatchObject({ barId: 'bL' });
     expect(resolveRoadmap(next).ok).toBe(true);
   });
+
+  it('end-edge tie (L.xEnd === R.xEnd): the left bar keeps its end-edge marker', () => {
+    const c = customChart([
+      { id: 'bL', systemId: 'sys1', xStart: 0, xEnd: 0.5, absNumber: 1, sectionId: null },
+      { id: 'bR', systemId: 'sys1', xStart: 0.3, xEnd: 0.5, absNumber: 2, sectionId: null }, // same xEnd
+    ], [
+      { id: 'fn', kind: 'fine', barId: 'bL', edge: 'end' }, // tie → left wins, kept
+      { id: 'dc', kind: 'jump', barId: 'bR', edge: 'end', from: 'capo', until: 'fine' }, // dropped
+    ]);
+    const next = removeBarline(c, 'sys1', 1);
+    expect([next.bars![0].xStart, next.bars![0].xEnd]).toEqual([0, 0.5]);
+    expect(next.roadmap!.map((m) => m.id)).toEqual(['fn']);
+    expect(next.roadmap![0]).toMatchObject({ barId: 'bL' });
+  });
 });
 
 describe('removeBarline — bounded resolver sweep', () => {
@@ -2017,5 +2076,17 @@ describe('removeBarline — bounded resolver sweep', () => {
     expect(ids).toContain('e2'); // not auto-dropped — sweep never fired
     expect(ids).toContain('tc'); // unrelated incoherence preserved
     expect(resolveRoadmap(next).ok).toBe(false);
+  });
+
+  it('a remapped repeatEnd that lands on its own repeatStart bar is swept', () => {
+    const c = barsChart(4, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b2', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b3', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    // Merge b2 + b3: re (on b3) remaps to b2 — the very bar rs sits on, so the
+    // repeat closes on its own start. The sweep drops the edit-touched re.
+    const next = removeBarline(c, 'sys1', 2);
+    expect(next.roadmap!.map((m) => m.id)).toEqual(['rs']);
+    expect(resolveRoadmap(next).ok).toBe(true);
   });
 });
