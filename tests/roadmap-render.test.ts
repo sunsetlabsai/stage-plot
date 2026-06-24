@@ -115,3 +115,120 @@ describe('layoutRoadmap / buildCalibration — structural parity', () => {
     expect(cal.sections).toHaveLength(spec.sections.length);
   });
 });
+
+describe('layoutRoadmap — page spill', () => {
+  it('spills long forms onto multiple pages, preserving reading order', async () => {
+    const spec: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'C',
+      barsPerLine: 4,
+      sections: [{ id: 'long', label: 'Vamp', bars: 120 }],
+    };
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+
+    const layout = layoutRoadmap(spec);
+    expect(layout.pageCount).toBeGreaterThan(1);
+    expect(layout.systems.some((s) => s.page > 1)).toBe(true);
+
+    const cal = buildCalibration(spec, layout);
+    expect(cal.bars).toHaveLength(120);
+    expect((cal.bars ?? []).map((b) => b.absNumber)).toEqual(Array.from({ length: 120 }, (_, i) => i + 1));
+
+    const { pdfBytes } = await renderRoadmap(spec);
+    expect(pdfBytes.length).toBeGreaterThan(200);
+    expect(resolveRoadmap(cal).ok).toBe(true);
+  });
+});
+
+describe('renderRoadmap — navigation variants', () => {
+  it('renders a D.S. al Coda form (segno + coda + toCoda + jump)', async () => {
+    const spec: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'G',
+      sections: [
+        { id: 'a', label: 'A', bars: 4 },
+        { id: 'b', label: 'B', bars: 8 },
+        { id: 'c', label: 'Coda', bars: 4 },
+      ],
+      navigation: {
+        segno: { section: 1, bar: 1 },
+        coda: { section: 2, bar: 1 },
+        toCoda: { section: 1, bar: 8 },
+        jump: { at: { section: 1, bar: 8 }, from: 'segno', until: 'coda' },
+      },
+    };
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+
+    const { pdfBytes, calibration } = await renderRoadmap(spec);
+    expect(pdfBytes.length).toBeGreaterThan(200);
+    expect(resolveRoadmap(calibration).ok).toBe(true);
+    const kinds = new Set((calibration.roadmap ?? []).map((m) => m.kind));
+    expect(kinds.has('coda')).toBe(true);
+    expect(kinds.has('toCoda')).toBe(true);
+    expect(kinds.has('segno')).toBe(true);
+  });
+
+  it('renders a D.C. al Fine form (fine + jump)', async () => {
+    const spec: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'D',
+      sections: [
+        { id: 'a', label: 'A', bars: 8 },
+        { id: 'b', label: 'B', bars: 8 },
+      ],
+      navigation: {
+        fine: { section: 0, bar: 8 },
+        jump: { at: { section: 1, bar: 8 }, from: 'capo', until: 'fine' },
+      },
+    };
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+
+    const { calibration } = await renderRoadmap(spec);
+    expect(resolveRoadmap(calibration).ok).toBe(true);
+    const kinds = new Set((calibration.roadmap ?? []).map((m) => m.kind));
+    expect(kinds.has('fine')).toBe(true);
+    expect(kinds.has('jump')).toBe(true);
+  });
+});
+
+describe('renderRoadmap — chord content & header', () => {
+  function richSpec(): RoadmapSpec {
+    return {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'A',
+      sections: [
+        {
+          id: 'v',
+          label: 'Verse',
+          bars: 4,
+          changes: [
+            { bar: 1, chords: [{ degree: 1, held: true }] },                          // held diamond
+            { bar: 2, chords: [{ degree: 4, beats: 3 }, { degree: 5, bass: 7, beats: 1 }] }, // split bar
+          ],
+        },
+      ],
+    };
+  }
+
+  it('renders held diamonds and split bars deterministically', async () => {
+    const spec = richSpec();
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+    const a = await renderRoadmap(spec);
+    const b = await renderRoadmap(spec);
+    expect(a.pdfBytes.length).toBeGreaterThan(200);
+    expect(Buffer.from(a.pdfBytes).equals(Buffer.from(b.pdfBytes))).toBe(true);
+  });
+
+  it('threads a song title into the header (changes bytes, stays deterministic)', async () => {
+    const spec = richSpec();
+    const untitled = await renderRoadmap(spec);
+    const titled = await renderRoadmap(spec, { songTitle: 'Blue Skies' });
+    const titledAgain = await renderRoadmap(spec, { songTitle: 'Blue Skies' });
+    expect(Buffer.from(titled.pdfBytes).equals(Buffer.from(untitled.pdfBytes))).toBe(false);
+    expect(Buffer.from(titled.pdfBytes).equals(Buffer.from(titledAgain.pdfBytes))).toBe(true);
+  });
+});

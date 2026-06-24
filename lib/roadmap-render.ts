@@ -9,8 +9,11 @@
 // structural here, not hoped-for.
 //
 // Determinism is load-bearing: same spec → byte-identical PDF → stable source_hash
-// → idempotent re-render/replace. So layout uses fixed constants (below) and an
-// embedded, bundled font (TODO: bundle a font file; StandardFonts for the scaffold).
+// → idempotent re-render/replace. We get it from fixed layout constants (below),
+// stripped PDF dates, StandardFonts (byte-stable for the text), and VECTOR music
+// symbols (no binary font asset). The save path re-renders + re-hashes per save,
+// so within-version byte-stability is sufficient; a custom-bundled font would only
+// add cross-pdf-lib-version robustness and is deferred until/if that's needed.
 //
 // Coordinate model: ChartCalibration coords are normalized 0..1 within a page
 // (top→bottom for y, left→right for x), matching System/Bar/SectionAnchor. The
@@ -88,14 +91,27 @@ export interface RenderResult {
   calibration: ChartCalibration;
 }
 
+export interface RenderOptions {
+  songTitle?: string;  // printed in the header; the spec carries only renderKey
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 // Assumes `spec` already passed validateRoadmapSpec — the renderer is a pure
 // projection, not a second validator. Callers (save route) gate first.
-export async function renderRoadmap(spec: RoadmapSpec): Promise<RenderResult> {
+export async function renderRoadmap(spec: RoadmapSpec, opts: RenderOptions = {}): Promise<RenderResult> {
   const layout = layoutRoadmap(spec);
   const calibration = buildCalibration(spec, layout);
-  const pdfBytes = await drawRoadmapPdf(spec, layout);
+  const pdfBytes = await drawRoadmapPdf(spec, layout, opts);
   return { pdfBytes, calibration };
+}
+
+// A (sectionIndex, barInSection) → laid bar lookup. The single source both the
+// calibration projection and the PDF glyph pass use to resolve repeats/navigation
+// to concrete bars, so the two can't disagree on where a marker lands.
+function barIndex(layout: RoadmapLayout): Map<string, LaidBar> {
+  const m = new Map<string, LaidBar>();
+  for (const b of layout.bars) m.set(`${b.sectionIndex}:${b.barInSection}`, b);
+  return m;
 }
 
 // ── Stage 1: layout (pure, deterministic, the testable backbone) ──────────────
@@ -230,10 +246,9 @@ export function buildCalibration(spec: RoadmapSpec, layout: RoadmapLayout): Char
 function buildMarkers(spec: RoadmapSpec, layout: RoadmapLayout): RoadmapMarker[] {
   const markers: RoadmapMarker[] = [];
 
-  // A lookup from (sectionIndex, barInSection) → barId for BarRef resolution and
+  // Shared (sectionIndex, barInSection) → bar lookup for BarRef resolution and
   // section-edge anchoring.
-  const barAt = new Map<string, LaidBar>();
-  for (const b of layout.bars) barAt.set(`${b.sectionIndex}:${b.barInSection}`, b);
+  const barAt = barIndex(layout);
   const refBarId = (ref: BarRef): string | null => barAt.get(`${ref.section}:${ref.bar}`)?.id ?? null;
 
   // Section-scoped repeats.
@@ -313,14 +328,18 @@ function buildMarkers(spec: RoadmapSpec, layout: RoadmapLayout): RoadmapMarker[]
 }
 
 // ── Stage 3: PDF projection (layout → bytes) ──────────────────────────────────
-// SCAFFOLD draw: page(s), a title/key header, section labels, system baselines,
-// barlines, and per-bar Nashville chord text. Richer glyph fidelity is TODO and
-// does NOT affect the calibration (structure is already exact above):
-//   TODO: repeat |: :| brackets, volta 1./2. brackets, segno/coda/D.S./D.C./Fine
-//         symbols, diamond (held) noteheads, split-bar beat subdivisions/dots.
-//   TODO: bundle + embed a deterministic font (StandardFonts here is fine for the
-//         scaffold but ties bytes to pdf-lib's bundled metrics).
-async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout): Promise<Uint8Array> {
+// Draws the substrate: header (title + key), section labels, system baselines,
+// barlines, split-bar-aware Nashville chord text with held diamonds, and the
+// roadmap glyph pass (repeat |: :| dots, volta 1./2. brackets, coda ⊕ sign,
+// Segno / To Coda / Fine / D.S./D.C. directives). None of this touches the
+// calibration — structure is exact upstream; this is pure visual projection.
+//
+// Music symbols are drawn as VECTOR shapes (not a music font): Helvetica has no
+// segno/coda/diamond glyphs, and vectors are deterministic with zero binary asset.
+// StandardFonts is already byte-stable (proven by the determinism test); the save
+// path re-renders + re-hashes per save, so within-version byte-stability — which
+// StandardFonts + vectors give us — is all the source_hash/replace logic needs.
+async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: RenderOptions): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   // Strip non-deterministic metadata so identical specs → identical bytes.
   doc.setCreationDate(new Date(0));
@@ -334,50 +353,181 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout): Promise
     pages.push(doc.addPage([PAGE_W, PAGE_H]));
   }
 
-  // Header (page 1): title placeholder + key. Title comes from the chart row at
-  // save time; the spec itself carries only renderKey, so the renderer prints the
-  // key and leaves the title strip to the save layer (TODO: thread songTitle in).
-  drawText(pages[0], fontBold, `Key: ${spec.renderKey}`, MARGIN_X, MARGIN_TOP - 36, 14);
+  // Header (page 1): song title (if provided by the save layer) + key.
+  if (opts.songTitle) {
+    drawText(pages[0], fontBold, opts.songTitle, MARGIN_X, MARGIN_TOP - 36, 18);
+  }
+  drawText(pages[0], fontBold, `Key: ${spec.renderKey}`, MARGIN_X, MARGIN_TOP - 58, 12);
 
+  const beats = spec.timeSig.beats;
   for (const sys of layout.systems) {
     const pg = pages[sys.page - 1];
     if (sys.label) {
       drawText(pg, fontBold, sys.label, denormX(sys.xStart), denormYTop(sys.labelYTop) - 12, 11);
     }
-    // System baseline.
     const yTopPt = denormYTop(sys.yTop);
     const yBottomPt = denormYTop(sys.yBottom);
-    drawLine(pg, denormX(sys.xStart), yBottomPt, denormX(sys.xEnd), yBottomPt);
+    drawLine(pg, denormX(sys.xStart), yBottomPt, denormX(sys.xEnd), yBottomPt, 1);
 
     for (const bar of sys.bars) {
-      const xs = denormX(bar.xStart);
-      // Leading barline.
-      drawLine(pg, xs, yTopPt, xs, yBottomPt);
-      // Chord text for this bar (if any change is addressed to it).
-      const label = chordLabelForBar(bar);
-      if (label) drawText(pg, font, label, xs + 4, yTopPt - 16, 12);
+      drawLine(pg, denormX(bar.xStart), yTopPt, denormX(bar.xStart), yBottomPt, 1); // leading barline
+      drawBarContent(pg, font, bar, beats, yTopPt);
     }
-    // Trailing barline at the end of the system.
-    const xe = denormX(sys.xEnd);
-    drawLine(pg, xe, yTopPt, xe, yBottomPt);
+    drawLine(pg, denormX(sys.xEnd), yTopPt, denormX(sys.xEnd), yBottomPt, 1); // trailing barline
   }
+
+  drawRoadmapGlyphs(pages, fontBold, spec, layout);
 
   return doc.save();
 }
 
-// The Nashville chord text for a bar, built from its section's changes (sparse;
-// a bar with no change renders blank). Split bars join with a thin space.
-function chordLabelForBar(bar: LaidBar): string | null {
+// Per-bar Nashville chord content. Sparse: a bar with no addressed change draws
+// nothing. Split bars place each chord at its beat offset and drop a thin
+// subdividing tick at each interior boundary; held chords get a diamond.
+function drawBarContent(page: PDFPage, font: PDFFont, bar: LaidBar, beats: number, bandTopPt: number): void {
   const change = bar.section.changes?.find((c) => c.bar === bar.barInSection);
-  if (!change) return null;
-  return change.chords
-    .map((c) => {
-      const quality = c.quality ?? '';
-      const bass = c.bass ? `/${c.bass}` : '';
-      const held = c.held ? '◇' : '';
-      return `${c.degree}${quality}${bass}${held}`;
-    })
-    .join('  ');
+  if (!change) return;
+
+  const x0 = denormX(bar.xStart);
+  const x1 = denormX(bar.xEnd);
+  const w = x1 - x0;
+  const textY = bandTopPt - 18;
+
+  const n = change.chords.length;
+  let cumBeats = 0;
+  change.chords.forEach((c, i) => {
+    const frac = beats > 0 ? cumBeats / beats : i / n;
+    const cx = x0 + 4 + frac * w;
+    if (i > 0) {
+      const tx = x0 + frac * w;
+      drawLine(page, tx, bandTopPt, tx, bandTopPt - 8, 0.5); // interior split tick
+    }
+    const label = `${c.degree}${c.quality ?? ''}${c.bass ? `/${c.bass}` : ''}`;
+    drawText(page, font, label, cx, textY, 12);
+    if (c.held) {
+      const dx = cx + font.widthOfTextAtSize(label, 12) + 5;
+      drawDiamond(page, dx, textY + 4, 3.5);
+    }
+    cumBeats += c.beats ?? (beats > 0 ? beats / n : 0);
+  });
+}
+
+// The roadmap glyph pass — resolves repeats + navigation to laid bars (the SAME
+// barIndex the calibration uses) and draws the printed symbols.
+function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, layout: RoadmapLayout): void {
+  const barAt = barIndex(layout);
+  const pageOf = (b: LaidBar): PDFPage => pages[b.page - 1];
+
+  spec.sections.forEach((section, si) => {
+    const repeat = section.repeat;
+    if (!repeat) return;
+    const first = barAt.get(`${si}:1`);
+    const last = barAt.get(`${si}:${section.bars}`);
+    if (!first || !last) return;
+
+    drawRepeatStart(pageOf(first), first);
+    if (repeat.kind === 'plain') {
+      drawRepeatEnd(pageOf(last), last, font, repeat.times);
+    } else {
+      repeat.endings.forEach((ending) => {
+        const startBar = barAt.get(`${si}:${ending.bars.start}`);
+        const endBar = barAt.get(`${si}:${ending.bars.start + ending.bars.count - 1}`);
+        // Bracket math only makes sense within one system/page; voltas sit at a
+        // section's tail and are short, so this holds in practice.
+        if (startBar && endBar && startBar.page === endBar.page && startBar.systemId === endBar.systemId) {
+          drawVoltaBracket(pageOf(startBar), startBar, endBar, font, ending.passes);
+        }
+      });
+    }
+  });
+
+  const nav = spec.navigation;
+  if (!nav) return;
+  const at = (ref: BarRef): LaidBar | undefined => barAt.get(`${ref.section}:${ref.bar}`);
+
+  if (nav.segno) { const b = at(nav.segno); if (b) drawDirective(pageOf(b), font, b, 'start', 'Segno'); }
+  if (nav.coda) {
+    const b = at(nav.coda);
+    if (b) {
+      const cx = denormX(b.xStart) + 8;
+      const cy = denormYTop(b.yTop) + 12;
+      drawCodaSign(pageOf(b), cx, cy, 5);
+      drawDirective(pageOf(b), font, b, 'start', 'Coda', 18);
+    }
+  }
+  if (nav.toCoda) { const b = at(nav.toCoda); if (b) drawDirective(pageOf(b), font, b, 'end', 'To Coda'); }
+  if (nav.fine) { const b = at(nav.fine); if (b) drawDirective(pageOf(b), font, b, 'end', 'Fine'); }
+  if (nav.jump) { const b = at(nav.jump.at); if (b) drawDirective(pageOf(b), font, b, 'end', jumpLabel(nav.jump.from, nav.jump.until)); }
+}
+
+// "D.C." / "D.S." with an optional al-Fine / al-Coda suffix.
+function jumpLabel(from: 'capo' | 'segno', until: 'end' | 'fine' | 'coda'): string {
+  const head = from === 'capo' ? 'D.C.' : 'D.S.';
+  if (until === 'fine') return `${head} al Fine`;
+  if (until === 'coda') return `${head} al Coda`;
+  return head;
+}
+
+// ── Glyph primitives (vector; deterministic) ──────────────────────────────────
+
+// |: — thick start barline + two dots just inside the bar's left edge.
+function drawRepeatStart(page: PDFPage, bar: LaidBar): void {
+  const x = denormX(bar.xStart) + 2;
+  const top = denormYTop(bar.yTop);
+  const bottom = denormYTop(bar.yBottom);
+  const h = top - bottom;
+  drawLine(page, x, top, x, bottom, 2.5);
+  drawDot(page, x + 4, bottom + h * 0.38, 1.6);
+  drawDot(page, x + 4, bottom + h * 0.62, 1.6);
+}
+
+// :| — two dots + thick end barline just inside the bar's right edge; ×N if >2.
+function drawRepeatEnd(page: PDFPage, bar: LaidBar, font: PDFFont, times: number): void {
+  const x = denormX(bar.xEnd) - 2;
+  const top = denormYTop(bar.yTop);
+  const bottom = denormYTop(bar.yBottom);
+  const h = top - bottom;
+  drawDot(page, x - 4, bottom + h * 0.38, 1.6);
+  drawDot(page, x - 4, bottom + h * 0.62, 1.6);
+  drawLine(page, x, top, x, bottom, 2.5);
+  if (times > 2) drawText(page, font, `\u00d7${times}`, x - 18, top + 3, 9);
+}
+
+// Volta bracket: a horizontal line above the ending bars, a down-tick at the
+// start, and the pass numbers (e.g. "1." or "2.–3.").
+function drawVoltaBracket(page: PDFPage, startBar: LaidBar, endBar: LaidBar, font: PDFFont, passes: number[]): void {
+  const x0 = denormX(startBar.xStart);
+  const x1 = denormX(endBar.xEnd);
+  const y = denormYTop(startBar.yTop) + 10;
+  drawLine(page, x0, y, x1, y, 1);          // top of bracket
+  drawLine(page, x0, y, x0, y - 8, 1);      // left down-tick
+  const label = passes.length > 1 ? `${passes[0]}.\u2013${passes[passes.length - 1]}.` : `${passes[0]}.`;
+  drawText(page, font, label, x0 + 3, y - 9, 8);
+}
+
+// ⊕ — coda sign: outline circle with a vertical + horizontal line through it.
+function drawCodaSign(page: PDFPage, cx: number, cy: number, r: number): void {
+  page.drawCircle({ x: cx, y: cy, size: r, borderColor: rgb(0, 0, 0), borderWidth: 1 });
+  drawLine(page, cx, cy - r - 2, cx, cy + r + 2, 1);
+  drawLine(page, cx - r - 2, cy, cx + r + 2, cy, 1);
+}
+
+// ◇ — held/whole-note diamond (4-line rhombus).
+function drawDiamond(page: PDFPage, cx: number, cy: number, half: number): void {
+  drawLine(page, cx, cy + half, cx + half, cy, 1);
+  drawLine(page, cx + half, cy, cx, cy - half, 1);
+  drawLine(page, cx, cy - half, cx - half, cy, 1);
+  drawLine(page, cx - half, cy, cx, cy + half, 1);
+}
+
+// A text directive (Segno / Coda / To Coda / Fine / D.S. al Coda…) anchored above
+// the band at the bar's start or end edge. `dx` nudges past an adjacent glyph.
+function drawDirective(page: PDFPage, font: PDFFont, bar: LaidBar, edge: 'start' | 'end', text: string, dx = 0): void {
+  const y = denormYTop(bar.yTop) + 8;
+  const x = edge === 'start'
+    ? denormX(bar.xStart) + dx
+    : denormX(bar.xEnd) - font.widthOfTextAtSize(text, 9) - dx;
+  drawText(page, font, text, x, y, 9);
 }
 
 // ── PDF coordinate helpers (normalized 0..1 → PDF points, y flipped) ──────────
@@ -393,6 +543,10 @@ function drawText(page: PDFPage, font: PDFFont, text: string, x: number, y: numb
   page.drawText(text, { x, y, size, font, color: rgb(0, 0, 0) });
 }
 
-function drawLine(page: PDFPage, x1: number, y1: number, x2: number, y2: number): void {
-  page.drawLine({ start: { x: x1, y: y1 }, end: { x: x2, y: y2 }, thickness: 1, color: rgb(0, 0, 0) });
+function drawLine(page: PDFPage, x1: number, y1: number, x2: number, y2: number, thickness: number): void {
+  page.drawLine({ start: { x: x1, y: y1 }, end: { x: x2, y: y2 }, thickness, color: rgb(0, 0, 0) });
+}
+
+function drawDot(page: PDFPage, x: number, y: number, r: number): void {
+  page.drawCircle({ x, y, size: r, color: rgb(0, 0, 0) });
 }
