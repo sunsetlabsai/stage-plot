@@ -5,6 +5,14 @@ Status: **DRAFT for review** · Branch `opus/design-roadmap-builder` · Owner: G
 source_spec lifecycle + server-owned save route; LOW born-verified-still-gated)
 · Codex R2: no BLOCK/HIGH — addressed MED (non-atomic storage↔DB save ordering: stage-new-hash → DB
 commit → cleanup) + LOW (list APIs return `is_builder` flag; full spec via owner-only edit route).
+· Codex R3 (3 BLOCKING + 2 NB) ALL folded: (B1) DB commit pinned to a single `save_builder_chart`
+Postgres RPC (chart_library + calibration in ONE transaction; atomic rollback = no torn state at the
+table level); (B2) volta shape was inexpressive `number[][]` → `SectionRepeat` discriminated union
+(`plain{times}` | `volta{endings:VoltaEnding[]}`, `bars:{start,count}` + `passes[]`) mapping 1:1 to
+resolveRoadmap's EITHER-plain-OR-volta rule; (B3) no spec field for global jumps → pinned
+`RoadmapNavigation` block (segno/coda/toCoda/fine/jump via `BarRef`), validator mirrors resolver
+preconditions; (NB) spec↔calibration parity assertion in the save route; (NB) renderer embeds a fixed
+bundled font for metric determinism.
 **Directionally ready; awaiting Graham sign-off.**
 
 ## Why now
@@ -110,6 +118,7 @@ interface RoadmapSpec {
                                                // (v1: re-key = change this + re-render + replace)
   barsPerLine?: number;                        // layout hint (default 4)
   sections: RoadmapSection[];                  // ordered; the song form
+  navigation?: RoadmapNavigation;              // OPTIONAL global jumps/targets (D.S./D.C./Coda/Fine/Segno)
 }
 
 interface RoadmapSection {
@@ -117,7 +126,7 @@ interface RoadmapSection {
   label: string;                               // "Intro", "Verse", "Chorus", "Solo"
   bars: number;                                // count (the form math the validator checks)
   changes?: BarChange[];                       // optional NNS changes, one entry per bar (or sparse)
-  repeat?: { times: number; endings?: number[][] }; // maps to RoadmapMarker repeat/ending on render
+  repeat?: SectionRepeat;                      // section-scoped repeat; maps to RoadmapMarkers on render
 }
 
 interface BarChange {
@@ -125,13 +134,60 @@ interface BarChange {
   // split bar = >1 chord sharing the measure; beats sum to timeSig.beats
   chords: { degree: number; quality?: string; bass?: number; beats?: number; held?: boolean }[];
 }
+
+// A repeat is EITHER a plain |: … :|×times OR a volta repeat (1st/2nd… endings) —
+// NEVER both. This discriminated union encodes that at the type level, matching
+// resolveRoadmap §5#4 exactly (a repeatStart binds EITHER a repeatEnd OR endings,
+// never both) so the renderer can't emit an unresolvable marker set. The repeat is
+// section-scoped: the repeatStart anchors the section's FIRST bar (start edge).
+type SectionRepeat =
+  | { kind: 'plain'; times: number }           // |: … :|×times  → repeatStart + repeatEnd(times)
+  | { kind: 'volta'; endings: VoltaEnding[] };  // |: …[1.][2.]   → repeatStart + ending markers; times = max(passes)
+
+// One volta bracket. `bars` is a CONTIGUOUS range within the section (contiguity is
+// guaranteed by {start,count}, which the loose number[][] could not express — Codex R3
+// BLOCKING). `passes` = which repeat passes take this ending (e.g. [1] or [2,3]).
+interface VoltaEnding {
+  bars: { start: number; count: number };      // 1-based bar range within the section; start MUST be > 1
+                                               //   (after the section-anchored repeatStart) and count ≥ 1
+  passes: number[];                            // pass numbers; ⋃passes across endings must partition 1..max
+}
+
+// Global roadmap jumps/targets — segno/coda/D.S./D.C./Fine. The proposed spec
+// previously had no field for these even though NNS scope marks them v1 (Codex R3
+// BLOCKING). Each is a reference to a (section, bar) position the renderer resolves to
+// a barId and emits as the matching RoadmapMarker (`lib/types.ts`). All optional;
+// present only when the song uses them. The validator mirrors resolveRoadmap's
+// preconditions (below) so a born-verified chart can never carry a dangling jump.
+interface RoadmapNavigation {
+  segno?: BarRef;                              // 𝄋 target            → { kind:'segno',  edge:'start' }
+  coda?: BarRef;                               // ⊕ coda target       → { kind:'coda',   edge:'start' }
+  toCoda?: BarRef;                             // "To Coda" departure → { kind:'toCoda', edge:'end' }
+  fine?: BarRef;                               // Fine end point      → { kind:'fine',   edge:'end' }
+  jump?: {                                     // D.C. (from:'capo') / D.S. (from:'segno')
+    at: BarRef;                                //   departure bar     → { kind:'jump', edge:'end', from, until }
+    from: 'capo' | 'segno';
+    until: 'end' | 'fine' | 'coda';
+  };
+}
+
+// A position within the expanded form: section index (0-based, into spec.sections)
+// + 1-based bar within that section. The renderer maps this to the concrete barId
+// once bar geometry is expanded.
+interface BarRef { section: number; bar: number; }
 ```
 
 - `degree` 1–7 (Nashville). `quality` ∈ `{'', 'm', '7', 'maj7', 'm7', 'dim', 'sus', …}` (v1 subset).
   `bass` = slash-chord degree. `held` = diamond (whole-note hold). `beats` enables split bars.
 - **Rendering** maps `RoadmapSection` → `SectionAnchor`, expands bar counts → `System`/`Bar` geometry on
-  the grid, and `repeat`/`endings` → existing `RoadmapMarker`s (`lib/types.ts`) — so the **nav-graph
-  resolver (`resolveRoadmap`) and conductor mode consume builder charts with zero new plumbing**.
+  the grid, and `repeat`/`navigation` → existing `RoadmapMarker`s (`lib/types.ts`) — so the **nav-graph
+  resolver (`resolveRoadmap`) and conductor mode consume builder charts with zero new plumbing**:
+  - `repeat.kind:'plain'` → `repeatStart` (section's first bar, `edge:'start'`) + `repeatEnd`
+    (`repeatStartId`, `times`, last bar `edge:'end'`).
+  - `repeat.kind:'volta'` → one `repeatStart` + one `ending` per `VoltaEnding` (`repeatStartId`,
+    `barIds` = the section bars in `[start, start+count)`, `numbers` = `passes`).
+  - `navigation.{segno,coda,toCoda,fine,jump}` → the matching marker kinds, each `barId` resolved from its
+    `BarRef`.
 - **Storage**: builder charts are normal `chart_library` rows; the `RoadmapSpec` rides alongside in a
   nullable `source_spec jsonb` column (Open Q2). Imports leave it null. This also dovetails with BYOS/git
   storage — a spec is far more diff-friendly than a PDF (cf. `design-storage-notation.md` Phase 3 .md-first
@@ -171,8 +227,18 @@ NL text ──▶ [AI parse route]  ──▶ RoadmapSpec ──▶ [validator] 
 - **Parse route** (`/api/charts/roadmap/parse`, proposed): NL → `RoadmapSpec` via the Anthropic SDK
   (reuse the converter's key sourcing — platform key now, BYOA later). Returns the spec; **never writes**.
 - **Validator** (`lib/roadmap-spec.ts`, pure): bar math, section sums, time-sig consistency, degree/
-  quality whitelist, split-bar beat sums, repeat/ending balance. The DB-boundary gate (mirrors
-  `isValidCalibration`).
+  quality whitelist, split-bar beat sums. It **mirrors every `resolveRoadmap` precondition the spec can
+  violate**, so a valid spec always renders a resolvable (born-verified) calibration:
+  - **Repeats/voltas** (`SectionRepeat`): `plain.times ≥ 2`; for `volta`, each `VoltaEnding.bars` is in
+    range (`start > 1`, `count ≥ 1`, `start+count-1 ≤ section.bars`), ending ranges are **non-overlapping**,
+    and `⋃ passes` **partitions `1..max` with no gap/overlap** (resolveRoadmap §5#3/#6 — contiguity is free
+    from `{start,count}`).
+  - **Navigation** (`RoadmapNavigation`): every `BarRef` resolves to a real `(section, bar)`; `jump.from:
+    'segno'` requires `navigation.segno`; `jump.until:'coda'` requires both `coda` and `toCoda`;
+    `jump.until:'fine'` requires `fine` (mirrors resolveRoadmap's walk preconditions). At most one of each
+    global target (the model is single-segno/single-coda).
+  This is the DB-boundary gate (mirrors `isValidCalibration`); the save route additionally runs the
+  rendered output through the real `isValidCalibration`/`canVerify` + the spec↔calibration parity assertion.
 - **Renderer** (`lib/roadmap-render.ts`, pure-ish): `RoadmapSpec` + key → `{ pdfBytes, calibration }`.
   Deterministic grid layout; exact coords.
 - **Save = one server-owned route** (`/api/charts/roadmap/save`, proposed) — NOT loose client steps
@@ -180,12 +246,21 @@ NL text ──▶ [AI parse route]  ──▶ RoadmapSpec ──▶ [validator] 
   transaction:
   1. **Validate** the spec (reject 4xx on invalid — never persist an unvalidated spec).
   2. **Render** `spec → { pdfBytes, calibration }` (deterministic).
-  3. **Compute `source_hash`** from `pdfBytes` (same hashing the viewer/calibration path uses).
-  4. **Upload/replace** the PDF in storage and **upsert `chart_library`** on `(owner_id, song_key, role)`
-     — preserving `chart_library.id` on edit — **setting `source_spec = spec`** in the same write.
-  5. **Gate + upsert calibration**: run the rendered calibration through `isValidCalibration` /
-     `canVerify`; if it passes, upsert it as `verified` keyed `(chart_id, source_hash)`. (Born-verified,
-     but still gated — Decision #5.)
+  3. **Spec↔calibration parity assertion (Codex R3 NB).** `isValidCalibration`/`canVerify` prove the
+     calibration is *shape-valid and resolver-consistent*, but **not** that the renderer actually emitted what
+     the spec described — a renderer bug could pass the gate while drawing the wrong song. So before hashing,
+     assert builder-specific parity: emitted `bars.length` == Σ section bar counts; every emitted bar is
+     assigned to exactly one section; each section's bar span matches its spec count; every spec
+     `repeat`/`ending`/`navigation` marker is present in `roadmap` with the span/passes the spec named; and the
+     PDF + calibration were laid out with the **same** grid/layout constants (one shared module, asserted by a
+     golden-fixture test in chunk 1). Parity failure = renderer bug → 5xx, persist nothing.
+  4. **Compute `source_hash`** from `pdfBytes` (same hashing the viewer/calibration path uses).
+  5. **Gate** the rendered calibration through `isValidCalibration` / `canVerify` (born-verified but still
+     gated — Decision #5). Gate failure → 5xx, persist nothing (see Failure behavior).
+  6. **Stage** `pdfBytes` at the new hash-addressed object path, then **commit via the
+     `save_builder_chart` RPC** (one transaction): `chart_library` upsert on `(owner_id, song_key, role)` —
+     preserving `id` on edit, setting `storage_path` + `source_spec = spec` — **and** the `(chart_id,
+     source_hash)` calibration upsert as `verified`, atomically. Then best-effort cleanup of the old object.
   - **Do NOT call the `uploadChart()` helper** — it fires the converter (`triggerOverlayCreate`), which
     would race a `draft` overlay against our `verified` one for the same `(chart_id, source_hash)`. The
     builder writes its calibration directly and never invokes the converter.
@@ -196,19 +271,33 @@ NL text ──▶ [AI parse route]  ──▶ RoadmapSpec ──▶ [validator] 
     until the next successful save). Avoid in-place overwrite. The renderer is deterministic, so a re-render
     yields a **new `source_hash`** → stage the new PDF at a **new, hash-addressed object path** (never the
     old live path), *then* run the DB writes that flip the `chart_library` row to point at the new path and
-    upsert the new-hash `verified` calibration. Commit order: **(1)** stage new object → **(2)** DB upsert
-    (row pointer + `source_spec` + calibration) as the single commit point → **(3)** best-effort cleanup of
-    the now-orphaned old object.
+    upsert the new-hash `verified` calibration. Commit order: **(1)** stage new object → **(2)** the single
+    atomic DB commit (below) → **(3)** best-effort cleanup of the now-orphaned old object.
+  - **The DB commit MUST be one Postgres transaction, not two sequential upserts (Codex R3 BLOCKING).**
+    `chart_library` (row pointer + `storage_path` + `source_spec`) and `chart_calibration` (the verified
+    overlay) are **separate rows in separate tables**; writing them as two client calls means a crash between
+    them can flip the live row onto the new PDF while the matching `verified` calibration is missing — the
+    "torn state" the staging order was meant to prevent, just moved one layer in. Pin a **single
+    `SECURITY DEFINER` Postgres RPC** — `save_builder_chart(p_owner, p_song_key, p_role, p_chart_id,
+    p_storage_path, p_source_hash, p_source_spec jsonb, p_calibration jsonb)` — that performs the
+    `chart_library` upsert (preserving `id` on edit) **and** the `(chart_id, source_hash)` calibration upsert
+    **inside one transaction**, with an `owner_id` ownership guard (RBAC scope) on the target row. Either both
+    rows land or neither does. (Supabase/Postgres function = real transaction; note `feedback_neon_migrations`
+    — no advisory locks needed here, this is a plain BEGIN/COMMIT body, not a lock.) The route calls
+    `supabase.rpc('save_builder_chart', …)`; it does **not** issue the two upserts itself.
   - **Failure behavior** at each step:
     - Stage (storage) fails → abort, surface error, **no DB writes**, nothing changed (old artifact still
       live).
-    - DB upsert fails after staging → the live row still points at the **old** object (untouched), so the
-      chart keeps serving the prior valid artifact; surface error; the just-staged new object is orphaned
-      and swept by the same cleanup pass (a periodic GC of hash-addressed objects with no referencing row).
-      No partial/torn state is ever served.
-    - Calibration gate fails (should be impossible for renderer output, but defend the boundary) → keep the
-      chart+spec pointer, skip the calibration write, log; the chart degrades to the manual rail rather than
-      persisting a bad overlay.
+    - The RPC fails (validation inside the txn, calibration constraint, or crash) → the transaction **rolls
+      back atomically**: the live row still points at the **old** object with its **old** `source_spec` and
+      the **old** `verified` calibration intact, so the chart keeps serving the prior valid artifact; surface
+      error; the just-staged new object is orphaned and swept by the cleanup pass (a periodic GC of
+      hash-addressed objects with no referencing row). **No partial/torn state is ever served** — now true at
+      the table level, not just the storage level.
+    - Calibration gate fails (should be impossible for renderer output, but defend the boundary) → this is
+      checked **before** entering the RPC (route step 5 runs `isValidCalibration`/`canVerify` on the rendered
+      calibration); a failure means the RPC is never called, the prior artifact stays live, and we log. The
+      builder never persists a chart whose overlay didn't pass the gate.
 
 ## Transposition & the key dimension (Codex R1 HIGH)
 
@@ -239,10 +328,10 @@ PDF by Decision #1, and a live-transposing viewer would require a native NNS ren
 | Slash / bass degree (`5/7`) | ✅ | |
 | Split bars (`(1 4)`, beat-weighted) | ✅ | `beats` per chord, must sum to time sig |
 | Diamond / held (whole-note ring) | ✅ | `held: true` → render diamond + tie |
-| Repeats `|: :|`, 1st/2nd endings | ✅ | maps to existing `RoadmapMarker` |
+| Repeats `|: :|`, 1st/2nd endings | ✅ | `SectionRepeat` union → existing `RoadmapMarker` repeat/ending |
 | Pushes `>`, marcato `^`, staccato | ⏳ v2 | rhythmic micro-notation |
 | Multi-dot uneven beat spacing | ⏳ v2 | |
-| Segno/Coda/D.S./D.C./Fine | ✅* | already in `RoadmapMarker`; expose in spec if asked |
+| Segno/Coda/D.S./D.C./Fine | ✅ | `RoadmapNavigation` block → existing marker kinds; validator mirrors resolver preconditions (Codex R3) |
 
 Prior art for the *output* is mature (JotChord, 1Chart, Nashville Numbers App, iReal Pro's number view).
 None pair it with an **AI copilot that parses free-form English into the structure** — that's the
@@ -250,12 +339,16 @@ differentiator (and, per Graham, likely a current market gap).
 
 ## Chunking (build sequence — for a later build PR, not this doc)
 
-0. **Spec model + validator + tests** (pure; no UI/AI/render). The contract everything else binds to.
+0. **Spec model + validator + tests** (pure; no UI/AI/render). The contract everything else binds to —
+   incl. the `SectionRepeat` union, `VoltaEnding`, and `RoadmapNavigation`/`BarRef` shapes, with validator
+   tests for the repeat/volta partition + navigation precondition rules (Codex R3).
 1. **Renderer**: `RoadmapSpec`+key → `{ pdfBytes, ChartCalibration }`, golden-fixture tests (exact
    coords). Resolves Open Q1 (PDF gen).
 2. **AI parse route**: NL → `RoadmapSpec`; validator-gated; deterministic-fixture tests with a mocked
    model (per the repo's node-env vitest posture).
-3. **Builder UI**: NL input + structured editor + live preview + save into the library (role pick).
+3. **Builder UI + save route**: NL input + structured editor + live preview + save into the library (role
+   pick). Includes the `save_builder_chart` Postgres RPC migration (atomic chart_library + calibration
+   commit) and the spec↔calibration parity assertion (Codex R3).
 4. **Re-key (v1 transposition)**: key selector → re-render → replace the single artifact; verify
    degree→chord mapping across keys. (Concurrent multi-key = deferred option (c).)
 5. **Edit loop**: re-open spec from a saved builder chart → re-render → replace file + rewrite verified
@@ -288,6 +381,12 @@ overlay out. Worth weighing when sequencing that epic.
    dep (flagging per repo policy: no undeclared deps). Server-side keeps it deterministic and testable in
    the route; client-side reuses the browser we already have. **Recommendation:** server-side `pdf-lib` in
    the renderer so chunk 1 is unit-testable end-to-end without a browser. Needs Graham/Codex call.
+   - **Font determinism (Codex R3 NB).** Geometry is "exact by construction" **only if glyph metrics are
+     fixed**. A fallback/system font whose metrics differ by environment would drift text from the
+     coordinates the calibration asserts. So the renderer must **embed a single bundled font** (e.g. a
+     committed `.ttf`/`.otf` for the chord/degree text) and measure with it — never rely on pdf-lib's
+     StandardFonts resolution or any host font. The bundled font is part of the shared layout-constants
+     module the parity check pins, and the golden-fixture coords are computed against it.
 2. **Where the `RoadmapSpec` lives.** (A) nullable `source_spec jsonb` on `chart_library` (travels with
    the chart, null for imports) vs (B) a `chart_source` table. **Recommendation:** (A) — simplest, 1:1
    with the chart, and the presence of the column is the import-vs-builder signal the edit UX needs.
