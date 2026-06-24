@@ -504,7 +504,7 @@ function drawVoltaBracket(pages: PDFPage[], bars: LaidBar[], font: PDFFont, pass
     if (last && last[0].page === b.page && last[0].systemId === b.systemId) last.push(b);
     else groups.push([b]);
   }
-  const label = passes.length > 1 ? `${passes[0]}.\u2013${passes[passes.length - 1]}.` : `${passes[0]}.`;
+  const label = voltaLabel(passes);
   groups.forEach((group, gi) => {
     const page = pages[group[0].page - 1];
     const x0 = denormX(group[0].xStart);
@@ -516,6 +516,25 @@ function drawVoltaBracket(pages: PDFPage[], bars: LaidBar[], font: PDFFont, pass
       drawText(page, font, label, x0 + 3, y - 9, 8);
     }
   });
+}
+
+// Pass-number label for a volta ending. The validator allows any pass set
+// (unsorted, non-contiguous), so we sort and collapse only genuinely adjacent
+// runs into "a.–b."; gaps stay separate terms ("1. 3.") so the printed label
+// never implies a pass the ending doesn't actually take.
+export function voltaLabel(passes: number[]): string {
+  const sorted = [...passes].sort((a, b) => a - b);
+  const runs: string[] = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+  for (let i = 1; i <= sorted.length; i++) {
+    const cur = sorted[i];
+    if (i < sorted.length && cur === prev + 1) { prev = cur; continue; }
+    runs.push(start === prev ? `${start}.` : `${start}.\u2013${prev}.`);
+    start = cur;
+    prev = cur;
+  }
+  return runs.join(' ');
 }
 
 // ⊕ — coda sign: outline circle with a vertical + horizontal line through it.

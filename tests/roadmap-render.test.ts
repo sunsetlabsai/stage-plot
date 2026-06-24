@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderRoadmap, layoutRoadmap, buildCalibration } from '../lib/roadmap-render';
+import { renderRoadmap, layoutRoadmap, buildCalibration, voltaLabel } from '../lib/roadmap-render';
 import { validateRoadmapSpec, type RoadmapSpec } from '../lib/roadmap-spec';
 import { isValidCalibration, canVerify, resolveRoadmap, CALIBRATION_SCHEMA_VERSION } from '../lib/chart-calibration';
 
@@ -113,6 +113,24 @@ describe('layoutRoadmap / buildCalibration — structural parity', () => {
     const spec = navSpec();
     const cal = buildCalibration(spec, layoutRoadmap(spec));
     expect(cal.sections).toHaveLength(spec.sections.length);
+  });
+});
+
+describe('voltaLabel — honest pass-number rendering', () => {
+  it('renders a singleton pass', () => {
+    expect(voltaLabel([2])).toBe('2.');
+  });
+  it('collapses a contiguous run into a range', () => {
+    expect(voltaLabel([1, 2, 3])).toBe('1.\u20133.');
+  });
+  it('sorts unsorted input before collapsing', () => {
+    expect(voltaLabel([2, 1])).toBe('1.\u20132.');
+  });
+  it('keeps non-contiguous passes as separate terms (never implies a skipped pass)', () => {
+    expect(voltaLabel([1, 3])).toBe('1. 3.');
+  });
+  it('mixes a run and a gap', () => {
+    expect(voltaLabel([1, 2, 4])).toBe('1.\u20132. 4.');
   });
 });
 
