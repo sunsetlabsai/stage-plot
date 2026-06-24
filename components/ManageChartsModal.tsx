@@ -7,6 +7,7 @@ import { canonicalizeRole, displayRole, type ChartRole } from '@/lib/normalize';
 import { uploadChart, ChartUploadError, type ConvertResult } from '@/lib/chart-upload';
 import { availableRoles, applyUploadedChart, removeChartById } from '@/lib/chart-management';
 import { loadPdfDoc, renderPage } from '@/lib/pdf-viewer';
+import RoadmapBuilder from '@/components/RoadmapBuilder';
 
 const ACCEPT = '.pdf,.png,.jpg,.jpeg';
 
@@ -26,6 +27,7 @@ interface Props {
 export default function ManageChartsModal({ songTitle, charts, isOwner, onClose, onChartsChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [building, setBuilding] = useState(false);
   const [addRole, setAddRole] = useState<ChartRole | ''>('');
   // Track the previewed chart by id and derive the chart from the latest list:
   // Replace preserves chart_library.id but swaps the file, so deriving keeps the
@@ -78,6 +80,14 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
       };
       setError(msg[overlay.reason] ?? '');
     }
+  }
+
+  // A chart built from a RoadmapSpec is persisted server-side by the builder's
+  // /save route; we only fold the returned chart into the live list (replacing
+  // any existing chart for that role, like an upload).
+  function onBuilt(chart: Chart) {
+    onChartsChanged(applyUploadedChart(charts, chart));
+    setBuilding(false);
   }
 
   function onAddFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -212,6 +222,24 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
               </div>
             )}
 
+            {isOwner && free.length > 0 && (
+              <div className="flex items-center gap-2 pt-1">
+                <div className="flex-1 h-px bg-zinc-800" />
+                <span className="text-[10px] uppercase tracking-wide text-zinc-600">or</span>
+                <div className="flex-1 h-px bg-zinc-800" />
+              </div>
+            )}
+
+            {isOwner && free.length > 0 && (
+              <button
+                onClick={() => setBuilding(true)}
+                disabled={busy}
+                className="w-full px-3 py-1.5 rounded border border-blue-600/50 text-blue-300 text-sm font-medium hover:bg-blue-600/10 disabled:opacity-40"
+              >
+                Build a chart with AI
+              </button>
+            )}
+
             {error && <p className="text-sm text-amber-400 pt-1">{error}</p>}
 
             {/* Hidden file inputs drive both add + replace */}
@@ -229,6 +257,15 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
           </div>
         </div>
       </div>
+
+      {building && (
+        <RoadmapBuilder
+          songTitle={songTitle}
+          charts={charts}
+          onClose={() => setBuilding(false)}
+          onSaved={onBuilt}
+        />
+      )}
     </div>
   );
 }
