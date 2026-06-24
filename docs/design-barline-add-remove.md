@@ -1,13 +1,16 @@
 # Design — Add / Remove a Barline (local cardinality edit)
 
-Status: DESIGN — REVISED for Codex R2 (2 blocking folded). Build-on-GO only.
+Status: DESIGN — REVISED for Codex R3 (2 blocking folded). Build-on-GO only.
 **Decisions 2/3/5 changed** (union merge edge + deterministic position-based
-roadmap remap + `resolveRoadmap` dry-run sweep, replacing the original
-prune-only) — **Graham re-confirmed (all yes)**.
-R2 fixes: (1) survival by edge coordinate (`endKeeper = L.xEnd>=R.xEnd?L:R`) so
-the overlap case is correct; (2) post-remap `resolveRoadmap` sweep drops any
-marker the resolver proves incoherent (ending collisions, etc).
-NEXT: Codex R3 → build (#96 first, then CV snap #2).
+roadmap remap + **bounded** resolver sweep, replacing the original prune-only) —
+**Graham re-confirmed (all yes)**.
+R2 fixes: survival by edge coordinate (`endKeeper = L.xEnd>=R.xEnd?L:R`).
+R3 fixes: the resolver sweep is now **bounded** — (1) `error.markerIds` is the
+conflict-participant set, so drop only the single edit-touched loser, never an
+innocent/pre-existing marker or an untouched `repeatStart`; (2) precondition on a
+pre-coherent roadmap (skip the sweep for already-incoherent drafts — `:252-255`),
+so a local bar edit never deletes unrelated roadmap work.
+NEXT: Codex R4 → build (#96 first, then CV snap #2).
 Scope: ONE focused gap surfaced in #94 UAT — locally **add** or **remove** a
 single barline without re-distributing the whole system. Completes the manual
 barline edit set; pairs with CV snap (`docs/design-cv-barline-snap.md`) as its
@@ -98,25 +101,45 @@ they are stated in terms of `min`/`max` of the actual edge coordinates, so the
 overlapping case is handled, not assumed away.
 
 A tiny pure helper `remapRoadmapForBarEdit(roadmap, edits)` does the `barId`
-rewrite. Then **two** existing-machinery passes finish the cascade:
+rewrite and records the **edit-touched set** `T` = the markers this edit actually
+changed (remapped `barId`/`barIds`) ∪ the markers `pruneRoadmap` dropped for the
+vanished bar. Then the cascade finishes in two passes:
 
 1. `pruneRoadmap(roadmap, liveIds)` — drops markers on vanished bars + their
    orphaned repeat dependents (`chart-calibration.ts:204`).
-2. **Resolver dry-run sweep** (the B2 guard): remap can *preserve every id* yet
-   still produce a **resolver-level contradiction** that `pruneRoadmap` does not
-   catch — e.g. two `ending`s `[L]` and `[R]` for one repeat both collapse to
-   `[L]` ("endings overlap / share a bar", `chart-calibration.ts:703`), or an
-   `ending` on `R` lands on its own `repeatStart`'s bar (`:685`). So after remap +
-   prune we run `resolveRoadmap(candidate)` (`:588`, the single source of truth
-   for roadmap coherence); if it returns `{ ok:false, error:{ markerIds } }` we
-   **drop those marker(s)** and re-resolve, iterating to a fixpoint (bounded by
-   marker count). Everything dropped here joins the warn set. This reuses the
-   real validator rather than re-enumerating contradiction classes by hand, and
-   future-proofs against any new rule.
+2. **Bounded resolver sweep** (the B2 guard, R3-corrected): a remap that
+   *preserves every id* can still introduce a **resolver-level contradiction**
+   `pruneRoadmap` doesn't catch — two `ending`s `[L]`,`[R]` for one repeat both
+   collapse to `[L]` ("endings overlap / share a bar", `:703`), or a remapped
+   `ending` lands on its own `repeatStart`'s bar (`:685`). The sweep repairs
+   **only contradictions this edit could have caused**, under two strict guards so
+   a local bar edit never deletes unrelated roadmap work:
+
+   - **Precondition — only sweep a roadmap that was coherent before the edit.**
+     Mid-edit drafts are *intentionally* allowed to be unresolved (`:252-255`;
+     `resolveRoadmap` is a verify-time gate, `:130`, not an authoring lock). So if
+     `resolveRoadmap(before).ok === false`, **skip the sweep entirely** — do the
+     local remap/prune and leave every pre-existing contradiction untouched (the
+     calibration stays `draft`). The bar edit must not "fix" unrelated drafts.
+   - **Scope + minimal loser — `error.markerIds` is the *conflict participant set*,
+     not a delete set.** `resolveRoadmap` returns *all* markers involved in a
+     contradiction (e.g. both ending ids at `:705`, or `[repeatStart, ending]` at
+     `:687`). Deleting them all would over-cascade (and could drop a `repeatStart`
+     the edit never touched). Instead, when `resolveRoadmap(after)` returns
+     `{ ok:false, error:{ markerIds } }`, drop the **single deterministic loser**
+     = the participant that is **in `T`** (the marker this edit actually moved),
+     choosing by stable order (anchor-bar reading order, then marker id) if more
+     than one. If **no** participant is in `T`, the contradiction is pre-existing
+     → **leave it** (don't drop). Re-resolve and iterate to a fixpoint (bounded by
+     `|T|`, which strictly shrinks each drop).
+
+   Net: the sweep only ever removes a marker **this edit moved into a conflict**;
+   the innocent/pre-existing side of every conflict survives. Dropped markers join
+   the warn set.
 
 This is strictly better than blanket prune-by-bar-id (the original v1): it loses
-**only** markers whose anchor x literally disappears (plus any the resolver proves
-incoherent), never a marker whose anchor x is preserved on a neighbour. (Original
+**only** markers whose anchor x literally disappears, plus the edit-touched marker
+in any conflict the edit itself created — never an untouched neighbour. (Original
 prune-only v1 is recorded under Decisions 3/5 as the rejected alternative.)
 
 #### `removeBarline(cal, systemId, boundaryIndex)`
@@ -160,13 +183,16 @@ edge coordinates so both cases are correct.
      the only ones anchored to a vanished position; the **warn** enumerates them.
    - **`ending` whose `barIds` contains `R.id`** → rewrite `R.id → L.id` and
      **dedupe** within that ending.
-   - Apply via `remapRoadmapForBarEdit`, then `pruneRoadmap(roadmap, liveIds)`
-     (`liveIds` excludes `R.id`) to cascade orphaned repeat dependents, **then the
-     `resolveRoadmap` dry-run sweep** (marker-model §, B2): a remap that kept all
-     ids can still make two endings collide (`:703`) or put an ending on its
-     `repeatStart`'s bar (`:685`) — those markers are dropped to a fixpoint and
-     added to the warn set. Without this sweep a remap could silently persist an
-     unresolvable roadmap. [Codex R2 blocking #2.]
+   - Apply via `remapRoadmapForBarEdit` (recording the edit-touched set `T` = the
+     remapped end-edge markers + remapped endings), then `pruneRoadmap(roadmap,
+     liveIds)` (`liveIds` excludes `R.id`) to cascade orphaned repeat dependents,
+     **then the bounded resolver sweep** (marker-model §, B2/R3): only if the
+     roadmap was coherent *before* this remove (else skip — don't touch unrelated
+     draft contradictions); for each resolver conflict, drop the **single
+     edit-touched participant** (the remapped marker, e.g. the `[R]`-ending now
+     `[L]`), never the innocent pre-existing side and never an untouched
+     `repeatStart`. Iterate to a fixpoint over `T`; drops join the warn set.
+     [Codex R2 #2 + R3 #1/#2.]
    - **Warn-before-destroy:** the UI computes the drop set as a **dry-run of the
      full cascade** (remap → prune → resolver sweep) and, if non-empty, warns
      "Removing this barline clears N navigation marker(s)" before applying.
@@ -203,12 +229,18 @@ edge coordinates so both cases are correct.
      after `bar.id` in reading order so the bracket stays contiguous and still
      spans the (now two) measures it covered.
    - `pruneRoadmap` after remap drops **nothing** (every id still live: `bar.id`
-     on `left`, `right.id` on `right`). The **`resolveRoadmap` sweep** is run for
-     symmetry but is provably a **no-op** for add: every original anchor position
-     survives, no ending bracket loses contiguity or collides, and no marker
-     crosses its `repeatStart`. Add is therefore genuinely non-destructive — no
-     warn. Same `remapRoadmapForBarEdit` + sweep path as remove; if the sweep ever
-     did fire it would drop+warn identically (defensive, never expected for add).
+     on `left`, `right.id` on `right`). The **bounded sweep** runs the same path
+     as remove and **provably drops nothing for add**, under either guard branch:
+     - If the roadmap was **incoherent before** the edit → the precondition
+       **skips the sweep**, so add never touches the pre-existing draft (this is
+       the R3 #2 fix: add must not "repair" unrelated contradictions).
+     - If the roadmap was **coherent before** → add preserves resolvability: every
+       original anchor x survives (`left.xStart`, `right.xEnd`), the only changed
+       ending gains a contiguous adjacent bar (no collision, no shared bar, no
+       bar crossing its `repeatStart`), so `resolveRoadmap(after).ok === true` and
+       the sweep finds no conflict. Either way `T`'s markers stay.
+     Add is therefore genuinely non-destructive — no warn. Same
+     `remapRoadmapForBarEdit` + bounded-sweep path as remove.
 
 ## Interaction (`app/[owner]/[show]/page.tsx`, Bars tool, system selected)
 
@@ -251,13 +283,14 @@ The Bars tool gains a small mode model; **drag (move) stays the default**:
    required so an overlapping converter input doesn't lose width. [was: plain
    `R.xEnd`; changed per Codex R1 blocking #3.]
 3. **CHANGED (supersedes prior "prune + warn, remap deferred"). Graham
-   re-confirmed.** Roadmap on remove = **position-based remap → prune →
-   `resolveRoadmap` dry-run sweep, then warn.** Survival is decided by edge
-   coordinate (`endKeeper = L.xEnd >= R.xEnd ? L : R`), so the overlap case is
-   correct; only markers anchored to a vanished position (the removed tick + the
-   shorter bar's end) and any the resolver proves incoherent are dropped, all
-   surfaced in one warn. Recommend **yes** — strictly better than prune-only.
-   [Codex R2 blocking #1 (position test) + #2 (resolver sweep).]
+   re-confirmed.** Roadmap on remove = **position-based remap → prune → bounded
+   resolver sweep, then warn.** Survival is by edge coordinate (`endKeeper =
+   L.xEnd >= R.xEnd ? L : R`), so the overlap case is correct. Dropped = markers
+   at a vanished position (removed tick + shorter bar's end) + the **single
+   edit-touched loser** of any conflict the edit itself created — and only if the
+   roadmap was coherent before the edit (pre-existing draft contradictions are
+   left alone). All surfaced in one warn. Recommend **yes** — strictly better than
+   prune-only. [Codex R2 #1/#2 + R3 #1/#2.]
 4. **Add splits only inside an existing measure**; tap in blank/margin = no-op
    (not "create a bar in empty space"). Recommend **yes**.
 5. **CHANGED (supersedes prior "non-destructive, end-anchor remap deferred").**
@@ -289,9 +322,11 @@ The Bars tool gains a small mode model; **drag (move) stays the default**:
     `bar.xEnd == right.xEnd`
   - an `ending` whose `barIds` contained the parent now contains BOTH halves'
     ids; bracket still contiguous
-  - **nothing pruned, resolver sweep is a no-op** — pruned set unchanged, no
-    markers lost (regression guard against the old "stays on left, one bar early");
-    a chart with endings spanning the split bar still resolves `ok:true`
+  - **nothing pruned, bounded sweep is a no-op (both guard branches):**
+    - before-coherent chart with endings spanning the split bar → still resolves
+      `ok:true`, sweep drops nothing (regression guard vs old "one bar early")
+    - before-INCOHERENT draft (pre-existing unrelated contradiction) → precondition
+      skips the sweep; add leaves that marker intact (no surprise deletion) [R3 #2]
 
 `removeBarline`
 - merge interior boundary k → one measure `[L.xStart, max(L.xEnd, R.xEnd)]`,
@@ -312,13 +347,19 @@ The Bars tool gains a small mode model; **drag (move) stays the default**:
     dropped (the old label-based rule wrongly dropped it) [Codex R2 blocking #1]
   - an **end-edge** marker on `R` (anchor `.5`, now interior) is **dropped**
   - regression guard: assert these two outcomes are swapped vs the contiguous case
-- **resolver sweep (B2) — remap keeps ids but resolver rejects:** [Codex R2 #2]
-  - two `ending`s `[L]` and `[R]` for the same `repeatStart`: after `R.id→L.id`
-    both become `[L]` → `resolveRoadmap` returns "endings overlap / share a bar"
-    (`:703`) → one ending dropped to fixpoint, counted in warn
-  - an `ending` on `R` that, remapped to `L`, lands on its own `repeatStart`'s bar
-    → resolver "volta ending precedes its repeatStart" (`:685`) → dropped + warned
-  - a roadmap that stays coherent after remap → sweep drops nothing (no false drop)
+- **bounded resolver sweep (B2 + R3) — drop only the edit-touched loser:**
+  - two `ending`s `[L]` (pre-existing) and `[R]` for the same `repeatStart`: after
+    `R.id→L.id` both are `[L]` → resolver returns BOTH ids (`:705`), but only the
+    **remapped** ending (in `T`) is dropped; the **pre-existing `[L]` ending
+    survives** (assert exactly one dropped, and it's the remapped one) [R3 #1]
+  - an `ending` on `R` that, remapped to `L`, lands on its `repeatStart`'s bar →
+    resolver returns `[repeatStart, ending]` (`:687`); only the **ending** (in `T`)
+    is dropped — the **`repeatStart` survives** (no over-cascade) [R3 #1]
+  - **precondition guard:** a roadmap that was **already incoherent before** the
+    remove (e.g. a pre-existing `:685` violation elsewhere, unrelated to this bar)
+    → sweep is **skipped**; that unrelated marker is **NOT** dropped by the edit
+    [R3 #2]
+  - a roadmap coherent before AND after remap → sweep drops nothing (no false drop)
 - **cascade:** pruning a `repeatStart` (at the removed tick) also prunes its
   dependent `repeatEnd`/`ending` (parity with `autoDistributeBars`/`removeSystem`)
 - dry-run drop set = on-the-line markers + cascade + resolver-rejected markers;
