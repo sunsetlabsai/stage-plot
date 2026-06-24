@@ -75,6 +75,8 @@ import {
   resizeSystemBand,
   moveBarBoundary,
   autoDistributeBars,
+  addBarline,
+  removeBarline,
   systemsForPage,
 } from '@/lib/chart-calibration';
 import type { TraversalStep } from '@/lib/chart-calibration';
@@ -1662,14 +1664,18 @@ function SectionMarker({
 // barline tick (N bars → N+1 boundaries) gets a wide invisible hit-strip so it
 // can be dragged horizontally onto the real printed barline.
 function SystemBand({
-  system, bars, box, selected, flagged, onSelect, onResizeStart, onBoundaryResizeStart,
+  system, bars, box, selected, flagged, addBarMode, selectedBoundaryIndex,
+  onSelect, onAddBarline, onResizeStart, onBoundaryResizeStart,
 }: {
   system: System;
   bars: Bar[];
   box: CanvasBox;
   selected: boolean;
   flagged: boolean;
+  addBarMode: boolean;
+  selectedBoundaryIndex: number | null;
   onSelect: () => void;
+  onAddBarline: (x: number) => void;
   onResizeStart: (edge: 'top' | 'bottom', e: ReactPointerEvent<HTMLDivElement>) => void;
   onBoundaryResizeStart: (index: number, e: ReactPointerEvent<HTMLDivElement>) => void;
 }) {
@@ -1689,8 +1695,21 @@ function SystemBand({
     <>
       <div
         data-chart-overlay-interactive
-        onClick={(e) => { e.stopPropagation(); onSelect(); }}
+        onClick={(e) => {
+          e.stopPropagation();
+          // In Add mode, a tap inside the selected band splits the measure under
+          // x; otherwise it (de)selects the band.
+          if (selected && addBarMode) {
+            const r = e.currentTarget.getBoundingClientRect();
+            const xNorm = system.xStart + ((e.clientX - r.left) / r.width) * (system.xEnd - system.xStart);
+            onAddBarline(xNorm);
+          } else {
+            onSelect();
+          }
+        }}
         className={`absolute ${selected ? 'bg-sky-500/15 ring-2 ring-sky-400' : 'bg-zinc-400/10 ring-1 ring-zinc-500'} ${
+          selected && addBarMode ? 'cursor-copy' : ''
+        } ${
           flagged ? 'outline-dashed outline-2 outline-offset-1 outline-amber-400' : ''
         }`}
         style={{ left, top, width, height, pointerEvents: 'auto', touchAction: 'manipulation' }}
@@ -1726,7 +1745,9 @@ function SystemBand({
           data-chart-overlay-interactive
           onPointerDown={(e) => onBoundaryResizeStart(i, e)}
           onClick={(e) => e.stopPropagation()}
-          className="absolute w-3.5 -translate-x-1/2 cursor-ew-resize hover:bg-sky-400/20"
+          className={`absolute w-3.5 -translate-x-1/2 cursor-ew-resize ${
+            i === selectedBoundaryIndex ? 'bg-red-500/40 ring-1 ring-red-400' : 'hover:bg-sky-400/20'
+          }`}
           style={{
             left: box.left + bx * box.width,
             top,
@@ -1903,6 +1924,7 @@ function CalibrationOverlay({
   calibration, box, page, mode, calTool, seekId, holdId, editingId,
   barMode, barRedline, onBarTap,
   selectedSystemId, onDropSystem, onSelectSystem, onResizeSystem, onMoveBoundary,
+  addBarMode, selectedBoundary, onAddBarline, onTapBoundary,
   onDrop, onSeek, onHold, onRelabel, onDelete, onBeginEdit,
   selectedBarId, selectedMarkerId, endingBarIds, resolveErrorIds,
   flaggedSectionIds, flaggedSystemIds, flaggedMarkerIds,
@@ -1924,6 +1946,10 @@ function CalibrationOverlay({
   onSelectSystem: (id: string | null) => void;
   onResizeSystem: (id: string, yTop: number, yBottom: number) => void;
   onMoveBoundary: (systemId: string, boundaryIndex: number, x: number) => void;
+  addBarMode: boolean;
+  selectedBoundary: { systemId: string; index: number } | null;
+  onAddBarline: (systemId: string, x: number) => void;
+  onTapBoundary: (systemId: string, index: number) => void;
   onDrop: (x: number, y: number) => void;
   onSeek: (id: string) => void;
   onHold: (id: string) => void;
@@ -1960,17 +1986,19 @@ function CalibrationOverlay({
   const overlayRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<
     | { kind: 'band'; id: string; edge: 'top' | 'bottom'; other: number }
-    | { kind: 'boundary'; systemId: string; index: number }
+    | { kind: 'boundary'; systemId: string; index: number; startX: number; startY: number; moved: boolean }
     | null
   >(null);
   const boxRef = useRef(box);
   const onResizeRef = useRef(onResizeSystem);
   const onMoveBoundaryRef = useRef(onMoveBoundary);
+  const onTapBoundaryRef = useRef(onTapBoundary);
   // Keep the drag-loop's refs current without re-subscribing the listener.
   useEffect(() => {
     boxRef.current = box;
     onResizeRef.current = onResizeSystem;
     onMoveBoundaryRef.current = onMoveBoundary;
+    onTapBoundaryRef.current = onTapBoundary;
   });
   useEffect(() => {
     const move = (e: globalThis.PointerEvent) => {
@@ -1987,12 +2015,39 @@ function CalibrationOverlay({
         else onResizeRef.current(d.id, d.other, ny);
       } else {
         if (!b.width) return;
+        // Below a small threshold the gesture is still a candidate TAP (select a
+        // tick to remove); only once it clearly moves does it become a drag.
+        if (!d.moved && Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 4) return;
+        d.moved = true;
         let nx = (e.clientX - r.left - b.left) / b.width;
         nx = nx < 0 ? 0 : nx > 1 ? 1 : nx;
         onMoveBoundaryRef.current(d.systemId, d.index, nx);
       }
     };
-    const up = () => { dragRef.current = null; };
+    const up = (e: globalThis.PointerEvent) => {
+      const d = dragRef.current;
+      if (d && d.kind === 'boundary') {
+        // Classify on the release displacement, not just prior pointermove
+        // events: a release within the threshold (no real drag delivered) is a
+        // TAP → select for removal; anything past it is a drag we've already
+        // tracked, so apply its final position here too in case no pointermove
+        // landed between press and release.
+        const released = Math.hypot(e.clientX - d.startX, e.clientY - d.startY);
+        if (!d.moved && released < 4) {
+          onTapBoundaryRef.current(d.systemId, d.index);
+        } else {
+          const ov = overlayRef.current;
+          const b = boxRef.current;
+          if (ov && b.width) {
+            const r = ov.getBoundingClientRect();
+            let nx = (e.clientX - r.left - b.left) / b.width;
+            nx = nx < 0 ? 0 : nx > 1 ? 1 : nx;
+            onMoveBoundaryRef.current(d.systemId, d.index, nx);
+          }
+        }
+      }
+      dragRef.current = null;
+    };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
     return () => {
@@ -2011,7 +2066,7 @@ function CalibrationOverlay({
 
   const beginBoundary = (sys: System, index: number, e: ReactPointerEvent<HTMLDivElement>) => {
     e.stopPropagation();
-    dragRef.current = { kind: 'boundary', systemId: sys.id, index };
+    dragRef.current = { kind: 'boundary', systemId: sys.id, index, startX: e.clientX, startY: e.clientY, moved: false };
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* unsupported */ }
   };
 
@@ -2078,7 +2133,10 @@ function CalibrationOverlay({
           bars={allBars.filter((b) => b.systemId === sys.id)}
           selected={sys.id === selectedSystemId}
           flagged={flaggedSystemIds.has(sys.id)}
+          addBarMode={addBarMode}
+          selectedBoundaryIndex={selectedBoundary && selectedBoundary.systemId === sys.id ? selectedBoundary.index : null}
           onSelect={() => onSelectSystem(sys.id)}
+          onAddBarline={(x) => onAddBarline(sys.id, x)}
           onResizeStart={(edge, e) => beginResize(sys, edge, e)}
           onBoundaryResizeStart={(index, e) => beginBoundary(sys, index, e)}
         />
@@ -2330,6 +2388,7 @@ function ChartNavigator({
   const containerRef = useRef<HTMLDivElement>(null);
   const docRef = useRef<import('pdfjs-dist').PDFDocumentProxy | null>(null);
   const prevSongIdxRef = useRef(currentIdx);
+  const prevPageNumRef = useRef(1);
 
   // ── Chart calibration (realtime chart control, step 1: section rail) ──
   const [calMode, setCalMode] = useState<'perform' | 'calibrate'>('perform');
@@ -2343,6 +2402,12 @@ function ChartNavigator({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [calTool, setCalTool] = useState<'sections' | 'bars' | 'roadmap'>('sections');
   const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
+  // ── Bars-tool cardinality edits (add / remove a single barline) ──
+  // addBarMode = the "＋ Add barline" toggle (a tap inside a band splits at x);
+  // selectedBoundary = an interior tick tapped (not dragged) for removal. The
+  // two are mutually exclusive; both clear on tool/mode/system change.
+  const [addBarMode, setAddBarMode] = useState(false);
+  const [selectedBoundary, setSelectedBoundary] = useState<{ systemId: string; index: number } | null>(null);
   // ── Roadmap tool state ──
   // selectedBarId = the bar the marker palette acts on; selectedMarkerId = a
   // placed marker tapped for deletion (delete-to-resolve). endingDraft = the
@@ -2373,6 +2438,17 @@ function ChartNavigator({
       setPageNum(1);
     }
   }, [currentIdx]);
+
+  // A tick selection is page-local — a selected boundary lives on a system on the
+  // current page. When the page changes (arrows, swipe, ref-jump, chart switch),
+  // clear it so the Remove button can't act on an off-page (hidden) tick. Guarded
+  // by a ref so the clear only fires on an actual page change, not every render.
+  useEffect(() => {
+    if (pageNum !== prevPageNumRef.current) {
+      prevPageNumRef.current = pageNum;
+      setSelectedBoundary(null);
+    }
+  }, [pageNum]);
 
   // Clamp activeChartIdx when filtered charts shrink (e.g., role filter change)
   const clampedChartIdx = charts.length > 0 ? Math.min(activeChartIdx, charts.length - 1) : 0;
@@ -2452,11 +2528,43 @@ function ChartNavigator({
     setCalibration((c) => (c ? resizeSystemBand(c, id, yTop, yBottom) : c));
   const moveBoundary = (systemId: string, boundaryIndex: number, x: number) =>
     setCalibration((c) => (c ? moveBarBoundary(c, systemId, boundaryIndex, x) : c));
-  const setSystemBars = (id: string, count: number) =>
+  const setSystemBars = (id: string, count: number) => {
+    // The stepper re-distributes evenly (destructive), which renumbers every
+    // tick — drop any pending tick selection so the Remove button can't act on a
+    // stale index, and disarm Add mode (it would otherwise stay armed across the
+    // destructive redistribution).
+    setSelectedBoundary(null);
+    setAddBarMode(false);
     setCalibration((c) => (c ? autoDistributeBars(c, id, Math.max(0, count)) : c));
+  };
+  // Local cardinality edits (non-destructive to neighbors), beside the stepper:
+  // add splits the measure under x; remove merges the two bars a tick divides.
+  const addBarlineAt = (systemId: string, x: number) =>
+    setCalibration((c) => (c ? addBarline(c, systemId, x) : c));
+  const removeBarlineAt = (systemId: string, index: number) => {
+    setCalibration((c) => (c ? removeBarline(c, systemId, index) : c));
+    setSelectedBoundary(null);
+  };
+  // A tick TAP (vs drag) selects an interior boundary (1..N-1) for removal; the
+  // band edges (0, N) are extent, not dividers, so they never select.
+  const tapBoundary = (systemId: string, index: number) => {
+    const n = (calibration?.bars ?? []).filter((b) => b.systemId === systemId).length;
+    if (index < 1 || index > n - 1) { setSelectedBoundary(null); return; }
+    setAddBarMode(false);
+    setSelectedBoundary((cur) =>
+      cur && cur.systemId === systemId && cur.index === index ? null : { systemId, index });
+  };
+  // Selecting a system (or deselecting) clears any in-flight cardinality edit.
+  const selectSystem = (id: string | null) => {
+    setSelectedSystemId(id);
+    setSelectedBoundary(null);
+    setAddBarMode(false);
+  };
   const deleteSystem = (id: string) => {
     setCalibration((c) => (c ? removeSystem(c, id) : c));
     setSelectedSystemId(null);
+    setSelectedBoundary(null);
+    setAddBarMode(false);
   };
   const selectedSystem = selectedSystemId
     ? (calibration?.systems ?? []).find((s) => s.id === selectedSystemId) ?? null
@@ -2667,6 +2775,8 @@ function ChartNavigator({
       setSelectedBarId(null);
       setSelectedMarkerId(null);
       setEndingDraft(null);
+      setAddBarMode(false);
+      setSelectedBoundary(null);
       setCanvasBox(null);
       setReviewIdx(-1);
       setEverReviewed(false);
@@ -2863,7 +2973,7 @@ function ChartNavigator({
           )}
           {calibratable && (
             <button
-              onClick={() => { setCalMode((m) => (m === 'calibrate' ? 'perform' : 'calibrate')); setEditingId(null); setSelectedSystemId(null); }}
+              onClick={() => { setCalMode((m) => (m === 'calibrate' ? 'perform' : 'calibrate')); setEditingId(null); setSelectedSystemId(null); setAddBarMode(false); setSelectedBoundary(null); }}
               className={`px-2 py-1 rounded text-xs font-bold transition-colors ${
                 calMode === 'calibrate'
                   ? 'bg-sky-500 text-white'
@@ -2947,8 +3057,12 @@ function ChartNavigator({
             selectedSystemId={selectedSystemId}
             onDropSystem={dropSystem}
             onMoveBoundary={moveBoundary}
-            onSelectSystem={setSelectedSystemId}
+            onSelectSystem={selectSystem}
             onResizeSystem={resizeSystem}
+            addBarMode={addBarMode}
+            selectedBoundary={selectedBoundary}
+            onAddBarline={addBarlineAt}
+            onTapBoundary={tapBoundary}
             onDrop={dropSection}
             onSeek={seek}
             onHold={hold}
@@ -2981,6 +3095,7 @@ function ChartNavigator({
                     setCalTool(tool);
                     setSelectedSystemId(null); setEditingId(null);
                     setSelectedBarId(null); setSelectedMarkerId(null); setEndingDraft(null);
+                    setAddBarMode(false); setSelectedBoundary(null);
                   }}
                   className={`px-2 py-1 rounded text-[11px] font-bold capitalize transition-colors ${
                     calTool === tool ? 'bg-sky-500 text-white' : 'text-zinc-400 hover:text-white'
@@ -3044,9 +3159,41 @@ function ChartNavigator({
                     +
                   </button>
                 </div>
+                <span className="text-zinc-600">·</span>
+                {/* Local cardinality edits (don't re-distribute / wipe nudges like
+                    the stepper does). Add: toggle, then tap inside a measure. Remove:
+                    tap a barline tick to select it, then confirm. */}
+                <button
+                  onClick={() => { setAddBarMode((v) => !v); setSelectedBoundary(null); }}
+                  className={`px-2 h-6 rounded font-bold ${
+                    addBarMode ? 'bg-sky-500 text-white' : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
+                  }`}
+                >
+                  &#65291; Add barline
+                </button>
+                {selectedBoundary && selectedBoundary.systemId === selectedSystem.id && calibration && (() => {
+                  const dry = removeBarline(calibration, selectedBoundary.systemId, selectedBoundary.index);
+                  const lost = (calibration.roadmap?.length ?? 0) - (dry.roadmap?.length ?? 0);
+                  return (
+                    <button
+                      onClick={() => removeBarlineAt(selectedBoundary.systemId, selectedBoundary.index)}
+                      className="px-2 h-6 rounded font-bold bg-red-600 text-white hover:bg-red-500"
+                    >
+                      &#10005; Remove barline{lost > 0 ? ` (\u2212${lost} marker${lost === 1 ? '' : 's'})` : ''}
+                    </button>
+                  );
+                })()}
+                <span className="truncate text-zinc-500">
+                  {addBarMode
+                    ? 'tap inside a measure to split it'
+                    : selectedBoundary
+                      ? 'confirm removal, or tap the tick again to cancel'
+                      : 'tap a barline to remove · drag a tick to align'}
+                </span>
+                <span className="text-zinc-600">·</span>
                 <button
                   onClick={() => deleteSystem(selectedSystem.id)}
-                  className="text-zinc-500 hover:text-red-400 underline"
+                  className="text-zinc-500 hover:text-red-400 underline shrink-0"
                 >
                   Delete system
                 </button>
