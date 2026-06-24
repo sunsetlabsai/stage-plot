@@ -59,10 +59,23 @@ describe('validateRoadmapSpec — happy path', () => {
           id: 'chorus',
           label: 'Chorus',
           bars: 8,
-          repeat: { times: 2, endings: [[1], [2]] },
+          repeat: {
+            kind: 'volta',
+            endings: [
+              { bars: { start: 7, count: 1 }, passes: [1] },
+              { bars: { start: 8, count: 1 }, passes: [2] },
+            ],
+          },
           changes: [{ bar: 1, chords: [{ degree: 1, beats: 3 }, { degree: 5, bass: 7, beats: 1 }] }],
         },
       ],
+      navigation: {
+        segno: { section: 1, bar: 1 },
+        coda: { section: 2, bar: 8 },
+        toCoda: { section: 1, bar: 8 },
+        fine: { section: 2, bar: 8 },
+        jump: { at: { section: 2, bar: 8 }, from: 'segno', until: 'coda' },
+      },
     };
     expect(validateRoadmapSpec(spec).ok).toBe(true);
   });
@@ -230,47 +243,167 @@ describe('validateRoadmapSpec — split-bar beat math', () => {
   });
 });
 
-describe('validateRoadmapSpec — repeats & endings', () => {
-  it('accepts a plain repeat', () => {
+describe('validateRoadmapSpec — plain repeats', () => {
+  it('accepts a plain repeat on a multi-bar section', () => {
     const spec = baseSpec();
-    spec.sections[0].repeat = { times: 2 };
+    spec.sections[0].repeat = { kind: 'plain', times: 2 };
     expect(validateRoadmapSpec(spec).ok).toBe(true);
   });
 
-  it('rejects times < 2', () => {
+  it('rejects plain times < 2', () => {
     const spec = baseSpec();
-    spec.sections[0].repeat = { times: 1 };
-    expectError(spec, 'repeat.times must be an integer >= 2');
+    spec.sections[0].repeat = { kind: 'plain', times: 1 };
+    expectError(spec, 'plain repeat.times must be an integer >= 2');
   });
 
-  it('accepts balanced voltas', () => {
+  it('rejects a plain repeat on a 1-bar section (repeatStart/repeatEnd would collide)', () => {
     const spec = baseSpec();
-    spec.sections[0].repeat = { times: 3, endings: [[1, 2], [3]] };
+    spec.sections[0].bars = 1;
+    spec.sections[0].changes = undefined;
+    spec.sections[0].repeat = { kind: 'plain', times: 2 };
+    expectError(spec, 'section.bars >= 2');
+  });
+
+  it('rejects an unknown repeat kind', () => {
+    const spec = baseSpec();
+    // @ts-expect-error — exercising the runtime guard on a bad discriminant
+    spec.sections[0].repeat = { kind: 'loop', times: 2 };
+    expectError(spec, "repeat.kind must be 'plain' or 'volta'");
+  });
+});
+
+describe('validateRoadmapSpec — volta repeats', () => {
+  function voltaSpec(endings: unknown): RoadmapSpec {
+    const spec = baseSpec();
+    spec.sections[0].bars = 8;
+    spec.sections[0].changes = undefined;
+    // @ts-expect-error — tests feed deliberately malformed endings through the validator
+    spec.sections[0].repeat = { kind: 'volta', endings };
+    return spec;
+  }
+
+  it('accepts balanced, non-overlapping voltas', () => {
+    const spec = voltaSpec([
+      { bars: { start: 7, count: 1 }, passes: [1, 2] },
+      { bars: { start: 8, count: 1 }, passes: [3] },
+    ]);
     expect(validateRoadmapSpec(spec).ok).toBe(true);
   });
 
-  it('rejects fewer than 2 ending groups', () => {
-    const spec = baseSpec();
-    spec.sections[0].repeat = { times: 2, endings: [[1]] };
-    expectError(spec, 'at least 2 ending groups');
+  it('rejects fewer than 2 endings', () => {
+    expectError(voltaSpec([{ bars: { start: 7, count: 1 }, passes: [1] }]), 'at least 2 endings');
   });
 
-  it('rejects overlapping ending passes', () => {
-    const spec = baseSpec();
-    spec.sections[0].repeat = { times: 2, endings: [[1], [1, 2]] };
-    expectError(spec, 'appears in more than one ending');
+  it('rejects an ending starting at bar 1 (collides with the repeatStart)', () => {
+    expectError(
+      voltaSpec([
+        { bars: { start: 1, count: 1 }, passes: [1] },
+        { bars: { start: 8, count: 1 }, passes: [2] },
+      ]),
+      'bars.start must be > 1',
+    );
   });
 
-  it('rejects a gap in ending passes', () => {
-    const spec = baseSpec();
-    spec.sections[0].repeat = { times: 3, endings: [[1], [3]] };
-    expectError(spec, 'do not cover 1..3');
+  it('rejects an ending running past the section', () => {
+    expectError(
+      voltaSpec([
+        { bars: { start: 7, count: 4 }, passes: [1] },
+        { bars: { start: 8, count: 1 }, passes: [2] },
+      ]),
+      'runs past the section',
+    );
   });
 
-  it('rejects ending passes that disagree with times', () => {
+  it('rejects overlapping ending bar ranges', () => {
+    expectError(
+      voltaSpec([
+        { bars: { start: 6, count: 2 }, passes: [1] },
+        { bars: { start: 7, count: 1 }, passes: [2] },
+      ]),
+      'bar ranges overlap',
+    );
+  });
+
+  it('rejects overlapping passes', () => {
+    expectError(
+      voltaSpec([
+        { bars: { start: 7, count: 1 }, passes: [1] },
+        { bars: { start: 8, count: 1 }, passes: [1, 2] },
+      ]),
+      'appears in more than one ending',
+    );
+  });
+
+  it('rejects a gap in pass coverage', () => {
+    expectError(
+      voltaSpec([
+        { bars: { start: 7, count: 1 }, passes: [1] },
+        { bars: { start: 8, count: 1 }, passes: [3] },
+      ]),
+      'do not cover 1..3',
+    );
+  });
+});
+
+describe('validateRoadmapSpec — navigation', () => {
+  function navSpec(navigation: unknown): RoadmapSpec {
     const spec = baseSpec();
-    spec.sections[0].repeat = { times: 4, endings: [[1], [2]] };
-    expectError(spec, 'repeat.times is 4');
+    spec.sections = [
+      { id: 'a', label: 'A', bars: 4 },
+      { id: 'b', label: 'B', bars: 4 },
+    ];
+    // @ts-expect-error — tests feed deliberately malformed navigation through the validator
+    spec.navigation = navigation;
+    return spec;
+  }
+
+  it('accepts a full, internally consistent navigation block', () => {
+    const spec = navSpec({
+      segno: { section: 0, bar: 1 },
+      coda: { section: 1, bar: 4 },
+      toCoda: { section: 0, bar: 4 },
+      fine: { section: 1, bar: 4 },
+      jump: { at: { section: 1, bar: 4 }, from: 'segno', until: 'coda' },
+    });
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+  });
+
+  it('rejects a BarRef to a non-existent section', () => {
+    expectError(navSpec({ segno: { section: 5, bar: 1 } }), 'segno.section must index an existing section');
+  });
+
+  it('rejects a BarRef bar past its section length', () => {
+    expectError(navSpec({ segno: { section: 0, bar: 9 } }), 'segno.bar must be within 1..4');
+  });
+
+  it('rejects a standalone toCoda with no coda', () => {
+    expectError(navSpec({ toCoda: { section: 0, bar: 4 } }), 'navigation.toCoda requires navigation.coda');
+  });
+
+  it('rejects a segno jump with no segno', () => {
+    expectError(
+      navSpec({ jump: { at: { section: 0, bar: 4 }, from: 'segno', until: 'end' } }),
+      'jump.from "segno" requires navigation.segno',
+    );
+  });
+
+  it('rejects an al-Fine jump with no fine', () => {
+    expectError(
+      navSpec({ jump: { at: { section: 0, bar: 4 }, from: 'capo', until: 'fine' } }),
+      'jump.until "fine" requires navigation.fine',
+    );
+  });
+
+  it('rejects an al-Coda jump missing coda/toCoda', () => {
+    expectError(
+      navSpec({ jump: { at: { section: 0, bar: 4 }, from: 'capo', until: 'coda' } }),
+      'jump.until "coda" requires navigation.coda and navigation.toCoda',
+    );
+  });
+
+  it('rejects a bad jump.from / jump.until', () => {
+    expectError(navSpec({ jump: { at: { section: 0, bar: 4 }, from: 'x', until: 'end' } }), "jump.from must be 'capo' or 'segno'");
+    expectError(navSpec({ jump: { at: { section: 0, bar: 4 }, from: 'capo', until: 'x' } }), "jump.until must be 'end', 'fine', or 'coda'");
   });
 });
 

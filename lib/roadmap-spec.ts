@@ -22,6 +22,7 @@ export interface RoadmapSpec {
   renderKey: string;                           // printed key, e.g. "G" / "Bb" / "Am"
   barsPerLine?: number;                        // layout hint (default applied by the renderer)
   sections: RoadmapSection[];                  // ordered; the song form
+  navigation?: RoadmapNavigation;              // OPTIONAL global jumps/targets (D.S./D.C./Coda/Fine/Segno)
 }
 
 export interface RoadmapSection {
@@ -29,8 +30,47 @@ export interface RoadmapSection {
   label: string;                               // "Intro", "Verse", "Chorus", "Solo"
   bars: number;                                // count (the form math the validator checks)
   changes?: BarChange[];                       // optional NNS changes (sparse; one entry per addressed bar)
-  repeat?: { times: number; endings?: number[][] }; // maps to RoadmapMarker repeat/ending on render
+  repeat?: SectionRepeat;                      // section-scoped repeat; maps to RoadmapMarkers on render
 }
+
+// A repeat is EITHER a plain |: … :|×times OR a volta repeat (1st/2nd… endings) —
+// NEVER both. The discriminated union encodes that at the type level, matching
+// resolveRoadmap §5#4 (a repeatStart binds EITHER a repeatEnd OR endings, never
+// both) so the renderer cannot emit an unresolvable marker set. Section-scoped:
+// the repeatStart anchors the section's FIRST bar.
+export type SectionRepeat =
+  | { kind: 'plain'; times: number }            // |: … :|×times  → repeatStart + repeatEnd(times)
+  | { kind: 'volta'; endings: VoltaEnding[] };   // |: …[1.][2.]   → repeatStart + ending markers
+
+// One volta bracket. `bars` is a CONTIGUOUS range within the section (contiguity
+// guaranteed by {start,count}, which a loose number[][] could not express).
+// `passes` = which repeat passes take this ending (e.g. [1] or [2,3]).
+export interface VoltaEnding {
+  bars: { start: number; count: number };      // 1-based range within the section; start MUST be > 1, count >= 1
+  passes: number[];                            // ⋃ passes across endings must partition 1..max
+}
+
+// Global roadmap jumps/targets — segno/coda/D.S./D.C./Fine. Each is a reference to
+// a (section, bar) position the renderer resolves to a barId and emits as the
+// matching RoadmapMarker (lib/types.ts). All optional; present only when used. The
+// validator mirrors resolveRoadmap's preconditions so a born-verified chart can
+// never carry a dangling jump.
+export interface RoadmapNavigation {
+  segno?: BarRef;                              // 𝄋 target            → segno marker
+  coda?: BarRef;                               // ⊕ coda target       → coda marker
+  toCoda?: BarRef;                             // "To Coda" departure → toCoda marker
+  fine?: BarRef;                               // Fine end point      → fine marker
+  jump?: {                                     // D.C. (from:'capo') / D.S. (from:'segno')
+    at: BarRef;                                //   departure bar
+    from: 'capo' | 'segno';
+    until: 'end' | 'fine' | 'coda';
+  };
+}
+
+// A position within the form: section index (0-based, into spec.sections) + 1-based
+// bar within that section. The renderer maps this to a concrete barId once bar
+// geometry is expanded.
+export interface BarRef { section: number; bar: number; }
 
 export interface BarChange {
   bar: number;                                 // 1-based within the section
@@ -137,6 +177,7 @@ export function validateRoadmapSpec(input: unknown): SpecValidation {
   }
 
   const sectionIds = new Set<string>();
+  const sectionBars: number[] = [];            // bar count per section index (0 = invalid); for BarRef resolution
   s.sections.forEach((raw, i) => {
     const where = `section ${i + 1}`;
     if (!raw || typeof raw !== 'object') {
@@ -163,6 +204,7 @@ export function validateRoadmapSpec(input: unknown): SpecValidation {
     } else {
       secBars = sec.bars as number;
     }
+    sectionBars[i] = secBars;
 
     // Changes (optional, sparse).
     if (sec.changes !== undefined) {
@@ -191,9 +233,15 @@ export function validateRoadmapSpec(input: unknown): SpecValidation {
 
     // Repeat / endings.
     if (sec.repeat !== undefined) {
-      validateRepeat(sec.repeat, name, errors);
+      validateRepeat(sec.repeat, name, secBars, errors);
     }
   });
+
+  // Navigation (optional) — validated after sections so BarRefs resolve against
+  // the collected section bar counts.
+  if (s.navigation !== undefined) {
+    validateNavigation(s.navigation, sectionBars, errors);
+  }
 
   return errors.length > 0 ? { ok: false, errors } : { ok: true, spec: input as RoadmapSpec };
 }
@@ -260,50 +308,158 @@ function validateChords(chords: unknown, where: string, beats: number, errors: s
   }
 }
 
-// A repeat: times >= 2, and (when present) endings partition the passes 1..times
-// with no gap or overlap — the same balance rule the calibration resolver
-// enforces on voltas (lib/chart-calibration resolveRoadmap §5 #3).
-function validateRepeat(repeat: unknown, where: string, errors: string[]): void {
+// A section repeat is a discriminated union (SectionRepeat): EITHER a plain
+// |: … :|×times OR a volta repeat with endings — never both (mirrors
+// resolveRoadmap §5#4). A plain repeat emits repeatStart on the section's first
+// bar and repeatEnd on its last; resolveRoadmap rejects repeatEnd whose position
+// is <= the repeatStart (lib/chart-calibration.ts:954), so a 1-bar section would
+// collide them — hence section.bars >= 2 for a plain repeat.
+function validateRepeat(repeat: unknown, where: string, secBars: number, errors: string[]): void {
   if (!repeat || typeof repeat !== 'object') {
-    errors.push(`${where}: repeat must be an object { times, endings? }`);
+    errors.push(`${where}: repeat must be an object`);
     return;
   }
   const r = repeat as Record<string, unknown>;
 
-  let times = 0;
-  if (!isInt(r.times) || (r.times as number) < 2) {
-    errors.push(`${where}: repeat.times must be an integer >= 2`);
+  if (r.kind === 'plain') {
+    if (!isInt(r.times) || (r.times as number) < 2) {
+      errors.push(`${where}: plain repeat.times must be an integer >= 2`);
+    }
+    if (secBars > 0 && secBars < 2) {
+      errors.push(`${where}: a plain repeat needs section.bars >= 2 (a 1-bar section collides repeatStart and repeatEnd)`);
+    }
+  } else if (r.kind === 'volta') {
+    validateVolta(r.endings, where, secBars, errors);
   } else {
-    times = r.times as number;
+    errors.push(`${where}: repeat.kind must be 'plain' or 'volta'`);
   }
+}
 
-  if (r.endings === undefined) return;
-
-  if (!Array.isArray(r.endings) || r.endings.length < 2) {
-    errors.push(`${where}: repeat.endings must list at least 2 ending groups`);
+// Volta endings: each VoltaEnding.bars is a contiguous in-range slice of the
+// section (start > 1 — after the section-anchored repeatStart — and count >= 1,
+// not running past the section), ending ranges are non-overlapping, and the union
+// of passes partitions 1..max with no gap or overlap (resolveRoadmap §5 #3/#6).
+function validateVolta(endings: unknown, where: string, secBars: number, errors: string[]): void {
+  if (!Array.isArray(endings) || endings.length < 2) {
+    errors.push(`${where}: volta repeat must list at least 2 endings`);
     return;
   }
 
-  const seen = new Set<number>();
+  const seenPasses = new Set<number>();
+  const ranges: Array<{ start: number; end: number }> = [];
   let shapeBad = false;
-  r.endings.forEach((group, i) => {
-    if (!Array.isArray(group) || group.length === 0 || !group.every((n) => isInt(n) && (n as number) >= 1)) {
-      errors.push(`${where}: ending ${i + 1} must be a non-empty array of pass numbers >= 1`);
+
+  endings.forEach((raw, i) => {
+    const ew = `${where} ending ${i + 1}`;
+    if (!raw || typeof raw !== 'object') {
+      errors.push(`${ew} must be an object { bars, passes }`);
       shapeBad = true;
       return;
     }
-    for (const n of group as number[]) {
-      if (seen.has(n)) errors.push(`${where}: pass ${n} appears in more than one ending`);
-      seen.add(n);
+    const e = raw as Record<string, unknown>;
+
+    const bars = e.bars as Record<string, unknown> | undefined;
+    if (!bars || typeof bars !== 'object' || !isInt(bars.start) || !isInt(bars.count)) {
+      errors.push(`${ew}: bars must be { start, count } integers`);
+      shapeBad = true;
+    } else {
+      const start = bars.start as number;
+      const count = bars.count as number;
+      if (start <= 1) errors.push(`${ew}: bars.start must be > 1 (after the section-anchored repeatStart)`);
+      if (count < 1) errors.push(`${ew}: bars.count must be >= 1`);
+      if (secBars > 0 && start >= 1 && count >= 1 && start + count - 1 > secBars) {
+        errors.push(`${ew}: bars range runs past the section (${secBars} bars)`);
+      }
+      if (start > 1 && count >= 1) ranges.push({ start, end: start + count - 1 });
+    }
+
+    if (!Array.isArray(e.passes) || e.passes.length === 0 || !e.passes.every((n) => isInt(n) && (n as number) >= 1)) {
+      errors.push(`${ew}: passes must be a non-empty array of pass numbers >= 1`);
+      shapeBad = true;
+    } else {
+      for (const n of e.passes as number[]) {
+        if (seenPasses.has(n)) errors.push(`${where}: pass ${n} appears in more than one ending`);
+        seenPasses.add(n);
+      }
     }
   });
+
   if (shapeBad) return;
 
-  const max = Math.max(...seen);
+  const max = Math.max(...seenPasses);
   for (let n = 1; n <= max; n++) {
-    if (!seen.has(n)) errors.push(`${where}: ending passes do not cover 1..${max} (missing ${n})`);
+    if (!seenPasses.has(n)) errors.push(`${where}: ending passes do not cover 1..${max} (missing ${n})`);
   }
-  if (times > 0 && max !== times) {
-    errors.push(`${where}: ending passes top out at ${max} but repeat.times is ${times}`);
+
+  ranges.sort((a, b) => a.start - b.start);
+  for (let i = 1; i < ranges.length; i += 1) {
+    if (ranges[i].start <= ranges[i - 1].end) {
+      errors.push(`${where}: volta ending bar ranges overlap`);
+      break;
+    }
+  }
+}
+
+// Global navigation: every BarRef must resolve to a real (section, bar), and the
+// jump/target preconditions mirror resolveRoadmap's walk exactly so a born-verified
+// chart never carries a dangling marker: toCoda implies coda (standalone To Coda is
+// rejected at lib/chart-calibration.ts:890, independent of any jump); a segno-jump
+// needs a segno; an al-Coda jump needs both coda and toCoda; an al-Fine jump needs
+// a fine.
+function validateNavigation(nav: unknown, sectionBars: number[], errors: string[]): void {
+  if (!nav || typeof nav !== 'object') {
+    errors.push('navigation must be an object');
+    return;
+  }
+  const n = nav as Record<string, unknown>;
+
+  const checkRef = (ref: unknown, label: string): void => {
+    if (!ref || typeof ref !== 'object') {
+      errors.push(`navigation.${label} must be a { section, bar } reference`);
+      return;
+    }
+    const r = ref as Record<string, unknown>;
+    if (!isInt(r.section) || (r.section as number) < 0 || (r.section as number) >= sectionBars.length) {
+      errors.push(`navigation.${label}.section must index an existing section`);
+      return;
+    }
+    const bars = sectionBars[r.section as number];
+    if (!isInt(r.bar) || (r.bar as number) < 1 || (bars > 0 && (r.bar as number) > bars)) {
+      errors.push(`navigation.${label}.bar must be within 1..${bars || '?'} of its section`);
+    }
+  };
+
+  if (n.segno !== undefined) checkRef(n.segno, 'segno');
+  if (n.coda !== undefined) checkRef(n.coda, 'coda');
+  if (n.toCoda !== undefined) checkRef(n.toCoda, 'toCoda');
+  if (n.fine !== undefined) checkRef(n.fine, 'fine');
+
+  // toCoda implies coda — independent of any jump (resolveRoadmap rejects a
+  // standalone To Coda with no Coda).
+  if (n.toCoda !== undefined && n.coda === undefined) {
+    errors.push('navigation.toCoda requires navigation.coda');
+  }
+
+  if (n.jump !== undefined) {
+    if (!n.jump || typeof n.jump !== 'object') {
+      errors.push('navigation.jump must be an object { at, from, until }');
+      return;
+    }
+    const j = n.jump as Record<string, unknown>;
+    checkRef(j.at, 'jump.at');
+
+    if (j.from !== 'capo' && j.from !== 'segno') {
+      errors.push("navigation.jump.from must be 'capo' or 'segno'");
+    } else if (j.from === 'segno' && n.segno === undefined) {
+      errors.push('navigation.jump.from "segno" requires navigation.segno');
+    }
+
+    if (j.until !== 'end' && j.until !== 'fine' && j.until !== 'coda') {
+      errors.push("navigation.jump.until must be 'end', 'fine', or 'coda'");
+    } else if (j.until === 'fine' && n.fine === undefined) {
+      errors.push('navigation.jump.until "fine" requires navigation.fine');
+    } else if (j.until === 'coda' && (n.coda === undefined || n.toCoda === undefined)) {
+      errors.push('navigation.jump.until "coda" requires navigation.coda and navigation.toCoda');
+    }
   }
 }
