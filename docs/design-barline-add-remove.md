@@ -1,6 +1,9 @@
 # Design — Add / Remove a Barline (local cardinality edit)
 
-Status: DESIGN — awaiting Graham sign-off, then Codex. Build-on-GO only.
+Status: DESIGN — REVISED for Codex R1 (3 blocking folded). Build-on-GO only.
+**Decisions 2/3/5 changed** (union merge edge + deterministic edge-aware roadmap
+remap, replacing the original prune-only). Decisions 3/5 were signed off earlier
+under the prune-only model → **Graham re-confirm needed** before build.
 Scope: ONE focused gap surfaced in #94 UAT — locally **add** or **remove** a
 single barline without re-distributing the whole system. Completes the manual
 barline edit set; pairs with CV snap (`docs/design-cv-barline-snap.md`) as its
@@ -57,34 +60,84 @@ addBarline(cal: ChartCalibration, systemId: string, x: number): ChartCalibration
 ```
 
 Both pure, immutable, node-unit-testable (no DOM). Both reuse the existing
-`renumberBars(...)` + `pruneRoadmap(...)` machinery so the bar-cardinality
-cascade behaves **identically** to `autoDistributeBars`/`removeSystem`
-(`chart-calibration.ts:378-387`, `384-386`) — there is one renumber path and one
-roadmap-integrity path.
+`renumberBars(...)` for the absNumber cascade (identical to
+`autoDistributeBars`/`removeSystem`, `chart-calibration.ts:378-387`). For the
+roadmap they add **one** small edge-aware remap step **before** the existing
+`pruneRoadmap(...)`, so prune only ever drops genuinely-orphaned markers (below).
+
+### Roadmap marker model — why remap is deterministic (REVISED, supersedes prune-only)
+
+Every bar-referencing marker carries an explicit **edge** (`lib/types.ts:110-132`):
+
+- **start-edge** (`edge: 'start'`): `repeatStart`, `segno`, `coda` — anchored at
+  `bar.xStart`.
+- **end-edge** (`edge: 'end'`): `repeatEnd`, `toCoda`, `fine`, `jump` — anchored
+  at `bar.xEnd`.
+- **`ending`**: a volta bracket over a contiguous `barIds[]` set (no single edge).
+- Cross-references (`repeatEnd.repeatStartId`, `ending.repeatStartId`) point at a
+  **marker id**, not a bar id, so they are untouched by bar remap and survive as
+  long as their `repeatStart` survives.
+
+Because each marker's anchor (`barId` + `edge`) maps to a concrete x-position, a
+cardinality edit can compute **deterministically** whether that x-position still
+exists after the edit, and on which surviving bar:
+
+- A position that **survives** → rewrite the marker's `barId` to the survivor
+  (keep the marker, identical x).
+- A position that **vanishes** (it sat exactly on a removed barline) → drop it
+  (`pruneRoadmap`, with dependent cascade) — and **warn first**.
+
+This is strictly better than blanket prune-by-bar-id (the original v1): it loses
+**only** the markers whose anchor line literally disappears, never a marker whose
+anchor x is preserved on a neighbour. A tiny pure helper
+`remapRoadmapForBarEdit(roadmap, edits)` does the rewrite; `pruneRoadmap` then
+cascades anything still orphaned. (Original prune-only v1 is recorded under
+Decisions 3/5 as the rejected alternative.)
 
 #### `removeBarline(cal, systemId, boundaryIndex)`
 
+Let `L = bars[k-1]`, `R = bars[k]`. The removed barline is the **shared edge**
+between them (`L.xEnd ≈ R.xStart`).
+
 1. Resolve the system's bars in reading order. **No-op** (return input identity)
    if: system missing, `N < 2`, `boundaryIndex` not an integer in `1..N-1`.
-2. Merge: `merged = { ...bars[k-1], xEnd: bars[k].xEnd }` — keep the **left**
-   bar's id, `sectionId`, and absNumber slot; extend its right edge to the right
-   bar's. Drop `bars[k]`. (Contiguous result by construction; if the input had a
-   gap/overlap at that boundary the merge closes it, consistent with #94.)
+2. Merge into one measure that keeps `L`'s id/`sectionId`/absNumber slot and
+   spans the **union** of both bars:
+   `merged = { ...L, xEnd: Math.max(L.xEnd, R.xEnd) }`. Drop `R`.
+   - The **union edge** (`max`, not `R.xEnd`) is required: with an overlapping
+     converter input like `L=[0, .9]`, `R=[.4, .5]`, plain `R.xEnd` would
+     **shrink** the merged bar to `[0, .5]` and silently delete real width.
+     `max` → `[0, .9]`, no geometry lost. (Contiguous input: `max == R.xEnd`,
+     unchanged.) [Codex R1 blocking #3]
 3. `withoutConfidence(merged)` (manual structural edit → self-clears review
    flag), `status: 'draft'`.
 4. `renumberBars([...otherBars, ...nextSysBars], systems)`.
-5. **Roadmap cascade (the crux):** the right bar's id vanishes, so
-   `pruneRoadmap(cal.roadmap, liveIds)` drops any marker that referenced it —
-   **identical** to today's bar-deletion cascade. A removed barline that carried
-   repeat/volta/nav markers therefore clears those markers. That is correct
-   behavior (the structure those markers described no longer exists), but it is
-   **destructive of roadmap work**, so the UI must **warn before** a remove that
-   would drop markers (below). v1 = prune, not remap.
-   - *Considered and deferred:* remapping the dropped bar's markers onto the
-     merged bar. Rejected for v1 — edge semantics are ambiguous (a `repeatEnd`
-     at the removed line vs at the far edge mean different things) and remap can
-     manufacture duplicate markers. Prune + warn is safe and honest; revisit if
-     real use shows the loss is painful.
+5. **Roadmap (the crux) — edge-aware remap, then prune.** Classify every marker
+   bound to `L` or `R` by its anchor x:
+   - **`L` start-edge** (anchor `L.xStart = merged.xStart`) → **keep** (stays on
+     `L`'s id; position unchanged).
+   - **`R` end-edge** (anchor `R.xEnd` → now `merged.xEnd` after union) →
+     **remap** `barId: R.id → L.id` (position preserved). [Codex R1 blocking #2's
+     mirror: end-anchored work on the right bar is preserved, not lost.]
+   - **`L` end-edge** and **`R` start-edge** (both anchor the **removed** barline)
+     → **drop** (their line no longer exists) → these are the only losses, and
+     the **warn** below enumerates exactly them. [Codex R1 blocking #2: the
+     original missed `L`'s end-edge markers entirely.]
+   - **`ending` whose `barIds` contains `R.id`** → rewrite `R.id → L.id` and
+     **dedupe** (if the bracket spanned both halves it collapses to one entry);
+     the bracket's bar set is otherwise unchanged.
+   - Apply via `remapRoadmapForBarEdit`, then `pruneRoadmap(roadmap, liveIds)` to
+     **cascade** dependents (e.g. a `repeatEnd`/`ending` whose `repeatStart` was
+     dropped). `liveIds` excludes `R.id`.
+   - **Warn-before-destroy:** the UI computes the drop set as a **dry-run of the
+     full cascade** (remap → prune) and, if non-empty, warns
+     "Removing this barline clears N navigation marker(s)" before applying. Only
+     markers anchored *on the removed line* (plus their cascade) are ever lost.
+   - *Rejected alternative (original v1): prune every marker on both `L` and `R`.*
+     That needlessly destroyed end-edge work on `R` (whose x survives) and — per
+     Codex — silently mis-anchored `L`'s end-edge markers to the merged far edge.
+     The `edge` field makes the precise remap above deterministic, so prune-only
+     is strictly worse and is dropped.
 
 #### `addBarline(cal, systemId, x)`
 
@@ -96,28 +149,38 @@ roadmap-integrity path.
 2. Let `bar` be the containing measure. **No-op** if the split would leave either
    half below `MIN_BAR_W` (`x − bar.xStart < MIN_BAR_W` or
    `bar.xEnd − x < MIN_BAR_W`) — a split needs room for two real measures.
-3. Split: `left = { ...bar, xEnd: x }`, `right = { id: crypto.randomUUID(),
-   systemId, xStart: x, xEnd: bar.xEnd, sectionId: bar.sectionId, absNumber: 0 }`.
-   Both halves inherit the parent's `sectionId`. `withoutConfidence` on both;
-   `status: 'draft'`.
+3. Split: `left = { ...bar, xEnd: x }` (keeps the parent id, `left.xStart =
+   bar.xStart`), `right = { id: crypto.randomUUID(), systemId, xStart: x,
+   xEnd: bar.xEnd, sectionId: bar.sectionId, absNumber: 0 }`. Both halves inherit
+   the parent's `sectionId`. `withoutConfidence` on both; `status: 'draft'`.
 4. `renumberBars(...)` assigns absNumbers by position (the new bar slots in).
-5. **Roadmap cascade:** the parent id survives on the **left** half, so
-   `pruneRoadmap` drops nothing — add is **non-destructive** to the roadmap. Any
-   marker on the parent stays bound to the left half. *Known limitation:* an
-   end-anchored marker (e.g. `repeatEnd`) that conceptually belonged at the
-   measure's far edge now renders at the new split line (the left half's end),
-   one measure early. v1 leaves it on the left for the user to re-place; the
-   per-kind edge-aware remap (end-anchored → right half) is a noted deferral.
-   Flagged for Codex.
+5. **Roadmap — edge-aware remap (fully non-destructive, deterministic).** The
+   parent measure `bar` becomes `left ∪ right`; `left.xStart == bar.xStart` and
+   `right.xEnd == bar.xEnd`, so **both** original anchor positions survive. For
+   each marker on `bar.id`:
+   - **start-edge** (anchor `bar.xStart = left.xStart`) → **keep** on the parent
+     id (now `left`). Position unchanged.
+   - **end-edge** (anchor `bar.xEnd = right.xEnd`) → **remap** `barId →
+     right.id`. Position unchanged. [Codex R1 blocking #1: the original left the
+     end-edge marker on `left`, rendering it one measure early — the false
+     "non-destructive" claim. Remap fixes it exactly.]
+   - **`ending` whose `barIds` contains `bar.id`** → insert `right.id` adjacent to
+     `bar.id` so the bracket still spans the (now two) measures it covered.
+   - `pruneRoadmap` after remap drops **nothing** (every id still live: `bar.id`
+     on `left`, `right.id` on `right`). Add is genuinely non-destructive — no warn
+     needed. Same `remapRoadmapForBarEdit` helper as remove.
 
 ## Interaction (`app/[owner]/[show]/page.tsx`, Bars tool, system selected)
 
 The Bars tool gains a small mode model; **drag (move) stays the default**:
 - **Remove:** tapping a barline tick (a discrete tap, distinct from the #94
   drag) **selects** it and reveals a small "✕ Remove barline" affordance (mirror
-  the section-marker delete UX). If that boundary's two bars carry roadmap
-  markers, the control warns first ("Removing this barline clears N navigation
-  marker(s)") and removes on confirm. Calls `removeBarline(systemId, index)`.
+  the section-marker delete UX). The control computes the drop set as a
+  **dry-run of the full remap→prune cascade** (only markers anchored *on the
+  removed line*, plus dependents); if non-empty it warns first ("Removing this
+  barline clears N navigation marker(s)") and removes on confirm. Markers anchored
+  on a surviving edge (e.g. an end-edge marker on the right bar) are silently
+  remapped, **not** counted in the warn. Calls `removeBarline(systemId, index)`.
 - **Add:** an **"＋ Add barline"** toggle; while active, a tap inside the band
   drops a new barline at the tap x by splitting that measure
   (`addBarline(systemId, x)`). The new tick is immediately #94-draggable and
@@ -143,15 +206,25 @@ The Bars tool gains a small mode model; **drag (move) stays the default**:
 
 1. **Remove range = interior boundaries only** (`1..N-1`); leading/trailing are
    band-extent, not dividers. Recommend **yes**.
-2. **Merge keeps the LEFT bar's id/section**, extends its `xEnd`. Recommend
-   **yes** (arbitrary-but-stable; the left measure "absorbs" the right).
-3. **Roadmap on remove = prune + warn (v1)**, remap deferred. Recommend **yes**
-   (safe, honest, matches existing cascade). The warn-before-destroy is the
-   important UX guard.
+2. **Merge keeps the LEFT bar's id/section**, extends its `xEnd` to the
+   **union** `max(L.xEnd, R.xEnd)` (not `R.xEnd`). Recommend **yes** — union is
+   required so an overlapping converter input doesn't lose width. [was: plain
+   `R.xEnd`; changed per Codex R1 blocking #3.]
+3. **CHANGED (supersedes prior "prune + warn, remap deferred").** Roadmap on
+   remove = **edge-aware remap, then prune + warn.** The `edge` field makes the
+   remap deterministic, so we keep `R`'s end-edge markers (x survives) and drop
+   **only** markers anchored *on the removed line* (`L`-end + `R`-start), with a
+   dry-run warn. Recommend **yes** — strictly better than prune-only (loses less,
+   no ambiguity). Original prune-only kept as the rejected alternative.
+   **→ This changes the decision Graham signed off; needs his re-confirm.**
 4. **Add splits only inside an existing measure**; tap in blank/margin = no-op
    (not "create a bar in empty space"). Recommend **yes**.
-5. **Add is non-destructive to roadmap** (markers stay on the left half);
-   end-anchored remap deferred with a known-limitation note. Recommend **yes**.
+5. **CHANGED (supersedes prior "non-destructive, end-anchor remap deferred").**
+   Add = **fully non-destructive via edge-aware remap**: start-edge markers stay
+   on the left half, end-edge markers remap to the right half (both anchor
+   positions survive the split), `ending` brackets extend to include the new bar.
+   Nothing is dropped; no known-limitation, no warn. Recommend **yes** — this is
+   what "non-destructive" should have meant. [Codex R1 blocking #1.]
 6. **`MIN_BAR_W` floor reused** for the minimum split half. Recommend **yes**.
 7. **Both clear confidence + set draft** (structural manual edit), consistent
    with `moveBarBoundary`. Recommend **yes**.
@@ -167,17 +240,39 @@ The Bars tool gains a small mode model; **drag (move) stays the default**:
 - x in the clef margin / trailing blank / a gap → no-op **identity** (`toBe`)
 - split leaving a sub-`MIN_BAR_W` half (either side) → no-op identity
 - unknown systemId → identity
-- roadmap: a marker on the parent stays bound to the (left) survivor; pruned set
-  unchanged
+- **roadmap remap (the fix):**
+  - a **start-edge** marker (`repeatStart`/`segno`/`coda`) on the parent stays on
+    the parent id (left half), `barId` unchanged
+  - an **end-edge** marker (`repeatEnd`/`toCoda`/`fine`/`jump`) on the parent is
+    **remapped** to the right half's new id (NOT left); its anchor x equals
+    `bar.xEnd == right.xEnd`
+  - an `ending` whose `barIds` contained the parent now contains BOTH halves'
+    ids; bracket still contiguous
+  - **nothing pruned** — pruned set unchanged, no markers lost (regression guard
+    against the old "stays on left, one bar early")
 
 `removeBarline`
-- merge interior boundary k → one measure `[bars[k-1].xStart, bars[k].xEnd]`,
+- merge interior boundary k → one measure `[L.xStart, max(L.xEnd, R.xEnd)]`,
   count N→N−1, neighbors untouched, renumbered
-- merge closes a pre-existing gap/overlap at that boundary (converter input)
+- **union edge:** overlapping input `L=[0,.9]`, `R=[.4,.5]` → merged `[0,.9]`
+  (NOT `[0,.5]`); plain-`R.xEnd` regression guard [Codex blocking #3]
+- merge closes a pre-existing gap at that boundary (contiguous result)
 - boundary `0` or `N` → no-op identity; `N < 2` → no-op identity
 - non-integer / out-of-range index, unknown systemId → identity
-- **roadmap cascade:** a marker on the dropped (right) bar is pruned; a marker on
-  a surviving bar is kept (parity with `autoDistributeBars`/`removeSystem`)
+- **roadmap remap + prune (the crux):**
+  - an **end-edge** marker on `R` (anchor `R.xEnd`) is **remapped** to `L`'s id
+    and KEPT (its x survives as `merged.xEnd`) — NOT pruned [Codex blocking #2's
+    win: right-bar end work preserved]
+  - a **start-edge** marker on `L` (anchor `L.xStart`) is KEPT on `L` unchanged
+  - an **end-edge** marker on `L` AND a **start-edge** marker on `R` (both anchor
+    the **removed** line) are **pruned** — and counted by the dry-run warn
+    [Codex blocking #2: left-bar end markers must be handled, not missed]
+  - an `ending` with `R.id` in `barIds` → `R.id` rewritten to `L.id`, deduped
+  - **cascade:** pruning a `repeatStart` (anchored on the removed line) also
+    prunes its dependent `repeatEnd`/`ending` (parity with
+    `autoDistributeBars`/`removeSystem`)
+  - dry-run drop set = exactly the on-the-line markers + cascade; markers on
+    surviving edges are absent from it
 - merged bar: confidence cleared, status draft
 
 Report test-count delta on the PR.
@@ -186,8 +281,6 @@ Report test-count delta on the PR.
 
 - Detecting where to add/remove from the image — that's CV snap's count flag +
   the human; this is the manual primitive it routes to.
-- Remapping roadmap markers across a merge/split (per-kind edge semantics) —
-  deferred (decisions 3, 5).
 - Moving a barline (that's #94 `moveBarBoundary`).
 - Changing the system band extent (that's `resizeSystemBand`).
 - Cross-system / multi-page barline operations.
