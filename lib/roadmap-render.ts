@@ -450,6 +450,12 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
           if (b) bars.push(b);
         }
         drawVoltaBracket(pages, bars, font, ending.passes);
+        // The volta pass-label sits above the ending's first bar at the start
+        // edge. Claim its start-edge row so any nav directive later landing on
+        // that same bar stacks above it instead of overprinting. The label
+        // always renders first (section pass precedes nav), so it keeps row 0 —
+        // its own position is unchanged.
+        if (bars.length > 0) stackDy(bars[0], 'start');
       });
     }
   });

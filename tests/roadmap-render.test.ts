@@ -265,6 +265,48 @@ describe('renderRoadmap — navigation variants', () => {
     expect(Buffer.from(pdfBytes).equals(Buffer.from(again.pdfBytes))).toBe(true);
   });
 
+  it('stacks a start-edge directive co-located on a volta ending first bar', async () => {
+    // A segno can validly target the same bar a volta ending starts on. The
+    // volta pass-label and the Segno both anchor above that bar's start edge,
+    // so the label must claim its stack row and the directive must lift clear.
+    const spec: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'A',
+      sections: [
+        { id: 'a', label: 'A', bars: 4 },
+        {
+          id: 'chorus',
+          label: 'Chorus',
+          bars: 8,
+          repeat: {
+            kind: 'volta',
+            endings: [
+              { bars: { start: 7, count: 1 }, passes: [1] },
+              { bars: { start: 8, count: 1 }, passes: [2] },
+            ],
+          },
+        },
+      ],
+      navigation: {
+        segno: { section: 1, bar: 7 }, // same bar the first volta ending starts on
+        jump: { at: { section: 1, bar: 8 }, from: 'segno', until: 'end' },
+      },
+    };
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+
+    const { pdfBytes, calibration } = await renderRoadmap(spec);
+    expect(resolveRoadmap(calibration).ok).toBe(true);
+    const markers = calibration.roadmap ?? [];
+    const segnoBar = markers.find((m) => m.kind === 'segno')?.barId;
+    const ending = markers.find((m) => m.kind === 'ending');
+    expect(segnoBar).toBeTruthy();
+    // The segno lands on the first volta ending's first bar (the co-location).
+    expect((ending && 'barIds' in ending ? ending.barIds : []).includes(segnoBar as string)).toBe(true);
+    const again = await renderRoadmap(spec);
+    expect(Buffer.from(pdfBytes).equals(Buffer.from(again.pdfBytes))).toBe(true);
+  });
+
   it('renders a D.C. al Fine form (fine + jump)', async () => {
     const spec: RoadmapSpec = {
       version: 1,
