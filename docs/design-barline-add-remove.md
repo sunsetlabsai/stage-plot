@@ -2,8 +2,8 @@
 
 Status: DESIGN — REVISED for Codex R1 (3 blocking folded). Build-on-GO only.
 **Decisions 2/3/5 changed** (union merge edge + deterministic edge-aware roadmap
-remap, replacing the original prune-only). Decisions 3/5 were signed off earlier
-under the prune-only model → **Graham re-confirm needed** before build.
+remap, replacing the original prune-only) — **Graham re-confirmed (all yes)**.
+NEXT: Codex R2 → build (#96 first, then CV snap #2).
 Scope: ONE focused gap surfaced in #94 UAT — locally **add** or **remove** a
 single barline without re-distributing the whole system. Completes the manual
 barline edit set; pairs with CV snap (`docs/design-cv-barline-snap.md`) as its
