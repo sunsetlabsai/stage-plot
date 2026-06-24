@@ -1,4 +1,4 @@
-import type { RoadmapSpec } from './roadmap-spec';
+import type { RoadmapSpec, BarRef } from './roadmap-spec';
 import type { ChartCalibration } from './types';
 
 // ── Roadmap Builder — chunk 3: the spec↔calibration parity gate ──────────────
@@ -18,7 +18,6 @@ export type ParityResult = { ok: true } | { ok: false; errors: string[] };
 export function assertSpecCalibrationParity(spec: RoadmapSpec, cal: ChartCalibration): ParityResult {
   const errors: string[] = [];
   const bars = cal.bars ?? [];
-  const roadmap = cal.roadmap ?? [];
 
   // 1. One section anchor per spec section, in order, with matching labels.
   if (cal.sections.length !== spec.sections.length) {
@@ -56,46 +55,127 @@ export function assertSpecCalibrationParity(spec: RoadmapSpec, cal: ChartCalibra
     }
   });
 
-  // 4. Every spec repeat/ending/navigation projects to exactly the expected
-  //    roadmap markers — no drops, no extras.
-  const expected = expectedMarkerCounts(spec);
-  const actual = new Map<string, number>();
-  for (const m of roadmap) actual.set(m.kind, (actual.get(m.kind) ?? 0) + 1);
-
-  for (const [kind, n] of expected) {
-    const got = actual.get(kind) ?? 0;
-    if (got !== n) errors.push(`expected ${n} ${kind} marker(s), calibration has ${got}`);
+  // 4. Every spec repeat/ending/navigation must project to a marker BOUND to the
+  //    bar(s) the spec named, with the scalar attributes (repeat times, ending
+  //    passes, jump from/until) the spec named — no drops, no extras, no
+  //    misbindings. Counting kinds is not enough: a renderer can emit the right
+  //    NUMBER of markers on the WRONG bars (or with wrong times/passes/from/
+  //    until) and still satisfy a count check, so we compare full bindings.
+  const want = toCounts(expectedMarkerSignatures(spec));
+  const got = toCounts(actualMarkerSignatures(cal));
+  for (const [sig, n] of want) {
+    const g = got.get(sig) ?? 0;
+    if (g < n) errors.push(`expected marker ${sig}${n > 1 ? ` (×${n})` : ''}, calibration has ${g}`);
   }
-  for (const [kind, got] of actual) {
-    if (!expected.has(kind)) errors.push(`calibration has ${got} unexpected ${kind} marker(s)`);
+  for (const [sig, g] of got) {
+    const n = want.get(sig) ?? 0;
+    if (g > n) errors.push(`calibration has ${g - n} unexpected/misbound marker(s) ${sig}`);
   }
 
   return errors.length > 0 ? { ok: false, errors } : { ok: true };
 }
 
-// The marker multiset the spec implies: each section repeat → a repeatStart plus
-// either a repeatEnd (plain) or one ending per VoltaEnding; each navigation field
-// → its matching marker kind.
-function expectedMarkerCounts(spec: RoadmapSpec): Map<string, number> {
+function toCounts(sigs: string[]): Map<string, number> {
   const m = new Map<string, number>();
-  const bump = (kind: string, by = 1) => m.set(kind, (m.get(kind) ?? 0) + by);
+  for (const s of sigs) m.set(s, (m.get(s) ?? 0) + 1);
+  return m;
+}
 
+// The marker bindings the spec implies, as canonical signatures — kind + the
+// ABSOLUTE bar number(s) the marker must sit on + its scalar attributes. Bar
+// numbers are computed straight from the section bar-offset running total, fully
+// independent of the renderer's own marker projection (buildMarkers): that
+// independence is what lets this catch a renderer that miscounts or misplaces a
+// marker.
+function expectedMarkerSignatures(spec: RoadmapSpec): string[] {
+  const sigs: string[] = [];
+
+  // base[i] = absolute (1-based) number of section i's first bar.
+  const base: number[] = [];
+  let acc = 1;
   for (const s of spec.sections) {
-    const r = s.repeat;
-    if (!r) continue;
-    bump('repeatStart');
-    if (r.kind === 'plain') bump('repeatEnd');
-    else bump('ending', r.endings.length);
+    base.push(acc);
+    acc += s.bars;
   }
+
+  const refAbs = (ref: BarRef): string => {
+    if (ref.section < 0 || ref.section >= spec.sections.length) return '?';
+    const sec = spec.sections[ref.section];
+    if (ref.bar < 1 || ref.bar > sec.bars) return '?';
+    return String(base[ref.section] + ref.bar - 1);
+  };
+
+  spec.sections.forEach((s, i) => {
+    const r = s.repeat;
+    if (!r) return;
+    sigs.push(`repeatStart@${base[i]}`);
+    if (r.kind === 'plain') {
+      sigs.push(`repeatEnd@${base[i] + s.bars - 1}×${r.times}`);
+    } else {
+      for (const e of r.endings) {
+        const abs: number[] = [];
+        for (let n = 0; n < e.bars.count; n += 1) abs.push(base[i] + e.bars.start - 1 + n);
+        sigs.push(`ending@${abs.sort(numAsc).join(',')}#${[...e.passes].sort(numAsc).join('.')}`);
+      }
+    }
+  });
 
   const nav = spec.navigation;
   if (nav) {
-    if (nav.segno) bump('segno');
-    if (nav.coda) bump('coda');
-    if (nav.toCoda) bump('toCoda');
-    if (nav.fine) bump('fine');
-    if (nav.jump) bump('jump');
+    if (nav.segno) sigs.push(`segno@${refAbs(nav.segno)}`);
+    if (nav.coda) sigs.push(`coda@${refAbs(nav.coda)}`);
+    if (nav.toCoda) sigs.push(`toCoda@${refAbs(nav.toCoda)}`);
+    if (nav.fine) sigs.push(`fine@${refAbs(nav.fine)}`);
+    if (nav.jump) sigs.push(`jump@${refAbs(nav.jump.at)} from:${nav.jump.from} until:${nav.jump.until}`);
   }
 
-  return m;
+  return sigs;
+}
+
+// The same signatures recovered from the calibration: resolve each marker's
+// barId(s) to absolute bar numbers via cal.bars, then render the identical
+// canonical form so the two multisets can be diffed. A barId the calibration
+// doesn't carry resolves to '?' so it can never spuriously match an expected one.
+function actualMarkerSignatures(cal: ChartCalibration): string[] {
+  const absOf = new Map<string, number>();
+  for (const b of cal.bars ?? []) absOf.set(b.id, b.absNumber);
+  const at = (id: string | undefined): string => (id != null && absOf.has(id) ? String(absOf.get(id)) : '?');
+
+  const sigs: string[] = [];
+  for (const m of cal.roadmap ?? []) {
+    switch (m.kind) {
+      case 'repeatStart':
+        sigs.push(`repeatStart@${at(m.barId)}`);
+        break;
+      case 'repeatEnd':
+        sigs.push(`repeatEnd@${at(m.barId)}×${m.times ?? 2}`);
+        break;
+      case 'ending': {
+        const abs = m.barIds.map((id) => (absOf.has(id) ? String(absOf.get(id)) : '?'));
+        const resolved = abs.every((x) => x !== '?') ? abs.map(Number).sort(numAsc).map(String) : abs;
+        sigs.push(`ending@${resolved.join(',')}#${[...m.numbers].sort(numAsc).join('.')}`);
+        break;
+      }
+      case 'segno':
+        sigs.push(`segno@${at(m.barId)}`);
+        break;
+      case 'coda':
+        sigs.push(`coda@${at(m.barId)}`);
+        break;
+      case 'toCoda':
+        sigs.push(`toCoda@${at(m.barId)}`);
+        break;
+      case 'fine':
+        sigs.push(`fine@${at(m.barId)}`);
+        break;
+      case 'jump':
+        sigs.push(`jump@${at(m.barId)} from:${m.from} until:${m.until}`);
+        break;
+    }
+  }
+  return sigs;
+}
+
+function numAsc(a: number, b: number): number {
+  return a - b;
 }

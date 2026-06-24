@@ -101,9 +101,11 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: uploadError.message }, { status: 500 });
   }
 
-  // Commit both tables atomically. Called with the USER client so the RPC's
-  // auth.uid() ownership guard sees the caller's identity.
-  const { data: result, error: rpcError } = await supabase.rpc('save_builder_chart', {
+  // Commit both tables atomically. Called with the ADMIN (service_role) client:
+  // the RPC is granted to service_role ONLY so it can never be reached by a
+  // client bypassing this route. p_owner is the authenticated user.id resolved
+  // above — the route is the ownership boundary.
+  const { data: result, error: rpcError } = await admin.rpc('save_builder_chart', {
     p_owner: user.id,
     p_song_key: songKey,
     p_song_title: songTitle,

@@ -11,6 +11,14 @@
 --     leave a library row pointing at a calibration that isn't there (or vice
 --     versa). Returns the prior storage_path so the route can best-effort delete
 --     the now-orphaned object after a successful re-render.
+--
+--     SECURITY BOUNDARY: this function persists arbitrary source_spec and even
+--     status='verified' calibration JSON, so it must NEVER be reachable by an
+--     authenticated client directly — that would let any client forge a verified
+--     chart and bypass the server route's validate→render→parity→gate pipeline.
+--     Execute is granted to service_role ONLY; the server route (which has already
+--     authenticated the user and re-derived the artifacts) calls it via the admin
+--     client. The route is the boundary; the grant enforces it.
 
 alter table chart_library add column source_spec jsonb;
 
@@ -30,19 +38,19 @@ create or replace function save_builder_chart(
   p_calibration jsonb
 ) returns jsonb
 language plpgsql
-security definer
 set search_path = public, extensions
 as $$
 declare
   v_chart_id uuid;
   v_old_path text;
 begin
-  -- Ownership guard: SECURITY DEFINER bypasses RLS, so the function itself must
-  -- prove the caller owns the row it writes. auth.uid() reads the caller's JWT
-  -- (the route invokes this with the user-scoped client, not the admin client).
-  if p_owner is null or p_owner <> auth.uid() then
-    raise exception 'not authorized to save for owner %', p_owner using errcode = '42501';
+  if p_owner is null then
+    raise exception 'p_owner is required' using errcode = '22004';
   end if;
+
+  -- No auth.uid() check here: this runs as service_role (granted below), called
+  -- only by the server route, which has already authenticated the user and sets
+  -- p_owner = that user's id. The service_role-only grant is the ownership guard.
 
   -- Capture the object the live row currently points at (if any) so the route can
   -- reclaim it once this commit lands and the new hash-addressed object is live.
@@ -88,4 +96,4 @@ revoke all on function save_builder_chart(
 
 grant execute on function save_builder_chart(
   uuid, text, text, text, text, text, text, integer, jsonb, text, integer, text, jsonb
-) to authenticated;
+) to service_role;

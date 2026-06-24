@@ -101,7 +101,7 @@ describe('assertSpecCalibrationParity — renderer-bug guard (spec ↔ calibrati
     cal.roadmap = cal.roadmap!.filter((m) => m.kind !== 'coda');
     const r = assertSpecCalibrationParity(SPEC, cal);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.errors.join(' ')).toMatch(/expected 1 coda marker/i);
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/expected marker coda@/i);
   });
 
   it('flags an unexpected marker (renderer invents a Fine)', () => {
@@ -113,7 +113,7 @@ describe('assertSpecCalibrationParity — renderer-bug guard (spec ↔ calibrati
     const cal = buildCal(SPEC);
     const r = assertSpecCalibrationParity(specNoFine, cal);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.errors.join(' ')).toMatch(/unexpected fine marker/i);
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/unexpected\/misbound marker\(s\) fine@/i);
   });
 
   it('flags a miscounted volta (one ending instead of two)', () => {
@@ -121,7 +121,52 @@ describe('assertSpecCalibrationParity — renderer-bug guard (spec ↔ calibrati
     cal.roadmap = cal.roadmap!.filter((m, i) => !(m.kind === 'ending' && i === cal.roadmap!.findIndex((x) => x.kind === 'ending')));
     const r = assertSpecCalibrationParity(SPEC, cal);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.errors.join(' ')).toMatch(/expected 2 ending marker/i);
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/expected marker ending@/i);
+  });
+
+  it('flags a marker on the WRONG bar (right count, misbound)', () => {
+    const cal = clone(buildCal(SPEC));
+    const re = cal.roadmap!.find((m) => m.kind === 'repeatEnd')!;
+    // Re-point the repeatEnd at a bar that is NOT the verse's last bar.
+    const otherBar = cal.bars!.find((b) => b.id !== (re as { barId: string }).barId)!;
+    (re as { barId: string }).barId = otherBar.id;
+    const r = assertSpecCalibrationParity(SPEC, cal);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/misbound|repeatEnd/i);
+  });
+
+  it('flags a repeatEnd with the wrong times count', () => {
+    const cal = clone(buildCal(SPEC));
+    const re = cal.roadmap!.find((m) => m.kind === 'repeatEnd')! as { times?: number };
+    re.times = 4; // spec says 2
+    const r = assertSpecCalibrationParity(SPEC, cal);
+    expect(r.ok).toBe(false);
+  });
+
+  it('flags an ending with the wrong passes (numbers)', () => {
+    const cal = clone(buildCal(SPEC));
+    const ending = cal.roadmap!.find((m) => m.kind === 'ending')! as { numbers: number[] };
+    ending.numbers = [3]; // spec says [1] or [2]
+    const r = assertSpecCalibrationParity(SPEC, cal);
+    expect(r.ok).toBe(false);
+  });
+
+  it('flags an ending bound to the wrong bar span', () => {
+    const cal = clone(buildCal(SPEC));
+    const ending = cal.roadmap!.find((m) => m.kind === 'ending')! as { barIds: string[] };
+    // Point the ending at a Chorus bar that is not in its spec span.
+    const firstChorusBar = cal.bars!.find((b) => b.sectionId === 'sec-2')!;
+    ending.barIds = [firstChorusBar.id];
+    const r = assertSpecCalibrationParity(SPEC, cal);
+    expect(r.ok).toBe(false);
+  });
+
+  it('flags a jump with the wrong until target', () => {
+    const cal = clone(buildCal(SPEC));
+    const jump = cal.roadmap!.find((m) => m.kind === 'jump')! as { until: string };
+    jump.until = 'coda'; // spec says 'fine'
+    const r = assertSpecCalibrationParity(SPEC, cal);
+    expect(r.ok).toBe(false);
   });
 
   it('reports every mismatch at once (full renderer-regression description)', () => {
