@@ -179,6 +179,31 @@ export async function renderPage(
   }
 }
 
+// Render a page to a fresh, detached canvas at an EXPLICIT scale. Unlike
+// renderPage this owns a local render task (no module-global activeRenderTask to
+// stomp the on-screen viewer) and needs no DOM parent — it's the offscreen
+// substrate the CV barline-snap reads pixels from. Caller owns the returned
+// canvas; nothing is appended to the document.
+export async function renderPageOffscreen(
+  doc: PDFDocumentProxy,
+  pageNum: number,
+  scale: number,
+): Promise<HTMLCanvasElement | null> {
+  if (pageNum < 1 || pageNum > doc.numPages) return null;
+  const page = await doc.getPage(pageNum);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.ceil(viewport.width));
+  canvas.height = Math.max(1, Math.ceil(viewport.height));
+  const task: RenderTask = page.render({ canvas, viewport });
+  try {
+    await task.promise;
+  } catch {
+    return null;
+  }
+  return canvas;
+}
+
 export function destroyAllDocs() {
   if (activeRenderTask) {
     activeRenderTask.cancel();
