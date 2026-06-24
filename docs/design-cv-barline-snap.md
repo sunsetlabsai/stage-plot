@@ -4,10 +4,10 @@ Status: DESIGN — decisions 1-8 LOCKED by Graham (all yes; #3 = option A).
 Revised after Codex round-1 (order-aware matching contract, honest no-regression
 claim, dedicated offscreen render helper), Opus self-review R2 (pre-snap snapshot
 determinism, MIN_STRENGTH floor in both branches, pinned alignment, post-apply
-honesty), and **Codex round-2** (symmetric mutual-nearest matcher — the
-iterate-and-consume version burned lines belonging to later boundaries;
-edge-aware MAX_PULL for boundary 0/N; reading-order tie-break — see §Decisions).
-Build-on-GO only, after Codex re-review.
+honesty), **Codex round-2** (symmetric mutual-nearest matcher; edge-aware
+MAX_PULL; reading-order tie-break), and **Codex round-3** (pinned the
+`SnapBarsResult` metadata contract the UX needs; "sub-strength" wording — see
+§Decisions). Build-on-GO only, after Codex re-review.
 Scope: the **automated** refinement that sits between `autoDistributeBars`
 (even floor) and the manual barline-tick drag (`moveBarBoundary`, shipped in
 PR #94). Cardinality reconciliation (add/remove a barline) is its companion —
@@ -99,13 +99,38 @@ export interface DetectedLine {
 
 export function detectBarlines(profile: BandProfile, opts?: SnapOptions): DetectedLine[];
 
+// The result is a SHAPE, not just the mutated calibration (Codex R3): the UI must
+// report "no clear barlines," the count delta, and clamped partials WITHOUT
+// re-deriving matcher internals. All counts are computed inside snapBarsToLines
+// (which owns the matcher + the post-fold honesty check) and handed out here.
+export interface SnapBarsResult {
+  calibration: ChartCalibration;  // mutated cal; === input identity when accepted == 0
+  detectedLines: number;          // |L| AFTER the MIN_STRENGTH prefilter — the lines snap acted on
+  expectedBoundaries: number;     // N+1 for the system's N bars
+  accepted: number;               // matches the matcher accepted (pre-apply)
+  fullySnapped: number;           // accepted boundaries that landed within ε of their pageX
+  partial: number;                // accepted − fullySnapped (moveBarBoundary clamped them short)
+  surplusLines: number;           // detectedLines − accepted (lines no boundary took)
+}
+
 export function snapBarsToLines(
   cal: ChartCalibration,
   systemId: string,
   lines: DetectedLine[],     // band-space, from detectBarlines
   opts?: SnapOptions,
-): ChartCalibration;
+): SnapBarsResult;
 ```
+
+**What the UI reads from `SnapBarsResult` (no matcher internals re-implemented):**
+- `accepted === 0` → "No clear barlines found — drag to align" (the degrade hint).
+- `detectedLines !== expectedBoundaries` → the count-mismatch banner, in
+  like-for-like units: `detectedLines` lines ≈ `detectedLines − 1` bars vs N bars
+  → route to Add/Remove (cardinality companion).
+- `partial > 0` → "N snapped, M needed a manual nudge" — the post-apply honesty
+  surface; those boundaries were clamped short of their detected line by
+  `moveBarBoundary` and stay #94-draggable.
+- `surplusLines > 0` is implied by the count delta; it needs no separate copy in
+  v1 but is exposed for completeness.
 
 #### `detectBarlines` — vertical-line finder
 
@@ -164,8 +189,10 @@ remap-against-original discipline #96 uses). Steps:
      and boundary N → the last line **however far** they are from the band edge.
      `MAX_PULL` is intentionally *not* applied here (that is exactly what lets a
      boundary reclaim a wide clef margin), but the strength prefilter (step 2)
-     still gates it, so a single spurious stroke can no longer make the count
-     coincidentally `N+1` and yank the whole row onto a shifted sequence.
+     still gates it, so a *sub-strength* spurious stroke can no longer make the
+     count coincidentally `N+1` and yank the whole row onto a shifted sequence. (A
+     *strong* false positive still can — the honest guarantee admits this; that's
+     why every result stays #94-correctable.)
    - **Counts differ:** run the **monotone (order-preserving) alignment** below
      and apply only **gated** matches.
 
@@ -209,22 +236,22 @@ remap-against-original discipline #96 uses). Steps:
    target that lands outside its window and *no-ops* a degenerate one — so an
    accepted match (especially an ungated equal-count edge) can leave a boundary
    **not on its detected line**. After the fold, compare each moved boundary's
-   resting x to its intended `pageX`; any that differ by more than a px-scale
-   epsilon are counted as **partial / not-fully-snapped** and rolled into the
-   same delta surfaced to the user (Count mismatch, below), so snap never
-   *reports* a clamp it didn't actually achieve. Honest-guarantee section reflects
-   this.
+   resting x to its intended `pageX`; those within a px-scale epsilon increment
+   `fullySnapped`, the rest are `partial` (= `accepted − fullySnapped`). These
+   counts are returned in `SnapBarsResult` (above), so the UI surfaces clamped
+   partials without re-deriving them and snap never *reports* a snap it didn't
+   achieve. Honest-guarantee section reflects this.
 
 **Count mismatch — surfaced, never silently forced (decision 2 = positions
 only):** detections rarely equal N+1. Snap never adds or removes a bar.
 - More lines than boundaries → extra lines ignored by the matcher.
 - Fewer lines → only gated boundaries move; the rest keep even spacing.
-- When `|L| ≠ N+1`, snap returns its best positions **and the UI flags the
-  delta in like-for-like units** — lines are boundaries, so `M` detected lines
-  imply `M−1` measures: e.g. "detected M barlines (≈ M−1 bars) vs N bars —
-  Add/Remove to reconcile" (not the apples-to-oranges "M lines vs N bars").
-  This routes the user to the cardinality primitive in
-  `docs/design-barline-add-remove.md`.
+- When `detectedLines ≠ expectedBoundaries`, snap returns its best positions
+  **and the UI flags the delta in like-for-like units** from the result fields —
+  lines are boundaries, so `M = detectedLines` lines imply `M−1` measures: e.g.
+  "detected M barlines (≈ M−1 bars) vs N bars — Add/Remove to reconcile" (not the
+  apples-to-oranges "M lines vs N bars"). This routes the user to the cardinality
+  primitive in `docs/design-barline-add-remove.md`.
   That companion is what makes a wrong count locally fixable without a
   destructive stepper re-distribute (the gap Graham hit in #94 UAT).
 
@@ -253,9 +280,12 @@ coloring) surfaces weak snaps for human glance. Two options, Graham picks:
   Snap (auto-align) → drag any tick snap missed (#94). Re-running the count
   stepper re-distributes and wipes snaps — already today's "reset this system"
   escape hatch (#94 §"Relationship to auto-distribute"); unchanged.
-- **Degrade/feedback:** if `detectBarlines` returns nothing usable, the button
-  is a no-op; show a brief inline "No clear barlines found — drag to align"
-  hint rather than silently doing nothing. (Copy TBD.)
+- **Degrade/feedback (driven by `SnapBarsResult`):** `accepted === 0` → the
+  button is a no-op + a brief inline "No clear barlines found — drag to align"
+  hint (never silent); `detectedLines ≠ expectedBoundaries` → the count-delta
+  banner routing to Add/Remove; `partial > 0` → "X snapped, Y need a manual
+  nudge." All read from result fields — the UI never re-runs the matcher. (Copy
+  TBD.)
 - **Optional later: "Snap all systems"** on the page — same core per system in a
   loop. Out of scope for v1; per-selected-system matches the manual model.
 
@@ -306,6 +336,16 @@ snapshot. NB tie-break → smaller index (reading order). Codex confirmed B2's
 prefilter is directionally correct (a faint-edge filtered → expected partial, not
 a bug, once the matcher is fixed).
 
+**Codex R3 (folded):** both R2 blockers VERIFIED resolved (symmetric matcher +
+edge MAX_PULL + tie-break; matcher confirmed build-ready). New BLOCKING: the core
+returned only `ChartCalibration`, but the UX (count-mismatch banner + post-apply
+clamp honesty) needs metadata the UI can't safely re-derive — pinned the
+`SnapBarsResult` shape (calibration + detectedLines / expectedBoundaries /
+accepted / fullySnapped / partial / surplusLines), with the exact field the UI
+reads for each surface. NB (folded): "single spurious stroke" → "*sub-strength*
+spurious stroke" (a strong false positive still can pad the count — the honest
+guarantee already admits it).
+
 ## Test plan (builder writes tests — pure core only)
 
 `tests/chart-snap.test.ts` (new):
@@ -348,13 +388,20 @@ a bug, once the matcher is fixed).
   mutual-nearest) evaluated on original geometry — feeding lines in any order, or
   two near-adjacent accepted targets, yields the same result (no live-width drift)
 - **post-apply honesty (Opus R2 #D):** a detected line outside its boundary's
-  `moveBarBoundary` window leaves the boundary clamped short → reported as a
-  partial (counted in the delta), not as a snapped success
+  `moveBarBoundary` window leaves the boundary clamped short → result `partial`
+  increments and `fullySnapped` does not, not a snapped success
+- **`SnapBarsResult` contract (Codex R3):** equal-count clean snap →
+  `accepted == fullySnapped == expectedBoundaries`, `partial == surplusLines == 0`;
+  a fewer-lines case → `detectedLines < expectedBoundaries`,
+  `surplusLines == 0`, only gated boundaries counted in `accepted`; a
+  clamped-edge case → `partial >= 1`; `accepted == 0` on a no-detection input
 - monotone result: reading order / `absNumber` preserved (inherits #94's clamp)
 - band→page x mapping correct for an indented system (`xStart ≠ 0`)
 - option (A): snapped bars' confidence cleared, status → draft (delegates to
-  moveBarBoundary); unknown systemId → input unchanged
-- degenerate: empty `lines` → returns input **identity** (`toBe`)
+  moveBarBoundary); unknown systemId → `result.calibration` is input unchanged,
+  `accepted == 0`
+- degenerate: empty `lines` → `result.calibration` is input **identity** (`toBe`),
+  `accepted == 0`
 
 DOM adapter (offscreen render + getImageData + column projection) has no jsdom
 in this repo → validated by manual UAT on real charts, same posture as the #94
