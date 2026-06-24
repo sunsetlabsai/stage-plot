@@ -2440,6 +2440,10 @@ function ChartNavigator({
   // ── Chart calibration (realtime chart control, step 1: section rail) ──
   const [calMode, setCalMode] = useState<'perform' | 'calibrate'>('perform');
   const [calibration, setCalibration] = useState<ChartCalibration | null>(null);
+  // Latest-value mirror of calibration: the async snap reads this AFTER its
+  // offscreen render so it matches+applies against the freshest geometry, never
+  // a snapshot captured before any concurrent add/remove/drag/stepper edit.
+  const calibrationRef = useRef(calibration);
   const [sourceHash, setSourceHash] = useState<string | null>(null);
   const [seekId, setSeekId] = useState<string | null>(null);
   const [holdId, setHoldId] = useState<string | null>(null);
@@ -2492,14 +2496,24 @@ function ChartNavigator({
     }
   }, [currentIdx]);
 
-  // A tick selection is page-local — a selected boundary lives on a system on the
-  // current page. When the page changes (arrows, swipe, ref-jump, chart switch),
-  // clear it so the Remove button can't act on an off-page (hidden) tick. Guarded
-  // by a ref so the clear only fires on an actual page change, not every render.
+  // Keep the latest-value calibration mirror current (read by the async snap).
+  useEffect(() => {
+    calibrationRef.current = calibration;
+  }, [calibration]);
+
+  // The bars-tool selection is page-local — a selected system (and any tick
+  // selection / snap result on it) lives on the current page. When the page
+  // changes (arrows, swipe, ref-jump, chart switch), clear it so off-page edits
+  // can't fire on a hidden band — in particular so "Snap to lines" can't profile
+  // a stale off-page system rect. Guarded by a ref so the clear only fires on an
+  // actual page change, not every render.
   useEffect(() => {
     if (pageNum !== prevPageNumRef.current) {
       prevPageNumRef.current = pageNum;
+      setSelectedSystemId(null);
       setSelectedBoundary(null);
+      setAddBarMode(false);
+      setSnapResult(null);
     }
   }, [pageNum]);
 
@@ -2613,15 +2627,23 @@ function ChartNavigator({
       if (!doc || snapBusy) return;
       setSnapBusy(true);
       try {
-        const cal = calibration;
-        const system = (cal?.systems ?? []).find((s) => s.id === systemId);
-        if (!cal || !system) return;
-        const canvas = await renderPageOffscreen(doc, pageNum, SNAP_RENDER_SCALE);
+        const system = (calibrationRef.current?.systems ?? []).find((s) => s.id === systemId);
+        if (!system) return;
+        // Render the SYSTEM's own page (not the displayed pageNum): the band rect
+        // is normalized to that page, so detection geometry stays self-consistent
+        // regardless of where the viewer currently sits.
+        const canvas = await renderPageOffscreen(doc, system.page, SNAP_RENDER_SCALE);
         if (!canvas) return;
         const profile = buildBandProfile(canvas, system);
         if (!profile) return;
         const lines = detectBarlines(profile);
-        const result = snapBarsToLines(cal, systemId, lines);
+        // Match + apply against the calibration as it stands AFTER the async render
+        // (read via the latest-value ref), so a concurrent add/remove/drag/stepper
+        // edit isn't clobbered by a stale pre-render snapshot. snapBarsToLines is
+        // pure; this read→apply is synchronous so nothing can interleave between.
+        const current = calibrationRef.current;
+        if (!current) return;
+        const result = snapBarsToLines(current, systemId, lines);
         setCalibration(result.calibration);
         setSnapResult({ systemId, result });
         setSelectedBoundary(null);
@@ -2630,7 +2652,7 @@ function ChartNavigator({
         setSnapBusy(false);
       }
     },
-    [calibration, pageNum, snapBusy],
+    [snapBusy],
   );
   // A tick TAP (vs drag) selects an interior boundary (1..N-1) for removal; the
   // band edges (0, N) are extent, not dividers, so they never select.
@@ -3269,7 +3291,7 @@ function ChartNavigator({
                   return (
                     <span className="flex items-center gap-1 truncate">
                       <span className="text-emerald-400">
-                        {r.fullySnapped} snapped{r.partial > 0 ? `, ${r.partial} nudged` : ''}
+                        {r.fullySnapped} snapped{r.partial > 0 ? `, ${r.partial} need a nudge` : ''}
                       </span>
                       {countOff && (
                         <span className="text-amber-400">
