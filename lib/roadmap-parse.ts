@@ -40,6 +40,7 @@ ChordHit: { "degree": <int 1..7>, "quality"?: <one of "","m","dim","aug","sus","
 - One chord in a bar = whole bar. Multiple chords with no "beats" = even division (chord count must divide timeSig.beats evenly).
 - If chords split a bar unevenly, give EVERY chord an explicit "beats"; the beats MUST sum to timeSig.beats.
 - "changes" is SPARSE: include only the bars that have chords; omit "changes" entirely for sections you don't know.
+- ACCEPT roman numerals in the description and EMIT numeric degrees: IV→{degree:4}, V7→{degree:5,quality:"7"}, vi→{degree:6,quality:"m"} (a lowercase roman with no other quality is minor). Never output roman numerals; "degree" is always 1..7.
 
 SectionRepeat (a section repeat is EITHER plain OR volta, never both):
 - Plain: { "kind": "plain", "times": <int >= 2> }. The section MUST have bars >= 2.
