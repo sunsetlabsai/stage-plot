@@ -50,7 +50,7 @@ import {
   formatBytes,
   type DownloadProgress,
 } from '@/lib/chart-cache';
-import { loadPdfDoc, renderPage, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
+import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
 import ManageChartsModal from '@/components/ManageChartsModal';
 import { updateSetlistCharts } from '@/lib/chart-management';
 import {
@@ -80,6 +80,14 @@ import {
   systemsForPage,
 } from '@/lib/chart-calibration';
 import type { TraversalStep } from '@/lib/chart-calibration';
+import {
+  detectBarlines,
+  snapBarsToLines,
+  DARK_LUMA,
+  SNAP_RENDER_SCALE,
+  type BandProfile,
+  type SnapBarsResult,
+} from '@/lib/chart-snap';
 import { reviewFlags } from '@/lib/chart-review';
 import type { FlaggedRef } from '@/lib/chart-review';
 import { useShow } from '@/lib/use-show';
@@ -1548,6 +1556,45 @@ interface CanvasBox {
   height: number;
 }
 
+// DOM half of the CV barline snap (the pure half is lib/chart-snap.ts): turn an
+// offscreen-rendered page canvas into a per-column darkness profile over a
+// system's band rect. Each column's value is the fraction of band rows whose
+// pixel reads as dark ink. pdf.js paints ink onto a transparent canvas, so a
+// pixel only counts when it is BOTH opaque and below the luma floor — that
+// rejects the empty background (luma 0 but alpha 0) and white fills alike.
+// Manual-UAT only (vitest is environment:'node', no canvas), mirroring the
+// repo's logic-tested / DOM-untested split.
+function buildBandProfile(
+  canvas: HTMLCanvasElement,
+  system: { xStart: number; xEnd: number; yTop: number; yBottom: number },
+): BandProfile | null {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  const W = canvas.width;
+  const H = canvas.height;
+  const x0 = Math.max(0, Math.floor(system.xStart * W));
+  const x1 = Math.min(W, Math.ceil(system.xEnd * W));
+  const y0 = Math.max(0, Math.floor(system.yTop * H));
+  const y1 = Math.min(H, Math.ceil(system.yBottom * H));
+  const cols = x1 - x0;
+  const rows = y1 - y0;
+  if (cols <= 0 || rows <= 0) return null;
+  const data = ctx.getImageData(x0, y0, cols, rows).data;
+  const dark = new Float32Array(cols);
+  for (let cx = 0; cx < cols; cx += 1) {
+    let darkRows = 0;
+    for (let cy = 0; cy < rows; cy += 1) {
+      const p = (cy * cols + cx) * 4;
+      const a = data[p + 3];
+      if (a <= 10) continue; // transparent background — not ink
+      const luma = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+      if (luma < DARK_LUMA) darkRows += 1;
+    }
+    dark[cx] = darkRows / rows;
+  }
+  return { cols, dark };
+}
+
 // Press-and-hold threshold: a quick tap seeks the redline to a section; a hold
 // "parks" it there (step 1 has no transport, so both just park — hold is the
 // forward-looking gesture for level-B follow).
@@ -2393,6 +2440,10 @@ function ChartNavigator({
   // ── Chart calibration (realtime chart control, step 1: section rail) ──
   const [calMode, setCalMode] = useState<'perform' | 'calibrate'>('perform');
   const [calibration, setCalibration] = useState<ChartCalibration | null>(null);
+  // Latest-value mirror of calibration: the async snap reads this AFTER its
+  // offscreen render so it matches+applies against the freshest geometry, never
+  // a snapshot captured before any concurrent add/remove/drag/stepper edit.
+  const calibrationRef = useRef(calibration);
   const [sourceHash, setSourceHash] = useState<string | null>(null);
   const [seekId, setSeekId] = useState<string | null>(null);
   const [holdId, setHoldId] = useState<string | null>(null);
@@ -2408,6 +2459,12 @@ function ChartNavigator({
   // two are mutually exclusive; both clear on tool/mode/system change.
   const [addBarMode, setAddBarMode] = useState(false);
   const [selectedBoundary, setSelectedBoundary] = useState<{ systemId: string; index: number } | null>(null);
+  // ── CV barline snap (#2) ──
+  // snapBusy guards the async offscreen render; snapResult holds the last run's
+  // metadata for the selected system so the controls can surface no-ops, count
+  // mismatches, and clamped partials. Cleared whenever the selection changes.
+  const [snapBusy, setSnapBusy] = useState(false);
+  const [snapResult, setSnapResult] = useState<{ systemId: string; result: SnapBarsResult } | null>(null);
   // ── Roadmap tool state ──
   // selectedBarId = the bar the marker palette acts on; selectedMarkerId = a
   // placed marker tapped for deletion (delete-to-resolve). endingDraft = the
@@ -2439,14 +2496,24 @@ function ChartNavigator({
     }
   }, [currentIdx]);
 
-  // A tick selection is page-local — a selected boundary lives on a system on the
-  // current page. When the page changes (arrows, swipe, ref-jump, chart switch),
-  // clear it so the Remove button can't act on an off-page (hidden) tick. Guarded
-  // by a ref so the clear only fires on an actual page change, not every render.
+  // Keep the latest-value calibration mirror current (read by the async snap).
+  useEffect(() => {
+    calibrationRef.current = calibration;
+  }, [calibration]);
+
+  // The bars-tool selection is page-local — a selected system (and any tick
+  // selection / snap result on it) lives on the current page. When the page
+  // changes (arrows, swipe, ref-jump, chart switch), clear it so off-page edits
+  // can't fire on a hidden band — in particular so "Snap to lines" can't profile
+  // a stale off-page system rect. Guarded by a ref so the clear only fires on an
+  // actual page change, not every render.
   useEffect(() => {
     if (pageNum !== prevPageNumRef.current) {
       prevPageNumRef.current = pageNum;
+      setSelectedSystemId(null);
       setSelectedBoundary(null);
+      setAddBarMode(false);
+      setSnapResult(null);
     }
   }, [pageNum]);
 
@@ -2535,16 +2602,58 @@ function ChartNavigator({
     // destructive redistribution).
     setSelectedBoundary(null);
     setAddBarMode(false);
+    setSnapResult(null);
     setCalibration((c) => (c ? autoDistributeBars(c, id, Math.max(0, count)) : c));
   };
   // Local cardinality edits (non-destructive to neighbors), beside the stepper:
   // add splits the measure under x; remove merges the two bars a tick divides.
-  const addBarlineAt = (systemId: string, x: number) =>
+  const addBarlineAt = (systemId: string, x: number) => {
+    setSnapResult(null);
     setCalibration((c) => (c ? addBarline(c, systemId, x) : c));
+  };
   const removeBarlineAt = (systemId: string, index: number) => {
     setCalibration((c) => (c ? removeBarline(c, systemId, index) : c));
     setSelectedBoundary(null);
+    setSnapResult(null);
   };
+  // CV barline snap (#2): render the page offscreen, read the selected system's
+  // band darkness, detect printed barlines, and snap the auto-distributed
+  // boundaries onto them — all through moveBarBoundary (so every #94 invariant
+  // inherits). Positions only; never changes bar count. Result metadata drives
+  // the controls' no-op / count-mismatch / partial hints.
+  const snapSelectedSystem = useCallback(
+    async (systemId: string) => {
+      const doc = docRef.current;
+      if (!doc || snapBusy) return;
+      setSnapBusy(true);
+      try {
+        const system = (calibrationRef.current?.systems ?? []).find((s) => s.id === systemId);
+        if (!system) return;
+        // Render the SYSTEM's own page (not the displayed pageNum): the band rect
+        // is normalized to that page, so detection geometry stays self-consistent
+        // regardless of where the viewer currently sits.
+        const canvas = await renderPageOffscreen(doc, system.page, SNAP_RENDER_SCALE);
+        if (!canvas) return;
+        const profile = buildBandProfile(canvas, system);
+        if (!profile) return;
+        const lines = detectBarlines(profile);
+        // Match + apply against the calibration as it stands AFTER the async render
+        // (read via the latest-value ref), so a concurrent add/remove/drag/stepper
+        // edit isn't clobbered by a stale pre-render snapshot. snapBarsToLines is
+        // pure; this read→apply is synchronous so nothing can interleave between.
+        const current = calibrationRef.current;
+        if (!current) return;
+        const result = snapBarsToLines(current, systemId, lines);
+        setCalibration(result.calibration);
+        setSnapResult({ systemId, result });
+        setSelectedBoundary(null);
+        setAddBarMode(false);
+      } finally {
+        setSnapBusy(false);
+      }
+    },
+    [snapBusy],
+  );
   // A tick TAP (vs drag) selects an interior boundary (1..N-1) for removal; the
   // band edges (0, N) are extent, not dividers, so they never select.
   const tapBoundary = (systemId: string, index: number) => {
@@ -2559,12 +2668,14 @@ function ChartNavigator({
     setSelectedSystemId(id);
     setSelectedBoundary(null);
     setAddBarMode(false);
+    setSnapResult(null);
   };
   const deleteSystem = (id: string) => {
     setCalibration((c) => (c ? removeSystem(c, id) : c));
     setSelectedSystemId(null);
     setSelectedBoundary(null);
     setAddBarMode(false);
+    setSnapResult(null);
   };
   const selectedSystem = selectedSystemId
     ? (calibration?.systems ?? []).find((s) => s.id === selectedSystemId) ?? null
@@ -3159,6 +3270,37 @@ function ChartNavigator({
                     +
                   </button>
                 </div>
+                <span className="text-zinc-600">·</span>
+                {/* CV barline snap (#2): align the even-distributed boundaries onto
+                    the page's real printed barlines. Positions only — bar count is
+                    the stepper's job. Result hint surfaces no-op / count-mismatch /
+                    partials so a bad snap reads as "nudge these" not "done". */}
+                <button
+                  onClick={() => snapSelectedSystem(selectedSystem.id)}
+                  disabled={snapBusy || selectedBarCount === 0}
+                  className="px-2 h-6 rounded font-bold bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  {snapBusy ? 'Snapping\u2026' : '\u2317 Snap to lines'}
+                </button>
+                {snapResult && snapResult.systemId === selectedSystem.id && (() => {
+                  const r = snapResult.result;
+                  if (r.accepted === 0) {
+                    return <span className="text-amber-400 truncate">no clear barlines to snap</span>;
+                  }
+                  const countOff = r.detectedLines !== r.expectedBoundaries;
+                  return (
+                    <span className="flex items-center gap-1 truncate">
+                      <span className="text-emerald-400">
+                        {r.fullySnapped} snapped{r.partial > 0 ? `, ${r.partial} need a nudge` : ''}
+                      </span>
+                      {countOff && (
+                        <span className="text-amber-400">
+                          · found {r.detectedLines}, expected {r.expectedBoundaries} &mdash; adjust count
+                        </span>
+                      )}
+                    </span>
+                  );
+                })()}
                 <span className="text-zinc-600">·</span>
                 {/* Local cardinality edits (don't re-distribute / wipe nudges like
                     the stepper does). Add: toggle, then tap inside a measure. Remove:
