@@ -228,6 +228,17 @@ describe('renderRoadmap — navigation variants', () => {
     expect(kinds.has('coda')).toBe(true);
     expect(kinds.has('toCoda')).toBe(true);
     expect(kinds.has('segno')).toBe(true);
+
+    // toCoda and the D.S. jump intentionally share bar (1,8): the renderer must
+    // stack co-located directives rather than overprint. Pin the co-location so
+    // the stacking path stays exercised, and confirm the render is deterministic.
+    const markers = calibration.roadmap ?? [];
+    const toCodaBar = markers.find((m) => m.kind === 'toCoda')?.barId;
+    const jumpBar = markers.find((m) => m.kind === 'jump')?.barId;
+    expect(toCodaBar).toBeTruthy();
+    expect(jumpBar).toBe(toCodaBar);
+    const again = await renderRoadmap(spec);
+    expect(Buffer.from(pdfBytes).equals(Buffer.from(again.pdfBytes))).toBe(true);
   });
 
   it('renders a D.C. al Fine form (fine + jump)', async () => {

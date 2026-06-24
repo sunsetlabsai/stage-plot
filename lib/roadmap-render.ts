@@ -444,19 +444,30 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
   if (!nav) return;
   const at = (ref: BarRef): LaidBar | undefined => barAt.get(`${ref.section}:${ref.bar}`);
 
-  if (nav.segno) { const b = at(nav.segno); if (b) drawDirective(pageOf(b), font, b, 'start', 'Segno'); }
+  // The resolver allows distinct marker kinds to share a bar (e.g. an al-Coda
+  // form fires D.S. and To Coda on the same bar across passes). Stack same
+  // bar+edge directives vertically so none overprints another.
+  const rows = new Map<string, number>();
+  const stackDy = (b: LaidBar, edge: 'start' | 'end'): number => {
+    const key = `${b.page}:${b.id}:${edge}`;
+    const n = rows.get(key) ?? 0;
+    rows.set(key, n + 1);
+    return n * 10;
+  };
+
+  if (nav.segno) { const b = at(nav.segno); if (b) drawDirective(pageOf(b), font, b, 'start', 'Segno', 0, stackDy(b, 'start')); }
   if (nav.coda) {
     const b = at(nav.coda);
     if (b) {
       const cx = denormX(b.xStart) + 8;
       const cy = denormYTop(b.yTop) + 12;
       drawCodaSign(pageOf(b), cx, cy, 5);
-      drawDirective(pageOf(b), font, b, 'start', 'Coda', 18);
+      drawDirective(pageOf(b), font, b, 'start', 'Coda', 18, stackDy(b, 'start'));
     }
   }
-  if (nav.toCoda) { const b = at(nav.toCoda); if (b) drawDirective(pageOf(b), font, b, 'end', 'To Coda'); }
-  if (nav.fine) { const b = at(nav.fine); if (b) drawDirective(pageOf(b), font, b, 'end', 'Fine'); }
-  if (nav.jump) { const b = at(nav.jump.at); if (b) drawDirective(pageOf(b), font, b, 'end', jumpLabel(nav.jump.from, nav.jump.until)); }
+  if (nav.toCoda) { const b = at(nav.toCoda); if (b) drawDirective(pageOf(b), font, b, 'end', 'To Coda', 0, stackDy(b, 'end')); }
+  if (nav.fine) { const b = at(nav.fine); if (b) drawDirective(pageOf(b), font, b, 'end', 'Fine', 0, stackDy(b, 'end')); }
+  if (nav.jump) { const b = at(nav.jump.at); if (b) drawDirective(pageOf(b), font, b, 'end', jumpLabel(nav.jump.from, nav.jump.until), 0, stackDy(b, 'end')); }
 }
 
 // "D.C." / "D.S." with an optional al-Fine / al-Coda suffix.
@@ -553,9 +564,10 @@ function drawDiamond(page: PDFPage, cx: number, cy: number, half: number): void 
 }
 
 // A text directive (Segno / Coda / To Coda / Fine / D.S. al Coda…) anchored above
-// the band at the bar's start or end edge. `dx` nudges past an adjacent glyph.
-function drawDirective(page: PDFPage, font: PDFFont, bar: LaidBar, edge: 'start' | 'end', text: string, dx = 0): void {
-  const y = denormYTop(bar.yTop) + 8;
+// the band at the bar's start or end edge. `dx` nudges past an adjacent glyph;
+// `dy` lifts the row so co-located directives stack instead of overprinting.
+function drawDirective(page: PDFPage, font: PDFFont, bar: LaidBar, edge: 'start' | 'end', text: string, dx = 0, dy = 0): void {
+  const y = denormYTop(bar.yTop) + 8 + dy;
   const x = edge === 'start'
     ? denormX(bar.xStart) + dx
     : denormX(bar.xEnd) - font.widthOfTextAtSize(text, 9) - dx;
