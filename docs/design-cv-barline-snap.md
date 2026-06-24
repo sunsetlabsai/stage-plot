@@ -2,7 +2,10 @@
 
 Status: DESIGN — decisions 1-8 LOCKED by Graham (all yes; #3 = option A).
 Revised after Codex round-1 (order-aware matching contract, honest no-regression
-claim, dedicated offscreen render helper). Build-on-GO only, after Codex re-review.
+claim, dedicated offscreen render helper) and Opus self-review R2 (pre-snap
+snapshot determinism, MIN_STRENGTH floor in both branches, pinned monotone
+alignment, post-apply honesty — see §Decisions). Build-on-GO only, after Codex
+re-review.
 Scope: the **automated** refinement that sits between `autoDistributeBars`
 (even floor) and the manual barline-tick drag (`moveBarBoundary`, shipped in
 PR #94). Cardinality reconciliation (add/remove a barline) is its companion —
@@ -39,10 +42,14 @@ Because it applies only through `moveBarBoundary`, it can never produce an
 *invalid* calibration — no crossings, inversions, or sub-`MIN_BAR_W` bars,
 reading order/`absNumber` preserved. It can still *mis-position* a boundary onto
 the wrong vertical stroke (a false-positive line), since geometry can't know
-which stroke is semantically a barline. So snap is **gated** (strength floor +
-unambiguous ordinal match, below) to make that rare, and every result stays
-human-correctable via the #94 drag or a stepper re-distribute. On a chart it
-can't read it degrades to a partial/full no-op. The claim is "never an invalid
+which stroke is semantically a barline. So snap is **gated** — a `MIN_STRENGTH`
+floor that applies in **both** the equal- and unequal-count branches (so the
+ordinal path is not the least-defended), mutual-nearest pairing, and a
+bar-width-relative `MAX_PULL` — to make that rare, and every result stays
+human-correctable via the #94 drag or a stepper re-distribute. Snap also
+**verifies its own work**: a boundary that `moveBarBoundary` clamps short of its
+detected line is reported as a partial, not a success. On a chart it can't read
+it degrades to a partial/full no-op. The claim is "never an invalid
 calibration," **not** "never mis-positioned."
 
 ## Architecture — pure core + thin DOM adapter
@@ -124,9 +131,24 @@ array, output is numbers. Fully unit-testable with synthetic `dark` arrays
 Given the system's N bars → N+1 boundaries (same model as #94: tick `0` =
 `bars[0].xStart`, tick `k` = `bars[k].xStart`, tick `N` = `bars[N-1].xEnd`):
 
+**All matching and gating is computed against ONE pre-snap snapshot** (the
+boundary positions `B` and bar widths captured *before any apply*); the accepted
+matches are then committed in a single left-to-right `moveBarBoundary` fold.
+Gates are **never** re-evaluated against the partially-mutated calibration — bar
+widths shift as each fold lands, so a live re-read would make `MAX_PULL` and
+"nearest boundary" order-coupled and non-deterministic (the same
+remap-against-original discipline #96 uses). Steps:
+
 1. Map each band-space line to **page space**:
    `pageX = system.xStart + line.x × (system.xEnd − system.xStart)`.
-2. **Match — order-aware, NOT nearest-within-tolerance (Codex R1 #1).**
+2. **Strength prefilter (BOTH branches, Opus R2 #B2).** Drop every detected line
+   with `strength < MIN_STRENGTH` *before* the count is even examined. The
+   floor therefore guards the equal-count ordinal path too — it is no longer the
+   least-defended path. A weak false positive is removed (so it can't pad the
+   count to `N+1`); a weak real line is also removed (dropping the count, which
+   routes to the gated branch rather than trusting it). `L` below is the
+   **strength-filtered** line set.
+3. **Match — order-aware, NOT nearest-within-tolerance (Codex R1 #1).**
    The naive "snap each boundary to the nearest line within `SNAP_TOL`" fails the
    main workflow: a full-width system from `autoDistributeBars` puts boundary 0 at
    `system.xStart` (the page edge) and boundary N at `system.xEnd`, but the first
@@ -134,29 +156,52 @@ Given the system's N bars → N+1 boundaries (same model as #94: tick `0` =
    a tiny tolerance leaves the very margins #94 introduced unsnapped. The match
    must therefore be **ordinal** (position-in-sequence), not proximity:
    - Let `B` = the N+1 boundary positions (page-space, ascending) and `L` = the
-     detected line positions (page-space, ascending).
+     strength-filtered line positions (page-space, ascending).
    - **Counts equal (`|L| == N+1`):** assign by ordinal — `L[i] → boundary i`.
      Edges anchor by their place in the sequence, so boundary 0 → the first line
      and boundary N → the last line **however far** they are from the band edge.
-   - **Counts differ:** run a **monotone alignment** (order-preserving) of `B` to
-     `L` and apply only **gated** matches:
-     - **Mutual-nearest:** apply `L[j] → boundary i` only when `L[j]` is the
-       nearest line to boundary `i` *and* boundary `i` is the nearest boundary to
-       `L[j]` — so two boundaries can't fight over one line and a boundary can't
-       reach across a bar.
-     - **Strength floor:** `L[j].strength ≥ MIN_STRENGTH`.
-     - **Displacement guard `MAX_PULL`:** cap the pull at a fraction of the
-       *local bar width* (proposed `0.5 × min(adjacent bar widths)`), **not** a
-       fixed page-fraction. Bar-width-relative is what lets boundary 0 reclaim a
-       wide clef margin while still refusing a cross-bar yank. (This replaces the
-       old fixed `SNAP_TOL = 0.02` — see decision 4.)
-     - Unmatched boundaries stay put; surplus lines are reported, never forced
-       (Count mismatch, below).
-3. **Apply** each accepted match through the existing `moveBarBoundary(cal,
+     `MAX_PULL` is intentionally *not* applied here (that is exactly what lets a
+     boundary reclaim a wide clef margin), but the strength prefilter (step 2)
+     still gates it, so a single spurious stroke can no longer make the count
+     coincidentally `N+1` and yank the whole row onto a shifted sequence.
+   - **Counts differ:** run the **monotone (order-preserving) alignment** below
+     and apply only **gated** matches.
+
+   **Monotone alignment — pinned procedure (Opus R2 #C).** Between two
+   ascending sequences, walk both with a single pass and pair by mutual-nearest;
+   this is provably order-preserving (if `B[i]→L[j]` then no later boundary can
+   accept a line `< L[j]`):
+   ```
+   for each boundary i (ascending):
+     cand = the line L[j] minimizing |L[j] − B[i]| among lines not yet claimed
+            by an earlier boundary
+     accept L[j] → boundary i  ⟺  ALL of:
+       (a) mutual-nearest: B[i] is also the nearest boundary to L[j]
+           (no earlier/later boundary is closer) — two boundaries can't fight
+           over one line, a boundary can't reach across a bar;
+       (b) MAX_PULL: |L[j] − B[i]| ≤ 0.5 × min(adjacent bar widths of i)
+           in the PRE-SNAP snapshot — local-bar-width-relative, not a fixed
+           page-fraction (replaces the rejected `SNAP_TOL = 0.02`, decision 4);
+       (c) the strength floor already held (step 2).
+     else boundary i stays put; L[j] remains available to no one past it
+          (claimed-or-skipped is monotone).
+   ```
+   Unmatched boundaries keep their even-floor position; surplus lines are
+   reported, never forced (Count mismatch, below).
+4. **Apply** each accepted match through the existing `moveBarBoundary(cal,
    systemId, boundaryIndex, pageX)` — so all the #94 invariants (no sibling
    crossing, no inversion, MIN_BAR_W floor, renumber) are inherited and there is
-   **one** mutation path. Fold left-to-right; `moveBarBoundary`'s own clamp keeps
-   the sequence monotone even if two accepted targets are close.
+   **one** mutation path. Commit the accepted targets in a single left-to-right
+   fold (gates were all decided on the pre-snap snapshot, step rationale above).
+5. **Post-apply honesty (Opus R2 #D).** `moveBarBoundary` silently *clamps* a
+   target that lands outside its window and *no-ops* a degenerate one — so an
+   accepted match (especially an ungated equal-count edge) can leave a boundary
+   **not on its detected line**. After the fold, compare each moved boundary's
+   resting x to its intended `pageX`; any that differ by more than a px-scale
+   epsilon are counted as **partial / not-fully-snapped** and rolled into the
+   same delta surfaced to the user (Count mismatch, below), so snap never
+   *reports* a clamp it didn't actually achieve. Honest-guarantee section reflects
+   this.
 
 **Count mismatch — surfaced, never silently forced (decision 2 = positions
 only):** detections rarely equal N+1. Snap never adds or removes a bar.
@@ -226,7 +271,18 @@ coloring) surfaces weak snaps for human glance. Two options, Graham picks:
    printed barline (after clef/key-sig) and final barline anchor to boundary 0/N
    by sequence position (not proximity), so wide margins snap. The thinness +
    coverage filters keep the clef/time-sig from registering as a line — flagged
-   for Codex scrutiny on real charts.
+   for Codex scrutiny on real charts. **Amended (Opus R2 #B2):** the
+   `MIN_STRENGTH` floor now runs as a *prefilter in both branches*, so the
+   ungated ordinal edge-anchoring acts only on lines that already cleared
+   strength — a single spurious stroke can no longer pad the count to `N+1` and
+   cascade-misalign the row. `moveBarBoundary` accepts index 0 and N
+   (`chart-calibration.ts:418`), so edge anchoring is genuinely applied, not a
+   silent no-op.
+
+**Opus self-review R2 (folded, pre-Codex-R2):** #B1 all gating computed on one
+pre-snap snapshot then a single fold (determinism); #B2 strength floor in both
+branches; #C monotone-alignment procedure pinned; #D post-apply honesty (clamped
+≠ detected → reported partial). #B2 reconfirmed by Graham.
 
 ## Test plan (builder writes tests — pure core only)
 
@@ -252,6 +308,15 @@ coloring) surfaces weak snaps for human glance. Two options, Graham picks:
 - `MAX_PULL` guard: a line beyond `0.5 × local bar width` from its ordinal
   boundary is refused (no cross-bar yank); one within it is applied
 - `MIN_STRENGTH` gate: a weak line is not applied
+- **strength prefilter in BOTH branches (Opus R2 #B2):** a sub-`MIN_STRENGTH`
+  spurious line that would make `|L| == N+1` is dropped first → does NOT trigger
+  ungated ordinal anchoring; the real lines snap on the (now unequal) gated path
+- **pre-snap snapshot determinism (Opus R2 #B1):** gates (`MAX_PULL`,
+  mutual-nearest) evaluated on original geometry — feeding lines in any order, or
+  two near-adjacent accepted targets, yields the same result (no live-width drift)
+- **post-apply honesty (Opus R2 #D):** a detected line outside its boundary's
+  `moveBarBoundary` window leaves the boundary clamped short → reported as a
+  partial (counted in the delta), not as a snapped success
 - monotone result: reading order / `absNumber` preserved (inherits #94's clamp)
 - band→page x mapping correct for an indented system (`xStart ≠ 0`)
 - option (A): snapped bars' confidence cleared, status → draft (delegates to
