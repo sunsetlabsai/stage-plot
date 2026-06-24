@@ -81,8 +81,21 @@ One function: turn a selected system's band into a 1-D darkness profile.
    viewport). No cross-origin taint — the PDF is same-origin (Supabase public
    URL or the Drive proxy), so the canvas is readable.
 3. Collapse to a **column darkness profile**: for each column, the fraction of
-   band-height rows whose luminance < `DARK_LUMA`. Output `BandProfile`
+   **staff-height** rows whose luminance < `DARK_LUMA`. Output `BandProfile`
    (below). This is the only DOM-dependent step; everything downstream is pure.
+
+   **Staff-extent crop (UAT R1).** The coverage denominator is the *staff's*
+   vertical span, not the full band. Users and the VLM routinely draw a band
+   taller than the printed staff; a barline only spans the staff, so against the
+   padded band its coverage falls under `MIN_COVERAGE` and detection returns
+   nothing ("no clear barlines" — the consistent prod-UAT failure). Staff lines
+   run dark across most of the band width, so the adapter finds the first/last
+   row whose dark-fraction ≥ `STAFF_ROW_FRAC` (0.5) and crops the column profile
+   to that span — a real barline then reads ~1.0 regardless of band slack. If no
+   staff rows are found (slash/chord chart, no staff lines) it falls back to the
+   full band (prior behavior). The pure core is unchanged: it still consumes a
+   `BandProfile`, now a better-conditioned one. Single pixel pass builds a 1-bit
+   ink map + per-row dark counts; luma computed only for opaque pixels.
 
 ### Pure core (new file `lib/chart-snap.ts`)
 
@@ -303,8 +316,8 @@ coloring) surfaces weak snaps for human glance. Two options, Graham picks:
    `0.5 × min(adjacent bar widths)`). ✅ Replaces the rejected fixed
    `SNAP_TOL = 0.02`, which couldn't reclaim a wide clef margin (Codex R1 #1).
 5. **Named-constant set** (`MIN_COVERAGE = 0.6`, `DARK_LUMA`, `MIN_STRENGTH`,
-   `MAX_LINE_FRAC`, `NMS_PX`, `MAX_PULL`, `SNAP_RENDER_SCALE`) — accepted,
-   tunable post-UAT. ✅
+   `MAX_LINE_FRAC`, `NMS_PX`, `MAX_PULL`, `SNAP_RENDER_SCALE`, `STAFF_ROW_FRAC`)
+   — accepted, tunable post-UAT. ✅
 6. **Per-selected-system v1** ("Snap all" deferred). ✅
 7. **Pure JS projection, no OpenCV/wasm dep.** ✅ Zero deps; real CV rejected as
    over-engineering for v1, revisit only if projection underperforms on real

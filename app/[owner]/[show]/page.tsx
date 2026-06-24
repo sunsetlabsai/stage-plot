@@ -85,6 +85,7 @@ import {
   snapBarsToLines,
   DARK_LUMA,
   SNAP_RENDER_SCALE,
+  STAFF_ROW_FRAC,
   type BandProfile,
   type SnapBarsResult,
 } from '@/lib/chart-snap';
@@ -1558,12 +1559,19 @@ interface CanvasBox {
 
 // DOM half of the CV barline snap (the pure half is lib/chart-snap.ts): turn an
 // offscreen-rendered page canvas into a per-column darkness profile over a
-// system's band rect. Each column's value is the fraction of band rows whose
+// system's band rect. Each column's value is the fraction of STAFF rows whose
 // pixel reads as dark ink. pdf.js paints ink onto a transparent canvas, so a
 // pixel only counts when it is BOTH opaque and below the luma floor — that
 // rejects the empty background (luma 0 but alpha 0) and white fills alike.
-// Manual-UAT only (vitest is environment:'node', no canvas), mirroring the
-// repo's logic-tested / DOM-untested split.
+//
+// Crucially the coverage denominator is the staff's vertical span, NOT the full
+// band. Users (and the VLM) routinely draw a band taller than the printed staff;
+// a barline only spans the staff, so against the padded band its coverage falls
+// under MIN_COVERAGE and nothing is detected ("no clear barlines"). Staff lines
+// run dark across most of the band width, so we find the first/last such row and
+// crop to it — then a real barline reads ~1.0 regardless of band slack. If no
+// staff rows are found (e.g. a slash/chord chart with no staff), we fall back to
+// the full band. Manual-UAT only (vitest is environment:'node', no canvas).
 function buildBandProfile(
   canvas: HTMLCanvasElement,
   system: { xStart: number; xEnd: number; yTop: number; yBottom: number },
@@ -1579,18 +1587,53 @@ function buildBandProfile(
   const cols = x1 - x0;
   const rows = y1 - y0;
   if (cols <= 0 || rows <= 0) return null;
+
+  // Single pixel pass: a 1-bit ink map plus the per-row dark count (for the
+  // staff-extent crop). luma is only computed for opaque pixels.
   const data = ctx.getImageData(x0, y0, cols, rows).data;
+  const ink = new Uint8Array(cols * rows);
+  const rowInk = new Uint32Array(rows);
+  for (let cy = 0; cy < rows; cy += 1) {
+    let rc = 0;
+    const base = cy * cols;
+    for (let cx = 0; cx < cols; cx += 1) {
+      const p = (base + cx) * 4;
+      if (data[p + 3] <= 10) continue; // transparent background — not ink
+      const luma = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+      if (luma < DARK_LUMA) {
+        ink[base + cx] = 1;
+        rc += 1;
+      }
+    }
+    rowInk[cy] = rc;
+  }
+
+  // Staff vertical extent: the topmost/bottommost rows dark across ≥ STAFF_ROW_FRAC
+  // of the width (the printed staff lines). Crop coverage to that span.
+  const staffRowMin = STAFF_ROW_FRAC * cols;
+  let ry0 = 0;
+  let ry1 = rows - 1;
+  let first = -1;
+  let last = -1;
+  for (let cy = 0; cy < rows; cy += 1) {
+    if (rowInk[cy] >= staffRowMin) {
+      if (first < 0) first = cy;
+      last = cy;
+    }
+  }
+  if (first >= 0 && last > first) {
+    ry0 = first;
+    ry1 = last;
+  }
+  const winH = ry1 - ry0 + 1;
+
   const dark = new Float32Array(cols);
   for (let cx = 0; cx < cols; cx += 1) {
     let darkRows = 0;
-    for (let cy = 0; cy < rows; cy += 1) {
-      const p = (cy * cols + cx) * 4;
-      const a = data[p + 3];
-      if (a <= 10) continue; // transparent background — not ink
-      const luma = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
-      if (luma < DARK_LUMA) darkRows += 1;
+    for (let cy = ry0; cy <= ry1; cy += 1) {
+      if (ink[cy * cols + cx]) darkRows += 1;
     }
-    dark[cx] = darkRows / rows;
+    dark[cx] = darkRows / winH;
   }
   return { cols, dark };
 }
@@ -1759,7 +1802,7 @@ function SystemBand({
         } ${
           flagged ? 'outline-dashed outline-2 outline-offset-1 outline-amber-400' : ''
         }`}
-        style={{ left, top, width, height, pointerEvents: 'auto', touchAction: 'manipulation' }}
+        style={{ left, top, width, height, pointerEvents: 'auto', touchAction: 'manipulation', zIndex: selected ? 20 : 10 }}
       >
         {selected && (
           <span className="absolute -top-4 left-0 text-[10px] font-bold text-sky-300">
@@ -1801,6 +1844,7 @@ function SystemBand({
             height,
             pointerEvents: 'auto',
             touchAction: 'none',
+            zIndex: 21,
           }}
         />
       ))}
@@ -1818,6 +1862,7 @@ function SystemBand({
             width,
             pointerEvents: 'auto',
             touchAction: 'none',
+            zIndex: 21,
           }}
         />
       ))}
