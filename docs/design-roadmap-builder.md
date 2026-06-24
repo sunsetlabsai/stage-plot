@@ -229,14 +229,20 @@ NL text ──▶ [AI parse route]  ──▶ RoadmapSpec ──▶ [validator] 
 - **Validator** (`lib/roadmap-spec.ts`, pure): bar math, section sums, time-sig consistency, degree/
   quality whitelist, split-bar beat sums. It **mirrors every `resolveRoadmap` precondition the spec can
   violate**, so a valid spec always renders a resolvable (born-verified) calibration:
-  - **Repeats/voltas** (`SectionRepeat`): `plain.times ≥ 2`; for `volta`, each `VoltaEnding.bars` is in
+  - **Repeats/voltas** (`SectionRepeat`): `plain.times ≥ 2` **and `section.bars ≥ 2`** — a plain repeat
+    emits `repeatStart` on the section's first bar and `repeatEnd` on its last, and `resolveRoadmap` rejects a
+    `repeatEnd` whose position is `≤` the `repeatStart` (`lib/chart-calibration.ts:951`), so a 1-bar section
+    would land both markers on the same bar and fail `canVerify`. (1-bar plain repeats are out of v1 scope
+    unless the resolver model changes.) For `volta`, each `VoltaEnding.bars` is in
     range (`start > 1`, `count ≥ 1`, `start+count-1 ≤ section.bars`), ending ranges are **non-overlapping**,
     and `⋃ passes` **partitions `1..max` with no gap/overlap** (resolveRoadmap §5#3/#6 — contiguity is free
     from `{start,count}`).
-  - **Navigation** (`RoadmapNavigation`): every `BarRef` resolves to a real `(section, bar)`; `jump.from:
-    'segno'` requires `navigation.segno`; `jump.until:'coda'` requires both `coda` and `toCoda`;
-    `jump.until:'fine'` requires `fine` (mirrors resolveRoadmap's walk preconditions). At most one of each
-    global target (the model is single-segno/single-coda).
+  - **Navigation** (`RoadmapNavigation`): every `BarRef` resolves to a real `(section, bar)`; **`toCoda`
+    implies `coda`** — `resolveRoadmap` rejects a standalone `toCoda` whenever no `coda` exists
+    (`lib/chart-calibration.ts:889`), independent of any jump; `jump.from:'segno'` requires
+    `navigation.segno`; `jump.until:'coda'` requires both `coda` and `toCoda`; `jump.until:'fine'` requires
+    `fine` (mirrors resolveRoadmap's walk preconditions). At most one of each global target (the model is
+    single-segno/single-coda).
   This is the DB-boundary gate (mirrors `isValidCalibration`); the save route additionally runs the
   rendered output through the real `isValidCalibration`/`canVerify` + the spec↔calibration parity assertion.
 - **Renderer** (`lib/roadmap-render.ts`, pure-ish): `RoadmapSpec` + key → `{ pdfBytes, calibration }`.
