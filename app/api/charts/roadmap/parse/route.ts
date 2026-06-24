@@ -14,7 +14,7 @@ interface PostBody {
   description?: string;
 }
 
-// POST /api/charts/roadmap — AI parse boundary (PARSE-ONLY). Natural-language
+// POST /api/charts/roadmap/parse — AI parse boundary (PARSE-ONLY). Natural-language
 // song description → a validator-gated RoadmapSpec. Rendering the PDF + the
 // born-verified ChartCalibration is the caller's separate step (renderRoadmap,
 // chunk 1) so the AI seam and the deterministic renderer stay independently
