@@ -16,7 +16,7 @@ export default function LibraryPage() {
   const [addingNew, setAddingNew] = useState(false);
   const [managingId, setManagingId] = useState<string | null>(null);
   const [buildingId, setBuildingId] = useState<string | null>(null);
-  const [duplicating, setDuplicating] = useState<{ title: string; key: string; lead: string; notes: string } | null>(null);
+  const [duplicating, setDuplicating] = useState<{ title: string; artist: string; key: string; lead: string; notes: string } | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -32,11 +32,11 @@ export default function LibraryPage() {
     loadSongs();
   }, []);
 
-  async function handleCreate(title: string, key: string, lead: string, notes: string) {
+  async function handleCreate(title: string, key: string, lead: string, artist: string, notes: string) {
     const res = await fetch('/api/songs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, key, lead, notes }),
+      body: JSON.stringify({ title, key, lead, artist, notes }),
     });
 
     if (res.ok) {
@@ -50,7 +50,7 @@ export default function LibraryPage() {
     return data.error || 'Failed to create song';
   }
 
-  async function handleUpdate(id: string, updates: { title?: string; key?: string; lead?: string; notes?: string }) {
+  async function handleUpdate(id: string, updates: { title?: string; key?: string; lead?: string; artist?: string; notes?: string }) {
     const res = await fetch('/api/songs/update', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -103,6 +103,7 @@ export default function LibraryPage() {
   function handleDuplicate(song: Song) {
     setDuplicating({
       title: suggestDuplicateTitle(song.title, songs.map((s) => s.title)),
+      artist: song.artist ?? '',
       key: song.key ?? '',
       lead: song.lead ?? '',
       notes: song.notes ?? '',
@@ -111,8 +112,8 @@ export default function LibraryPage() {
     setEditingId(null);
   }
 
-  async function handleDuplicateSave(title: string, key: string, lead: string, notes: string) {
-    const err = await handleCreate(title, key, lead, notes);
+  async function handleDuplicateSave(title: string, key: string, lead: string, artist: string, notes: string) {
+    const err = await handleCreate(title, key, lead, artist, notes);
     if (!err) setDuplicating(null);
     return err;
   }
@@ -207,7 +208,7 @@ export default function LibraryPage() {
               <SongForm
                 key={song.id}
                 initial={song}
-                onSave={(title, key, lead, notes) => handleUpdate(song.id, { title, key, lead, notes })}
+                onSave={(title, key, lead, artist, notes) => handleUpdate(song.id, { title, key, lead, artist, notes })}
                 onCancel={() => setEditingId(null)}
               />
             ) : (
@@ -278,7 +279,10 @@ function SongRow({
 
   return (
     <div className="grid grid-cols-[1fr_80px_120px_60px_60px_210px] gap-2 items-center px-4 py-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors">
-      <span className="font-medium truncate">{song.title}</span>
+      <div className="min-w-0">
+        <p className="font-medium truncate">{song.title}</p>
+        {song.artist && <p className="text-xs text-zinc-500 truncate">{song.artist}</p>}
+      </div>
       <span>
         {song.key && (
           <span className="inline-block px-2 py-0.5 rounded bg-zinc-800 text-xs text-zinc-300">
@@ -342,12 +346,13 @@ function SongForm({
   onCancel,
   submitLabel,
 }: {
-  initial?: { title: string; key: string | null; lead: string; notes: string };
-  onSave: (title: string, key: string, lead: string, notes: string) => Promise<string | null>;
+  initial?: { title: string; artist?: string; key: string | null; lead: string; notes: string };
+  onSave: (title: string, key: string, lead: string, artist: string, notes: string) => Promise<string | null>;
   onCancel: () => void;
   submitLabel?: string;
 }) {
   const [title, setTitle] = useState(initial?.title ?? '');
+  const [artist, setArtist] = useState(initial?.artist ?? '');
   const [key, setKey] = useState(initial?.key ?? '');
   const [lead, setLead] = useState(initial?.lead ?? '');
   const [notes, setNotes] = useState(initial?.notes ?? '');
@@ -364,7 +369,7 @@ function SongForm({
     if (!title.trim() || saving) return;
     setSaving(true);
     setError('');
-    const err = await onSave(title.trim(), key.trim(), lead.trim(), notes.trim());
+    const err = await onSave(title.trim(), key.trim(), lead.trim(), artist.trim(), notes.trim());
     if (err) {
       setError(err);
       setSaving(false);
@@ -400,6 +405,14 @@ function SongForm({
           className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-white outline-none focus:border-blue-500"
         />
       </div>
+      <input
+        type="text"
+        value={artist}
+        onChange={(e) => setArtist(e.target.value)}
+        placeholder="Artist (optional)"
+        maxLength={100}
+        className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-white outline-none focus:border-blue-500"
+      />
       <input
         type="text"
         value={notes}

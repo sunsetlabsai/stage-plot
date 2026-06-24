@@ -67,8 +67,22 @@ export async function POST(request: NextRequest) {
   }
   const role = canonicalizeRole(body.role);
 
+  const admin = getSupabaseAdmin();
+
+  // Artist is song-level metadata owned by the library, so we read it from the
+  // canonical songs row (by owner + song_key) rather than trust a client value —
+  // the printed credit tracks the song, not the request. Tolerant of a missing
+  // row / pre-migration column: fall back to no credit.
+  const { data: songRow } = await admin
+    .from('songs')
+    .select('artist')
+    .eq('owner_id', user.id)
+    .eq('song_key', songKey)
+    .maybeSingle();
+  const artist = typeof songRow?.artist === 'string' ? songRow.artist : '';
+
   // Render server-side: spec → {pdfBytes, born-verified calibration}.
-  const { pdfBytes, calibration } = await renderRoadmap(spec, { songTitle });
+  const { pdfBytes, calibration } = await renderRoadmap(spec, { songTitle, artist });
 
   // Renderer-bug guard: prove the calibration faithfully describes the spec before
   // it is ever hashed or persisted (a renderer regression that drops/miscounts a
@@ -93,7 +107,6 @@ export async function POST(request: NextRequest) {
   // until the DB commit lands and we reclaim it. Upsert is idempotent for retries
   // of the same hash.
   const storagePath = `${user.id}/${songKey}/${role}/${sourceHash}.pdf`;
-  const admin = getSupabaseAdmin();
   const { error: uploadError } = await admin.storage
     .from('charts')
     .upload(storagePath, pdfBytes, { contentType: MIME, upsert: true });

@@ -73,6 +73,17 @@ describe('renderRoadmap — substrate + born-verified calibration', () => {
     expect(Buffer.from(a.pdfBytes).equals(Buffer.from(b.pdfBytes))).toBe(true);
   });
 
+  it('artist credit is header-only — never perturbs the born calibration', async () => {
+    // The save route asserts spec↔calibration parity, so the printed credit must
+    // be cosmetic: it changes the PDF bytes but leaves the geometry untouched.
+    const spec = linearSpec();
+    const plain = await renderRoadmap(spec, { songTitle: 'Song' });
+    const credited = await renderRoadmap(spec, { songTitle: 'Song', artist: 'The Band' });
+
+    expect(credited.calibration).toEqual(plain.calibration);
+    expect(Buffer.from(credited.pdfBytes).equals(Buffer.from(plain.pdfBytes))).toBe(false);
+  });
+
   it('projects repeats and navigation onto resolvable RoadmapMarkers', async () => {
     const spec = navSpec();
     expect(validateRoadmapSpec(spec).ok).toBe(true);

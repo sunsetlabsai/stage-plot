@@ -162,6 +162,7 @@ export interface Song {
   owner_id: string;
   song_key: string;
   title: string;
+  artist: string;       // song-level credit; printed on built charts
   key: string | null;
   lead: string;
   notes: string;

@@ -93,6 +93,7 @@ export interface RenderResult {
 
 export interface RenderOptions {
   songTitle?: string;  // printed in the header; the spec carries only renderKey
+  artist?: string;     // song-level credit under the title (from the songs row)
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -353,11 +354,15 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
     pages.push(doc.addPage([PAGE_W, PAGE_H]));
   }
 
-  // Header (page 1): song title (if provided by the save layer) + key.
+  // Header (page 1): song title + artist credit (if provided by the save layer)
+  // then key. Key drops a line when a credit is present so they never collide.
   if (opts.songTitle) {
     drawText(pages[0], fontBold, opts.songTitle, MARGIN_X, MARGIN_TOP - 36, 18);
   }
-  drawText(pages[0], fontBold, `Key: ${spec.renderKey}`, MARGIN_X, MARGIN_TOP - 58, 12);
+  if (opts.artist) {
+    drawText(pages[0], font, opts.artist, MARGIN_X, MARGIN_TOP - 52, 11);
+  }
+  drawText(pages[0], fontBold, `Key: ${spec.renderKey}`, MARGIN_X, MARGIN_TOP - (opts.artist ? 70 : 58), 12);
 
   const beats = spec.timeSig.beats;
   for (const sys of layout.systems) {

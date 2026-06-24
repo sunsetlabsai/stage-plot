@@ -114,7 +114,7 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { title, key, lead, notes } = body;
+  const { title, artist, key, lead, notes } = body;
 
   if (typeof title !== 'string' || !title.trim()) {
     return Response.json({ error: 'Title is required' }, { status: 400 });
@@ -135,11 +135,12 @@ export async function POST(request: NextRequest) {
       owner_id: user.id,
       song_key: songKey,
       title: trimmedTitle,
+      artist: artist || '',
       key: key || null,
       lead: lead || '',
       notes: notes || '',
     })
-    .select('id, song_key, title, key, lead, notes, created_at, updated_at')
+    .select('id, song_key, title, artist, key, lead, notes, created_at, updated_at')
     .single();
 
   if (error) {

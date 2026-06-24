@@ -13,7 +13,7 @@ export async function PUT(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { id, title, key, lead, notes } = body;
+  const { id, title, artist, key, lead, notes } = body;
 
   if (!id) {
     return Response.json({ error: 'Song id is required' }, { status: 400 });
@@ -34,6 +34,7 @@ export async function PUT(request: NextRequest) {
   }
 
   const updates: Record<string, unknown> = {};
+  if (artist !== undefined) updates.artist = artist || '';
   if (lead !== undefined) updates.lead = lead;
   if (notes !== undefined) updates.notes = notes;
   if (key !== undefined) updates.key = key || null;
@@ -78,7 +79,7 @@ export async function PUT(request: NextRequest) {
     .from('songs')
     .update(updates)
     .eq('id', id)
-    .select('id, song_key, title, key, lead, notes, updated_at')
+    .select('id, song_key, title, artist, key, lead, notes, updated_at')
     .single();
 
   if (error) {
