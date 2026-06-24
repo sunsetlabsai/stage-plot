@@ -94,6 +94,14 @@ revoke all on function save_builder_chart(
   uuid, text, text, text, text, text, text, integer, jsonb, text, integer, text, jsonb
 ) from public;
 
+-- Explicit revoke from authenticated/anon: REVOKE FROM public does NOT strip a
+-- prior EXPLICIT grant, so if any environment ever applied an earlier draft of
+-- this migration that granted execute to authenticated, this removes it. No-op
+-- on a fresh apply.
+revoke all on function save_builder_chart(
+  uuid, text, text, text, text, text, text, integer, jsonb, text, integer, text, jsonb
+) from authenticated, anon;
+
 grant execute on function save_builder_chart(
   uuid, text, text, text, text, text, text, integer, jsonb, text, integer, text, jsonb
 ) to service_role;
