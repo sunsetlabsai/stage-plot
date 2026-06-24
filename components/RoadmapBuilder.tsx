@@ -29,8 +29,9 @@ import {
   type ViewModel,
   type ViewSection,
   type ViewBar,
+  type ViewNavigation,
 } from '@/lib/roadmap-view';
-import type { RoadmapSpec, SectionRepeat, RoadmapNavigation } from '@/lib/roadmap-spec';
+import type { RoadmapSpec, SectionRepeat } from '@/lib/roadmap-spec';
 
 // ── Roadmap Builder — describe a song's structure, render an exact chart ─────
 // Full-screen overlay launched from ManageChartsModal. Compose (big prompt) →
@@ -458,7 +459,7 @@ function repeatLabel(repeat: SectionRepeat | undefined): string | null {
 }
 
 // Read-only summary of the global roadmap navigation as marker chips.
-function navMarkers(nav: RoadmapNavigation | undefined): string[] {
+function navMarkers(nav: ViewNavigation | undefined): string[] {
   if (!nav) return [];
   const out: string[] = [];
   if (nav.segno) out.push('Segno');

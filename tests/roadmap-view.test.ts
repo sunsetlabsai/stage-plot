@@ -229,6 +229,66 @@ describe('spec ↔ view round-trip', () => {
   });
 });
 
+describe('navigation refs survive reorder / drop on remove (Codex #98 R2)', () => {
+  // [A, B, C] with segno on B (index 1) and a D.S. al Fine: jump.at on C, fine on C.
+  const NAV_SPEC: RoadmapSpec = {
+    version: 1,
+    timeSig: { beats: 4, unit: 4 },
+    renderKey: 'C',
+    sections: [
+      { id: 'a', label: 'A', bars: 2 },
+      { id: 'b', label: 'B', bars: 2 },
+      { id: 'c', label: 'C', bars: 2 },
+    ],
+    navigation: {
+      segno: { section: 1, bar: 1 },
+      fine: { section: 2, bar: 2 },
+      jump: { at: { section: 2, bar: 2 }, from: 'segno', until: 'fine' },
+    },
+  };
+
+  it('specToView keys nav refs by stable section id', () => {
+    const v = specToView(NAV_SPEC);
+    expect(v.navigation?.segno).toEqual({ sectionId: 'b', bar: 1 });
+    expect(v.navigation?.fine).toEqual({ sectionId: 'c', bar: 2 });
+    expect(v.navigation?.jump?.at).toEqual({ sectionId: 'c', bar: 2 });
+  });
+
+  it('round-trips at the same order', () => {
+    expect(viewToSpec(specToView(NAV_SPEC))).toEqual(NAV_SPEC);
+  });
+
+  it('reorder retargets the index to follow the section, not the slot', () => {
+    const v = specToView(NAV_SPEC);
+    // Drag B to the top: [B, A, C].
+    v.sections = [v.sections[1], v.sections[0], v.sections[2]];
+    const spec = viewToSpec(v);
+    // segno still points at B — now index 0, not the stale index 1 (would be A).
+    expect(spec.navigation?.segno).toEqual({ section: 0, bar: 1 });
+    expect(spec.navigation?.fine).toEqual({ section: 2, bar: 2 });
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+  });
+
+  it('removing a referenced section drops navigation atomically', () => {
+    const v = specToView(NAV_SPEC);
+    // Remove B — segno's target id 'b' no longer resolves.
+    v.sections = v.sections.filter((s) => s.id !== 'b');
+    const spec = viewToSpec(v);
+    expect(spec.navigation).toBeUndefined();
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+  });
+
+  it('removing an unreferenced section keeps navigation (refs re-index)', () => {
+    const v = specToView(NAV_SPEC);
+    // Remove A — nothing references it; B/C refs survive at their new indices.
+    v.sections = v.sections.filter((s) => s.id !== 'a');
+    const spec = viewToSpec(v);
+    expect(spec.navigation?.segno).toEqual({ section: 0, bar: 1 });
+    expect(spec.navigation?.fine).toEqual({ section: 1, bar: 2 });
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+  });
+});
+
 describe('renderCell — numbers vs letters', () => {
   it('numbers mode shows the degree form', () => {
     expect(renderCell(cell(6, 4, { quality: 'm' }), 'numbers', 'G')).toBe('6m');

@@ -11,11 +11,14 @@
 // evenly, are rejected so the author reaches for `-`. This is the single place
 // the authoring grammar is reconciled with validateRoadmapSpec's beat math.
 
-import type {
-  RoadmapSpec,
-  RoadmapSection,
-  BarChange,
-  ChordHit,
+import {
+  QUALITY_WHITELIST,
+  type RoadmapSpec,
+  type RoadmapSection,
+  type BarChange,
+  type ChordHit,
+  type RoadmapNavigation,
+  type BarRef,
 } from './roadmap-spec';
 
 // A chord occupying `beats` beats of its measure (the real span — cells in a bar
@@ -46,8 +49,29 @@ export interface ViewModel {
   timeSig: { beats: number; unit: number };
   renderKey: string;
   barsPerLine?: number;
-  navigation?: RoadmapSpec['navigation'];
+  navigation?: ViewNavigation;
   sections: ViewSection[];
+}
+
+// View-level navigation refs key their target section by its STABLE id, NOT the
+// positional index RoadmapNavigation.BarRef uses (roadmap-spec). The builder lets
+// sections be reordered and removed, which shuffles indices — an index-based ref
+// would silently retarget the wrong section and persist a semantically-wrong but
+// validator-valid chart (Codex #98 R2). Keying by id makes reorder a no-op for
+// navigation and makes a removed-section ref detectable (its id stops resolving);
+// viewToSpec lowers ids back to indices and drops navigation if a referenced
+// section was deleted.
+export interface ViewBarRef {
+  sectionId: string;
+  bar: number;
+}
+
+export interface ViewNavigation {
+  segno?: ViewBarRef;
+  coda?: ViewBarRef;
+  toCoda?: ViewBarRef;
+  fine?: ViewBarRef;
+  jump?: { at: ViewBarRef; from: 'capo' | 'segno'; until: 'end' | 'fine' | 'coda' };
 }
 
 // ── Token grammar (roman → canonical numeric ChordHit) ───────────────────────
@@ -56,10 +80,6 @@ export interface ViewModel {
 // when no quality is given. Numeric input passes through. Quality + /bass ride
 // along.
 const ROMAN: Record<string, number> = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7 };
-
-const QUALITIES = new Set([
-  '', 'm', 'dim', 'aug', 'sus', 'sus2', 'sus4', '7', 'maj7', 'm7', 'm7b5', 'dim7', '6', 'm6',
-]);
 
 interface ParsedPart { degree: number; quality: string }
 
@@ -87,7 +107,7 @@ function parsePart(s: string, allowQuality: boolean): ParsedPart | { error: stri
   let quality = qualRaw;
   if (!allowQuality && quality !== '') return { error: `bass "${s}" cannot carry a quality` };
   if (minorByCase && quality === '') quality = 'm';
-  if (allowQuality && !QUALITIES.has(quality)) return { error: `quality "${quality}" is not supported` };
+  if (allowQuality && !QUALITY_WHITELIST.has(quality)) return { error: `quality "${quality}" is not supported` };
 
   return { degree, quality };
 }
@@ -234,6 +254,55 @@ export function fitBars(chords: ViewBar[], bars: number): ViewBar[] {
   return out;
 }
 
+// Spec BarRef (section INDEX) → view ViewBarRef (section ID). A validated spec's
+// index always resolves; an out-of-range one yields null so the ref is dropped.
+function liftRef(ref: BarRef, sections: RoadmapSection[]): ViewBarRef | null {
+  const sec = sections[ref.section];
+  return sec ? { sectionId: sec.id, bar: ref.bar } : null;
+}
+
+function liftNavigation(nav: RoadmapNavigation, sections: RoadmapSection[]): ViewNavigation {
+  const out: ViewNavigation = {};
+  let r: ViewBarRef | null;
+  if (nav.segno && (r = liftRef(nav.segno, sections))) out.segno = r;
+  if (nav.coda && (r = liftRef(nav.coda, sections))) out.coda = r;
+  if (nav.toCoda && (r = liftRef(nav.toCoda, sections))) out.toCoda = r;
+  if (nav.fine && (r = liftRef(nav.fine, sections))) out.fine = r;
+  if (nav.jump) {
+    const at = liftRef(nav.jump.at, sections);
+    if (at) out.jump = { at, from: nav.jump.from, until: nav.jump.until };
+  }
+  return out;
+}
+
+// View ViewNavigation (section ID) → spec RoadmapNavigation (section INDEX) at the
+// CURRENT section order. If any referenced section id no longer resolves (the
+// section was removed in the builder) the whole navigation block is dropped: a
+// half-resolved nav set could violate the validator's cross-field preconditions
+// (toCoda⇒coda, D.S.⇒segno, al-Coda⇒coda+toCoda), so we fail safe rather than
+// persist a dangling marker. Reorder is lossless — ids just map to new indices.
+function lowerNavigation(nav: ViewNavigation, sections: ViewSection[]): RoadmapNavigation | null {
+  const indexOf = new Map(sections.map((s, i) => [s.id, i] as const));
+  let orphaned = false;
+  const lower = (ref: ViewBarRef): BarRef => {
+    const idx = indexOf.get(ref.sectionId);
+    if (idx === undefined) {
+      orphaned = true;
+      return { section: -1, bar: ref.bar };
+    }
+    return { section: idx, bar: ref.bar };
+  };
+
+  const out: RoadmapNavigation = {};
+  if (nav.segno) out.segno = lower(nav.segno);
+  if (nav.coda) out.coda = lower(nav.coda);
+  if (nav.toCoda) out.toCoda = lower(nav.toCoda);
+  if (nav.fine) out.fine = lower(nav.fine);
+  if (nav.jump) out.jump = { at: lower(nav.jump.at), from: nav.jump.from, until: nav.jump.until };
+
+  return orphaned ? null : out;
+}
+
 // RoadmapSpec → editable ViewModel. Each section's sparse changes are expanded
 // onto a per-bar array (length === bars); unaddressed bars are null (inherit).
 export function specToView(spec: RoadmapSpec): ViewModel {
@@ -243,7 +312,7 @@ export function specToView(spec: RoadmapSpec): ViewModel {
     timeSig: spec.timeSig,
     renderKey: spec.renderKey,
     barsPerLine: spec.barsPerLine,
-    navigation: spec.navigation,
+    navigation: spec.navigation ? liftNavigation(spec.navigation, spec.sections) : undefined,
     sections: spec.sections.map((sec) => {
       const chords: ViewBar[] = Array.from({ length: sec.bars }, () => null);
       for (const change of sec.changes ?? []) {
@@ -281,7 +350,10 @@ export function viewToSpec(view: ViewModel): RoadmapSpec {
     sections,
   };
   if (view.barsPerLine != null) spec.barsPerLine = view.barsPerLine;
-  if (view.navigation) spec.navigation = view.navigation;
+  if (view.navigation) {
+    const nav = lowerNavigation(view.navigation, view.sections);
+    if (nav) spec.navigation = nav;
+  }
   return spec;
 }
 
