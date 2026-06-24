@@ -2024,10 +2024,28 @@ function CalibrationOverlay({
         onMoveBoundaryRef.current(d.systemId, d.index, nx);
       }
     };
-    const up = () => {
+    const up = (e: globalThis.PointerEvent) => {
       const d = dragRef.current;
-      // A tick pressed and released without a drag is a TAP → select for removal.
-      if (d && d.kind === 'boundary' && !d.moved) onTapBoundaryRef.current(d.systemId, d.index);
+      if (d && d.kind === 'boundary') {
+        // Classify on the release displacement, not just prior pointermove
+        // events: a release within the threshold (no real drag delivered) is a
+        // TAP → select for removal; anything past it is a drag we've already
+        // tracked, so apply its final position here too in case no pointermove
+        // landed between press and release.
+        const released = Math.hypot(e.clientX - d.startX, e.clientY - d.startY);
+        if (!d.moved && released < 4) {
+          onTapBoundaryRef.current(d.systemId, d.index);
+        } else {
+          const ov = overlayRef.current;
+          const b = boxRef.current;
+          if (ov && b.width) {
+            const r = ov.getBoundingClientRect();
+            let nx = (e.clientX - r.left - b.left) / b.width;
+            nx = nx < 0 ? 0 : nx > 1 ? 1 : nx;
+            onMoveBoundaryRef.current(d.systemId, d.index, nx);
+          }
+        }
+      }
       dragRef.current = null;
     };
     window.addEventListener('pointermove', move);
@@ -2370,6 +2388,7 @@ function ChartNavigator({
   const containerRef = useRef<HTMLDivElement>(null);
   const docRef = useRef<import('pdfjs-dist').PDFDocumentProxy | null>(null);
   const prevSongIdxRef = useRef(currentIdx);
+  const prevPageNumRef = useRef(1);
 
   // ── Chart calibration (realtime chart control, step 1: section rail) ──
   const [calMode, setCalMode] = useState<'perform' | 'calibrate'>('perform');
@@ -2419,6 +2438,17 @@ function ChartNavigator({
       setPageNum(1);
     }
   }, [currentIdx]);
+
+  // A tick selection is page-local — a selected boundary lives on a system on the
+  // current page. When the page changes (arrows, swipe, ref-jump, chart switch),
+  // clear it so the Remove button can't act on an off-page (hidden) tick. Guarded
+  // by a ref so the clear only fires on an actual page change, not every render.
+  useEffect(() => {
+    if (pageNum !== prevPageNumRef.current) {
+      prevPageNumRef.current = pageNum;
+      setSelectedBoundary(null);
+    }
+  }, [pageNum]);
 
   // Clamp activeChartIdx when filtered charts shrink (e.g., role filter change)
   const clampedChartIdx = charts.length > 0 ? Math.min(activeChartIdx, charts.length - 1) : 0;
@@ -2501,8 +2531,10 @@ function ChartNavigator({
   const setSystemBars = (id: string, count: number) => {
     // The stepper re-distributes evenly (destructive), which renumbers every
     // tick — drop any pending tick selection so the Remove button can't act on a
-    // stale index.
+    // stale index, and disarm Add mode (it would otherwise stay armed across the
+    // destructive redistribution).
     setSelectedBoundary(null);
+    setAddBarMode(false);
     setCalibration((c) => (c ? autoDistributeBars(c, id, Math.max(0, count)) : c));
   };
   // Local cardinality edits (non-destructive to neighbors), beside the stepper:
