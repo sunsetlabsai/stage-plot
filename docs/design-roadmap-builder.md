@@ -332,7 +332,8 @@ PDF by Decision #1, and a live-transposing viewer would require a native NNS ren
 | Degrees 1–7, minor (`6m`/`2m`) | ✅ | core |
 | 7ths / maj7 / m7 / dim / sus | ✅ | covers most jazz changes |
 | Slash / bass degree (`5/7`) | ✅ | |
-| Split bars (`(1 4)`, beat-weighted) | ✅ | `beats` per chord, must sum to time sig |
+| Roman-numeral **input** (`IV`, `vi`, `V7`) | ✅ | input sugar only — normalized on commit to numeric degree+quality (lowercase roman = minor); same normalization on the AI path. Canonical storage is always numeric. |
+| Split bars (`(1 4)`, beat-weighted) | ✅ | `beats` per chord, must sum to time sig; authored via the per-beat tie grammar (below) — `5 4` even, `1 - 4 5` = 2/1/1; aligned by beat weight, not by count |
 | Diamond / held (whole-note ring) | ✅ | `held: true` → render diamond + tie |
 | Repeats `|: :|`, 1st/2nd endings | ✅ | `SectionRepeat` union → existing `RoadmapMarker` repeat/ending |
 | Pushes `>`, marcato `^`, staccato | ⏳ v2 | rhythmic micro-notation |
@@ -359,6 +360,57 @@ differentiator (and, per Graham, likely a current market gap).
    degree→chord mapping across keys. (Concurrent multi-key = deferred option (c).)
 5. **Edit loop**: re-open spec from a saved builder chart → re-render → replace file + rewrite verified
    calibration (via the save route; sets `source_spec`).
+
+## Builder UI authoring model (chunk 3)
+
+Prototyped in the `/mockup/roadmap-builder` standalone page (stubbed, no API) and iterated with Graham.
+Two states; one source of truth (`RoadmapSpec`).
+
+- **Compose → Review.** Compose is a single big prompt (room to type, later to dictate). Review is a
+  three-pane grid `[refine | chart | structure]`: a re-prompt rail (left), the **chart system as the
+  hero** (center), and the editorial/structure panel + save (right).
+- **The chart IS the chord editor (manual path).** The center preview is a real Nashville system —
+  numerals sit **over** each bar, rhythm slashes (one per beat) sit **inside** the measure. Chords are
+  **sparse**: a bar with no change prints nothing and inherits the prior chord (chart convention).
+  **Click a bar to edit it in place** — no run-length chips in the editor. (Run-length phrasing like
+  "4 of 1, 2 of 4" is *prompt* language for the AI only; it never appears as an editing widget.)
+- **Per-beat tie grammar (chord input).** One whitespace-separated slot per beat; `-` ties/extends the
+  previous chord by a beat. `1` = whole bar; `5 4` = even half/half; `1 - 4 5` = 2 beats of 1, then 4,
+  then 5 (`beats:[2,1,1]`). **Alignment is by beat weight** (each chord's width ∝ its beats, snapped to
+  the beat slashes), *not* even-by-count — so non-uniform splits land on the right beats. This is the
+  authoring surface for `BarChange.chords[].beats`.
+- **Live split-preview (keep `-`, never force beats).** The `-` tie stays a terse *text* convention; its
+  weighting is made legible by a **live preview** under the edit input that carves the bar as you type —
+  each chord shown as a block whose width ∝ its beats (snapped to the bar), labeled with the chord and
+  `Nb` when held. A tally line reads the state back: even splits (no `-`) say "N chords, even (k beats
+  each)"; tied bars say "k of T beats"; under/over-fill turns amber ("— last chord holds the rest" / "—
+  over the bar"); a blank bar previews "inherits previous chord". **Crucially the common case stays
+  blank/terse** — you type only chords and they auto-split evenly; `-` appears *only* on a genuinely
+  uneven bar. We explicitly **rejected** a visual beat-grid editor that would force explicit beats on
+  every bar: the preview gives the grid's legibility without taxing the common case. (Preview is parse-
+  only — it renders `parseBar(draft)`; commit still goes through the same normalization/validation.)
+- **Roman-numeral input is normalized on commit.** Typing `IV`/`vi`/`V7` folds to the canonical numeric
+  degree+quality (`4`/`6m`/`57`); lowercase roman = minor when no quality is given; numeric input passes
+  through. Storage is always numeric (NNS is Arabic numerals); romans are a convenience for people who
+  think functionally. The **same normalization is specified for the AI parse prompt** (accept romans,
+  emit numeric degrees) so both paths converge on identical specs.
+- **Bars authoritative; chords are a sparse overlay.** `section.bars` is the count; the chord array is
+  fitted to it (pad with inherit / truncate). Lets you sketch form first, add changes later. No model
+  change — matches `RoadmapSection.changes`.
+- **Section structure CRUD (right panel).** Add / remove / reorder (drag) / edit label+bars. Markers
+  shown as chips (edit affordance TBD).
+- **Metadata.** Song title + artist/author are inline-editable at the **top of the chart** where a lead
+  sheet prints them. Title → `chart_library.song_title`; artist = additional metadata (persistence field
+  TBD).
+- **Numbers ⇄ Letters + key toggle = the transposition payoff.** Because changes are key-agnostic
+  degrees, the same chart renders as `1 4 5` or as `G C D`; flip the key and every degree re-spells live.
+  One control demonstrates the whole NNS thesis.
+- **Two authoring paths, one document.** The **AI assistant** (conversational, broad/structural) and the
+  **manual editor** (chart for chords, right panel for structure — surgical) both emit edits to the same
+  spec. **Decision — Option A:** the assistant applies **scoped patches** that preserve manual edits;
+  **full Regenerate is an explicit reset** that warns first; either way the chart **flashes a diff
+  highlight** of what the AI touched so the conversation and the chart never silently disagree. (Today's
+  mock "Regenerate" replaces the whole spec — Option A is the planned model, not yet built.)
 
 ## UX flow (no dead ends)
 
