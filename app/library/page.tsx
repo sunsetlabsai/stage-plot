@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import type { Chart, Song } from '@/lib/types';
 import ManageChartsModal from '@/components/ManageChartsModal';
-import { suggestDuplicateTitle } from '@/lib/chart-management';
+import RoadmapBuilder from '@/components/RoadmapBuilder';
+import { suggestDuplicateTitle, applyUploadedChart, availableRoles } from '@/lib/chart-management';
 
 export default function LibraryPage() {
   const [songs, setSongs] = useState<Song[]>([]);
@@ -14,6 +15,7 @@ export default function LibraryPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [addingNew, setAddingNew] = useState(false);
   const [managingId, setManagingId] = useState<string | null>(null);
+  const [buildingId, setBuildingId] = useState<string | null>(null);
   const [duplicating, setDuplicating] = useState<{ title: string; key: string; lead: string; notes: string } | null>(null);
   const router = useRouter();
 
@@ -116,6 +118,7 @@ export default function LibraryPage() {
   }
 
   const managingSong = managingId ? songs.find((s) => s.id === managingId) ?? null : null;
+  const buildingSong = buildingId ? songs.find((s) => s.id === buildingId) ?? null : null;
 
   const filtered = search
     ? songs.filter((s) => s.title.toLowerCase().includes(search.toLowerCase()))
@@ -191,7 +194,7 @@ export default function LibraryPage() {
         </div>
       ) : (
         <div className="space-y-1">
-          <div className="grid grid-cols-[1fr_80px_120px_60px_60px_150px] gap-2 px-4 py-2 border border-transparent text-xs text-zinc-500 uppercase tracking-wide">
+          <div className="grid grid-cols-[1fr_80px_120px_60px_60px_210px] gap-2 px-4 py-2 border border-transparent text-xs text-zinc-500 uppercase tracking-wide">
             <span>Title</span>
             <span>Key</span>
             <span>Lead</span>
@@ -215,6 +218,7 @@ export default function LibraryPage() {
                 onEdit={() => { setEditingId(song.id); setAddingNew(false); setDuplicating(null); }}
                 onDelete={() => handleDelete(song.id, song.title, song.show_count ?? 0)}
                 onManageCharts={() => setManagingId(song.id)}
+                onBuild={() => setBuildingId(song.id)}
                 onDuplicate={() => handleDuplicate(song)}
               />
             ),
@@ -231,6 +235,18 @@ export default function LibraryPage() {
           onChartsChanged={(charts) => handleChartsChanged(managingSong.id, charts)}
         />
       )}
+
+      {buildingSong && (
+        <RoadmapBuilder
+          songTitle={buildingSong.title}
+          charts={buildingSong.charts ?? []}
+          onClose={() => setBuildingId(null)}
+          onSaved={(chart) => {
+            handleChartsChanged(buildingSong.id, applyUploadedChart(buildingSong.charts ?? [], chart));
+            setBuildingId(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -241,6 +257,7 @@ function SongRow({
   onEdit,
   onDelete,
   onManageCharts,
+  onBuild,
   onDuplicate,
 }: {
   song: Song;
@@ -248,15 +265,19 @@ function SongRow({
   onEdit: () => void;
   onDelete: () => void;
   onManageCharts: () => void;
+  onBuild: () => void;
   onDuplicate: () => void;
 }) {
   const count = song.chart_count ?? 0;
   // Owners can always manage (incl. add to an empty song); collaborators can open
   // only to preview when charts exist.
   const canManage = isOwner || count > 0;
+  // The builder saves into one free role; with every role filled there is nowhere
+  // to put a new chart, so the entry is hidden rather than dead-ending on save.
+  const canBuild = isOwner && availableRoles(song.charts ?? []).length > 0;
 
   return (
-    <div className="grid grid-cols-[1fr_80px_120px_60px_60px_150px] gap-2 items-center px-4 py-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors">
+    <div className="grid grid-cols-[1fr_80px_120px_60px_60px_210px] gap-2 items-center px-4 py-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 transition-colors">
       <span className="font-medium truncate">{song.title}</span>
       <span>
         {song.key && (
@@ -280,6 +301,14 @@ function SongRow({
       </span>
       <span className="text-sm text-zinc-500 text-center">{song.show_count ?? 0}</span>
       <div className="flex gap-2">
+        {canBuild && (
+          <button
+            onClick={onBuild}
+            className="text-xs text-zinc-600 hover:text-blue-400 transition-colors"
+          >
+            Build chart
+          </button>
+        )}
         {isOwner && (
           <>
             <button
