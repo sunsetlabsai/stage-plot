@@ -418,6 +418,18 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
   const barAt = barIndex(layout);
   const pageOf = (b: LaidBar): PDFPage => pages[b.page - 1];
 
+  // Co-located markers must not overprint. The resolver allows distinct kinds on
+  // one bar (e.g. a times>2 repeatEnd and a same-bar D.S. jump, or To Coda + D.S.
+  // across passes), so every label anchored above a bar's start/end edge claims a
+  // row in this shared stack and is lifted clear of the ones already there.
+  const rows = new Map<string, number>();
+  const stackDy = (b: LaidBar, edge: 'start' | 'end'): number => {
+    const key = `${b.page}:${b.id}:${edge}`;
+    const n = rows.get(key) ?? 0;
+    rows.set(key, n + 1);
+    return n * 10;
+  };
+
   spec.sections.forEach((section, si) => {
     const repeat = section.repeat;
     if (!repeat) return;
@@ -427,7 +439,9 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
 
     drawRepeatStart(pageOf(first), first);
     if (repeat.kind === 'plain') {
-      drawRepeatEnd(pageOf(last), last, font, repeat.times);
+      // The ×N count only prints (and only claims an end-edge row) when times>2.
+      const dy = repeat.times > 2 ? stackDy(last, 'end') : 0;
+      drawRepeatEnd(pageOf(last), last, font, repeat.times, dy);
     } else {
       repeat.endings.forEach((ending) => {
         const bars: LaidBar[] = [];
@@ -443,17 +457,6 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
   const nav = spec.navigation;
   if (!nav) return;
   const at = (ref: BarRef): LaidBar | undefined => barAt.get(`${ref.section}:${ref.bar}`);
-
-  // The resolver allows distinct marker kinds to share a bar (e.g. an al-Coda
-  // form fires D.S. and To Coda on the same bar across passes). Stack same
-  // bar+edge directives vertically so none overprints another.
-  const rows = new Map<string, number>();
-  const stackDy = (b: LaidBar, edge: 'start' | 'end'): number => {
-    const key = `${b.page}:${b.id}:${edge}`;
-    const n = rows.get(key) ?? 0;
-    rows.set(key, n + 1);
-    return n * 10;
-  };
 
   if (nav.segno) { const b = at(nav.segno); if (b) drawDirective(pageOf(b), font, b, 'start', 'Segno', 0, stackDy(b, 'start')); }
   if (nav.coda) {
@@ -492,7 +495,9 @@ function drawRepeatStart(page: PDFPage, bar: LaidBar): void {
 }
 
 // :| — two dots + thick end barline just inside the bar's right edge; ×N if >2.
-function drawRepeatEnd(page: PDFPage, bar: LaidBar, font: PDFFont, times: number): void {
+// `dy` lifts the ×N count into the shared end-edge row stack so it never
+// overprints a co-located navigation directive on the same bar.
+function drawRepeatEnd(page: PDFPage, bar: LaidBar, font: PDFFont, times: number, dy = 0): void {
   const x = denormX(bar.xEnd) - 2;
   const top = denormYTop(bar.yTop);
   const bottom = denormYTop(bar.yBottom);
@@ -500,7 +505,7 @@ function drawRepeatEnd(page: PDFPage, bar: LaidBar, font: PDFFont, times: number
   drawDot(page, x - 4, bottom + h * 0.38, 1.6);
   drawDot(page, x - 4, bottom + h * 0.62, 1.6);
   drawLine(page, x, top, x, bottom, 2.5);
-  if (times > 2) drawText(page, font, `\u00d7${times}`, x - 18, top + 3, 9);
+  if (times > 2) drawText(page, font, `\u00d7${times}`, x - 18, top + 3 + dy, 9);
 }
 
 // Volta bracket: a horizontal line above the ending bars, a down-tick at the

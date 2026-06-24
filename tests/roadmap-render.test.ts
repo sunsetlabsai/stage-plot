@@ -241,6 +241,30 @@ describe('renderRoadmap — navigation variants', () => {
     expect(Buffer.from(pdfBytes).equals(Buffer.from(again.pdfBytes))).toBe(true);
   });
 
+  it('stacks a ×N repeat count with a same-bar end-edge directive (no overprint)', async () => {
+    // times:3 prints ×3 at the section's last-bar end edge; a jump.at on that
+    // same bar fires after the repeat completes. Both are valid and co-located,
+    // so the ×N count must share the end-edge stack with the directive.
+    const spec: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'C',
+      sections: [{ id: 'v', label: 'Verse', bars: 8, repeat: { kind: 'plain', times: 3 } }],
+      navigation: { jump: { at: { section: 0, bar: 8 }, from: 'capo', until: 'end' } },
+    };
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+
+    const { pdfBytes, calibration } = await renderRoadmap(spec);
+    expect(resolveRoadmap(calibration).ok).toBe(true);
+    const markers = calibration.roadmap ?? [];
+    const repeatEndBar = markers.find((m) => m.kind === 'repeatEnd')?.barId;
+    const jumpBar = markers.find((m) => m.kind === 'jump')?.barId;
+    expect(repeatEndBar).toBeTruthy();
+    expect(jumpBar).toBe(repeatEndBar); // both land on the section's last bar
+    const again = await renderRoadmap(spec);
+    expect(Buffer.from(pdfBytes).equals(Buffer.from(again.pdfBytes))).toBe(true);
+  });
+
   it('renders a D.C. al Fine form (fine + jump)', async () => {
     const spec: RoadmapSpec = {
       version: 1,
