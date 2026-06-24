@@ -25,6 +25,7 @@ export const MAX_PULL_FRAC = 0.5; // cap a pull at 0.5 × local bar width (unequ
 export const SNAP_EPSILON = 0.003; // page-norm: how close a landed boundary counts as fully snapped
 export const DARK_LUMA = 140; // 0..255; luminance below this = "dark" (DOM adapter)
 export const SNAP_RENDER_SCALE = 2.5; // offscreen render scale (DOM adapter; ~1000px band target)
+export const STAFF_ROW_FRAC = 0.5; // DOM adapter: a band row is "staff" if dark across ≥50% of its width
 
 export interface BandProfile {
   cols: number; // sampled columns across the band width (≈ band px width)
