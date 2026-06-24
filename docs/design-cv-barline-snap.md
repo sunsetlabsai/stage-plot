@@ -2,10 +2,12 @@
 
 Status: DESIGN — decisions 1-8 LOCKED by Graham (all yes; #3 = option A).
 Revised after Codex round-1 (order-aware matching contract, honest no-regression
-claim, dedicated offscreen render helper) and Opus self-review R2 (pre-snap
-snapshot determinism, MIN_STRENGTH floor in both branches, pinned monotone
-alignment, post-apply honesty — see §Decisions). Build-on-GO only, after Codex
-re-review.
+claim, dedicated offscreen render helper), Opus self-review R2 (pre-snap snapshot
+determinism, MIN_STRENGTH floor in both branches, pinned alignment, post-apply
+honesty), and **Codex round-2** (symmetric mutual-nearest matcher — the
+iterate-and-consume version burned lines belonging to later boundaries;
+edge-aware MAX_PULL for boundary 0/N; reading-order tie-break — see §Decisions).
+Build-on-GO only, after Codex re-review.
 Scope: the **automated** refinement that sits between `autoDistributeBars`
 (even floor) and the manual barline-tick drag (`moveBarBoundary`, shipped in
 PR #94). Cardinality reconciliation (add/remove a barline) is its companion —
@@ -167,27 +169,37 @@ remap-against-original discipline #96 uses). Steps:
    - **Counts differ:** run the **monotone (order-preserving) alignment** below
      and apply only **gated** matches.
 
-   **Monotone alignment — pinned procedure (Opus R2 #C).** Between two
-   ascending sequences, walk both with a single pass and pair by mutual-nearest;
-   this is provably order-preserving (if `B[i]→L[j]` then no later boundary can
-   accept a line `< L[j]`):
+   **Mutual-nearest alignment — pinned procedure (Opus R2 #C; corrected Codex
+   R2 #1).** Do **not** iterate-and-consume: a greedy "earlier boundary claims
+   the globally nearest line then skips it on a mutual-nearest miss" wrongly
+   burns a line that actually belongs to a later boundary (e.g. `B=[0,.25,.5,
+   .75,1]`, filtered `L=[.25,.5,.75]`: B0 grabs .25, fails because .25 is B1's,
+   skips it — and B1..B3 never recover their real lines). Acceptance must be
+   **symmetric and computed in one shot from the snapshot**, independent of any
+   visiting order:
    ```
-   for each boundary i (ascending):
-     cand = the line L[j] minimizing |L[j] − B[i]| among lines not yet claimed
-            by an earlier boundary
-     accept L[j] → boundary i  ⟺  ALL of:
-       (a) mutual-nearest: B[i] is also the nearest boundary to L[j]
-           (no earlier/later boundary is closer) — two boundaries can't fight
-           over one line, a boundary can't reach across a bar;
-       (b) MAX_PULL: |L[j] − B[i]| ≤ 0.5 × min(adjacent bar widths of i)
-           in the PRE-SNAP snapshot — local-bar-width-relative, not a fixed
-           page-fraction (replaces the rejected `SNAP_TOL = 0.02`, decision 4);
+   from the PRE-SNAP snapshot (positions B, lines L):
+     for each boundary i:  nearestLine[i]     = argmin_j |L[j] − B[i]|
+     for each line j:       nearestBoundary[j] = argmin_i |L[j] − B[i]|
+       (ties → smaller index, i.e. reading order — Codex R2 NB)
+     accept  L[j] → boundary i  ⟺  ALL of:
+       (a) mutual-nearest: nearestLine[i] == j  AND  nearestBoundary[j] == i
+           (both point at each other; no line is consumed merely by being
+           considered, so two boundaries can't fight over one line and a real
+           line is never burned by an earlier boundary's miss);
+       (b) MAX_PULL: |L[j] − B[i]| ≤ 0.5 × W(i), W from the snapshot:
+             i == 0   → width(bar 0)            (leading edge — one neighbor)
+             i == N   → width(bar N−1)          (trailing edge — one neighbor)
+             else     → min(width(bar i−1), width(bar i))   (interior tick)
+           local-bar-width-relative, not a fixed page-fraction (replaces the
+           rejected `SNAP_TOL = 0.02`, decision 4; edge formula = Codex R2 #2);
        (c) the strength floor already held (step 2).
-     else boundary i stays put; L[j] remains available to no one past it
-          (claimed-or-skipped is monotone).
    ```
-   Unmatched boundaries keep their even-floor position; surplus lines are
-   reported, never forced (Count mismatch, below).
+   Mutual-nearest between two ascending sequences is automatically
+   order-preserving (if `i < i'` and both accept, then their matched lines
+   satisfy `j < j'`), so the result is monotone with no per-line consumption
+   bookkeeping. Unmatched boundaries keep their even-floor position; surplus
+   lines are reported, never forced (Count mismatch, below).
 4. **Apply** each accepted match through the existing `moveBarBoundary(cal,
    systemId, boundaryIndex, pageX)` — so all the #94 invariants (no sibling
    crossing, no inversion, MIN_BAR_W floor, renumber) are inherited and there is
@@ -284,6 +296,16 @@ pre-snap snapshot then a single fold (determinism); #B2 strength floor in both
 branches; #C monotone-alignment procedure pinned; #D post-apply honesty (clamped
 ≠ detected → reported partial). #B2 reconfirmed by Graham.
 
+**Codex R2 (folded):** #1 (BLOCKING) the pinned matcher iterate-and-consume burned
+a line belonging to a later boundary (B0 grabs+skips B1's line → B1..B3 never
+recover) — replaced with a **symmetric precomputed mutual-nearest** (nearestLine[i]
+∧ nearestBoundary[j] point at each other; no consume-on-consideration). #2
+(BLOCKING) MAX_PULL undefined at edges — pinned: boundary 0 → width(bar 0),
+boundary N → width(bar N−1), interior → min of the two adjacent, all from the
+snapshot. NB tie-break → smaller index (reading order). Codex confirmed B2's
+prefilter is directionally correct (a faint-edge filtered → expected partial, not
+a bug, once the matcher is fixed).
+
 ## Test plan (builder writes tests — pure core only)
 
 `tests/chart-snap.test.ts` (new):
@@ -305,12 +327,23 @@ branches; #C monotone-alignment procedure pinned; #D post-apply honesty (clamped
   fewer lines → only gated boundaries move, the rest keep even spacing
 - mutual-nearest gate: two boundaries can't both grab one line; a line nearer to
   a different boundary is not stolen
-- `MAX_PULL` guard: a line beyond `0.5 × local bar width` from its ordinal
-  boundary is refused (no cross-bar yank); one within it is applied
+- **no line-consumption (Codex R2 #1 regression):** `B=[0,.25,.5,.75,1]`,
+  filtered `L=[.25,.5,.75]` → B1↔.25, B2↔.5, B3↔.75 all snap; B0/B4 stay put.
+  The interior lines are NOT burned by B0 considering .25 first (symmetric
+  precompute, not iterate-and-consume)
+- `MAX_PULL` guard, interior: a line beyond `0.5 × min(width(i−1),width(i))` from
+  its boundary is refused (no cross-bar yank); one within it is applied
+- **`MAX_PULL` at edges (Codex R2 #2):** boundary 0 uses `0.5 × width(bar 0)`,
+  boundary N uses `0.5 × width(bar N−1)` (single neighbor); a faint-edge-filtered
+  count-mismatch case gates the surviving edge candidate by that formula
+- **tie-break (Codex R2 NB):** a line exactly equidistant between two boundaries
+  (or a boundary between two lines) resolves to the smaller index (reading order),
+  deterministically
 - `MIN_STRENGTH` gate: a weak line is not applied
 - **strength prefilter in BOTH branches (Opus R2 #B2):** a sub-`MIN_STRENGTH`
   spurious line that would make `|L| == N+1` is dropped first → does NOT trigger
   ungated ordinal anchoring; the real lines snap on the (now unequal) gated path
+  via the symmetric mutual-nearest matcher
 - **pre-snap snapshot determinism (Opus R2 #B1):** gates (`MAX_PULL`,
   mutual-nearest) evaluated on original geometry — feeding lines in any order, or
   two near-adjacent accepted targets, yields the same result (no live-width drift)
