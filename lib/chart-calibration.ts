@@ -469,6 +469,234 @@ export function moveBarBoundary(
   };
 }
 
+// ── Add / Remove a barline (local cardinality edit) ─────────────────────────
+// Non-destructive companions to the count stepper (autoDistributeBars, which
+// re-spaces a whole system) and the manual drag (moveBarBoundary, which only
+// re-positions). removeBarline merges two measures (N→N-1); addBarline splits
+// one (N→N+1). Every other bar is preserved. Both reuse renumberBars for the
+// absNumber cascade and route the roadmap through an edge-aware remap + prune +
+// a bounded resolver sweep so navigation markers follow the geometry instead of
+// being blindly dropped. See docs/design-barline-add-remove.md.
+
+// The roadmap rewrite produced by a cardinality edit: the new marker list plus
+// the `touched` set = markers whose bar binding this edit actually changed
+// (a remapped barId / rewritten ending barIds). The bounded sweep may only drop
+// a marker from `touched`, so a local edit never deletes unrelated work.
+interface RoadmapRemap {
+  roadmap: RoadmapMarker[] | undefined;
+  touched: Set<string>;
+}
+
+// REMOVE remap: merge leftId ⟵ rightId. The merged bar keeps leftId and spans
+// to max(L.xEnd, R.xEnd); `endKeeperIsL` says which bar owns that surviving end
+// edge. A marker survives iff its anchor x coincides with a surviving edge of
+// the merged bar (left.xStart, or the kept end edge); anything anchored to the
+// removed tick or the shorter bar's now-interior end is dropped.
+function remapRoadmapForRemove(
+  roadmap: RoadmapMarker[] | undefined,
+  leftId: string,
+  rightId: string,
+  endKeeperIsL: boolean,
+): RoadmapRemap {
+  if (!roadmap) return { roadmap, touched: new Set() };
+  const touched = new Set<string>();
+  const next: RoadmapMarker[] = [];
+  for (const m of roadmap) {
+    if (m.kind === 'ending') {
+      if (m.barIds.includes(rightId)) {
+        const seen = new Set<string>();
+        const barIds: string[] = [];
+        for (const b of m.barIds) {
+          const id = b === rightId ? leftId : b;
+          if (!seen.has(id)) {
+            seen.add(id);
+            barIds.push(id);
+          }
+        }
+        next.push({ ...m, barIds });
+        touched.add(m.id);
+      } else {
+        next.push(m);
+      }
+      continue;
+    }
+    if (m.barId === rightId) {
+      // Right bar vanishes. Its end edge survives only when it owns merged.xEnd.
+      if (m.edge === 'end' && !endKeeperIsL) {
+        next.push({ ...m, barId: leftId });
+        touched.add(m.id);
+      }
+      // else: right start edge (the removed tick) or an interior right end → drop.
+      continue;
+    }
+    if (m.barId === leftId) {
+      // Left start edge always survives; left end edge survives only when L owns
+      // merged.xEnd (overlap-contained), else it became interior → drop.
+      if (m.edge === 'end' && !endKeeperIsL) continue;
+      next.push(m);
+      continue;
+    }
+    next.push(m);
+  }
+  return { roadmap: next, touched };
+}
+
+// ADD remap: split parentId → left keeps parentId (start edge), right is a new
+// bar (end edge). Both original anchor positions survive, so add is fully
+// non-destructive: start-edge markers stay on the parent, end-edge markers move
+// to the right half, and an ending bracket gains the new bar (kept contiguous).
+function remapRoadmapForAdd(
+  roadmap: RoadmapMarker[] | undefined,
+  parentId: string,
+  rightId: string,
+): RoadmapRemap {
+  if (!roadmap) return { roadmap, touched: new Set() };
+  const touched = new Set<string>();
+  const next = roadmap.map((m): RoadmapMarker => {
+    if (m.kind === 'ending') {
+      if (!m.barIds.includes(parentId)) return m;
+      const barIds: string[] = [];
+      for (const b of m.barIds) {
+        barIds.push(b);
+        if (b === parentId) barIds.push(rightId); // immediately after, stays contiguous
+      }
+      touched.add(m.id);
+      return { ...m, barIds };
+    }
+    if (m.barId === parentId && m.edge === 'end') {
+      touched.add(m.id);
+      return { ...m, barId: rightId };
+    }
+    return m;
+  });
+  return { roadmap: next, touched };
+}
+
+// The bounded resolver sweep (design §B2/R3). A remap can preserve every id yet
+// still create a resolver-level contradiction pruneRoadmap can't see (e.g. two
+// endings collapsing onto one bar). We repair ONLY contradictions this edit
+// could have caused: skip entirely unless the roadmap was coherent before the
+// edit (mid-edit drafts are allowed to be unresolved), and from each conflict
+// drop only the single edit-touched participant (never an innocent/pre-existing
+// marker), deterministically by reading order then id. Iterates to a fixpoint,
+// bounded by |touched|.
+function boundedResolverSweep(
+  before: ChartCalibration,
+  after: ChartCalibration,
+  touched: Set<string>,
+): ChartCalibration {
+  if (!after.roadmap || after.roadmap.length === 0 || touched.size === 0) return after;
+  if (!resolveRoadmap(before).ok) return after; // precondition: only fix what we broke
+
+  const barPos = new Map(barsInOrder(after).map((b, i) => [b.id, i] as const));
+  const anchorPos = (m: RoadmapMarker): number =>
+    m.kind === 'ending'
+      ? Math.min(...m.barIds.map((b) => barPos.get(b) ?? Number.POSITIVE_INFINITY))
+      : barPos.get(m.barId) ?? Number.POSITIVE_INFINITY;
+
+  let roadmap = after.roadmap;
+  for (;;) {
+    const res = resolveRoadmap({ ...after, roadmap });
+    if (res.ok) break;
+    const participants = new Set(res.error.markerIds);
+    const losers = roadmap
+      .filter((m) => participants.has(m.id) && touched.has(m.id))
+      .sort((a, b) => anchorPos(a) - anchorPos(b) || (a.id < b.id ? -1 : 1));
+    if (losers.length === 0) break; // contradiction not caused by this edit — leave it
+    const dropId = losers[0].id;
+    roadmap = roadmap.filter((m) => m.id !== dropId);
+  }
+  return roadmap === after.roadmap ? after : { ...after, roadmap };
+}
+
+// Remove an interior barline: merge the two measures it divides into one. The
+// removable barlines are the interior boundaries 1..N-1 (shared edges); the
+// leading/trailing edges (0 and N) are band extent, not dividers. The merged
+// bar keeps the LEFT bar's id/sectionId and spans to max(L.xEnd, R.xEnd) (the
+// union, so an overlapping converter pair never loses width). No-op identity on
+// bad inputs. Manual edit clears confidence and resets to draft.
+export function removeBarline(
+  cal: ChartCalibration,
+  systemId: string,
+  boundaryIndex: number,
+): ChartCalibration {
+  const system = (cal.systems ?? []).find((s) => s.id === systemId);
+  if (!system) return cal;
+  const sysBars = (cal.bars ?? [])
+    .filter((b) => b.systemId === systemId)
+    .sort((a, b) => a.xStart - b.xStart);
+  const n = sysBars.length;
+  if (n < 2) return cal;
+  if (!Number.isInteger(boundaryIndex) || boundaryIndex < 1 || boundaryIndex > n - 1) return cal;
+
+  const left = sysBars[boundaryIndex - 1];
+  const right = sysBars[boundaryIndex];
+  const endKeeperIsL = left.xEnd >= right.xEnd;
+  const merged = withoutConfidence({ ...left, xEnd: Math.max(left.xEnd, right.xEnd) });
+
+  const nextSysBars = sysBars
+    .filter((b) => b.id !== right.id)
+    .map((b) => (b.id === left.id ? merged : b));
+  const others = (cal.bars ?? []).filter((b) => b.systemId !== systemId);
+  const nextBars = renumberBars([...others, ...nextSysBars], cal.systems ?? []);
+
+  const { roadmap, touched } = remapRoadmapForRemove(cal.roadmap, left.id, right.id, endKeeperIsL);
+  const after: ChartCalibration = {
+    ...cal,
+    status: 'draft',
+    bars: nextBars,
+    roadmap: pruneRoadmap(roadmap, new Set(nextBars.map((b) => b.id))),
+  };
+  return boundedResolverSweep(cal, after, touched);
+}
+
+// Add a barline: split the measure containing page-x `x` into two at `x`. The
+// left half keeps the parent id; the right half is a new bar inheriting the
+// parent's sectionId. No-op identity if x lies in no bar span (clef margin,
+// trailing blank, a gap) or either half would fall below MIN_BAR_W. Clears
+// confidence on both halves and resets to draft.
+export function addBarline(
+  cal: ChartCalibration,
+  systemId: string,
+  x: number,
+): ChartCalibration {
+  const system = (cal.systems ?? []).find((s) => s.id === systemId);
+  if (!system) return cal;
+  const sysBars = (cal.bars ?? [])
+    .filter((b) => b.systemId === systemId)
+    .sort((a, b) => a.xStart - b.xStart);
+
+  const target = clamp01(x);
+  const bar = sysBars.find((b) => target >= b.xStart && target <= b.xEnd);
+  if (!bar) return cal; // nothing to split under the tap
+  if (target - bar.xStart < MIN_BAR_W || bar.xEnd - target < MIN_BAR_W) return cal;
+
+  const rightId = crypto.randomUUID();
+  const left = withoutConfidence({ ...bar, xEnd: target });
+  const rightBar: Bar = {
+    id: rightId,
+    systemId,
+    xStart: target,
+    xEnd: bar.xEnd,
+    absNumber: 0,
+    sectionId: bar.sectionId,
+  };
+  const right = withoutConfidence(rightBar);
+
+  const nextSysBars = sysBars.flatMap((b) => (b.id === bar.id ? [left, right] : [b]));
+  const others = (cal.bars ?? []).filter((b) => b.systemId !== systemId);
+  const nextBars = renumberBars([...others, ...nextSysBars], cal.systems ?? []);
+
+  const { roadmap, touched } = remapRoadmapForAdd(cal.roadmap, bar.id, rightId);
+  const after: ChartCalibration = {
+    ...cal,
+    status: 'draft',
+    bars: nextBars,
+    roadmap: pruneRoadmap(roadmap, new Set(nextBars.map((b) => b.id))),
+  };
+  return boundedResolverSweep(cal, after, touched);
+}
+
 // Find the bar at a tap (page, x, y). Picks the nearest system by y, then the
 // bar whose [xStart, xEnd] span contains x. Returns null when x falls outside
 // every bar span (leading clef/margin, trailing blank, or a not-yet-normalized

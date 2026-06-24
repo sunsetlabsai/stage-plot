@@ -23,6 +23,8 @@ import {
   resizeSystemBand,
   autoDistributeBars,
   moveBarBoundary,
+  addBarline,
+  removeBarline,
   MIN_BAR_W,
   TAP_TOL,
   barsInOrder,
@@ -1768,5 +1770,252 @@ describe('summarizeTraversal (Roadmap-tool play-order readout)', () => {
   it('skips steps whose bar id is unknown, and returns empty for none', () => {
     expect(summarizeTraversal(c, [{ barId: 'ghost', pass: 1 }])).toBe('');
     expect(summarizeTraversal(c, [])).toBe('');
+  });
+});
+
+// ── addBarline / removeBarline (local cardinality edit) ──────────────────────
+
+// A single-system chart from explicit bar specs (for overlap/gap geometry that
+// barsChart's even distribution can't express). status 'verified' so edits can
+// prove they reset to draft.
+function customChart(bars: Bar[], roadmap?: RoadmapMarker[]): ChartCalibration {
+  return {
+    schemaVersion: CALIBRATION_SCHEMA_VERSION,
+    status: 'verified',
+    sections: [{ id: 'sec', page: 1, x: 0.05, y: 0.05, label: 'A' }],
+    systems: [{ id: 'sys1', page: 1, yTop: 0.1, yBottom: 0.3, xStart: 0, xEnd: 1 }],
+    bars,
+    roadmap,
+  };
+}
+
+// The newly-created right half after a split has the only id we can't predict;
+// find it by its xStart (the split point).
+function barAtX(c: ChartCalibration, x: number): Bar {
+  const b = (c.bars ?? []).find((bar) => Math.abs(bar.xStart - x) < 1e-9);
+  if (!b) throw new Error(`no bar starts at ${x}`);
+  return b;
+}
+
+describe('addBarline — geometry & cardinality', () => {
+  it('splits the measure under x into two; N → N+1', () => {
+    const next = addBarline(barsChart(4), 'sys1', 0.375); // inside b2 [.25,.5]
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars).toHaveLength(5);
+    expect(bars.map((b) => [b.xStart, b.xEnd])).toEqual([
+      [0, 0.25], [0.25, 0.375], [0.375, 0.5], [0.5, 0.75], [0.75, 1],
+    ]);
+    // The left half keeps the parent id; the right half is a fresh id.
+    expect(bars[1].id).toBe('b2');
+    expect(bars[2].id).not.toBe('b2');
+  });
+
+  it('renumbers absNumber 1..N+1 in reading order', () => {
+    const next = addBarline(barsChart(4), 'sys1', 0.375);
+    const nums = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart).map((b) => b.absNumber);
+    expect(nums).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it('inherits sectionId on both halves, clears confidence, resets to draft', () => {
+    const c = customChart([
+      { id: 'b1', systemId: 'sys1', xStart: 0, xEnd: 0.5, absNumber: 1, sectionId: 'sec', confidence: 0.4 },
+      { id: 'b2', systemId: 'sys1', xStart: 0.5, xEnd: 1, absNumber: 2, sectionId: 'sec', confidence: 0.9 },
+    ]);
+    const next = addBarline(c, 'sys1', 0.25); // split b1
+    expect(next.status).toBe('draft');
+    const left = next.bars!.find((b) => b.id === 'b1')!;
+    const right = barAtX(next, 0.25);
+    expect(left.sectionId).toBe('sec');
+    expect(right.sectionId).toBe('sec');
+    expect(left.confidence).toBeUndefined();
+    expect(right.confidence).toBeUndefined();
+  });
+
+  it('no-op identity when x lies in a gap between bars', () => {
+    const c = customChart([
+      { id: 'b1', systemId: 'sys1', xStart: 0, xEnd: 0.4, absNumber: 1, sectionId: null },
+      { id: 'b2', systemId: 'sys1', xStart: 0.6, xEnd: 1, absNumber: 2, sectionId: null },
+    ]);
+    expect(addBarline(c, 'sys1', 0.5)).toBe(c);
+  });
+
+  it('no-op identity when either half would fall below MIN_BAR_W', () => {
+    const c = barsChart(4); // b2 = [.25,.5]
+    expect(addBarline(c, 'sys1', 0.25 + MIN_BAR_W / 2)).toBe(c); // left sliver too thin
+    expect(addBarline(c, 'sys1', 0.5 - MIN_BAR_W / 2)).toBe(c); // right sliver too thin
+  });
+
+  it('no-op identity on an unknown system', () => {
+    const c = barsChart(4);
+    expect(addBarline(c, 'nope', 0.3)).toBe(c);
+  });
+});
+
+describe('addBarline — roadmap remap (non-destructive)', () => {
+  it('keeps a start-edge marker on the parent (left) half', () => {
+    const c = barsChart(4, [{ id: 'rs', kind: 'repeatStart', barId: 'b2', edge: 'start' }]);
+    const next = addBarline(c, 'sys1', 0.375); // split b2
+    expect(next.roadmap).toHaveLength(1);
+    expect(next.roadmap![0]).toMatchObject({ id: 'rs', barId: 'b2' });
+  });
+
+  it('remaps an end-edge marker to the new right half', () => {
+    const c = barsChart(4, [{ id: 'fine', kind: 'fine', barId: 'b2', edge: 'end' }]);
+    const next = addBarline(c, 'sys1', 0.375);
+    const right = barAtX(next, 0.375);
+    expect(next.roadmap).toHaveLength(1);
+    expect(next.roadmap![0]).toMatchObject({ id: 'fine', barId: right.id });
+    expect(resolveRoadmap(next).ok).toBe(true);
+  });
+
+  it('an ending bracket gains the new bar, kept contiguous; nothing pruned', () => {
+    const c = barsChart(6, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b3', 'b4'], numbers: [1] },
+    ]);
+    const next = addBarline(c, 'sys1', 0.41); // inside b3 [.3333,.5]
+    const mid = barAtX(next, 0.41);
+    expect(next.roadmap).toHaveLength(2);
+    expect(next.roadmap!.find((m) => m.id === 'e1')).toMatchObject({ barIds: ['b3', mid.id, 'b4'] });
+    expect(resolveRoadmap(next).ok).toBe(true);
+  });
+
+  it('pre-incoherent draft: sweep is skipped, remap applied, unrelated marker preserved', () => {
+    const c = barsChart(4, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b2'], numbers: [1] },
+      { id: 'tc', kind: 'toCoda', barId: 'b4', edge: 'end' }, // no Coda ⇒ before incoherent
+    ]);
+    const next = addBarline(c, 'sys1', 0.3); // split b2
+    const right = barAtX(next, 0.3);
+    expect(next.roadmap!.find((m) => m.id === 'e1')).toMatchObject({ barIds: ['b2', right.id] });
+    expect(next.roadmap!.map((m) => m.id)).toContain('tc'); // unrelated incoherence untouched
+  });
+});
+
+describe('removeBarline — geometry & cardinality', () => {
+  it('merges the two bars an interior boundary divides; N → N-1, keeps left id', () => {
+    const next = removeBarline(barsChart(4), 'sys1', 2); // merge b2 + b3
+    const bars = (next.bars ?? []).slice().sort((a, b) => a.xStart - b.xStart);
+    expect(bars).toHaveLength(3);
+    expect(bars.map((b) => [b.xStart, b.xEnd])).toEqual([[0, 0.25], [0.25, 0.75], [0.75, 1]]);
+    expect(bars[1].id).toBe('b2'); // left id survives
+    expect(bars.map((b) => b.absNumber)).toEqual([1, 2, 3]);
+  });
+
+  it('spans the UNION edge max(L.xEnd, R.xEnd) for overlapping converter bars', () => {
+    const c = customChart([
+      { id: 'bL', systemId: 'sys1', xStart: 0, xEnd: 0.9, absNumber: 1, sectionId: null },
+      { id: 'bR', systemId: 'sys1', xStart: 0.4, xEnd: 0.5, absNumber: 2, sectionId: null },
+    ]);
+    const next = removeBarline(c, 'sys1', 1);
+    expect(next.bars).toHaveLength(1);
+    expect([next.bars![0].xStart, next.bars![0].xEnd]).toEqual([0, 0.9]); // not .5
+    expect(next.bars![0].id).toBe('bL');
+  });
+
+  it('closes a gap between two bars (union edge)', () => {
+    const c = customChart([
+      { id: 'bL', systemId: 'sys1', xStart: 0, xEnd: 0.4, absNumber: 1, sectionId: null },
+      { id: 'bR', systemId: 'sys1', xStart: 0.6, xEnd: 1, absNumber: 2, sectionId: null },
+    ]);
+    const next = removeBarline(c, 'sys1', 1);
+    expect([next.bars![0].xStart, next.bars![0].xEnd]).toEqual([0, 1]);
+  });
+
+  it('clears confidence on the merged bar and resets to draft', () => {
+    const c = customChart([
+      { id: 'b1', systemId: 'sys1', xStart: 0, xEnd: 0.5, absNumber: 1, sectionId: null, confidence: 0.5 },
+      { id: 'b2', systemId: 'sys1', xStart: 0.5, xEnd: 1, absNumber: 2, sectionId: null, confidence: 0.5 },
+    ]);
+    const next = removeBarline(c, 'sys1', 1);
+    expect(next.status).toBe('draft');
+    expect(next.bars![0].confidence).toBeUndefined();
+  });
+
+  it('no-op identity on edge boundaries, N<2, non-integer, and unknown system', () => {
+    const c = barsChart(4);
+    expect(removeBarline(c, 'sys1', 0)).toBe(c); // leading edge, not a divider
+    expect(removeBarline(c, 'sys1', 4)).toBe(c); // trailing edge (N=4, max interior 3)
+    expect(removeBarline(c, 'sys1', 1.5)).toBe(c); // non-integer
+    expect(removeBarline(c, 'nope', 1)).toBe(c); // unknown system
+  });
+
+  it('no-op identity when the system has a single bar (N<2)', () => {
+    const one = barsChart(1);
+    expect(removeBarline(one, 'sys1', 1)).toBe(one);
+  });
+});
+
+describe('removeBarline — roadmap remap', () => {
+  it('contiguous: the right end-edge marker remaps to the merged id and survives', () => {
+    const c = barsChart(4, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b3', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    const next = removeBarline(c, 'sys1', 2); // merge b2 + b3, R end (.75) survives
+    expect(next.roadmap!.find((m) => m.id === 're')).toMatchObject({ barId: 'b2' });
+    expect(next.roadmap!.map((m) => m.id).sort()).toEqual(['re', 'rs']);
+    expect(resolveRoadmap(next).ok).toBe(true);
+  });
+
+  it('drops a start-edge marker that sat on the removed tick and cascades its repeatEnd', () => {
+    const c = barsChart(4, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b3', edge: 'start' }, // on the removed tick
+      { id: 're', kind: 'repeatEnd', barId: 'b4', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    const next = removeBarline(c, 'sys1', 2); // merge b2 + b3; rs dropped, re orphaned
+    expect(next.roadmap).toEqual([]);
+  });
+
+  it('drops a left end-edge marker that sat on the removed tick (contiguous)', () => {
+    const c = barsChart(4, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 're', kind: 'repeatEnd', barId: 'b2', edge: 'end', repeatStartId: 'rs', times: 2 },
+    ]);
+    const next = removeBarline(c, 'sys1', 2); // L end (.5) is the removed tick → drop re
+    expect(next.roadmap!.map((m) => m.id)).toEqual(['rs']);
+    expect(resolveRoadmap(next).ok).toBe(true);
+  });
+
+  it('overlap-contained: keeps the LEFT end-edge, drops the RIGHT end-edge (endKeeper rule)', () => {
+    const c = customChart([
+      { id: 'bL', systemId: 'sys1', xStart: 0, xEnd: 0.9, absNumber: 1, sectionId: null },
+      { id: 'bR', systemId: 'sys1', xStart: 0.4, xEnd: 0.5, absNumber: 2, sectionId: null },
+    ], [
+      { id: 'fn', kind: 'fine', barId: 'bL', edge: 'end' }, // L end (.9) keeps merged.xEnd
+      { id: 'dc', kind: 'jump', barId: 'bR', edge: 'end', from: 'capo', until: 'fine' }, // R end interior → drop
+    ]);
+    const next = removeBarline(c, 'sys1', 1);
+    expect(next.roadmap!.map((m) => m.id)).toEqual(['fn']);
+    expect(next.roadmap![0]).toMatchObject({ barId: 'bL' });
+    expect(resolveRoadmap(next).ok).toBe(true);
+  });
+});
+
+describe('removeBarline — bounded resolver sweep', () => {
+  it('collapsing two endings onto one bar drops ONLY the edit-touched ending', () => {
+    const c = barsChart(5, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b3'], numbers: [1] },
+      { id: 'e2', kind: 'ending', repeatStartId: 'rs', barIds: ['b4'], numbers: [2] },
+    ]);
+    const next = removeBarline(c, 'sys1', 3); // merge b3 + b4 → e2's b4 remaps to b3, collides e1
+    expect(next.roadmap!.map((m) => m.id).sort()).toEqual(['e1', 'rs']); // e2 (touched loser) dropped
+    expect(resolveRoadmap(next).ok).toBe(true);
+  });
+
+  it('pre-incoherent draft: sweep is skipped; the collision and unrelated marker persist', () => {
+    const c = barsChart(5, [
+      { id: 'rs', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+      { id: 'e1', kind: 'ending', repeatStartId: 'rs', barIds: ['b3'], numbers: [1] },
+      { id: 'e2', kind: 'ending', repeatStartId: 'rs', barIds: ['b4'], numbers: [2] },
+      { id: 'tc', kind: 'toCoda', barId: 'b5', edge: 'end' }, // no Coda ⇒ before incoherent
+    ]);
+    const next = removeBarline(c, 'sys1', 3);
+    const ids = next.roadmap!.map((m) => m.id);
+    expect(ids).toContain('e2'); // not auto-dropped — sweep never fired
+    expect(ids).toContain('tc'); // unrelated incoherence preserved
+    expect(resolveRoadmap(next).ok).toBe(false);
   });
 });
