@@ -163,8 +163,11 @@ only):** detections rarely equal N+1. Snap never adds or removes a bar.
 - More lines than boundaries → extra lines ignored by the matcher.
 - Fewer lines → only gated boundaries move; the rest keep even spacing.
 - When `|L| ≠ N+1`, snap returns its best positions **and the UI flags the
-  delta** ("detected M lines vs N bars — Add/Remove to reconcile"), routing the
-  user to the cardinality primitive in `docs/design-barline-add-remove.md`.
+  delta in like-for-like units** — lines are boundaries, so `M` detected lines
+  imply `M−1` measures: e.g. "detected M barlines (≈ M−1 bars) vs N bars —
+  Add/Remove to reconcile" (not the apples-to-oranges "M lines vs N bars").
+  This routes the user to the cardinality primitive in
+  `docs/design-barline-add-remove.md`.
   That companion is what makes a wrong count locally fixable without a
   destructive stepper re-distribute (the gap Graham hit in #94 UAT).
 
