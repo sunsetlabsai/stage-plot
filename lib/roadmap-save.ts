@@ -30,30 +30,66 @@ export function assertSpecCalibrationParity(spec: RoadmapSpec, cal: ChartCalibra
     });
   }
 
+  // base[i] = absolute (1-based) number of section i's first bar; the running
+  // total that defines each section's CONTIGUOUS spec bar-range.
+  const base: number[] = [];
+  let acc = 1;
+  for (const s of spec.sections) {
+    base.push(acc);
+    acc += s.bars;
+  }
+  const totalBars = acc - 1;
+
   // 2. Total bar count == Σ section bar counts.
-  const totalBars = spec.sections.reduce((n, s) => n + s.bars, 0);
   if (bars.length !== totalBars) {
     errors.push(`bar count ${bars.length} != spec total ${totalBars}`);
   }
 
-  // 3. Every bar is assigned to a section, and each section's emitted bar count
-  //    matches its spec count.
-  const bySection = new Map<string, number>();
-  for (const b of bars) {
-    if (b.sectionId == null) {
-      errors.push(`bar ${b.absNumber} has no sectionId`);
-      continue;
+  // 3. SECTION MEMBERSHIP (not just per-section counts): each bar must belong to
+  //    the section whose contiguous spec bar-range contains its absolute number.
+  //    Counting bars per section is insufficient — a renderer could swap which
+  //    section owns which contiguous block (sec-0 ← bars 3-4, sec-1 ← bars 1-2)
+  //    with both counts AND labels still matching. Mapping each absNumber to its
+  //    spec-implied section and comparing the bar's sectionId catches that.
+  if (cal.sections.length === spec.sections.length) {
+    const absToSectionIndex = (abs: number): number => {
+      // base is strictly ascending; the owning section is the last whose first
+      // bar is ≤ abs.
+      let idx = -1;
+      for (let i = 0; i < base.length; i += 1) {
+        if (base[i] <= abs) idx = i;
+        else break;
+      }
+      return idx;
+    };
+    const labelOf = new Map<string, string>();
+    for (const sec of cal.sections) labelOf.set(sec.id, sec.label);
+
+    for (const b of bars) {
+      if (b.sectionId == null) {
+        errors.push(`bar ${b.absNumber} has no sectionId`);
+        continue;
+      }
+      if (b.absNumber < 1 || b.absNumber > totalBars) {
+        errors.push(`bar ${b.absNumber} is outside the spec bar range 1..${totalBars}`);
+        continue;
+      }
+      const expectIdx = absToSectionIndex(b.absNumber);
+      const expectId = cal.sections[expectIdx].id;
+      if (b.sectionId !== expectId) {
+        const gotLabel = labelOf.get(b.sectionId) ?? b.sectionId;
+        errors.push(
+          `bar ${b.absNumber} is in section "${gotLabel}" but the spec puts it in "${spec.sections[expectIdx].label}"`,
+        );
+      }
     }
-    bySection.set(b.sectionId, (bySection.get(b.sectionId) ?? 0) + 1);
+  } else {
+    // Section-count mismatch (reported in #1) makes range mapping meaningless;
+    // still surface any unassigned bars so the report is complete.
+    for (const b of bars) {
+      if (b.sectionId == null) errors.push(`bar ${b.absNumber} has no sectionId`);
+    }
   }
-  spec.sections.forEach((s, i) => {
-    const id = cal.sections[i]?.id;
-    if (id == null) return; // section-count mismatch already reported
-    const got = bySection.get(id) ?? 0;
-    if (got !== s.bars) {
-      errors.push(`section ${i + 1} ("${s.label}") has ${got} bars, spec says ${s.bars}`);
-    }
-  });
 
   // 4. Every spec repeat/ending/navigation must project to a marker BOUND to the
   //    bar(s) the spec named, with the scalar attributes (repeat times, ending

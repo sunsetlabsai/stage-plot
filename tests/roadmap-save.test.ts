@@ -84,7 +84,30 @@ describe('assertSpecCalibrationParity — renderer-bug guard (spec ↔ calibrati
     introBar!.sectionId = 'sec-1';
     const r = assertSpecCalibrationParity(SPEC, cal);
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.errors.join(' ')).toMatch(/bars, spec says/i);
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/but the spec puts it in/i);
+  });
+
+  it('flags swapped section spans even when counts and labels still match', () => {
+    // Two equal-sized sections so a renderer could swap which contiguous block
+    // each owns: counts (2/2) and labels both pass, but membership is wrong.
+    const swapSpec: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'C',
+      sections: [
+        { id: 'a', label: 'A', bars: 2 },
+        { id: 'b', label: 'B', bars: 2 },
+      ],
+    };
+    const cal = clone(buildCal(swapSpec));
+    // Swap the two blocks: bars 1-2 ↔ bars 3-4.
+    for (const b of cal.bars!) {
+      if (b.absNumber <= 2) b.sectionId = 'sec-1';
+      else b.sectionId = 'sec-0';
+    }
+    const r = assertSpecCalibrationParity(swapSpec, cal);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/but the spec puts it in/i);
   });
 
   it('flags a bar with no sectionId', () => {

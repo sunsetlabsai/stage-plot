@@ -127,8 +127,12 @@ export async function POST(request: NextRequest) {
   });
 
   if (rpcError) {
-    // Roll back the staged object — the commit didn't land.
-    await admin.storage.from('charts').remove([storagePath]);
+    // Do NOT delete the staged object here. The path is content-addressed
+    // (…/${sourceHash}.pdf), so a concurrent save of the SAME spec stages and
+    // commits the SAME object; removing it on our failure could yank the PDF a
+    // peer's committed row already points at. Leaving the (idempotent) object
+    // orphaned is safe — a retry reuses it, and unreferenced hash objects are a
+    // GC concern, never a torn live-DB state.
     return Response.json({ error: rpcError.message }, { status: 500 });
   }
 
