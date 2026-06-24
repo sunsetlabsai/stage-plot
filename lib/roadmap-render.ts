@@ -430,13 +430,12 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
       drawRepeatEnd(pageOf(last), last, font, repeat.times);
     } else {
       repeat.endings.forEach((ending) => {
-        const startBar = barAt.get(`${si}:${ending.bars.start}`);
-        const endBar = barAt.get(`${si}:${ending.bars.start + ending.bars.count - 1}`);
-        // Bracket math only makes sense within one system/page; voltas sit at a
-        // section's tail and are short, so this holds in practice.
-        if (startBar && endBar && startBar.page === endBar.page && startBar.systemId === endBar.systemId) {
-          drawVoltaBracket(pageOf(startBar), startBar, endBar, font, ending.passes);
+        const bars: LaidBar[] = [];
+        for (let k = 0; k < ending.bars.count; k++) {
+          const b = barAt.get(`${si}:${ending.bars.start + k}`);
+          if (b) bars.push(b);
         }
+        drawVoltaBracket(pages, bars, font, ending.passes);
       });
     }
   });
@@ -494,15 +493,29 @@ function drawRepeatEnd(page: PDFPage, bar: LaidBar, font: PDFFont, times: number
 }
 
 // Volta bracket: a horizontal line above the ending bars, a down-tick at the
-// start, and the pass numbers (e.g. "1." or "2.–3.").
-function drawVoltaBracket(page: PDFPage, startBar: LaidBar, endBar: LaidBar, font: PDFFont, passes: number[]): void {
-  const x0 = denormX(startBar.xStart);
-  const x1 = denormX(endBar.xEnd);
-  const y = denormYTop(startBar.yTop) + 10;
-  drawLine(page, x0, y, x1, y, 1);          // top of bracket
-  drawLine(page, x0, y, x0, y - 8, 1);      // left down-tick
+// start, and the pass numbers (e.g. "1." or "2.–3."). An ending may span systems
+// (or pages) for a valid spec, so we draw one bracket segment per contiguous
+// run of bars sharing a page+system; the down-tick and label sit on the first.
+function drawVoltaBracket(pages: PDFPage[], bars: LaidBar[], font: PDFFont, passes: number[]): void {
+  if (bars.length === 0) return;
+  const groups: LaidBar[][] = [];
+  for (const b of bars) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].page === b.page && last[0].systemId === b.systemId) last.push(b);
+    else groups.push([b]);
+  }
   const label = passes.length > 1 ? `${passes[0]}.\u2013${passes[passes.length - 1]}.` : `${passes[0]}.`;
-  drawText(page, font, label, x0 + 3, y - 9, 8);
+  groups.forEach((group, gi) => {
+    const page = pages[group[0].page - 1];
+    const x0 = denormX(group[0].xStart);
+    const x1 = denormX(group[group.length - 1].xEnd);
+    const y = denormYTop(group[0].yTop) + 10;
+    drawLine(page, x0, y, x1, y, 1);        // top of bracket
+    if (gi === 0) {
+      drawLine(page, x0, y, x0, y - 8, 1);  // left down-tick on the first segment
+      drawText(page, font, label, x0 + 3, y - 9, 8);
+    }
+  });
 }
 
 // ⊕ — coda sign: outline circle with a vertical + horizontal line through it.

@@ -139,6 +139,48 @@ describe('layoutRoadmap — page spill', () => {
     expect(pdfBytes.length).toBeGreaterThan(200);
     expect(resolveRoadmap(cal).ok).toBe(true);
   });
+
+  it('draws a volta ending that spans systems (per-segment bracket, no dropout)', async () => {
+    // barsPerLine 4 → bars 4 and 5 land on different systems; a valid ending
+    // covering bars 4-5 must still render (one bracket segment per system).
+    const spec: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'E',
+      barsPerLine: 4,
+      sections: [
+        {
+          id: 'chorus',
+          label: 'Chorus',
+          bars: 8,
+          repeat: {
+            kind: 'volta',
+            endings: [
+              { bars: { start: 4, count: 2 }, passes: [1] }, // bars 4-5: crosses systems
+              { bars: { start: 6, count: 1 }, passes: [2] },
+            ],
+          },
+        },
+      ],
+    };
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+
+    const layout = layoutRoadmap(spec);
+    const startSys = layout.bars.find((b) => b.sectionIndex === 0 && b.barInSection === 4)?.systemId;
+    const endSys = layout.bars.find((b) => b.sectionIndex === 0 && b.barInSection === 5)?.systemId;
+    expect(startSys).toBeTruthy();
+    expect(endSys).toBeTruthy();
+    expect(startSys).not.toBe(endSys); // the ending genuinely spans two systems
+
+    const cal = buildCalibration(spec, layout);
+    expect((cal.roadmap ?? []).some((m) => m.kind === 'ending')).toBe(true);
+    expect(resolveRoadmap(cal).ok).toBe(true);
+
+    const a = await renderRoadmap(spec);
+    const b = await renderRoadmap(spec);
+    expect(a.pdfBytes.length).toBeGreaterThan(200);
+    expect(Buffer.from(a.pdfBytes).equals(Buffer.from(b.pdfBytes))).toBe(true);
+  });
 });
 
 describe('renderRoadmap — navigation variants', () => {
