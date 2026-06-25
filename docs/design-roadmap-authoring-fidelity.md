@@ -96,8 +96,13 @@ fixed precedence, and threaded into both L1 and L2:
 
 1. **Explicit key in the description** — a tiny key grammar matches a leading/inline
    statement ("in D", "key of Bb", "G minor"). Highest precedence; the author said it.
-2. **User-selected key** — the builder UI already carries a key selector (chunk-3
-   mockup); when the description states none, the selected key wins.
+2. **User-selected key** — a Compose-screen key selector. **The shipped Compose
+   screen does not yet have a pre-parse key selector** (the chunk-3 mockup's key
+   selector lives on the *review* toolbar, not Compose). So 5a ships with sources
+   **1 and 3 only** (explicit-in-description, else default `C`); the pre-parse
+   selector is an explicit build step (§9, 5a) that inserts source 2 between them.
+   Until it exists, an author who wants a non-default key simply states it in the
+   description ("in Bb …"), which source 1 already honors.
 3. **Default `C`** — the same fallback `validateRoadmapSpec` / the parse prompt use
    today, so behavior is unchanged when nothing is known.
 
@@ -230,11 +235,14 @@ clear error, never a silent drop):
   endings obey the existing validator preconditions (start>1, non-overlap, passes
   partition 1..max). Repeat is resolved **after** splices (it brackets the final
   bar array).
-- `nav`/`navJump`: cross-field preconditions (toCoda⇒coda, D.S.⇒segno, al-Coda⇒
-  coda+toCoda, al-Fine⇒fine) are **not** re-checked here — they remain the
-  domain of `validateRoadmapSpec` at the L3 gate, so there is one source of truth.
-  A nav `ref` to a deleted/spliced-away bar drops that nav block (same fail-safe
-  as the chunk-3 `lowerNavigation`).
+- `nav`/`navJump`: a `ref.bar` names a **pre-op bar identity** (§6 — the 1-based
+  authored position before any splice). It is **not** a final bar number; the fold
+  re-maps it through the splices (§6, step 6) so a surviving ref lands on its
+  correct final bar. A `ref` to a **deleted** (spliced-away) bar drops that nav
+  block (same fail-safe as the chunk-3 `lowerNavigation`). Cross-field preconditions
+  (toCoda⇒coda, D.S.⇒segno, al-Coda⇒coda+toCoda, al-Fine⇒fine) are **not** re-checked
+  here — they remain the domain of `validateRoadmapSpec` at the L3 gate, so there is
+  one source of truth.
 
 ## 6. Deterministic fold (SpanList → RoadmapSpec)
 
@@ -259,12 +267,27 @@ inheritance so `re-expand(fold(draft)) == draft`'s explicit per-bar array; a `nu
 re-expansion would falsely "lose" the sustained bars and break the invariant.
 
 **Op ordering (single defined phase order, no drift).** Per section, fold applies:
-(1) expand spans → explicit bar array; (2) apply `spliceBars` ops left-to-right on
-**pre-op** positions (§5.1, resolved once up front); (3) recompute `section.bars`;
-(4) derive sparse `changes` by inheritance-diff; (5) attach the single `repeat` op;
-(6) lower `nav`/`navJump` refs to BarRef indices (dropping any ref to a
-spliced-away bar). Navigation cross-field preconditions are left to
-`validateRoadmapSpec` at L3 — one source of truth.
+(1) **expand** spans → explicit bar array, where **each bar carries a stable
+identity** = its 1-based pre-op position (`1..N`); (2) apply `spliceBars` ops
+left-to-right on **pre-op** positions (§5.1, resolved once up front) — splices
+operate on the identity array: a delete removes the `count` identities at `at`; an
+insert adds **fresh** identities (not reusing any pre-op number) for the inserted
+bars; (3) recompute `section.bars`; (4) derive sparse `changes` by inheritance-diff;
+(5) attach the single `repeat` op; (6) **lower nav refs through the identity map.**
+
+**Nav splice-mapping (the part Codex flagged).** Because splices preserve identities
+for every surviving bar, lowering a `ref.bar` is unambiguous:
+- Build the post-splice identity array (step 2's output). A nav `ref.bar` names a
+  **pre-op identity**.
+- If that identity is **still present**, its **final BarRef index = its position in
+  the post-splice array** (1-based). Example: nav at pre-op bar 8, then delete 1 bar
+  at `at:4` → identity 8 survives, now sits at post-splice position **7** → the nav
+  lowers to bar 7, *not* stale bar 8. An insertion of `k` bars before it pushes it to
+  `8 + k`. No drift, because the math is "where did this identity end up," not "add/
+  subtract a guessed offset."
+- If the identity was **deleted**, the nav block drops (the §5.1 fail-safe).
+Navigation cross-field preconditions are left to `validateRoadmapSpec` at L3 — one
+source of truth.
 
 The fold is the *only* place compression happens, it is total and deterministic,
 and it is unit-testable against fixtures (round-trip: SpanList → spec → re-expand
@@ -308,9 +331,12 @@ Algorithm (pure, key-aware, fixture-tested):
    grammar does **not** force it. `null` means "not a clean diatonic degree": the
    token is handed to L2, and a true chromatic root is the **Gap-1 `alter` follow-on**
    (`docs/design-roadmap-expressiveness.md`, separate branch), NOT silently rounded
-   to the nearest degree. (A slash bass whose ROOT *is* diatonic but whose bass is
-   chromatic keeps the diatonic root degree and drops the chromatic bass to `null`
-   bass — the root, not the bass, decides diatonicity.) Note `E/D` is the **clean**
+   to the nearest degree. (A slash chord whose ROOT is diatonic but whose BASS is
+   chromatic — e.g. `E/Eb` in key D — also returns `null` for the **whole token**:
+   dropping the bass to plain `2` would silently lose chord data, violating "convert
+   only what it can convert exactly." The token goes to L2, and an altered slash bass
+   is part of the Gap-1 `alter` follow-on. The parser never emits a lossy partial.)
+   Note `E/D` is the **clean**
    case, not a chromatic one: in key D it is `{ degree: 2, bass: 1 }` (E and D both
    diatonic); in key G the *same* letters parse to `{ degree: 6, bass: 5 }`. The key
    decides the degree — there is no single fixed answer, which is exactly why L0
@@ -345,8 +371,10 @@ The loop the author actually invoked. Two pieces:
 ## 9. Build steps
 
 - **5a — spine:** `AuthoringDraft`/`SpanList` types + `foldDraft` (pure) + the
-  read-back tally. Switch the existing parse to target the SpanList (L2 output
-  contract change) and fold deterministically. Biggest fidelity win; keystone.
+  read-back tally + L0 key resolution (sources 1+3; §4.1). Switch the existing parse
+  to target the SpanList (L2 output contract change) and fold deterministically.
+  Biggest fidelity win; keystone. **Includes** adding the Compose-screen pre-parse
+  key selector (L0 source 2) so a non-default key needn't be stated in prose.
 - **5b — span-grammar (L1):** deterministic parser for the countable phrasing;
   L2 becomes residue-only. Adds coverage telemetry.
 - **5c — diff-aware regenerate (L4):** prior-draft + correction context; scoped
@@ -369,8 +397,12 @@ read-back). 5b and 5c harden and close the loop.
 - `parseLetterChord` (key-aware): `"G7"`+key D → `{degree:4,quality:'7'}`; `"Bm7"` →
   `{degree:6,quality:'m7'}`; `"E/D"`+key **D** → `{degree:2,bass:1}` AND `"E/D"`+key
   **G** → `{degree:6,bass:5}` (same letters, key decides); chromatic root `"C"`+key D
-  → `null` (deferred to L2 / Gap-1, never rounded); round-trips against `degreeLetter`
-  for all diatonic degrees across several `renderKey`s.
+  → `null` (deferred to L2 / Gap-1, never rounded); chromatic SLASH BASS `"E/Eb"`+key
+  D → `null` for the whole token (never the lossy partial `2`); round-trips against
+  `degreeLetter` for all diatonic degrees across several `renderKey`s.
+- nav splice-mapping: nav at pre-op bar 8, delete 1 bar at `at:4` → lowers to bar 7
+  (identity survives, re-indexed); insert 2 bars before it → bar 10; nav on a deleted
+  bar → block drops; two splices don't drift the mapping.
 - renderKey resolution (L0): explicit "in D" in the description wins over the
   UI-selected key; UI key wins when the description states none; default `C` when
   neither; a letter that doesn't fit the resolved key falls to L2 (no force-map).
