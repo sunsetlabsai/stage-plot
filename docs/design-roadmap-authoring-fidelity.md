@@ -66,8 +66,10 @@ count is right by construction.*
 ```
 NL description
   │
+  ├─[L0] resolve renderKey (§4.1)           ──► pinned key, BEFORE any letter parse
+  │
   ├─[L1] deterministic span-grammar parser  ──► SpanList (faithful, no LLM)
-  │        "2 bars D, 2 bars G7, …"
+  │        "2 bars D, 2 bars G7, …"  (uses the L0 key to map letters→degrees)
   │
   ├─[L2] LLM for the fuzzy residue          ──► SpanList edits + structure ops
   │        "drop one bar of G, replace with Bm7/Em/A as a tag"; repeats; nav.
@@ -85,6 +87,27 @@ L3's terminal gate is **unchanged** — `validateRoadmapSpec` stays the DB bound
 (`lib/roadmap-spec.ts`). Everything new (SpanList, fold, grammar) is pure and
 sits *before* it, exactly mirroring the converter's "pure gate + thin transport"
 discipline (`lib/roadmap-parse.ts`).
+
+### 4.1 renderKey resolution (L0 — pinned before L1)
+
+L1's letter→degree parse (§7.1) is **key-dependent** (`G7` is the 4 of D but the 1
+of G), so `renderKey` MUST be pinned **before** L1 runs. It is resolved once, by this
+fixed precedence, and threaded into both L1 and L2:
+
+1. **Explicit key in the description** — a tiny key grammar matches a leading/inline
+   statement ("in D", "key of Bb", "G minor"). Highest precedence; the author said it.
+2. **User-selected key** — the builder UI already carries a key selector (chunk-3
+   mockup); when the description states none, the selected key wins.
+3. **Default `C`** — the same fallback `validateRoadmapSpec` / the parse prompt use
+   today, so behavior is unchanged when nothing is known.
+
+Ordering guarantee: **L1 never letter-parses against an unpinned key.** Because the
+key is fixed at L0, L1 is deterministic. If the resolved key is merely the default
+*and* the description's letters don't fit it diatonically, those letter tokens return
+`null` from `parseLetterChord` (§7.1) and fall through to **L2**, which can reason
+about the intended key from prose — they are never force-mapped against a wrong key.
+(A future enhancement could let L2 *propose* a key when none is stated and re-run L1;
+out of scope for chunk 5 — L0's three-source order is the build contract.)
 
 ## 5. The SpanList intermediate
 
@@ -106,16 +129,31 @@ interface ChordSpan {
   bars: number;      // contiguous bars sharing this IDENTICAL pattern (>= 1)
 }
 interface SectionDraft {
+  id: string;                // STABLE unique slug, e.g. "verse-1" (see id rules below)
   label: string;             // "Verse", "Chorus", "Intro"…
   spans: ChordSpan[];        // IN ORDER, one per contiguous region — NEVER pre-merged
   ops?: StructureOp[];       // repeat / tag-edit / nav (§5.1)
 }
 type AuthoringDraft = {
   timeSig: TimeSig;
-  renderKey: string;
+  renderKey: string;         // pinned BEFORE L1 runs (§4.1)
   sections: SectionDraft[];
 };
 ```
+
+**Section id rules (same stable-id discipline as chunk 3's `ViewBarRef`).** Nav ops
+reference a section by `id`, never by positional index, so reorder/remove can't
+silently retarget (the exact ambiguity chunk-3's `fecd369` fixed for `RoadmapSpec`).
+- `id` is a unique slug, generated deterministically from `label` + an ordinal when
+  labels repeat (`verse-1`, `verse-2`), exactly as the existing spec authoring slugs
+  sections.
+- Ids MUST be unique within an `AuthoringDraft`; the fold (§6) **rejects** a draft
+  with duplicate ids before any nav lowering (fail-closed, never a silent collision).
+- A nav op whose `ref.sectionId` matches no section drops that nav block (same
+  fail-safe as `lowerNavigation`), and on fold the surviving refs lower id→current
+  index exactly as `viewToSpec` does today. `RoadmapSpec.navigation` BarRefs stay
+  positional indices — the stable id lives only in the authoring layer, lowered away
+  at the L3 boundary.
 
 Why spans-with-counts (not one-element-per-bar):
 - Mirrors the input 1:1 ("2 bars D" → `{ bar: [{degree:1}], bars: 2 }`), so the
@@ -127,6 +165,24 @@ Why spans-with-counts (not one-element-per-bar):
 - A split bar is a span of `bars: 1` whose `bar` holds the multi-chord pattern;
   two consecutive identical split bars collapse to `bars: 2` losslessly (the fold,
   §6, re-expands them).
+
+**Canonical `BarPattern` form + equality (so "identical pattern" is well-defined).**
+A `BarPattern` is normalized to the **same canonical beats convention the shipped
+`ChordHit`/validator already use** (`cellsToChordHits`, `lib/roadmap-view.ts`):
+- 1 chord (whole bar) → `beats` **omitted**.
+- N chords that divide `timeSig.beats` **evenly** → `beats` **omitted** (even
+  division is implicit, exactly as `validateChords` allows all-or-none).
+- N chords that divide **unevenly** → **every** chord carries an explicit `beats`
+  summing to `timeSig.beats` (the all-or-none rule; this is what the `-` tie grammar
+  produces).
+
+Two `BarPattern`s are **equal** (and so coalesce into one span's `bars` count) iff,
+after this normalization, they have the same length and each slot matches on
+`(degree, quality ?? '', bass ?? none, beats ?? implicit-even)`. The fold (§6)
+stores the **canonical** (validator-style optional-beats) form — never a
+fully-inferred per-beat expansion — so what folds into `RoadmapSpec.changes` is
+byte-for-byte what `validateRoadmapSpec` already accepts, and the round-trip
+re-expand compares canonical patterns, not raw author keystrokes.
 
 **Anti-collapse discipline (L2 prompt rules):**
 - Emit **one span per contiguous region, in order**. Do **NOT** merge
@@ -247,12 +303,18 @@ Algorithm (pure, key-aware, fixture-tested):
    inverting the renderer's key→letter table. A letter that lands on a diatonic
    scale tone yields `degree ∈ 1..7`; map the quality suffix to the existing
    `ChordHit.quality` enum; map a slash `/bass` letter to its degree.
-3. **Chromatic roots fall through.** A letter that is NOT a diatonic degree of
-   `renderKey` (e.g. `C` in key D = ♭7, or the `E/D`→`6/5` ambiguity) returns
-   `null` — the grammar does **not** force it. `null` means "not a clean diatonic
-   degree": the token is handed to L2, and a true chromatic root is the
-   **Gap-1 `alter` follow-on** (`docs/design-roadmap-expressiveness.md`), NOT
-   silently rounded to the nearest degree.
+3. **Chromatic roots fall through.** A letter whose ROOT is NOT a diatonic degree
+   of `renderKey` (e.g. `C` in key D = ♭7, or `Eb` in key D) returns `null` — the
+   grammar does **not** force it. `null` means "not a clean diatonic degree": the
+   token is handed to L2, and a true chromatic root is the **Gap-1 `alter` follow-on**
+   (`docs/design-roadmap-expressiveness.md`, separate branch), NOT silently rounded
+   to the nearest degree. (A slash bass whose ROOT *is* diatonic but whose bass is
+   chromatic keeps the diatonic root degree and drops the chromatic bass to `null`
+   bass — the root, not the bass, decides diatonicity.) Note `E/D` is the **clean**
+   case, not a chromatic one: in key D it is `{ degree: 2, bass: 1 }` (E and D both
+   diatonic); in key G the *same* letters parse to `{ degree: 6, bass: 5 }`. The key
+   decides the degree — there is no single fixed answer, which is exactly why L0
+   pins `renderKey` before this runs.
 
 This keeps L1 honest: it converts only what it can convert *exactly*, and defers
 everything else rather than guessing. Roman/number tokens continue to route through
@@ -304,10 +366,20 @@ read-back). 5b and 5c harden and close the loop.
 - split bars: two adjacent identical split-bar patterns (`1 - 4 5`) coalesce to a
   `bars: 2` span and re-expand losslessly; a span's `bar: ChordHit[]` beats sum to
   `timeSig.beats`.
-- `parseLetterChord`: `"G7"`+key D → `{degree:4,quality:'7'}`; `"Bm7"` →
-  `{degree:6,quality:'m7'}`; `"E/D"`+key D → `{degree:2,bass:1}`; chromatic root
-  `"C"`+key D → `null` (deferred to L2 / Gap-1, never rounded); round-trips against
-  `degreeLetter` for all diatonic degrees across several `renderKey`s.
+- `parseLetterChord` (key-aware): `"G7"`+key D → `{degree:4,quality:'7'}`; `"Bm7"` →
+  `{degree:6,quality:'m7'}`; `"E/D"`+key **D** → `{degree:2,bass:1}` AND `"E/D"`+key
+  **G** → `{degree:6,bass:5}` (same letters, key decides); chromatic root `"C"`+key D
+  → `null` (deferred to L2 / Gap-1, never rounded); round-trips against `degreeLetter`
+  for all diatonic degrees across several `renderKey`s.
+- renderKey resolution (L0): explicit "in D" in the description wins over the
+  UI-selected key; UI key wins when the description states none; default `C` when
+  neither; a letter that doesn't fit the resolved key falls to L2 (no force-map).
+- section ids: duplicate ids in an `AuthoringDraft` are rejected by the fold; a nav
+  op whose `sectionId` matches no section drops that nav block; reorder/remove keeps
+  surviving nav refs pointing at the right section (stable-id, lowered at fold).
+- `BarPattern` canonical equality: whole-bar and even-division patterns compare equal
+  with `beats` omitted; an uneven pattern's explicit all-or-none beats are required to
+  match; the fold stores the canonical (validator-style) optional-beats form.
 - span-grammar: the failing verse string parses to 8 spans / 16 bars; the
   alternating front (`D G7 D G7 D`) yields **five** spans, not a collapsed vamp;
   non-grammar prose returns "no match" (falls through to L2).
