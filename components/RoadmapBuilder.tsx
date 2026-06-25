@@ -53,10 +53,12 @@ interface Props {
 
 export default function RoadmapBuilder({ songTitle, charts, onClose, onSaved }: Props) {
   const [description, setDescription] = useState('');
+  const [composeKey, setComposeKey] = useState(''); // '' = Auto (let L0 resolve)
   const [view, setView] = useState<ViewModel | null>(null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
   const [specErrors, setSpecErrors] = useState<string[]>([]);
+  const [tally, setTally] = useState<string[]>([]); // L4 read-back echo
 
   async function generate(reset: boolean) {
     const text = description.trim();
@@ -65,17 +67,19 @@ export default function RoadmapBuilder({ songTitle, charts, onClose, onSaved }: 
     setGenerating(true);
     setError('');
     setSpecErrors([]);
+    setTally([]);
     try {
       const res = await fetch('/api/charts/roadmap/parse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description: text }),
+        body: JSON.stringify({ description: text, key: composeKey || undefined }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(data.error || 'Could not reach the parser.');
         return;
       }
+      if (Array.isArray(data.tally)) setTally(data.tally);
       if (!data.ok) {
         setSpecErrors(Array.isArray(data.errors) ? data.errors : ['The parser returned an invalid chart.']);
         return;
@@ -109,9 +113,12 @@ export default function RoadmapBuilder({ songTitle, charts, onClose, onSaved }: 
         <Compose
           description={description}
           setDescription={setDescription}
+          composeKey={composeKey}
+          setComposeKey={setComposeKey}
           generating={generating}
           error={error}
           specErrors={specErrors}
+          tally={tally}
           onGenerate={() => generate(false)}
         />
       ) : (
@@ -123,6 +130,7 @@ export default function RoadmapBuilder({ songTitle, charts, onClose, onSaved }: 
           description={description}
           setDescription={setDescription}
           generating={generating}
+          tally={tally}
           onRegenerate={() => generate(true)}
           onSaved={onSaved}
         />
@@ -135,16 +143,22 @@ export default function RoadmapBuilder({ songTitle, charts, onClose, onSaved }: 
 function Compose({
   description,
   setDescription,
+  composeKey,
+  setComposeKey,
   generating,
   error,
   specErrors,
+  tally,
   onGenerate,
 }: {
   description: string;
   setDescription: (v: string) => void;
+  composeKey: string;
+  setComposeKey: (v: string) => void;
   generating: boolean;
   error: string;
   specErrors: string[];
+  tally: string[];
   onGenerate: () => void;
 }) {
   return (
@@ -178,7 +192,23 @@ function Compose({
             <p className="text-zinc-500">Try rephrasing and generate again.</p>
           </div>
         )}
-        <div className="flex items-center justify-end mt-4">
+        {tally.length > 0 && <ReadBack tally={tally} />}
+        <div className="flex items-center justify-between mt-4">
+          <label className="inline-flex items-center gap-2 text-xs text-zinc-500">
+            Key
+            <select
+              value={composeKey}
+              onChange={(e) => setComposeKey(e.target.value)}
+              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-sm text-white outline-none focus:border-blue-500"
+            >
+              <option value="">Auto</option>
+              {KEYS.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+          </label>
           <button
             onClick={onGenerate}
             disabled={generating || !description.trim()}
@@ -201,6 +231,7 @@ function Review({
   description,
   setDescription,
   generating,
+  tally,
   onRegenerate,
   onSaved,
 }: {
@@ -211,6 +242,7 @@ function Review({
   description: string;
   setDescription: (v: string) => void;
   generating: boolean;
+  tally: string[];
   onRegenerate: () => void;
   onSaved: (chart: Chart) => void;
 }) {
@@ -339,6 +371,7 @@ function Review({
         >
           {generating ? 'Generating…' : 'Regenerate'}
         </button>
+        {tally.length > 0 && <ReadBack tally={tally} />}
         <p className="text-[11px] text-zinc-600 mt-auto">
           Tip: click a bar — &ldquo;1&rdquo; or &ldquo;IV&rdquo; for a whole bar, &ldquo;5 4&rdquo; to
           split evenly, &ldquo;1 - 4 5&rdquo; to tie (2 of 1, then 4, then 5).
@@ -533,6 +566,24 @@ function SortableSectionRow({
       >
         ✕
       </button>
+    </div>
+  );
+}
+
+// L4 read-back echo: the per-section bar totals the parse produced, straight from
+// the SpanList — so a dropped span shows up as a wrong total before you ever save.
+function ReadBack({ tally }: { tally: string[] }) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 space-y-1">
+      <h4 className="text-[11px] uppercase tracking-wide text-zinc-500">Read-back</h4>
+      <ul className="space-y-0.5 text-xs text-zinc-300">
+        {tally.map((line, i) => (
+          <li key={i} className="font-mono leading-snug">
+            {line}
+          </li>
+        ))}
+      </ul>
+      <p className="text-[11px] text-zinc-600">Check the bar counts. If a section is short, refine and regenerate.</p>
     </div>
   );
 }
