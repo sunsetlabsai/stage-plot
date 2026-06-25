@@ -355,14 +355,19 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
   }
 
   // Header (page 1): song title + artist credit (if provided by the save layer)
-  // then key. Key drops a line when a credit is present so they never collide.
+  // then an authored-key tag. The body is pure Nashville degrees (key-invariant),
+  // so the LIVE key is resolved at view time in the app chrome from the show's
+  // setlist override (chunk 4, Option A) — NOT read off this PDF. This tag is a
+  // demoted, informational provenance note ("authored in X"), not the live key,
+  // so a standalone/printed PDF isn't keyless without claiming a key it can't honor.
+  // It drops a line when a credit is present so they never collide.
   if (opts.songTitle) {
     drawText(pages[0], fontBold, opts.songTitle, MARGIN_X, MARGIN_TOP - 36, 18);
   }
   if (opts.artist) {
     drawText(pages[0], font, opts.artist, MARGIN_X, MARGIN_TOP - 52, 11);
   }
-  drawText(pages[0], fontBold, `Key: ${spec.renderKey}`, MARGIN_X, MARGIN_TOP - (opts.artist ? 70 : 58), 12);
+  drawText(pages[0], font, `Nashville (authored in ${spec.renderKey})`, MARGIN_X, MARGIN_TOP - (opts.artist ? 70 : 58), 10);
 
   const beats = spec.timeSig.beats;
   for (const sys of layout.systems) {

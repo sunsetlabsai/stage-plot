@@ -338,6 +338,12 @@ function Review({
         mimeType: 'application/pdf',
         modifiedTime: new Date().toISOString(),
         label: `${data.song_key ?? ''}-${canonical}.pdf`,
+        // Re-key (Option A): a builder chart is Nashville/key-invariant. Mark it so
+        // the viewer/preview chrome surfaces the live key; authored_key = the spec's
+        // renderKey (informational). Persisted source_spec rehydrates the same on reload.
+        is_builder: true,
+        authored_key: spec.renderKey,
+        charted_key: null,
       };
       onSaved(chart);
     } catch {

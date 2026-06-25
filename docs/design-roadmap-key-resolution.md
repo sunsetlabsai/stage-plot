@@ -1,6 +1,7 @@
 # ShowRunr — Roadmap Key Resolution (chunk 4: re-key) DESIGN
 
-**Status:** DESIGN-ONLY. No build until Graham GO + Codex review.
+**Status:** BUILT (chunk 4, Option A live relabel) — Graham GO; awaiting Codex.
+Resolved decisions + what shipped: §10 / §10.1.
 Companion to `docs/design-roadmap-builder.md` (chunks 0–3 shipped to main `9902d08`).
 
 ---
@@ -278,24 +279,50 @@ a live-overlay. Keeping chunk 4 Numbers-native is what keeps re-key free.
 
 ## 10. Open questions (for Graham / Codex)
 
-1. **Invariant / migration (§3.2).** Keep `songs.key` and `source_spec.renderKey`
-   **independent** (i — lean), or **couple on save** (ii — builder save sets
-   `songs.key = renderKey` only when the song has no key)? This is the load-bearing
-   call; it decides what a `null` override means and whether a backfill is needed.
-2. **Print path now or later.** Ship chunk 4 as Option-A-only (live relabel) and
-   defer the on-demand keyed export (Option B / §6.1) to its own chunk? Or do both
-   together? (Lean: A first — it closes the mismatch; B is additive.)
+**Resolved (Graham, build chunk 4):** Q1 = **independent** (i); Q2 = **Option A
+only** (live relabel; defer Option B / §6.1); Q4 = **demote** to a neutral
+"Nashville (authored in {key})" tag. Q3 stays **deferred** (blocked on
+`charted_key`); Q5 stays **deferred** to chunk 5 / the edit loop.
+
+1. ~~**Invariant / migration (§3.2).**~~ **RESOLVED → independent (i).**
+   `songs.key` (library default) and `source_spec.renderKey` (authored key) stay
+   decoupled; the live key is always `songKey = resolveOverride(key_override,
+   songs.key)`; `authored_key` is informational only. No backfill needed.
+2. ~~**Print path now or later.**~~ **RESOLVED → Option A only.** Chunk 4 ships the
+   live relabel (chrome owns the live key); the on-demand keyed export (Option B /
+   §6.1) is deferred to its own chunk.
 3. **Converter-chart honesty.** Show a "charted in {key}" note when a converter
    chart's key ≠ `songKey`? **Blocked on `charted_key`** — imports carry no key
    metadata today (§6), so this stays deferred until that capture exists. (Lean:
    show it once we can; silent disagreement is the confusion we're removing.)
-4. **Drop vs demote the baked key.** Remove `Key:` from the builder PDF entirely
-   (chrome owns it), or keep a small neutral "Nashville / authored: {key}" tag for
-   standalone legibility? (Lean: demote so a raw PDF isn't keyless.)
+4. ~~**Drop vs demote the baked key.**~~ **RESOLVED → demote.** The builder PDF
+   prints `Nashville (authored in {renderKey})` (regular weight, size 10) instead
+   of a bold `Key:` — a raw PDF stays legible, but the live key is owned by chrome.
 5. **Authored-key edit.** Should re-keying the *authored* default (not a show
    override) be an editor action on the chart itself, separate from the per-show
    override? (Probably yes, but that's a builder-editor concern — flag for chunk 5
    / edit loop, not here.)
+
+### 10.1 What chunk 4 shipped (Option A — live relabel)
+
+- **`lib/roadmap-render.ts`** — demoted the baked header (Q4): `Key: {renderKey}`
+  (bold/12) → `Nashville (authored in {renderKey})` (regular/10). Geometry
+  untouched, so the born calibration is unchanged (the relabel never re-renders).
+- **Contract (`Chart` in `lib/types.ts`)** — added `is_builder`,
+  `authored_key`, `charted_key` (§6). Surfaced by both
+  `app/api/shows/[owner]/[show]/route.ts` and `app/api/songs/route.ts` from
+  `chart_library.source_spec` (`is_builder = source_spec != null`,
+  `authored_key = source_spec.renderKey`, `charted_key = null`).
+- **Chrome (live key, Q1)** — the chart navigator header
+  (`app/[owner]/[show]/page.tsx`) shows a key pill for builder charts =
+  `song.key || authored_key` (live setlist key, falling back to the authored key
+  when the song carries none). The standalone library preview
+  (`components/ManageChartsModal.tsx`) has no setlist, so it falls back to
+  `authored_key`. Freshly-built charts carry `is_builder`/`authored_key` from
+  `RoadmapBuilder` so the pill appears without a reload.
+- **Tests** — `tests/roadmap-render.test.ts`: a re-key is a pure relabel — the
+  born calibration is byte-identical across `renderKey`s (only the demoted header
+  differs). Chrome/route are type-checked only (no jsdom/route harness in repo).
 
 ## 11. Why this is the right shape
 

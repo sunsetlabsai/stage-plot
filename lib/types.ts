@@ -47,6 +47,14 @@ export interface Chart {
   fileId?: string;        // Drive file ID (for offline cache); for library charts = chart_library.id (the calibration chart_id)
   mimeType?: string;      // original MIME type (for export detection)
   modifiedTime?: string;  // ISO timestamp (for cache invalidation)
+  // ── Re-key (Option A: live-relabel) ──
+  // A builder (Nashville) chart's body is key-invariant degree numbers; only the
+  // key LABEL follows the song. The baked PDF no longer prints "Key:" — the live
+  // key is resolved into the viewer chrome from the setlist (song.key), falling
+  // back to authored_key when there is no song context (standalone library view).
+  is_builder?: boolean;       // source_spec present = authored in the builder
+  authored_key?: string | null; // the spec's renderKey (informational; not the live key)
+  charted_key?: string | null;  // reserved for import-time key capture (null for now)
 }
 
 // ── Chart Calibration (realtime chart control, step 1: sections-only rail) ──

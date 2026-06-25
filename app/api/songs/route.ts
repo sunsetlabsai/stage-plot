@@ -58,13 +58,15 @@ export async function GET(request: NextRequest) {
   if (songKeys.length > 0) {
     const { data: charts } = await admin
       .from('chart_library')
-      .select('id, song_key, role, file_name, storage_path, mime_type, updated_at')
+      .select('id, song_key, role, file_name, storage_path, mime_type, updated_at, source_spec')
       .eq('owner_id', ownerId)
       .in('song_key', songKeys);
 
     for (const c of charts || []) {
       chartCounts[c.song_key] = (chartCounts[c.song_key] || 0) + 1;
       if (!chartsBySong[c.song_key]) chartsBySong[c.song_key] = [];
+      // Builder origin + authored key (chunk 4) — see show route for the contract.
+      const sourceSpec = c.source_spec as { renderKey?: string } | null;
       // Same shape the show GET uses so charts attach + cache identically
       chartsBySong[c.song_key].push({
         role: c.role,
@@ -73,6 +75,9 @@ export async function GET(request: NextRequest) {
         mimeType: c.mime_type,
         modifiedTime: c.updated_at,
         label: c.file_name,
+        is_builder: sourceSpec != null,
+        authored_key: sourceSpec?.renderKey ?? null,
+        charted_key: null,
       });
     }
   }

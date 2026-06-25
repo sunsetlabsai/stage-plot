@@ -430,7 +430,7 @@ export default function Page() {
 
         // Apply charts from owner's library (matched by normalized song title)
         if (data.charts && typeof data.charts === 'object') {
-          const chartMap = data.charts as Record<string, Array<{ id: string; role: string; url: string; mime_type: string; updated_at: string; file_name: string }>>;
+          const chartMap = data.charts as Record<string, Array<{ id: string; role: string; url: string; mime_type: string; updated_at: string; file_name: string; is_builder?: boolean; authored_key?: string | null; charted_key?: string | null }>>;
           cfg.setlist = cfg.setlist.map((song) => {
             const songKey = normalizeSongKeySafe(song.title);
             if (!songKey || !chartMap[songKey]) return song;
@@ -441,6 +441,9 @@ export default function Page() {
               mimeType: c.mime_type,
               modifiedTime: c.updated_at,
               label: c.file_name,
+              is_builder: c.is_builder,
+              authored_key: c.authored_key,
+              charted_key: c.charted_key,
             }));
             return { ...song, charts };
           });
@@ -3119,7 +3122,17 @@ function ChartNavigator({
         </button>
         <div className="text-center flex-1 px-2">
           <p className="text-sm font-bold truncate">{song.title}</p>
-          <p className="text-[10px] text-zinc-500">Song {currentIdx + 1} of {setlist.length}</p>
+          <p className="text-[10px] text-zinc-500">
+            Song {currentIdx + 1} of {setlist.length}
+            {/* Re-key (Option A): a builder chart's PDF no longer bakes "Key:",
+                so the live key is surfaced here from the setlist (song.key),
+                falling back to authored_key when the song carries no key. */}
+            {activeChart?.is_builder && (song.key || activeChart.authored_key) && (
+              <span className="ml-1.5 px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-200 font-bold">
+                {song.key || activeChart.authored_key}
+              </span>
+            )}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           {isOffline && (

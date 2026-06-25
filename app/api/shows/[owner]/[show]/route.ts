@@ -101,12 +101,17 @@ export async function GET(
   if (songKeys.length > 0) {
     const { data: charts } = await admin
       .from('chart_library')
-      .select('id, song_key, role, file_name, storage_path, mime_type, file_size, updated_at')
+      .select('id, song_key, role, file_name, storage_path, mime_type, file_size, updated_at, source_spec')
       .eq('owner_id', showData.owner_id)
       .in('song_key', songKeys);
 
     for (const c of charts || []) {
       if (!chartsBySong[c.song_key]) chartsBySong[c.song_key] = [];
+      // Builder origin + authored key (chunk 4). is_builder = a stored source_spec;
+      // authored_key = its renderKey (informational — the live key is resolved in
+      // chrome from the setlist, never this field). charted_key is reserved (null)
+      // until import-time key capture exists.
+      const sourceSpec = c.source_spec as { renderKey?: string } | null;
       chartsBySong[c.song_key].push({
         id: c.id,
         song_key: c.song_key,
@@ -116,6 +121,9 @@ export async function GET(
         file_size: c.file_size,
         updated_at: c.updated_at,
         url: `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/charts/${c.storage_path}`,
+        is_builder: sourceSpec != null,
+        authored_key: sourceSpec?.renderKey ?? null,
+        charted_key: null,
       });
     }
   }

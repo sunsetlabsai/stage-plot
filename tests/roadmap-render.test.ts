@@ -380,6 +380,20 @@ describe('renderRoadmap — chord content & header', () => {
     expect(Buffer.from(titled.pdfBytes).equals(Buffer.from(titledAgain.pdfBytes))).toBe(true);
   });
 
+  it('re-key is a pure relabel — the calibration is key-invariant (Option A)', async () => {
+    // A builder chart is Nashville/degree-based: only the printed key LABEL follows
+    // the song. The structural truth (geometry, bars, markers) carries no key, so a
+    // live re-key never needs a re-render or re-calibration. Render the same spec in
+    // two keys: the born calibration is byte-identical; only the demoted header
+    // ("Nashville (authored in <key>)") differs, so the PDFs are non-identical.
+    const inD: RoadmapSpec = { ...richSpec(), renderKey: 'D' };
+    const inBb: RoadmapSpec = { ...richSpec(), renderKey: 'Bb' };
+    const d = await renderRoadmap(inD);
+    const bb = await renderRoadmap(inBb);
+    expect(d.calibration).toEqual(bb.calibration);
+    expect(Buffer.from(d.pdfBytes).equals(Buffer.from(bb.pdfBytes))).toBe(false);
+  });
+
   it('draws a chromatic-root accidental as a vector glyph — deterministic, calibration unperturbed (Gap 1)', async () => {
     // The motivating song's chorus C in D = ♭VII = { degree: 7, alter: -1 }.
     const flatSeven: RoadmapSpec = {

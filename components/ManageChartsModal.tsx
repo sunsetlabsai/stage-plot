@@ -312,6 +312,16 @@ function ChartPreview({ chart }: { chart: Chart }) {
 
   return (
     <div className="flex flex-col h-full w-full">
+      {/* Re-key (Option A): a builder chart's PDF no longer bakes "Key:". With no
+          setlist here (standalone library preview), the live key falls back to
+          the chart's authored_key. */}
+      {chart.is_builder && chart.authored_key && (
+        <div className="pb-2 text-center">
+          <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-xs font-bold text-zinc-200">
+            Key {chart.authored_key}
+          </span>
+        </div>
+      )}
       <div className="flex-1 min-h-0 overflow-auto flex items-center justify-center">
         <canvas ref={canvasRef} />
       </div>
