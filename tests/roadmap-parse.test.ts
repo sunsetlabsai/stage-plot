@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseModelDraft } from '../lib/roadmap-parse';
+import { parseModelDraft, parseGrammarDraft } from '../lib/roadmap-parse';
 
 // The model now emits an AuthoringDraft (a per-span SpanList) — NOT a RoadmapSpec.
 // parseModelDraft folds it deterministically, then gates it through
@@ -135,5 +135,35 @@ describe('parseModelDraft — fold + validate the model SpanList', () => {
     const r = parseModelDraft(DRAFT, 'Bb');
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.spec.renderKey).toBe('Bb');
+  });
+});
+
+// parseGrammarDraft is the L1 transport gate: a description that the deterministic
+// span-grammar transcribes whole → a folded+validated spec (NO model call); else
+// null so parseRoadmapSpec falls to L2. It shares foldAndValidateDraft with the
+// model path, so a grammar hit disposes identically.
+describe('parseGrammarDraft — L1 deterministic path (skips the model)', () => {
+  it('folds + validates the failing verse to 16 bars with the pinned key', () => {
+    const r = parseGrammarDraft(
+      'Verse: 2 bars D, 2 bars G7, 2 bars D, 2 bars G7, 2 bars D, 2 bars E, 2 bars G, 2 bars Dsus2',
+      'D',
+    );
+    expect(r).not.toBeNull();
+    if (r) {
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.spec.renderKey).toBe('D');
+        expect(r.spec.sections[0].bars).toBe(16);
+        expect(r.tally[0]).toMatch(/Verse: 16 bars/);
+      }
+    }
+  });
+
+  it('returns null for non-grammar prose (the model fallback handles it)', () => {
+    expect(parseGrammarDraft('drop one bar of G and add a Bm7/Em/A tag', 'D')).toBeNull();
+  });
+
+  it('returns null on a chromatic chord so L2 / Gap-1 can take it', () => {
+    expect(parseGrammarDraft('Verse: 2 bars D, 2 bars C', 'D')).toBeNull();
   });
 });

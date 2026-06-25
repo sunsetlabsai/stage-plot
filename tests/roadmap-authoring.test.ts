@@ -4,6 +4,7 @@ import {
   resolveRenderKey,
   tallyDraft,
   canonicalBarPattern,
+  parseDescription,
   type AuthoringDraft,
   type ChordSpan,
   type StructureOp,
@@ -352,5 +353,104 @@ describe('tallyDraft — read-back', () => {
       { id: 'v', label: 'Verse', spans: [span(1, 1), span(5, 1)] },
     ], 'C'));
     expect(lines).toEqual(['Verse: 2 bars — C, G']);
+  });
+});
+
+describe('parseDescription — L1 deterministic span-grammar', () => {
+  function hit(desc: string, key = 'D'): AuthoringDraft {
+    const d = parseDescription(desc, key);
+    if (!d) throw new Error(`expected a grammar hit for: ${desc}`);
+    return d;
+  }
+
+  it('parses the failing verse to 8 spans / 16 bars — never a collapsed vamp', () => {
+    const d = hit('Verse: 2 bars D, 2 bars G7, 2 bars D, 2 bars G7, 2 bars D, 2 bars E, 2 bars G, 2 bars Dsus2');
+    expect(d.sections).toHaveLength(1);
+    const v = d.sections[0];
+    expect(v.label).toBe('Verse');
+    expect(v.spans).toHaveLength(8);
+    expect(v.spans.reduce((n, s) => n + s.bars, 0)).toBe(16);
+    // In key D: D=1, G7=4/7, E=2, G=4, Dsus2=1sus2.
+    expect(v.spans.map((s) => s.bar)).toEqual([
+      [{ degree: 1 }], [{ degree: 4, quality: '7' }], [{ degree: 1 }], [{ degree: 4, quality: '7' }],
+      [{ degree: 1 }], [{ degree: 2 }], [{ degree: 4 }], [{ degree: 1, quality: 'sus2' }],
+    ]);
+  });
+
+  it('folds + validates the failing verse to 16 bars (the headline no-drop guarantee)', () => {
+    const spec = ok(foldDraft(hit('Verse: 2 bars D, 2 bars G7, 2 bars D, 2 bars G7, 2 bars D, 2 bars E, 2 bars G, 2 bars Dsus2')));
+    expect(spec.sections[0].bars).toBe(16);
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+  });
+
+  it('a bare comma list = 1 bar per chord — five spans, not a collapsed vamp', () => {
+    const d = hit('D, G7, D, G7, D');
+    expect(d.sections[0].spans).toHaveLength(5);
+    expect(d.sections[0].spans.every((s) => s.bars === 1)).toBe(true);
+  });
+
+  it('accepts all three count forms', () => {
+    expect(hit('4 bars D').sections[0].spans[0]).toEqual({ bar: [{ degree: 1 }], bars: 4 });
+    expect(hit('4 bars of D').sections[0].spans[0]).toEqual({ bar: [{ degree: 1 }], bars: 4 });
+    expect(hit('D for 4 bars').sections[0].spans[0]).toEqual({ bar: [{ degree: 1 }], bars: 4 });
+    expect(hit('1 bar D').sections[0].spans[0]).toEqual({ bar: [{ degree: 1 }], bars: 1 });
+  });
+
+  it('splits multiple labelled sections (inline, comma-bounded header)', () => {
+    const d = hit('Verse: 2 bars D, 2 bars G7. Chorus: 4 bars A');
+    expect(d.sections.map((s) => s.label)).toEqual(['Verse', 'Chorus']);
+    expect(d.sections[0].spans).toHaveLength(2);
+    expect(d.sections[1].spans).toEqual([{ bar: [{ degree: 5 }], bars: 4 }]); // A = 5 of D
+  });
+
+  it('dedupes repeated labels into unique stable ids', () => {
+    const d = hit('Verse: 2 bars D. Verse: 2 bars G7');
+    expect(d.sections.map((s) => s.id)).toEqual(['verse', 'verse-2']);
+  });
+
+  it('an unlabelled description folds into one default section', () => {
+    const d = hit('2 bars D, 2 bars G7');
+    expect(d.sections).toHaveLength(1);
+    expect(d.sections[0].label).toBe('Section');
+  });
+
+  it('strips a leading key statement so it is not mistaken for span prose', () => {
+    const d = hit('In D. Verse: 2 bars D, 2 bars G7');
+    expect(d.sections.map((s) => s.label)).toEqual(['Verse']);
+    expect(d.sections[0].spans).toHaveLength(2);
+  });
+
+  it('parses split-bar patterns through the same tie grammar (1 - 4 5)', () => {
+    const d = hit('2 bars 1 - 4 5');
+    // Uneven split (2,1,1) → canonical all-or-none explicit beats.
+    expect(d.sections[0].spans[0]).toEqual({
+      bar: [{ degree: 1, beats: 2 }, { degree: 4, beats: 1 }, { degree: 5, beats: 1 }],
+      bars: 2,
+    });
+  });
+
+  it('the key decides letter degrees (A in D = 5, A in G = 2)', () => {
+    expect(hit('4 bars A', 'D').sections[0].spans[0].bar).toEqual([{ degree: 5 }]);
+    expect(hit('4 bars A', 'G').sections[0].spans[0].bar).toEqual([{ degree: 2 }]);
+  });
+
+  it('defers a chromatic chord — the WHOLE description goes to L2 (null)', () => {
+    // C is ♭7 in D = chromatic; the grammar never rounds it.
+    expect(parseDescription('Verse: 2 bars D, 2 bars C', 'D')).toBeNull();
+  });
+
+  it('returns null for non-grammar prose (falls through to L2)', () => {
+    expect(parseDescription('drop one bar of G and add a tag', 'D')).toBeNull();
+    expect(parseDescription('the verse is kind of bluesy', 'D')).toBeNull();
+  });
+
+  it('returns null when content precedes the first header (never silently dropped)', () => {
+    // "4 bars D" sits before the Verse header (a "." boundary) — we won't guess it
+    // is its own section, so the whole description defers to L2.
+    expect(parseDescription('4 bars D. Verse: 2 bars G7', 'D')).toBeNull();
+  });
+
+  it('returns null on empty / whitespace input', () => {
+    expect(parseDescription('   ', 'D')).toBeNull();
   });
 });

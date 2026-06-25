@@ -4,6 +4,7 @@ import {
   foldDraft,
   tallyDraft,
   resolveRenderKey,
+  parseDescription,
   type AuthoringDraft,
   type SectionDraft,
   type ChordSpan,
@@ -135,6 +136,24 @@ function safeTally(draft: AuthoringDraft): string[] {
   }
 }
 
+// L3 + L4 shared by both fronts (L1 grammar and L2 model): an AuthoringDraft →
+// read-back tally → deterministic fold → the unchanged musical gate. The ONE place
+// a draft becomes a validated spec, so the grammar path and the model path dispose
+// identically. No IO — fixture-testable.
+function foldAndValidateDraft(draft: AuthoringDraft): ParseResult {
+  // L4 read-back, rendered FROM the SpanList so it reflects exactly what folds.
+  const tally = safeTally(draft);
+
+  // L3: we compress (deterministic), then the unchanged musical gate disposes.
+  const folded = foldDraft(draft);
+  if (!folded.ok) return { ok: false, errors: folded.errors, tally };
+
+  const validated = validateRoadmapSpec(folded.spec);
+  if (!validated.ok) return { ok: false, errors: validated.errors, tally };
+
+  return { ok: true, spec: validated.spec, tally };
+}
+
 // PURE gate: raw model text + the L0-pinned renderKey → a folded, validated
 // RoadmapSpec (or errors), plus the read-back tally. strip fences → JSON.parse →
 // normalize → foldDraft (compress) → validateRoadmapSpec (the unchanged musical
@@ -161,17 +180,23 @@ export function parseModelDraft(rawText: string, renderKey: string): ParseResult
     sections: normalizeSections(obj.sections),
   };
 
-  // L4 read-back, rendered FROM the SpanList so it reflects exactly what folds.
-  const tally = safeTally(draft);
+  return foldAndValidateDraft(draft);
+}
 
-  // L3: we compress (deterministic), then the unchanged musical gate disposes.
-  const folded = foldDraft(draft);
-  if (!folded.ok) return { ok: false, errors: folded.errors, tally };
-
-  const validated = validateRoadmapSpec(folded.spec);
-  if (!validated.ok) return { ok: false, errors: validated.errors, tally };
-
-  return { ok: true, spec: validated.spec, tally };
+// PURE L1 gate: a description + the L0-pinned renderKey → a folded, validated spec
+// when the span-grammar transcribes the WHOLE description exactly, else null (the
+// transport then falls to the L2 model). parseDescription is deterministic and
+// only claims clean countable phrasing; on the rare draft that the grammar emits
+// but the fold/validate rejects we ALSO return null, so an over-claim never blocks
+// the model fallback. No IO — fixture-testable.
+export function parseGrammarDraft(
+  description: string,
+  renderKey: string,
+): Extract<ParseResult, { ok: true }> | null {
+  const draft = parseDescription(description, renderKey);
+  if (!draft) return null;
+  const result = foldAndValidateDraft(draft);
+  return result.ok ? result : null;
 }
 
 // Thin transport: pin the key (L0), send the description to Claude, gate the
@@ -186,6 +211,17 @@ export async function parseRoadmapSpec(
   uiKey?: string,
 ): Promise<ParseResult> {
   const renderKey = resolveRenderKey(description, uiKey);
+
+  // L1: try the deterministic span-grammar first. A hit skips the model entirely —
+  // the count is right by construction. A miss falls through to L2. Log the
+  // hit/miss ratio as coverage telemetry (§7) to steer where the grammar widens.
+  const grammar = parseGrammarDraft(description, renderKey);
+  if (grammar) {
+    console.info('[roadmap-parse] L1 grammar hit', { renderKey, sections: grammar.tally.length });
+    return grammar;
+  }
+  console.info('[roadmap-parse] L1 grammar miss — falling to L2', { renderKey });
+
   const client = new Anthropic({ apiKey });
 
   const response = await client.messages.create(

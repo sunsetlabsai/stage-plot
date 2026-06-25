@@ -30,6 +30,7 @@ import {
   cellsToChordHits,
   chordHitsToCells,
   degreeLetter,
+  parseBarInput,
   type ViewBarRef,
 } from './roadmap-view';
 
@@ -344,4 +345,155 @@ export function tallyDraft(draft: AuthoringDraft): string[] {
     });
     return `${sec.label}: ${total} bars — ${parts.join(', ')}`;
   });
+}
+
+// ── L1 — the deterministic span-grammar parser (§7) ──────────────────────────
+//
+// The fast, faithful, ZERO-LLM front-end for the countable phrasing authors
+// naturally write ("2 bars D, 2 bars G7, …"). It converts ONLY what it can convert
+// exactly and defers everything else to L2 by returning null for the WHOLE
+// description — it never emits a partial or a guess. This is an optimization on
+// top of the (already faithful) L2 path, not the fidelity fix: when the grammar
+// hits, the count is right by construction and no model call is needed; when it
+// misses, L2 covers it (the transport logs the hit/miss ratio as coverage
+// telemetry). The chord token itself routes through the SAME parseBarInput /
+// parseLetterChord seam the manual editor uses, so a letter that isn't diatonic in
+// the L0-pinned key (e.g. a chromatic root) fails the whole parse to L2 / Gap-1
+// rather than being rounded.
+
+// Strip a leading/inline key statement (the L0 grammar already consumed it for the
+// renderKey) so it can't masquerade as span prose. Removes the FIRST match only —
+// conservative, mirrors resolveRenderKey's single-key resolution.
+function stripKeyPhrase(text: string): string {
+  const km = text.match(RE_KEYED);
+  if (km && km.index !== undefined) {
+    return `${text.slice(0, km.index)} ${text.slice(km.index + km[0].length)}`;
+  }
+  const bm = text.match(RE_BARE);
+  if (bm && bm.index !== undefined) {
+    return `${text.slice(0, bm.index)} ${text.slice(bm.index + bm[0].length)}`;
+  }
+  return text;
+}
+
+// A deterministic, collision-free slug from a section label (the same stable-id
+// discipline the fold's nav lowering relies on). Duplicate labels are deduped by
+// the caller; this only normalizes one label.
+function slugify(label: string): string {
+  return (
+    label
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'section'
+  );
+}
+
+// Split a description into labelled sections. A header is a short label followed
+// by a colon, anchored at the start or after a clause boundary (".,;\n"), so a
+// colon is the unambiguous section delimiter. No headers ⇒ one default section
+// (the whole text). If headers exist, any non-blank text BEFORE the first one
+// fails the parse (we won't silently drop authored content). Returns null when the
+// text is empty.
+function splitSections(text: string): Array<{ label: string; body: string }> | null {
+  const t = text.trim();
+  if (!t) return null;
+
+  const headerRe = /(?:^|[.,;\n])[ \t]*([A-Za-z][A-Za-z0-9 '&/-]{0,24}?)[ \t]*:/g;
+  const heads: Array<{ label: string; bodyStart: number; matchStart: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = headerRe.exec(t)) !== null) {
+    // matchStart = the boundary char (or 0 for ^); bodyStart = just after the colon.
+    heads.push({ label: m[1].trim(), matchStart: m.index, bodyStart: m.index + m[0].length });
+  }
+
+  if (heads.length === 0) return [{ label: 'Section', body: t }];
+
+  // Content before the first header must be blank — never silently dropped.
+  if (t.slice(0, heads[0].matchStart).trim() !== '') return null;
+
+  return heads.map((h, i) => ({
+    label: h.label,
+    body: t.slice(h.bodyStart, i + 1 < heads.length ? heads[i + 1].matchStart : t.length),
+  }));
+}
+
+// Split a section body into span clauses on commas, semicolons, periods, newlines,
+// or the word "then" — the separators an author uses between spans.
+function splitClauses(body: string): string[] {
+  return body
+    .split(/\s*(?:[,;.\n]|\bthen\b)\s*/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Parse ONE span clause to a ChordSpan, or null if it isn't clean countable
+// phrasing. Forms: "N bar(s) [of] CHORD", "CHORD for N bar(s)", or a bare CHORD
+// (= 1 bar). CHORD is whatever parseBarInput accepts in the pinned key — a single
+// chord OR a split-bar pattern ("1 - 4 5") — so the grammar inherits the manual
+// editor's exact chord rules and its honest failure (chromatic root → defer).
+function parseSpanClause(clause: string, renderKey: string, beats: number): ChordSpan | null {
+  const c = clause.trim();
+  if (!c) return null;
+
+  let bars = 1;
+  let barText = c;
+  const leading = c.match(/^(\d+)\s+bars?\s+(?:of\s+)?(.+)$/i);
+  if (leading) {
+    bars = Number(leading[1]);
+    barText = leading[2].trim();
+  } else {
+    const trailing = c.match(/^(.+?)\s+for\s+(\d+)\s+bars?$/i);
+    if (trailing) {
+      barText = trailing[1].trim();
+      bars = Number(trailing[2]);
+    }
+  }
+  if (!Number.isInteger(bars) || bars < 1) return null;
+
+  const parsed = parseBarInput(barText, beats, renderKey);
+  if (!parsed.ok || parsed.cells.length === 0) return null;
+  return { bar: cellsToChordHits(parsed.cells, beats), bars };
+}
+
+// L1 entry point: a natural-language description + the L0-pinned renderKey → an
+// AuthoringDraft, or null when the grammar can't transcribe the WHOLE description
+// exactly (the caller then falls to L2). Pure, deterministic, fixture-tested. The
+// returned draft is still folded + validated downstream like any other — L1 only
+// removes the model from the loop for the countable part.
+export function parseDescription(
+  description: string,
+  renderKey: string,
+  timeSig: { beats: number; unit: number } = { beats: 4, unit: 4 },
+): AuthoringDraft | null {
+  const secs = splitSections(stripKeyPhrase(description));
+  if (!secs) return null;
+
+  const beats = timeSig.beats;
+  const used = new Map<string, number>();
+  const sections: SectionDraft[] = [];
+
+  for (const { label, body } of secs) {
+    const clauses = splitClauses(body);
+    if (clauses.length === 0) return null; // a labelled section with no spans = miss
+
+    const spans: ChordSpan[] = [];
+    for (const clause of clauses) {
+      const span = parseSpanClause(clause, renderKey, beats);
+      if (!span) return null; // any unparseable clause defers the whole description
+      spans.push(span);
+    }
+
+    let id = slugify(label);
+    const seen = used.get(id);
+    if (seen) {
+      const n = seen + 1;
+      used.set(id, n);
+      id = `${id}-${n}`;
+    } else {
+      used.set(id, 1);
+    }
+    sections.push({ id, label, spans });
+  }
+
+  return sections.length > 0 ? { timeSig, renderKey, sections } : null;
 }
