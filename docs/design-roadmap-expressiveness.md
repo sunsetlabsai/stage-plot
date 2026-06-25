@@ -197,16 +197,29 @@ re-saved in the builder.** So Gap 1 must thread `alter` through the whole bridge
 
 | function | line | today | Gap-1 change |
 |---|---|---|---|
-| `ViewCell` (type) | 27–33 | no `alter` | add `alter?: -1\|0\|+1` |
-| `parsePart` | 88/94 | captures `[b#]` then **rejects** (`return {error}`) | accept `b`/`#`/`♭`/`♯` → set `alter`; drop the rejection; absent ≡ unset |
-| `cellChordText` | 186–188 | `${degree}${quality}${slash}` | prefix the accidental glyph when `alter` set |
+| `ViewCell` (type) | 27–33 | no `alter` | add `alter?: -1\|0\|+1` (**root only** — `bass` stays a bare `number`) |
+| `ParsedPart` (type) | 84 | `{ degree, quality }` | add `alter: -1\|0\|+1` (always present from the parser) |
+| `parsePart` | 88/94 | captures `[b#]` then **rejects** (`return {error}`) | accept `b`/`#`/`♭`/`♯` and **return** it as `alter` (absent ≡ `0`); drop the rejection. `parsePart` no longer decides scope — it just reports what it parsed |
+| `parseChordToken` | 116–128 | root via `parsePart(main,true)`, bass via `parsePart(bass,false)` | **root:** thread `head.alter` onto the cell. **bass:** if `b.alter !== 0` → **return an error** (chromatic bass deferred, root-only v1) — it must **never** drop the bass accidental into a plain `/N`. `ViewCell.bass` has no alter slot, so this is the *only* place that keeps slash-bass faithful |
+| `cellChordText` | 186–188 | `${degree}${quality}${slash}` | prefix the accidental glyph when root `alter` set |
 | `cellsToChordHits` | 217–227 | builds `{degree,…}` | emit `alter` (omit when 0) |
 | `chordHitsToCells` | 232–245 | builds `{degree,quality,beats,…}` | preserve `alter` onto the cell |
-| `renderCell` (letters mode) | 384–388 | `degreeLetter`-based, no accidental | apply `alter` to the spelled letter (uses the active-key scale, see minor-key note) |
+| `renderCell` (letters mode) | 384–388 | `degreeLetter`-based, no accidental | apply root `alter` to the spelled letter (uses the active-key scale, see minor-key note) |
 
 This is the missing seam Codex flagged: schema + renderer alone are necessary but
 **not sufficient** — the builder bridge is the only place a saved chart's `alter`
-can leak away. All six touchpoints ship together in G1a.
+can leak away. All touchpoints ship together in G1a.
+
+**`parsePart` is shared by root *and* bass** (`parseChordToken` calls it twice — once
+for the main chord, once after `/`). So the accidental-acceptance and the scope-guard
+are **two separate responsibilities, split across the two functions:** `parsePart`
+*parses* the accidental into `alter` for either part (it is mechanical), and
+`parseChordToken` *enforces scope* — root keeps its `alter`, a bass with a non-zero
+`alter` is rejected outright. This mirrors today's existing split (`parsePart` already
+takes `allowQuality` and `parseChordToken` already passes `false` for the bass), and it
+keeps the chromatic-bass deferral (§Schema, §Gap-1 build steps) airtight: a chromatic
+bass never silently degrades to a diatonic one. **Required test:** `1/b2` (and the
+letter form `E/Eb`) returns an error / `null` and is **never** rewritten to `1/2`.
 
 **Minor-key note (the scale `alter` rides on).** `alter` is *always* a single semitone
 relative to whatever pitch the diatonic degree resolves to in the active key — it does
@@ -261,12 +274,14 @@ this — both are clear today).
 - **G1a — schema + validator + renderer + builder bridge:** add `ChordHit.alter?:
   -1|0|+1` (`lib/roadmap-spec.ts`), validator enum (omit-when-0 at the emit points,
   not in the validator), the `drawAccidental` vector prefix in `drawBarContent`
-  (`lib/roadmap-render.ts`), **and** the six builder-bridge touchpoints in
-  `lib/roadmap-view.ts` (ViewCell field, `parsePart` accept-not-reject, `cellChordText`
-  prefix, `cellsToChordHits` emit, `chordHitsToCells` preserve, `renderCell` letters
-  mode). The bridge is part of G1a — without it a saved `alter` is dropped on the next
-  open/save. Pure + golden render test + a view round-trip test (`{7,-1}` survives
-  spec→cells→spec).
+  (`lib/roadmap-render.ts`), **and** the builder-bridge touchpoints in
+  `lib/roadmap-view.ts` (ViewCell `alter` field, `ParsedPart.alter`, `parsePart`
+  accept-not-reject, `parseChordToken` root-keeps / **bass-rejects** the accidental,
+  `cellChordText` prefix, `cellsToChordHits` emit, `chordHitsToCells` preserve,
+  `renderCell` letters mode). The bridge is part of G1a — without it a saved `alter` is
+  dropped on the next open/save, and without the bass-reject a chromatic bass silently
+  downgrades. Pure + golden render test + a view round-trip test (`{7,-1}` survives
+  spec→cells→spec) + a bass-reject test (`1/b2` → error, never `1/2`).
 - **G1b — parser seam:** extend `parseLetterChord` (chunk-5 §7.1) to emit
   `{degree, alter}` for chromatic roots via the prefer-flat-upper-neighbor rule;
   honor explicit `♭`/`♯` in the number/roman grammar; one-line prompt rule for L2.
@@ -284,6 +299,10 @@ this — both are clear today).
   byte-identically; `parsePart("b3")` and `parsePart("♭3")` both yield `alter:-1` (no
   error); `cellChordText` of an altered cell carries the glyph; a `{degree}` cell with
   no accidental round-trips with `alter` unset (existing charts byte-identical).
+- **bass-reject (slash-bass faithfulness):** `parseChordToken("1/b2")` and the letter
+  form `E/Eb` return an **error** and are **never** rewritten to `1/2` — a chromatic
+  bass is deferred, not downgraded (root-only v1). Altered root with diatonic bass
+  (`b7/4`) still parses.
 - transpose-invariance: re-key a spec containing `{7,-1}` → body unchanged, only the
   header label moves (composes with chunk 4).
 - `parseLetterChord`: `C`+key D → `{7,-1}` (♭7, not ♯6); `Eb`+key D → `{2,-1}` (♭2 —
