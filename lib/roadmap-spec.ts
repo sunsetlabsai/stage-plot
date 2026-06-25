@@ -79,8 +79,9 @@ export interface BarChange {
 
 export interface ChordHit {
   degree: number;                              // 1..7 (Nashville scale degree)
+  alter?: -1 | 0 | 1;                          // flat | natural | sharp on the degree ROOT; omitted = 0 (diatonic). e.g. ♭VII in D = { degree: 7, alter: -1 }
   quality?: string;                            // '' = major triad; see QUALITY_WHITELIST
-  bass?: number;                               // slash-chord bass degree 1..7
+  bass?: number;                               // slash-chord bass degree 1..7 (chromatic bass not yet supported)
   beats?: number;                              // split-bar weight; omitted = even division of the bar
   held?: boolean;                              // diamond / whole-note hold
 }
@@ -274,6 +275,9 @@ function validateChords(chords: unknown, where: string, beats: number, errors: s
     const c = rawC as Record<string, unknown>;
     if (!isInt(c.degree) || (c.degree as number) < 1 || (c.degree as number) > 7) {
       errors.push(`${cw}: degree must be an integer 1..7`);
+    }
+    if (c.alter !== undefined && c.alter !== -1 && c.alter !== 0 && c.alter !== 1) {
+      errors.push(`${cw}: alter must be -1, 0, or 1`);
     }
     if (c.quality !== undefined && !(typeof c.quality === 'string' && QUALITY_WHITELIST.has(c.quality))) {
       errors.push(`${cw}: quality "${String(c.quality)}" is not in the v1 vocabulary`);

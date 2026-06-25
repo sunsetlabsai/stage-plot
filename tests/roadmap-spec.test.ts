@@ -204,6 +204,26 @@ describe('validateRoadmapSpec — changes & chords', () => {
     expectError(spec, 'bass must be an integer 1..7');
   });
 
+  it('accepts a chromatic root via alter (♭VII = { degree: 7, alter: -1 })', () => {
+    const spec = baseSpec();
+    spec.sections[0].changes = [{ bar: 1, chords: [{ degree: 7, alter: -1 }] }];
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+  });
+
+  it('accepts alter on all of -1, 0, +1', () => {
+    for (const alter of [-1, 0, 1] as const) {
+      const spec = baseSpec();
+      spec.sections[0].changes = [{ bar: 1, chords: [{ degree: 4, alter }] }];
+      expect(validateRoadmapSpec(spec).ok).toBe(true);
+    }
+  });
+
+  it('rejects an out-of-range alter', () => {
+    const spec = baseSpec();
+    spec.sections[0].changes = [{ bar: 1, chords: [{ degree: 4, alter: 2 as -1 | 0 | 1 }] }];
+    expectError(spec, 'alter must be -1, 0, or 1');
+  });
+
   it('rejects empty chords', () => {
     const spec = baseSpec();
     spec.sections[0].changes = [{ bar: 1, chords: [] }];

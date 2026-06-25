@@ -379,4 +379,31 @@ describe('renderRoadmap — chord content & header', () => {
     expect(Buffer.from(titled.pdfBytes).equals(Buffer.from(untitled.pdfBytes))).toBe(false);
     expect(Buffer.from(titled.pdfBytes).equals(Buffer.from(titledAgain.pdfBytes))).toBe(true);
   });
+
+  it('draws a chromatic-root accidental as a vector glyph — deterministic, calibration unperturbed (Gap 1)', async () => {
+    // The motivating song's chorus C in D = ♭VII = { degree: 7, alter: -1 }.
+    const flatSeven: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'D',
+      sections: [{ id: 'ch', label: 'Chorus', bars: 4, changes: [{ bar: 1, chords: [{ degree: 7, alter: -1 }] }] }],
+    };
+    expect(validateRoadmapSpec(flatSeven).ok).toBe(true);
+
+    const a = await renderRoadmap(flatSeven);
+    const b = await renderRoadmap(flatSeven);
+    expect(a.pdfBytes.length).toBeGreaterThan(200);
+    expect(Buffer.from(a.pdfBytes).equals(Buffer.from(b.pdfBytes))).toBe(true); // deterministic
+
+    // The accidental is a glyph-pass change only: vs the same chart with a plain
+    // diatonic 7 it changes the bytes (the glyph draws) but leaves the born
+    // calibration byte-identical (geometry/parity untouched).
+    const plainSeven: RoadmapSpec = {
+      ...flatSeven,
+      sections: [{ id: 'ch', label: 'Chorus', bars: 4, changes: [{ bar: 1, chords: [{ degree: 7 }] }] }],
+    };
+    const plain = await renderRoadmap(plainSeven);
+    expect(Buffer.from(a.pdfBytes).equals(Buffer.from(plain.pdfBytes))).toBe(false);
+    expect(a.calibration).toEqual(plain.calibration);
+  });
 });

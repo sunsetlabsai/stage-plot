@@ -407,10 +407,17 @@ function drawBarContent(page: PDFPage, font: PDFFont, bar: LaidBar, beats: numbe
       const tx = x0 + frac * w;
       drawLine(page, tx, bandTopPt, tx, bandTopPt - 8, 0.5); // interior split tick
     }
+    // A chromatic root accidental (♭/♯) is a VECTOR prefix glyph — Helvetica
+    // (WinAnsi) cannot encode U+266D/U+266F, so it must NOT be interpolated into
+    // the drawText label. It claims a fixed advance (accW) immediately left of the
+    // degree, shifting the alphanumeric label right; alter 0/undefined adds nothing
+    // (existing charts render byte-identically).
+    const accW = c.alter ? 6 : 0;
+    if (c.alter) drawAccidental(page, c.alter, cx, textY, 12);
     const label = `${c.degree}${c.quality ?? ''}${c.bass ? `/${c.bass}` : ''}`;
-    drawText(page, font, label, cx, textY, 12);
+    drawText(page, font, label, cx + accW, textY, 12);
     if (c.held) {
-      const dx = cx + font.widthOfTextAtSize(label, 12) + 5;
+      const dx = cx + accW + font.widthOfTextAtSize(label, 12) + 5;
       drawDiamond(page, dx, textY + 4, 3.5);
     }
     cumBeats += c.beats ?? (beats > 0 ? beats / n : 0);
@@ -569,6 +576,29 @@ function drawCodaSign(page: PDFPage, cx: number, cy: number, r: number): void {
   page.drawCircle({ x: cx, y: cy, size: r, borderColor: rgb(0, 0, 0), borderWidth: 1 });
   drawLine(page, cx, cy - r - 2, cx, cy + r + 2, 1);
   drawLine(page, cx - r - 2, cy, cx + r + 2, cy, 1);
+}
+
+// ♭ / ♯ — chromatic-root accidental prefix, drawn as a vector (Helvetica/WinAnsi
+// can't encode U+266D/U+266F), consistent with the other music glyphs. (cx,
+// baseline) is the lower-left corner; the glyph is sized to the chord font and
+// sits on the text baseline, immediately left of the degree number.
+function drawAccidental(page: PDFPage, alter: -1 | 1, cx: number, baseline: number, size: number): void {
+  const w = size * 0.34;
+  const h = size * 0.74;
+  if (alter < 0) {
+    // ♭ — vertical stem with a bowl on the lower-right.
+    drawLine(page, cx, baseline, cx, baseline + h, 0.9);                                  // stem
+    drawLine(page, cx, baseline + h * 0.5, cx + w, baseline + h * 0.28, 0.9);             // bowl upper
+    drawLine(page, cx + w, baseline + h * 0.28, cx, baseline, 0.9);                       // bowl lower
+  } else {
+    // ♯ — two verticals crossed by two (slightly rising) horizontals.
+    const xa = cx + w * 0.3;
+    const xb = cx + w * 0.72;
+    drawLine(page, xa, baseline, xa, baseline + h, 0.9);
+    drawLine(page, xb, baseline, xb, baseline + h, 0.9);
+    drawLine(page, cx, baseline + h * 0.36, cx + w, baseline + h * 0.46, 0.9);
+    drawLine(page, cx, baseline + h * 0.6, cx + w, baseline + h * 0.7, 0.9);
+  }
 }
 
 // ◇ — held/whole-note diamond (4-line rhombus).

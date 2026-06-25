@@ -26,6 +26,7 @@ import {
 // through but not yet expressible in the text grammar.
 export interface ViewCell {
   degree: number;
+  alter?: -1 | 0 | 1;  // flat | natural | sharp on the ROOT (default 0); bass carries no alter (chromatic bass deferred)
   quality: string;     // '' = major triad
   bass?: number;
   beats: number;       // real beat span within the bar (≥ 1)
@@ -81,17 +82,18 @@ export interface ViewNavigation {
 // along.
 const ROMAN: Record<string, number> = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7 };
 
-interface ParsedPart { degree: number; quality: string }
+interface ParsedPart { degree: number; quality: string; alter: -1 | 0 | 1 }
 
 // Parse one degree token (no slash): accidental + roman|arabic + quality.
+// parsePart is MECHANICAL — it reports the accidental it parsed as `alter` (for
+// EITHER a root or a bass). Scope enforcement (root may carry alter, bass may not
+// yet) lives in parseChordToken, so a chromatic bass is rejected there rather than
+// silently downgraded. Accepts ASCII (b/#) and Unicode (♭/♯) accidentals.
 function parsePart(s: string, allowQuality: boolean): ParsedPart | { error: string } {
-  const m = s.match(/^([b#]?)([IiVv]+|[1-7])(.*)$/);
+  const m = s.match(/^([b#♭♯]?)([IiVv]+|[1-7])(.*)$/);
   if (!m) return { error: `"${s}" is not a chord degree` };
-  const [, , numRaw, qualRaw] = m;
-  // Accidental on a degree token is not part of the v1 ChordHit vocabulary
-  // (degree is 1..7; chromatic spelling rides on the render key), so reject it
-  // rather than silently dropping it.
-  if (m[1]) return { error: `accidental on degree "${s}" is not supported` };
+  const [, accRaw, numRaw, qualRaw] = m;
+  const alter: -1 | 0 | 1 = accRaw === 'b' || accRaw === '♭' ? -1 : accRaw === '#' || accRaw === '♯' ? 1 : 0;
 
   let degree: number;
   let minorByCase = false;
@@ -109,19 +111,24 @@ function parsePart(s: string, allowQuality: boolean): ParsedPart | { error: stri
   if (minorByCase && quality === '') quality = 'm';
   if (allowQuality && !QUALITY_WHITELIST.has(quality)) return { error: `quality "${quality}" is not supported` };
 
-  return { degree, quality };
+  return { degree, quality, alter };
 }
 
 // Parse a full chord token (main + optional /bass) into a beat-less ViewCell core.
+// The ROOT keeps its alter; a BASS with an accidental is rejected (chromatic bass
+// is deferred — ViewCell.bass has no alter slot, so accepting it would silently
+// downgrade 1/♭2 to 1/2). Root-only accidentals for v1.
 function parseChordToken(tok: string): Omit<ViewCell, 'beats'> | { error: string } {
   const [main, bass, extra] = tok.split('/');
   if (extra !== undefined) return { error: `"${tok}" has too many "/" separators` };
   const head = parsePart(main, true);
   if ('error' in head) return head;
   const cell: Omit<ViewCell, 'beats'> = { degree: head.degree, quality: head.quality };
+  if (head.alter) cell.alter = head.alter;
   if (bass !== undefined) {
     const b = parsePart(bass, false);
     if ('error' in b) return b;
+    if (b.alter !== 0) return { error: `chromatic bass "${bass}" is not supported yet` };
     cell.bass = b.degree;
   }
   return cell;
@@ -184,7 +191,8 @@ export function parseBarInput(raw: string, barBeats: number): BarParse {
 // Numbers-mode text for one cell's chord (degree+quality, optional /bass). This
 // is the canonical edit form — letters are a display-only re-spelling.
 function cellChordText(c: ViewCell): string {
-  return `${c.degree}${c.quality}${c.bass != null ? `/${c.bass}` : ''}`;
+  const acc = c.alter === -1 ? '♭' : c.alter === 1 ? '♯' : '';
+  return `${acc}${c.degree}${c.quality}${c.bass != null ? `/${c.bass}` : ''}`;
 }
 
 // Does this bar carve into an EVEN division (all equal spans that divide the bar)?
@@ -218,6 +226,7 @@ export function cellsToChordHits(cells: ViewCell[], barBeats: number): ChordHit[
   const explicit = cells.length > 1 && !isEvenDivision(cells, barBeats);
   return cells.map((c) => {
     const hit: ChordHit = { degree: c.degree };
+    if (c.alter) hit.alter = c.alter;     // omit-when-0 (canonical form)
     if (c.quality) hit.quality = c.quality;
     if (c.bass != null) hit.bass = c.bass;
     if (c.held) hit.held = true;
@@ -238,6 +247,7 @@ export function chordHitsToCells(chords: ChordHit[], barBeats: number): ViewCell
         ? barBeats
         : Math.max(1, Math.floor(barBeats / chords.length));
     const cell: ViewCell = { degree: c.degree, quality: c.quality ?? '', beats };
+    if (c.alter) cell.alter = c.alter;
     if (c.bass != null) cell.bass = c.bass;
     if (c.held) cell.held = true;
     return cell;
@@ -372,17 +382,23 @@ function keyRootPc(key: string): number {
   return (pc + 12) % 12;
 }
 
-export function degreeLetter(degree: number, key: string): string {
+// Spell a degree as a letter in `key`. `alter` (a ±1 semitone on the ROOT, default
+// 0) rides on whatever pitch the degree resolves to in the active key's scale
+// (MAJOR_STEPS for major, MINOR_STEPS for minor — so alter is mode-agnostic). An
+// altered note prefers the spelling matching its accidental direction (flat for
+// ♭, sharp for ♯); an unaltered note follows the key's default spelling.
+export function degreeLetter(degree: number, key: string, alter: -1 | 0 | 1 = 0): string {
   const steps = /m$/.test(key) ? MINOR_STEPS : MAJOR_STEPS;
-  const pc = (keyRootPc(key) + (steps[degree - 1] ?? 0)) % 12;
-  const flat = /b/.test(key) || /^F/.test(key.replace(/m$/, ''));
+  const pc = (keyRootPc(key) + (steps[degree - 1] ?? 0) + alter + 12) % 12;
+  const flat = alter !== 0 ? alter < 0 : (/b/.test(key) || /^F/.test(key.replace(/m$/, '')));
   return (flat ? CHROM_FLAT : CHROM_SHARP)[pc];
 }
 
 // Display text for a cell in the chosen mode: numbers (degree+quality/bass) or
-// letters (re-spelled into the render key — the transposition payoff).
+// letters (re-spelled into the render key — the transposition payoff). The bass
+// carries no alter (chromatic bass deferred), so it always spells diatonically.
 export function renderCell(cell: ViewCell, mode: 'numbers' | 'letters', key: string): string {
   if (mode === 'numbers') return cellChordText(cell);
-  const head = degreeLetter(cell.degree, key) + cell.quality;
+  const head = degreeLetter(cell.degree, key, cell.alter ?? 0) + cell.quality;
   return cell.bass != null ? `${head}/${degreeLetter(cell.bass, key)}` : head;
 }

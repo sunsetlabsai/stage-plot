@@ -309,3 +309,52 @@ describe('renderCell — numbers vs letters', () => {
     expect(degreeLetter(4, 'Bb')).toBe('Eb');
   });
 });
+
+describe('Gap 1 — chromatic roots (alter)', () => {
+  it('parses a flat root in both ASCII and Unicode (b7 / ♭7)', () => {
+    expect(parseBarInput('b7', 4)).toEqual({ ok: true, cells: [cell(7, 4, { alter: -1 })] });
+    expect(parseBarInput('♭7', 4)).toEqual({ ok: true, cells: [cell(7, 4, { alter: -1 })] });
+  });
+
+  it('parses a sharp root (#4 / ♯4)', () => {
+    expect(parseBarInput('#4', 4)).toEqual({ ok: true, cells: [cell(4, 4, { alter: 1 })] });
+    expect(parseBarInput('♯4', 4)).toEqual({ ok: true, cells: [cell(4, 4, { alter: 1 })] });
+  });
+
+  it('carries quality and a diatonic bass alongside an altered root (♭7 → b7/4)', () => {
+    expect(parseBarInput('♭7/4', 4)).toEqual({ ok: true, cells: [cell(7, 4, { alter: -1, bass: 4 })] });
+  });
+
+  it('REJECTS a chromatic bass — never downgrades 1/b2 to 1/2', () => {
+    const r = parseBarInput('1/b2', 4);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('chromatic bass');
+    // the diatonic-bass form is still fine
+    expect(parseBarInput('1/2', 4)).toEqual({ ok: true, cells: [cell(1, 4, { bass: 2 })] });
+  });
+
+  it('cellsToChordHits emits alter, omitting it when 0', () => {
+    expect(cellsToChordHits([cell(7, 4, { alter: -1 })], 4)).toEqual([{ degree: 7, alter: -1 }]);
+    expect(cellsToChordHits([cell(7, 4, { alter: 0 })], 4)).toEqual([{ degree: 7 }]);
+    expect(cellsToChordHits([cell(7, 4)], 4)).toEqual([{ degree: 7 }]);
+  });
+
+  it('chordHitsToCells preserves alter', () => {
+    expect(chordHitsToCells([{ degree: 7, alter: -1 }], 4)).toEqual([cell(7, 4, { alter: -1 })]);
+  });
+
+  it('a {7,-1} chord round-trips chordHitsToCells → cellsToChordHits', () => {
+    const hits = [{ degree: 7, alter: -1 as const }];
+    expect(cellsToChordHits(chordHitsToCells(hits, 4), 4)).toEqual(hits);
+  });
+
+  it('cellsToRaw shows the accidental glyph for an altered root', () => {
+    expect(cellsToRaw([cell(7, 4, { alter: -1 })], 4)).toBe('♭7');
+    expect(cellsToRaw([cell(4, 4, { alter: 1 })], 4)).toBe('♯4');
+  });
+
+  it('letters mode re-spells an altered root (♭7 in D = C, ♯4 in C = F#)', () => {
+    expect(renderCell(cell(7, 4, { alter: -1 }), 'letters', 'D')).toBe('C');
+    expect(renderCell(cell(4, 4, { alter: 1 }), 'letters', 'C')).toBe('F#');
+  });
+});
