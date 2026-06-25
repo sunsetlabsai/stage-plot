@@ -222,6 +222,25 @@ export function foldDraft(draft: AuthoringDraft): FoldResult {
     sections.push(out);
   });
 
+  // Duplicate GLOBAL navigation directives are an authoring conflict, not a
+  // musical one: two segno ops (or two navJump ops) would silently collapse to
+  // the last during lowering, and validateRoadmapSpec only ever sees the
+  // already-lowered single-field RoadmapNavigation — so it cannot catch the loss.
+  // Fail here, like >1 repeat. Counted from the DECLARED ops (regardless of
+  // whether a ref later resolves), so the conflict is reported even if one drops.
+  const navMarkerCounts = new Map<string, number>();
+  let jumpCount = 0;
+  for (const sec of draft.sections) {
+    for (const op of sec.ops ?? []) {
+      if (op.kind === 'nav') navMarkerCounts.set(op.marker, (navMarkerCounts.get(op.marker) ?? 0) + 1);
+      else if (op.kind === 'navJump') jumpCount += 1;
+    }
+  }
+  for (const [marker, count] of navMarkerCounts) {
+    if (count > 1) errors.push(`conflicting navigation: ${count} "${marker}" ops (each marker may be declared once)`);
+  }
+  if (jumpCount > 1) errors.push(`conflicting navigation: ${jumpCount} navJump ops (only one jump may be declared)`);
+
   if (errors.length > 0) return { ok: false, errors };
 
   // 6. Lower nav refs (global) through the identity maps. A ref to an unknown

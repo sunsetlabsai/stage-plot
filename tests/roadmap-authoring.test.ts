@@ -253,6 +253,55 @@ describe('foldDraft — section ids + nav resolution', () => {
     expect(spec.navigation?.segno).toEqual({ section: 1, bar: 2 });
   });
 
+  it('rejects two ops declaring the same nav marker (would silently collapse on lower)', () => {
+    const r = foldDraft(draft([
+      { id: 'v', label: 'Verse', spans: [span(1, 8)],
+        ops: [
+          { kind: 'nav', marker: 'segno', ref: { sectionId: 'v', bar: 2 } },
+          { kind: 'nav', marker: 'segno', ref: { sectionId: 'v', bar: 6 } },
+        ] },
+    ]));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/conflicting navigation.*segno/);
+  });
+
+  it('rejects two navJump ops', () => {
+    const r = foldDraft(draft([
+      { id: 'v', label: 'Verse', spans: [span(1, 8)],
+        ops: [
+          { kind: 'navJump', at: { sectionId: 'v', bar: 2 }, from: 'capo', until: 'end' },
+          { kind: 'navJump', at: { sectionId: 'v', bar: 5 }, from: 'capo', until: 'end' },
+        ] },
+    ]));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/conflicting navigation.*navJump/);
+  });
+
+  it('reports the conflict even when one duplicate ref would have dropped', () => {
+    // one coda resolves, the other names a ghost section — still a declared conflict
+    const r = foldDraft(draft([
+      { id: 'v', label: 'Verse', spans: [span(1, 8)],
+        ops: [
+          { kind: 'nav', marker: 'coda', ref: { sectionId: 'v', bar: 4 } },
+          { kind: 'nav', marker: 'coda', ref: { sectionId: 'ghost', bar: 1 } },
+        ] },
+    ]));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.join(' ')).toMatch(/conflicting navigation.*coda/);
+  });
+
+  it('allows distinct nav markers together', () => {
+    const spec = ok(foldDraft(draft([
+      { id: 'v', label: 'Verse', spans: [span(1, 8)],
+        ops: [
+          { kind: 'nav', marker: 'segno', ref: { sectionId: 'v', bar: 2 } },
+          { kind: 'nav', marker: 'coda', ref: { sectionId: 'v', bar: 6 } },
+        ] },
+    ])));
+    expect(spec.navigation?.segno).toEqual({ section: 0, bar: 2 });
+    expect(spec.navigation?.coda).toEqual({ section: 0, bar: 6 });
+  });
+
   it('lowers a navJump ref through the identity map', () => {
     const spec = ok(foldDraft(draft([
       { id: 'v', label: 'Verse', spans: [span(1, 8)],
