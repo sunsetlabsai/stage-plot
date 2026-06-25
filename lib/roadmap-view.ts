@@ -435,9 +435,11 @@ function diatonicDegreePcs(key: string): number[] {
 // canonicalized by Gap-1's prefer-flat-upper-neighbor rule: it sits a semitone
 // below exactly one diatonic degree (pc+1 is always diatonic for a chromatic pc in
 // a diatonic scale), so it becomes that upper neighbor with alter:-1 (C in D → ♭7;
-// Eb in D → ♭2). The five chromatic roots thus canonicalize to ♭2,♭3,♭5,♭6,♭7. A
-// chromatic BASS stays deferred (null) — ViewCell.bass has no alter slot, so root-
-// only for v1. quality is only allowed on the root, mirroring parsePart's split.
+// Eb in D → ♭2). The five chromatic roots canonicalize to ♭2,♭3,♭5,♭6,♭7 in a MAJOR
+// key; the set shifts to ♭1,♭2,♭4,♭5,♭7 in a MINOR key because the scale's semitone
+// gaps move (so the "missing" flats land on a diatonic note instead). A chromatic
+// BASS stays deferred (null) — ViewCell.bass has no alter slot, so root-only for
+// v1. quality is only allowed on the root, mirroring parsePart's split.
 function letterPartToDegree(
   s: string,
   key: string,
