@@ -25,9 +25,13 @@ While transcribing a real song, two questions surfaced that the current
 
 An earlier pass mis-analyzed this as "G mixolydian"; the correct key is **D**
 (A = V, G = IV, D = I keep it solidly in D — the only out-of-key color is borrowed,
-not a key change). NNS numbers are **major-scale-anchored**, so `7` always means
-C♯ regardless of whether you hear D major or D-mixolydian inflection. Walking every
-chord against the schema, **the entire song is expressible today except one**:
+not a key change). D is a **major** key, so its NNS numbers anchor to the major
+scale — `7` always means C♯ regardless of whether you hear D major or D-mixolydian
+inflection. (This major-scale anchoring is the **major-key** rule; minor keys use the
+natural-minor scale for the same letter mapping — see the minor-key note under the
+builder bridge. The motivating song is in a major key, so the contrast doesn't bite
+here.) Walking every chord against the schema, **the entire song is expressible today
+except one**:
 
 | chord (in key D) | reading | `ChordHit` | gap? |
 |---|---|---|---|
@@ -104,22 +108,46 @@ alter?: -1 | 0 | +1;   // flat | natural | sharp on the degree ROOT (default 0)
 
 ### Validator (`validateRoadmapSpec`)
 
-- `alter` optional, ∈ `{-1, 0, +1}`; absent ≡ `0`. Reject any other value.
+- `alter` optional, ∈ `{-1, 0, +1}`; absent ≡ `0`. **Reject** any other value. That
+  is the validator's *only* job here — it stays a pure predicate returning
+  `SpecValidation`, it does **not** rewrite/clone the input (today's validator
+  returns the input object untouched, and that doesn't change).
+- **Omit-when-0 is a NORMALIZATION rule at the emit points, not validator behavior.**
+  The places that *construct* `ChordHit`s simply don't set `alter` when it's `0`:
+  `cellsToChordHits` (view→spec), `foldDraft` (SpanList→spec), and `parseLetterChord`.
+  So existing specs and these paths stay byte-identical to today; `alter` appears
+  only on genuinely chromatic roots. (A hand-authored `alter:0` in stored JSON is
+  still *valid* — it's just never produced by our emitters.)
 - **No double-accidental / enharmonic-nonsense rule needed beyond the enum** —
   because `alter` is a single semitone on a diatonic degree, every `(degree, alter)`
   names a real chromatic pitch class; there is no `{degree, alter}` that resolves to
-  a non-pitch. (We deliberately do **not** canonicalize enharmonics — `{4,+1}` "♯4"
-  and `{5,-1}` "♭5" are both allowed and print as written, mirroring how a chart
-  author chooses spelling. Equality/dedup compares the literal `(degree, alter)`.)
-- Canonical form: omit `alter` when `0` (so existing specs and the fold's output are
-  byte-identical to today; `alter` only appears on genuinely chromatic roots).
+  a non-pitch. We deliberately do **not** canonicalize enharmonics — `{4,+1}` "♯4"
+  and `{5,-1}` "♭5" are both allowed and print as written. Equality/dedup compares
+  the literal `(degree, alter)`.
 
 ### Renderer (`lib/roadmap-render.ts`)
 
-`drawBarContent` prints `${alterGlyph(c.alter)}${c.degree}${c.quality ?? ''}${slash}`,
-where `alterGlyph` maps `-1→♭`, `+1→♯`, `0|undefined→''`. The glyph is a prefix on
-the degree number, vector-drawn like the other music glyphs (no new font asset). The
-`Key:` header is untouched — `alter` is part of the body, key-invariant.
+⚠ The chord label is drawn with `page.drawText` using `StandardFonts.Helvetica`
+(`drawText`, line 603). **WinAnsi cannot encode `♭` (U+266D) / `♯` (U+266F)** — so the
+accidental must **NOT** be interpolated into the `drawText` string (that throws at
+render). Consistent with chunk-1's decision ("music symbols = vector shapes, not a
+bundled font"), the accidental is a **separate vector prefix glyph**, drawn like the
+existing diamond / beat-tick / repeat-bracket glyphs:
+
+- `drawBarContent` keeps drawing the alphanumeric label `${degree}${quality}${slash}`
+  via `drawText` (ASCII, WinAnsi-safe — **unchanged**).
+- New `drawAccidental(page, alter, x, y, size)` vector-draws a small `♭`/`♯` shape
+  immediately **left** of the degree number.
+- **Width/layout:** the accidental claims a fixed advance `ACC_W` (≈ a half-digit at
+  the chord font size). When `alter` is present, the label's start-`x` shifts right by
+  `ACC_W` and the bar's chord-centering width includes `ACC_W`, so glyph and number
+  don't collide and centering stays correct. This is a glyph-pass change only —
+  **bar geometry and the born calibration are untouched** (same discipline as the
+  other vector symbols).
+- `alter: 0 | undefined` draws nothing and adds zero width → existing charts render
+  byte-identically.
+
+The `Key:` header is untouched — `alter` is part of the body, key-invariant.
 
 ### Transpose-invariance (composes with chunk 4)
 
@@ -151,6 +179,50 @@ pitch in 12-TET is ≤1 semitone from a diatonic degree, so one `alter` step alw
 suffices. The L1 grammar and the L2 prompt gain a one-line "chromatic roots use ♭/♯
 before the number; letters prefer ♭" rule; the `AuthoringDraft` → fold path is
 otherwise unchanged.
+
+**Accepted accidental spellings (input):** the manual/number grammar accepts **both**
+ASCII (`b`/`#`) and Unicode (`♭`/`♯`) before a degree — `b3`, `♭3`, `#4`, `♯4` all
+parse to the same `alter`. Internally `alter` is the canonical form; on **render** we
+always draw the Unicode vector glyph (♭/♯). So input is lenient, storage is numeric,
+output is one canonical glyph.
+
+### Builder bridge (`lib/roadmap-view.ts`) — alter must survive edit/save
+
+`RoadmapSpec` is not edited directly: the in-app builder round-trips a `ChordHit`
+through a `ViewCell` (`spec → cells → user edits → cells → spec`). Today that bridge
+has **no `alter` field and actively rejects an accidental on the degree** (`parsePart`,
+line 88/94: it captures `[b#]` then returns an error). If Gap 1 only touches the
+spec/renderer, **`alter` is silently dropped the first time a chart is opened and
+re-saved in the builder.** So Gap 1 must thread `alter` through the whole bridge:
+
+| function | line | today | Gap-1 change |
+|---|---|---|---|
+| `ViewCell` (type) | 27–33 | no `alter` | add `alter?: -1\|0\|+1` |
+| `parsePart` | 88/94 | captures `[b#]` then **rejects** (`return {error}`) | accept `b`/`#`/`♭`/`♯` → set `alter`; drop the rejection; absent ≡ unset |
+| `cellChordText` | 186–188 | `${degree}${quality}${slash}` | prefix the accidental glyph when `alter` set |
+| `cellsToChordHits` | 217–227 | builds `{degree,…}` | emit `alter` (omit when 0) |
+| `chordHitsToCells` | 232–245 | builds `{degree,quality,beats,…}` | preserve `alter` onto the cell |
+| `renderCell` (letters mode) | 384–388 | `degreeLetter`-based, no accidental | apply `alter` to the spelled letter (uses the active-key scale, see minor-key note) |
+
+This is the missing seam Codex flagged: schema + renderer alone are necessary but
+**not sufficient** — the builder bridge is the only place a saved chart's `alter`
+can leak away. All six touchpoints ship together in G1a.
+
+**Minor-key note (the scale `alter` rides on).** `alter` is *always* a single semitone
+relative to whatever pitch the diatonic degree resolves to in the active key — it does
+**not** pin to the major scale. `degreeLetter` (`lib/roadmap-view.ts:375`) already
+chooses `MAJOR_STEPS` for major keys and `MINOR_STEPS` for keys ending in `m`, so:
+
+- in a **major** key, degree 3 = the major third (F♯ in D) and `{3,-1}` = the minor
+  third (F natural);
+- in a **minor** key, degree 3 already = the minor third (the natural-minor scale),
+  so `{3,-1}` lowers *that* a further semitone.
+
+`alter` is purely an offset on the key-resolved degree pitch; it is **mode-agnostic by
+construction** and composes correctly with both scales. The number/letter the user sees
+is unchanged ("♭3" is "♭3" in any key) — only the rendered *letter* in letters-display
+mode differs, because that mode spells against the active scale. No special-casing is
+needed beyond using the same `degreeLetter` scale selection that already exists.
 
 ## Gap 2 — mid-song key change (modulation)
 
@@ -186,10 +258,15 @@ this — both are clear today).
 
 ### Gap-1 build steps
 
-- **G1a — schema + validator + renderer:** add `ChordHit.alter?: -1|0|+1`
-  (`lib/roadmap-spec.ts`), validator enum + omit-when-0 canonicalization, and the
-  `alterGlyph` prefix in `drawBarContent` (`lib/roadmap-render.ts`). Pure + golden
-  render test. Self-contained; nothing else depends on it.
+- **G1a — schema + validator + renderer + builder bridge:** add `ChordHit.alter?:
+  -1|0|+1` (`lib/roadmap-spec.ts`), validator enum (omit-when-0 at the emit points,
+  not in the validator), the `drawAccidental` vector prefix in `drawBarContent`
+  (`lib/roadmap-render.ts`), **and** the six builder-bridge touchpoints in
+  `lib/roadmap-view.ts` (ViewCell field, `parsePart` accept-not-reject, `cellChordText`
+  prefix, `cellsToChordHits` emit, `chordHitsToCells` preserve, `renderCell` letters
+  mode). The bridge is part of G1a — without it a saved `alter` is dropped on the next
+  open/save. Pure + golden render test + a view round-trip test (`{7,-1}` survives
+  spec→cells→spec).
 - **G1b — parser seam:** extend `parseLetterChord` (chunk-5 §7.1) to emit
   `{degree, alter}` for chromatic roots via the prefer-flat-upper-neighbor rule;
   honor explicit `♭`/`♯` in the number/roman grammar; one-line prompt rule for L2.
@@ -203,11 +280,16 @@ this — both are clear today).
   canonical form (existing fixtures byte-identical); `{7,-1}` round-trips.
 - renderer: `{7,-1}` prints "♭7", `{4,+1}` prints "♯4"; header `Key:` unchanged;
   determinism (byte-identical) holds with the glyph.
+- builder bridge: a spec with `{7,-1}` survives `chordHitsToCells → cellsToChordHits`
+  byte-identically; `parsePart("b3")` and `parsePart("♭3")` both yield `alter:-1` (no
+  error); `cellChordText` of an altered cell carries the glyph; a `{degree}` cell with
+  no accidental round-trips with `alter` unset (existing charts byte-identical).
 - transpose-invariance: re-key a spec containing `{7,-1}` → body unchanged, only the
   header label moves (composes with chunk 4).
-- `parseLetterChord`: `C`+key D → `{7,-1}` (♭7, not ♯6); `Eb`+key D → `{3,-1}` (♭3);
-  explicit `#4` via number grammar → `{4,+1}` honored; chromatic bass `E/Eb` still
-  → null (deferred).
+- `parseLetterChord`: `C`+key D → `{7,-1}` (♭7, not ♯6); `Eb`+key D → `{2,-1}` (♭2 —
+  Eb is the flat upper-neighbor of E=2; it is **not** ♭3, F is `{3,-1}`); explicit
+  `#4`/`♯4` via number grammar → `{4,+1}` honored; chromatic bass `E/Eb` still → null
+  (deferred).
 - end-to-end fixture: the motivating song parses with the chorus `C` as `{7,-1}` and
   the whole-song bar count is faithful.
 
