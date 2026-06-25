@@ -203,8 +203,15 @@ not hand-waving:
 - **Storage:** derived, hash-addressed, **namespaced apart from canonical charts**
   — e.g. `${owner}/${song_key}/${role}/export/${render_key}-${source_hash}.pdf`.
   NOT a `chart_library` row; this is an export artifact, not a library version.
-- **Cache key:** `(chart_id, render_key)` → the hash-addressed object. Idempotent
-  upsert; a repeat export of the same chart+key reuses the object.
+- **Cache key:** `(chart_id, render_key, source_hash)` → the hash-addressed
+  object, where `source_hash` is the canonical chart's current `source_spec` hash.
+  Including `source_hash` is **load-bearing** (Codex GO caveat): keyed only by
+  `(chart_id, render_key)`, an edit to the builder chart would silently reuse a
+  **stale** keyed export. With the source hash in the key, an edited `source_spec`
+  produces a new export object and the old one falls to GC; equivalently, the
+  export cache is **invalidated whenever `source_spec` changes**. Idempotent
+  upsert; a repeat export of the same chart+key against the unchanged source
+  reuses the object.
 - **Calibration:** **ephemeral** — re-rendered for the parity guard
   (`assertSpecCalibrationParity`, label is header-only and proven non-perturbing,
   `tests/roadmap-render.test.ts:76`) but **not persisted**. The canonical chart's
