@@ -66,7 +66,10 @@ export async function POST(request: NextRequest) {
     await admin.storage.from('charts').remove([oldPath]);
   }
 
-  // Upsert chart metadata
+  // Upsert chart metadata. A regular upload is NOT a builder chart, so clear any
+  // source_spec the slot may carry — replacing a builder chart with an ordinary
+  // PDF/image in the same (owner, song, role) must not leave the old authored
+  // spec behind (otherwise both routes would still classify it as is_builder).
   const { data: chart, error: dbError } = await supabase
     .from('chart_library')
     .upsert(
@@ -79,6 +82,7 @@ export async function POST(request: NextRequest) {
         storage_path: storagePath,
         mime_type: file.type,
         file_size: file.size,
+        source_spec: null,
       },
       { onConflict: 'owner_id,song_key,role' },
     )
@@ -92,5 +96,6 @@ export async function POST(request: NextRequest) {
 
   const url = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/charts/${storagePath}`;
 
-  return Response.json({ ...chart, url }, { status: 201 });
+  // Explicit re-key contract: an upload is never a builder chart.
+  return Response.json({ ...chart, url, is_builder: false, authored_key: null, charted_key: null }, { status: 201 });
 }
