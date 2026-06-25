@@ -429,8 +429,17 @@ function splitClauses(body: string): string[] {
 // Parse ONE span clause to a ChordSpan, or null if it isn't clean countable
 // phrasing. Forms: "N bar(s) [of] CHORD", "CHORD for N bar(s)", or a bare CHORD
 // (= 1 bar). CHORD is whatever parseBarInput accepts in the pinned key — a single
-// chord OR a split-bar pattern ("1 - 4 5") — so the grammar inherits the manual
-// editor's exact chord rules and its honest failure (chromatic root → defer).
+// chord OR an EXPLICITLY tied split-bar pattern ("1 - 4 5") — so the grammar
+// inherits the manual editor's exact chord rules and its honest failure (chromatic
+// root → defer).
+//
+// CRITICAL no-guess rule (Codex R1): a bare whitespace chord list like "D G7 D G7"
+// is AMBIGUOUS in prose — it could be one even-split bar or four 1-bar spans. The
+// manual editor's even-division grammar reads it as a single bar because there a
+// cell IS one bar, but L1 has no such boundary, so accepting it would silently
+// reintroduce the count-loss L1 exists to prevent. We therefore reject a multi-
+// chord bar pattern UNLESS it carries an explicit "-" tie (the unambiguous single-
+// bar split signal); the ambiguous whitespace list defers to L2.
 function parseSpanClause(clause: string, renderKey: string, beats: number): ChordSpan | null {
   const c = clause.trim();
   if (!c) return null;
@@ -449,6 +458,11 @@ function parseSpanClause(clause: string, renderKey: string, beats: number): Chor
     }
   }
   if (!Number.isInteger(bars) || bars < 1) return null;
+
+  // Multi-chord bar pattern without an explicit "-" tie = ambiguous shorthand → defer.
+  const tokens = barText.split(/\s+/).filter(Boolean);
+  const chordTokens = tokens.filter((t) => t !== '-');
+  if (chordTokens.length > 1 && !tokens.includes('-')) return null;
 
   const parsed = parseBarInput(barText, beats, renderKey);
   if (!parsed.ok || parsed.cells.length === 0) return null;

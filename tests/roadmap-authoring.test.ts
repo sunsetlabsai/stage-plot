@@ -389,6 +389,21 @@ describe('parseDescription — L1 deterministic span-grammar', () => {
     expect(d.sections[0].spans.every((s) => s.bars === 1)).toBe(true);
   });
 
+  it('DEFERS an ambiguous whitespace chord list — never guesses split-bar vs N-bars (Codex R1)', () => {
+    // "D G7 D G7" has no comma/period AND no "-" tie: a single even-split bar or
+    // four 1-bar spans? L1 must NOT guess (parseBarInput would read it as one bar) —
+    // it defers the whole description to L2.
+    expect(parseDescription('Verse: D G7 D G7', 'D')).toBeNull();
+    expect(parseDescription('2 bars D G7', 'D')).toBeNull();
+  });
+
+  it('ACCEPTS an explicitly tied split bar (the "-" signal is unambiguous, one bar)', () => {
+    const d = hit('1 - 4 5'); // 1 (2 beats) | 4 | 5 — clearly ONE bar
+    expect(d.sections[0].spans).toHaveLength(1);
+    expect(d.sections[0].spans[0].bars).toBe(1);
+    expect(d.sections[0].spans[0].bar).toHaveLength(3);
+  });
+
   it('accepts all three count forms', () => {
     expect(hit('4 bars D').sections[0].spans[0]).toEqual({ bar: [{ degree: 1 }], bars: 4 });
     expect(hit('4 bars of D').sections[0].spans[0]).toEqual({ bar: [{ degree: 1 }], bars: 4 });
