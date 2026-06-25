@@ -163,7 +163,16 @@ describe('parseGrammarDraft — L1 deterministic path (skips the model)', () => 
     expect(parseGrammarDraft('drop one bar of G and add a Bm7/Em/A tag', 'D')).toBeNull();
   });
 
-  it('returns null on a chromatic chord so L2 / Gap-1 can take it', () => {
-    expect(parseGrammarDraft('Verse: 2 bars D, 2 bars C', 'D')).toBeNull();
+  it('canonicalizes a chromatic root (C in D → ♭7) and folds+validates it', () => {
+    const r = parseGrammarDraft('Verse: 2 bars D, 2 bars C', 'D');
+    expect(r).not.toBeNull();
+    if (r) {
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.spec.sections[0].bars).toBe(4);
+    }
+  });
+
+  it('still returns null on a chromatic slash bass (root-only canonicalization)', () => {
+    expect(parseGrammarDraft('Verse: 2 bars E/Eb', 'D')).toBeNull();
   });
 });

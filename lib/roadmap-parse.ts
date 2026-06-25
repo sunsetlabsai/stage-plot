@@ -55,9 +55,10 @@ AuthoringDraft:
 
 A SPAN is a run of CONTIGUOUS bars that all share ONE identical bar pattern. "bars" is how many bars long that run is. "2 bars of D, then 2 bars of G7" → two spans: { bar:[{degree:1}], bars:2 }, { bar:[{degree:4,quality:"7"}], bars:2 }.
 
-ChordHit: { "degree": <int 1..7>, "quality"?: <one of "","m","dim","aug","sus","sus2","sus4","7","maj7","m7","m7b5","dim7","6","m6">, "bass"?: <int 1..7 slash bass>, "beats"?: <int split-bar weight>, "held"?: <bool diamond/whole-note hold> }
+ChordHit: { "degree": <int 1..7>, "alter"?: <-1 | 0 | 1 chromatic root shift>, "quality"?: <one of "","m","dim","aug","sus","sus2","sus4","7","maj7","m7","m7b5","dim7","6","m6">, "bass"?: <int 1..7 slash bass>, "beats"?: <int split-bar weight>, "held"?: <bool diamond/whole-note hold> }
 - "bar" is ONE bar's content. One chord = whole bar → [{degree:..}]. Multiple chords in a bar = a split bar: list each ChordHit. Even division → omit "beats". Uneven split → give EVERY chord an explicit "beats" that sum to timeSig.beats.
 - ACCEPT roman numerals and chord letters in the description and EMIT numeric degrees: IV→{degree:4}, V7→{degree:5,quality:"7"}, vi→{degree:6,quality:"m"} (a lowercase roman with no other quality is minor).
+- A CHROMATIC root (a chord whose root is NOT in the key, e.g. C in key D, or written ♭VII/bVII) becomes the upper diatonic neighbor degree with "alter":-1: C in D → {degree:7,alter:-1} (♭VII); ♭III → {degree:3,alter:-1}. Honor an explicit ♯/♭ in a roman/number as written. NEVER round a chromatic root to the nearest diatonic degree without "alter". A chromatic SLASH BASS is not supported — re-voice or omit the bass.
 
 ANTI-COLLAPSE RULES (this is the whole point — follow them exactly):
 - List ONE span per contiguous region, IN ORDER. The enumeration IS the answer.

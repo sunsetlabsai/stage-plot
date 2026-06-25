@@ -384,8 +384,39 @@ describe('parseLetterChord — letter chord → degree in a key (inverse of degr
     expect(parseLetterChord('F', 'Bb')).toEqual({ degree: 5 });
   });
 
-  it('defers a chromatic root (C in D → null, never rounded) — Gap-1 territory', () => {
-    expect(parseLetterChord('C', 'D')).toBeNull();
+  it('canonicalizes a chromatic root to {degree,alter:-1} (Gap-1 prefer-flat-upper-neighbor)', () => {
+    // C in D = ♭VII = upper neighbor of B(7) one semitone down → {7, alter:-1}.
+    expect(parseLetterChord('C', 'D')).toEqual({ degree: 7, alter: -1 });
+    // Eb in D = ♭2 (upper neighbor E=2); F in D = ♭3 (upper neighbor F#=3).
+    expect(parseLetterChord('Eb', 'D')).toEqual({ degree: 2, alter: -1 });
+    expect(parseLetterChord('F', 'D')).toEqual({ degree: 3, alter: -1 });
+  });
+
+  it('canonicalizes a chromatic root WITH quality (C7 in D → ♭7/7)', () => {
+    expect(parseLetterChord('C7', 'D')).toEqual({ degree: 7, alter: -1, quality: '7' });
+  });
+
+  it('the five chromatic roots canonicalize to ♭2,♭3,♭5,♭6,♭7 in every MAJOR key', () => {
+    // In a major scale the semitone gaps sit at 3-4 and 7-8, so the five chromatic
+    // pitches flat-spell as ♭2,♭3,♭5,♭6,♭7 (♭4 and ♭1 would land ON a diatonic note,
+    // so they are NOT chromatic). Re-spelling each back must round-trip the parse.
+    for (const key of ['C', 'G', 'D', 'A', 'Bb', 'Eb']) {
+      for (const degree of [2, 3, 5, 6, 7]) {
+        const letter = degreeLetter(degree, key, -1);
+        expect(parseLetterChord(letter, key)).toEqual({ degree, alter: -1 });
+      }
+    }
+  });
+
+  it('canonicalizes chromatic roots in a MINOR key by the same upper-neighbor rule', () => {
+    // Minor's semitone gaps sit at 2-3 and 5-6, so the chromatic flats are a
+    // different degree set: ♭1,♭2,♭4,♭5,♭7 (♭3 and ♭6 would land on a diatonic note).
+    for (const key of ['Am', 'Em']) {
+      for (const degree of [1, 2, 4, 5, 7]) {
+        const letter = degreeLetter(degree, key, -1);
+        expect(parseLetterChord(letter, key)).toEqual({ degree, alter: -1 });
+      }
+    }
   });
 
   it('defers the WHOLE token on a chromatic slash bass (E/Eb in D → null)', () => {
@@ -411,13 +442,14 @@ describe('parseBarInput — letter-aware in key context', () => {
     expect(parseBarInput('E/D', 4, 'D')).toEqual({ ok: true, cells: [cell(2, 4, { bass: 1 })] });
   });
 
-  it('errors with the key name on a non-diatonic letter chord (C in D)', () => {
-    const r = parseBarInput('C', 4, 'D');
+  it('canonicalizes a chromatic letter root through the bar parser (C in D → ♭7)', () => {
+    expect(parseBarInput('C', 4, 'D')).toEqual({ ok: true, cells: [cell(7, 4, { alter: -1 })] });
+  });
+
+  it('errors with the key name on a chromatic slash bass (E/Eb in D)', () => {
+    const r = parseBarInput('E/Eb', 4, 'D');
     expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.error).toContain('diatonic');
-      expect(r.error).toContain('D');
-    }
+    if (!r.ok) expect(r.error).toContain('D');
   });
 
   it('still parses degree/roman tokens unchanged when a key is present', () => {

@@ -449,9 +449,14 @@ describe('parseDescription — L1 deterministic span-grammar', () => {
     expect(hit('4 bars A', 'G').sections[0].spans[0].bar).toEqual([{ degree: 2 }]);
   });
 
-  it('defers a chromatic chord — the WHOLE description goes to L2 (null)', () => {
-    // C is ♭7 in D = chromatic; the grammar never rounds it.
-    expect(parseDescription('Verse: 2 bars D, 2 bars C', 'D')).toBeNull();
+  it('canonicalizes a chromatic root in the grammar (C in D → ♭7), never rounding it', () => {
+    // C is ♭7 in D; Gap-1 spells it {degree:7, alter:-1} (prefer-flat-upper-neighbor).
+    const d = hit('Verse: 2 bars D, 2 bars C', 'D');
+    expect(d.sections[0].spans[1].bar).toEqual([{ degree: 7, alter: -1 }]);
+  });
+
+  it('still defers a chromatic SLASH BASS to L2 (root-only canonicalization for v1)', () => {
+    expect(parseDescription('Verse: 2 bars E/Eb', 'D')).toBeNull();
   });
 
   it('returns null for non-grammar prose (falls through to L2)', () => {

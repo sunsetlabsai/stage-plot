@@ -128,8 +128,9 @@ function parseChordToken(tok: string, renderKey?: string): Omit<ViewCell, 'beats
   if (extra !== undefined) return { error: `"${tok}" has too many "/" separators` };
   if (renderKey && /^[A-G]/.test(main)) {
     const hit = parseLetterChord(tok, renderKey);
-    if (!hit) return { error: `"${tok}" is not a diatonic chord in ${renderKey}` };
+    if (!hit) return { error: `"${tok}" is not a valid chord in ${renderKey}` };
     const cell: Omit<ViewCell, 'beats'> = { degree: hit.degree, quality: hit.quality ?? '' };
+    if (hit.alter) cell.alter = hit.alter;
     if (hit.bass != null) cell.bass = hit.bass;
     return cell;
   }
@@ -429,38 +430,48 @@ function diatonicDegreePcs(key: string): number[] {
   return steps.map((s) => (root + s) % 12);
 }
 
-// Read one letter part (root or bass) to a DIATONIC degree in `key`. A chromatic
-// root (no diatonic match — e.g. C in D) returns null; the caller defers it (to
-// L2 today, to Gap-1 {degree,alter} once G1b lands), never rounds it. quality is
-// only allowed on the root (the bass carries none), mirroring parsePart's split.
+// Read one letter part (root or bass) to a degree in `key`. A diatonic letter maps
+// straight to its degree. A chromatic ROOT (no diatonic match — e.g. C in D) is
+// canonicalized by Gap-1's prefer-flat-upper-neighbor rule: it sits a semitone
+// below exactly one diatonic degree (pc+1 is always diatonic for a chromatic pc in
+// a diatonic scale), so it becomes that upper neighbor with alter:-1 (C in D → ♭7;
+// Eb in D → ♭2). The five chromatic roots thus canonicalize to ♭2,♭3,♭5,♭6,♭7. A
+// chromatic BASS stays deferred (null) — ViewCell.bass has no alter slot, so root-
+// only for v1. quality is only allowed on the root, mirroring parsePart's split.
 function letterPartToDegree(
   s: string,
   key: string,
   allowQuality: boolean,
-): { degree: number; quality: string } | null {
+): { degree: number; quality: string; alter: -1 | 0 | 1 } | null {
   const m = s.match(/^([A-G])([b#♭♯]?)(.*)$/);
   if (!m) return null;
   const [, letter, acc, qualRaw] = m;
   const pc = noteLetterPc(letter, acc);
   if (pc === null) return null;
-  const idx = diatonicDegreePcs(key).indexOf(pc);
-  if (idx === -1) return null; // chromatic root → deferred, never rounded
   if (!allowQuality && qualRaw !== '') return null;
   if (allowQuality && !QUALITY_WHITELIST.has(qualRaw)) return null;
-  return { degree: idx + 1, quality: qualRaw };
+  const pcs = diatonicDegreePcs(key);
+  const idx = pcs.indexOf(pc);
+  if (idx !== -1) return { degree: idx + 1, quality: qualRaw, alter: 0 };
+  if (!allowQuality) return null; // chromatic bass → deferred (root-only for v1)
+  const upper = pcs.indexOf((pc + 1) % 12); // upper diatonic neighbor → flat spelling
+  if (upper === -1) return null; // unreachable for a chromatic pc, but fail closed
+  return { degree: upper + 1, quality: qualRaw, alter: -1 };
 }
 
 // Parse a full letter chord (root[acc][quality][/bass]) to a canonical ChordHit in
-// `renderKey`, or null when any part is non-diatonic / malformed (the whole token
-// defers — never a lossy partial). "G7" in D → {degree:4, quality:'7'}; "Bm7" →
-// {degree:6, quality:'m7'}; "E/D" in D → {degree:2, bass:1} (in G → {6, bass:5} —
-// the key decides). A chromatic root or chromatic slash bass returns null.
+// `renderKey`, or null when the bass is non-diatonic / the token is malformed (the
+// whole token defers — never a lossy partial). "G7" in D → {degree:4, quality:'7'};
+// "Bm7" → {degree:6, quality:'m7'}; "E/D" in D → {degree:2, bass:1} (in G → {6,
+// bass:5} — the key decides). A chromatic ROOT canonicalizes to {degree,alter:-1}
+// (C in D → {7, alter:-1} = ♭VII); a chromatic slash BASS still returns null.
 export function parseLetterChord(token: string, renderKey: string): ChordHit | null {
   const [main, bass, extra] = token.split('/');
   if (extra !== undefined) return null; // too many "/" separators
   const head = letterPartToDegree(main, renderKey, true);
   if (!head) return null;
   const hit: ChordHit = { degree: head.degree };
+  if (head.alter) hit.alter = head.alter;
   if (head.quality) hit.quality = head.quality;
   if (bass !== undefined) {
     const b = letterPartToDegree(bass, renderKey, false);
