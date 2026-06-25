@@ -791,7 +791,7 @@ function BarEditor({
   onCancel: () => void;
 }) {
   const [draft, setDraft] = useState(initialRaw);
-  const parse = parseBarInput(draft, beats);
+  const parse = parseBarInput(draft, beats, renderKey);
 
   function commit() {
     if (!parse.ok) return;

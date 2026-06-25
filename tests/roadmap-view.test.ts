@@ -9,6 +9,7 @@ import {
   fitBars,
   renderCell,
   degreeLetter,
+  parseLetterChord,
   type ViewCell,
 } from '../lib/roadmap-view';
 import { validateRoadmapSpec, type RoadmapSpec } from '../lib/roadmap-spec';
@@ -356,5 +357,70 @@ describe('Gap 1 — chromatic roots (alter)', () => {
   it('letters mode re-spells an altered root (♭7 in D = C, ♯4 in C = F#)', () => {
     expect(renderCell(cell(7, 4, { alter: -1 }), 'letters', 'D')).toBe('C');
     expect(renderCell(cell(4, 4, { alter: 1 }), 'letters', 'C')).toBe('F#');
+  });
+});
+
+describe('parseLetterChord — letter chord → degree in a key (inverse of degreeLetter)', () => {
+  it('reads a triad to its diatonic degree (key decides)', () => {
+    // In D: G=4, A=5, Bm=6m, D=1.
+    expect(parseLetterChord('G', 'D')).toEqual({ degree: 4 });
+    expect(parseLetterChord('A', 'D')).toEqual({ degree: 5 });
+    expect(parseLetterChord('D', 'D')).toEqual({ degree: 1 });
+  });
+
+  it('carries quality (G7 → 4/7, Bm7 → 6/m7)', () => {
+    expect(parseLetterChord('G7', 'D')).toEqual({ degree: 4, quality: '7' });
+    expect(parseLetterChord('Bm7', 'D')).toEqual({ degree: 6, quality: 'm7' });
+  });
+
+  it('reads a slash bass, and the KEY decides the degree (E/D: 2/1 in D, 6/5 in G)', () => {
+    expect(parseLetterChord('E/D', 'D')).toEqual({ degree: 2, bass: 1 });
+    expect(parseLetterChord('E/D', 'G')).toEqual({ degree: 6, bass: 5 });
+  });
+
+  it('reads flat-key letters (in Bb: Bb=1, Eb=4, F=5)', () => {
+    expect(parseLetterChord('Bb', 'Bb')).toEqual({ degree: 1 });
+    expect(parseLetterChord('Eb', 'Bb')).toEqual({ degree: 4 });
+    expect(parseLetterChord('F', 'Bb')).toEqual({ degree: 5 });
+  });
+
+  it('defers a chromatic root (C in D → null, never rounded) — Gap-1 territory', () => {
+    expect(parseLetterChord('C', 'D')).toBeNull();
+  });
+
+  it('defers the WHOLE token on a chromatic slash bass (E/Eb in D → null)', () => {
+    expect(parseLetterChord('E/Eb', 'D')).toBeNull();
+  });
+
+  it('round-trips against degreeLetter across keys for every diatonic degree', () => {
+    for (const key of ['C', 'G', 'D', 'A', 'Bb', 'Eb', 'Am', 'Em']) {
+      for (let degree = 1; degree <= 7; degree++) {
+        const letter = degreeLetter(degree, key);
+        expect(parseLetterChord(letter, key)).toEqual({ degree });
+      }
+    }
+  });
+});
+
+describe('parseBarInput — letter-aware in key context', () => {
+  it('accepts a letter chord when renderKey is given (G7 in D → 4/7)', () => {
+    expect(parseBarInput('G7', 4, 'D')).toEqual({ ok: true, cells: [cell(4, 4, { quality: '7' })] });
+  });
+
+  it('accepts a letter slash bass (E/D in D → 2 over 1)', () => {
+    expect(parseBarInput('E/D', 4, 'D')).toEqual({ ok: true, cells: [cell(2, 4, { bass: 1 })] });
+  });
+
+  it('errors with the key name on a non-diatonic letter chord (C in D)', () => {
+    const r = parseBarInput('C', 4, 'D');
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toContain('diatonic');
+      expect(r.error).toContain('D');
+    }
+  });
+
+  it('still parses degree/roman tokens unchanged when a key is present', () => {
+    expect(parseBarInput('4 5', 4, 'D')).toEqual({ ok: true, cells: [cell(4, 2), cell(5, 2)] });
   });
 });

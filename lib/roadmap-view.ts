@@ -118,9 +118,21 @@ function parsePart(s: string, allowQuality: boolean): ParsedPart | { error: stri
 // The ROOT keeps its alter; a BASS with an accidental is rejected (chromatic bass
 // is deferred — ViewCell.bass has no alter slot, so accepting it would silently
 // downgrade 1/♭2 to 1/2). Root-only accidentals for v1.
-function parseChordToken(tok: string): Omit<ViewCell, 'beats'> | { error: string } {
+//
+// When `renderKey` is given and the token starts with a letter name (A–G), it is
+// read as a LETTER chord through parseLetterChord (the one letters→degrees seam),
+// so the manual editor accepts "G7"/"Bm7"/"E/D" in key context. A non-diatonic
+// letter chord fails with a clear, key-named error rather than being rounded.
+function parseChordToken(tok: string, renderKey?: string): Omit<ViewCell, 'beats'> | { error: string } {
   const [main, bass, extra] = tok.split('/');
   if (extra !== undefined) return { error: `"${tok}" has too many "/" separators` };
+  if (renderKey && /^[A-G]/.test(main)) {
+    const hit = parseLetterChord(tok, renderKey);
+    if (!hit) return { error: `"${tok}" is not a diatonic chord in ${renderKey}` };
+    const cell: Omit<ViewCell, 'beats'> = { degree: hit.degree, quality: hit.quality ?? '' };
+    if (hit.bass != null) cell.bass = hit.bass;
+    return cell;
+  }
   const head = parsePart(main, true);
   if ('error' in head) return head;
   const cell: Omit<ViewCell, 'beats'> = { degree: head.degree, quality: head.quality };
@@ -144,7 +156,8 @@ export type BarParse =
 // bar's beat count. Grammar: whitespace-separated chord tokens; `-` ties/extends
 // the previous chord by one share. No `-` → chords split the bar EVENLY (must
 // divide); any `-` → shares ARE the explicit beats and must sum to the bar.
-export function parseBarInput(raw: string, barBeats: number): BarParse {
+// `renderKey` (when given) lets letter-named tokens be parsed in key context.
+export function parseBarInput(raw: string, barBeats: number, renderKey?: string): BarParse {
   const slots = raw.trim().split(/\s+/).filter(Boolean);
   if (slots.length === 0) return { ok: true, cells: [] };
 
@@ -156,7 +169,7 @@ export function parseBarInput(raw: string, barBeats: number): BarParse {
       shares[shares.length - 1] += 1;
       continue;
     }
-    const core = parseChordToken(slot);
+    const core = parseChordToken(slot, renderKey);
     if ('error' in core) return { ok: false, error: core.error };
     cores.push(core);
     shares.push(1);
@@ -392,6 +405,69 @@ export function degreeLetter(degree: number, key: string, alter: -1 | 0 | 1 = 0)
   const pc = (keyRootPc(key) + (steps[degree - 1] ?? 0) + alter + 12) % 12;
   const flat = alter !== 0 ? alter < 0 : (/b/.test(key) || /^F/.test(key.replace(/m$/, '')));
   return (flat ? CHROM_FLAT : CHROM_SHARP)[pc];
+}
+
+// ── Letter chord → Nashville degree, in a key (the inverse of degreeLetter) ──
+// The key-aware front-end for letter-named input (chunk-5 §7.1, L1 grammar + the
+// manual editor). degreeLetter spells a degree as a letter IN a key; this reads a
+// letter back to its degree in that key. It is the ONE place letters→degrees, so
+// the AI parse path and the manual editor agree by construction.
+
+// A note name (A–G) + optional accidental → pitch class, or null if unparseable.
+function noteLetterPc(letter: string, accidental: string): number | null {
+  const base = LETTER_PC[letter];
+  if (base === undefined) return null;
+  const delta = accidental === '#' || accidental === '♯' ? 1 : accidental === 'b' || accidental === '♭' ? -1 : 0;
+  return (base + delta + 12) % 12;
+}
+
+// The diatonic pitch classes of `key`, indexed by degree-1 (major or minor scale,
+// the same scale degreeLetter spells against — no second source of truth).
+function diatonicDegreePcs(key: string): number[] {
+  const steps = /m$/.test(key) ? MINOR_STEPS : MAJOR_STEPS;
+  const root = keyRootPc(key);
+  return steps.map((s) => (root + s) % 12);
+}
+
+// Read one letter part (root or bass) to a DIATONIC degree in `key`. A chromatic
+// root (no diatonic match — e.g. C in D) returns null; the caller defers it (to
+// L2 today, to Gap-1 {degree,alter} once G1b lands), never rounds it. quality is
+// only allowed on the root (the bass carries none), mirroring parsePart's split.
+function letterPartToDegree(
+  s: string,
+  key: string,
+  allowQuality: boolean,
+): { degree: number; quality: string } | null {
+  const m = s.match(/^([A-G])([b#♭♯]?)(.*)$/);
+  if (!m) return null;
+  const [, letter, acc, qualRaw] = m;
+  const pc = noteLetterPc(letter, acc);
+  if (pc === null) return null;
+  const idx = diatonicDegreePcs(key).indexOf(pc);
+  if (idx === -1) return null; // chromatic root → deferred, never rounded
+  if (!allowQuality && qualRaw !== '') return null;
+  if (allowQuality && !QUALITY_WHITELIST.has(qualRaw)) return null;
+  return { degree: idx + 1, quality: qualRaw };
+}
+
+// Parse a full letter chord (root[acc][quality][/bass]) to a canonical ChordHit in
+// `renderKey`, or null when any part is non-diatonic / malformed (the whole token
+// defers — never a lossy partial). "G7" in D → {degree:4, quality:'7'}; "Bm7" →
+// {degree:6, quality:'m7'}; "E/D" in D → {degree:2, bass:1} (in G → {6, bass:5} —
+// the key decides). A chromatic root or chromatic slash bass returns null.
+export function parseLetterChord(token: string, renderKey: string): ChordHit | null {
+  const [main, bass, extra] = token.split('/');
+  if (extra !== undefined) return null; // too many "/" separators
+  const head = letterPartToDegree(main, renderKey, true);
+  if (!head) return null;
+  const hit: ChordHit = { degree: head.degree };
+  if (head.quality) hit.quality = head.quality;
+  if (bass !== undefined) {
+    const b = letterPartToDegree(bass, renderKey, false);
+    if (!b) return null; // chromatic / invalid bass → defer the WHOLE token
+    hit.bass = b.degree;
+  }
+  return hit;
 }
 
 // Display text for a cell in the chosen mode: numbers (degree+quality/bass) or
