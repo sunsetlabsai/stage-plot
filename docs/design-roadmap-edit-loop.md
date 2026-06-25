@@ -57,27 +57,38 @@ The edit loop is mostly assembled — three load-bearing pieces are already live
    `save_builder_chart` RPC upserts on `(owner, song_key, role)` and returns
    `old_storage_path` so the previous hash-addressed PDF is reclaimed
    (`route.ts:152–158`). Saving an edited chart to the **same role** overwrites
-   file + calibration + `source_spec` atomically. **No save-route change needed.**
+   file + calibration + `source_spec` atomically. The replace-by-role mechanism
+   is unchanged — but the **edit path** adds one thing the create path never
+   needed: an optimistic-concurrency precondition, so a stale edit can't clobber a
+   slot that changed underneath it (§4.4). This is the one save-side change 5c
+   makes; the create path is untouched.
 3. **Round-trip bridge.** `specToView` / `viewToSpec` (`lib/roadmap-view.ts`)
    round-trip the full structure — sections, repeat/volta, and navigation keyed by
    **stable section id** (so reorder/remove is safe; nav drops only when its target
    section is deleted). `renderKey` and `barsPerLine` carry through.
 
-The renderer is deterministic, so **re-opening and saving an unedited chart
-re-derives byte-identical PDF/calibration → same hash → an idempotent no-op
-overwrite.** That property is the safety net under the whole loop.
+The renderer is deterministic, so **re-opening and saving an unedited chart with
+unchanged render metadata re-derives byte-identical PDF/calibration → same hash →
+an idempotent no-op overwrite.** The narrowing matters: *render metadata* = song
+title + artist, read from the `songs` row at save time (`route.ts:76–85`), not from
+the spec. If the title/artist changed since the chart was built, the music-body
+geometry/calibration stays stable but the header re-renders to a **new hash** —
+still correct, just not byte-identical. So the precise claim is *same spec + same
+render metadata = idempotent*; spec-level geometry is always stable. That
+determinism is the safety net under the whole loop.
 
-## 4. The three gaps 5c fills
+## 4. The four gaps 5c fills
 
 ### 4.1 Re-open entry point (`ManageChartsModal`)
 A builder chart row needs an **Edit** action (owner-only) that opens the spec
 builder seeded with the saved spec. Gate it on the re-key contract already on the
 wire: **`is_builder === true`** (`chart.is_builder`, surfaced chunk 4). For a
-builder chart, the row reads **Preview · Edit · Replace · Delete**:
+builder chart, the row reads **Preview · Edit · Replace with file · Delete**:
 - **Edit** → opens `RoadmapBuilder` in Review with the loaded spec (this chunk).
-- **Replace** → file upload as today (converts to a static import; the chunk-4 fix
-  already clears `source_spec` on that path, so it cleanly stops being a builder
-  chart).
+- **Replace with file** → file upload as today (converts to a static import; the
+  chunk-4 fix already clears `source_spec` on that path, so it cleanly stops being a
+  builder chart). Reworded from plain "Replace" on builder rows to make the
+  spec-vs-file distinction obvious next to **Edit** (§11 Q1).
 - A non-builder (uploaded/converter) chart shows **no Edit** — it has no spec.
 
 ### 4.2 Source-spec read door (new GET)
@@ -88,21 +99,29 @@ Edit click**:
 
 ```
 GET /api/charts/roadmap/[chartId]   (authed owner only)
-→ 200 { chart_id, role, song_title, song_key, source_spec }   // source_spec = RoadmapSpec
+→ 200 { chart_id, role, song_title, song_key, updated_at, source_spec }  // source_spec = RoadmapSpec
 → 404 if not found / not owned
-→ 409 (or 422) if the row has no source_spec (not a builder chart)
+→ 422 if the row has no source_spec (not a builder chart) OR source_spec
+       fails validateRoadmapSpec (corrupt / hand-edited DB state)
 ```
 
 Owner-gated: resolve `auth.getUser()`, then admin-read the `chart_library` row and
 assert `owner_id === user.id` before returning the spec. (Read door only — the
-write boundary stays the save route + service-role RPC.)
+write boundary stays the save route + service-role RPC.) Two extras the door
+carries for 5c's correctness:
+- **`updated_at`** — the optimistic-lock token the edit save replays as a
+  precondition (§4.4). The client never interprets it; it only round-trips it.
+- **Validate before returning.** Run `source_spec` through `validateRoadmapSpec`
+  (the same gate the save route uses server-side) and **422** on a missing or
+  malformed spec, rather than handing a bad shape to the client. Corrupt DB state
+  fails clean at the read door instead of crashing `specToView` downstream.
 
 ### 4.3 Builder seeding (open in Review, fixed role)
 `RoadmapBuilder` gains an optional **edit mode**:
 
 ```ts
 // new optional prop; absent = today's "author a new chart" flow
-editChart?: { chartId: string; role: string; spec: RoadmapSpec };
+editChart?: { chartId: string; role: string; spec: RoadmapSpec; updatedAt: string };
 ```
 
 When present, the builder:
@@ -110,10 +129,40 @@ When present, the builder:
   Compose),
 - **locks the role** to `editChart.role` (an edit is an overwrite of one chart,
   not a free-role pick — the save-time role selector is fixed/hidden),
-- saves through the unchanged save route with that role → in-place replace.
+- saves through the save route with that role → in-place replace, **threading
+  `chartId` + `updatedAt` as the stale-edit precondition** (§4.4).
 
 `onSaved` folds the returned chart back into `ManageChartsModal`'s list exactly as
 the create path does (carrying the chunk-4 `is_builder`/`authored_key` contract).
+
+### 4.4 Stale-edit guard (the one save-side change)
+Today's save commits by `(owner, song_key, role)` with **no precondition on which
+chart currently holds that slot** (`save_builder_chart`, `route.ts:121`). For the
+**create** flow that's correct — a free role has nothing to clobber. But an **edit**
+loads chart X from a slot, then saves it back, and the save has no idea the slot may
+have changed in between. The dangerous interleave:
+
+1. Owner opens **Edit** on a builder chart (loads its spec + `updated_at`).
+2. In another tab (or by another session) **Replace with file** lands on the same
+   slot — chunk 4 correctly clears `source_spec`, de-buildering it.
+3. The first tab hits **Save**. With no precondition, the stale edit re-upserts
+   `source_spec` into the slot — **silently re-buildering the chart the user just
+   converted to a file.** This violates §4.1's "Replace cleanly de-builders" promise.
+
+**Fix — optimistic concurrency on the edit path only:**
+- The save body gains two **optional** fields, sent only by the edit flow:
+  `expected_chart_id` and `expected_updated_at` (the values the GET door returned).
+- `save_builder_chart` gains matching optional params. When present, it asserts —
+  inside the same atomic commit, before the upsert — that the current row at
+  `(owner, song_key, role)` still has `id = expected_chart_id` **and**
+  `updated_at = expected_updated_at`. On mismatch it raises a conflict the route
+  maps to **409 Conflict** ("this chart changed since you opened it — reload").
+- When absent (the create flow), behaviour is **exactly today's** — no precondition.
+
+Why `updated_at` and not `chart_id` alone: Replace-with-file upserts **in place**,
+keeping the same row `id` while nulling `source_spec`. So `chart_id` would still
+match — only the `updated_at` bump (any write touches it) catches the change. The
+pair together is the precise guard: same row, untouched since load.
 
 ## 5. The regenerate flow (5c, the hammer)
 
@@ -147,9 +196,13 @@ never silently mutates it. Two known, accepted edges to pin (not regressions):
   fidelity bug.
 
 **Test requirement:** a golden round-trip test over representative specs (linear,
-plain repeat, volta, full navigation, split bars, alters) asserting
-`viewToSpec(specToView(spec))` deep-equals `spec`. This is the guard that makes
-"open + save = no-op" true.
+plain repeat, volta, full navigation, split bars, alters, **held chords, and a
+non-default `barsPerLine`**) asserting `viewToSpec(specToView(spec))` deep-equals
+`spec`. `held` and `barsPerLine` both ride the ViewModel and are part of the no-op
+reopen claim, so they belong in the golden set explicitly — `held` to pin the
+spec→view→spec survival (distinct from the manual-retype loss in the first bullet),
+`barsPerLine` because it carries through and a regression would silently re-flow the
+chart on save. This is the guard that makes "open + save = no-op" true.
 
 ## 7. v1 vs deferred — persist the last-used prompt
 
@@ -190,31 +243,43 @@ should surface that explicitly or leave it to the existing key toggle.)
 ## 10. Build sketch (when GREEN to build)
 
 1. **GET route** `app/api/charts/roadmap/[chartId]/route.ts` — owner-gated read of
-   `source_spec` + role + song_title (§4.2).
-2. **Builder edit mode** — `RoadmapBuilder` optional `editChart` prop: mount in
-   Review, seed `specToView`, lock role (§4.3). Thread `onSaved` as today.
-3. **ManageChartsModal Edit affordance** — `is_builder`-gated row button that GETs
-   the spec then opens the builder in edit mode (§4.1). Loading/error states.
-4. **Round-trip golden test** (§6) — the fidelity guard.
-5. **(Deferred, NOT 5c)** `source_prompt` column + save-body `prompt` + refine
+   `source_spec` + role + song_title + `updated_at`; `validateRoadmapSpec` →
+   **422** on missing/corrupt spec (§4.2).
+2. **Save-path precondition** — save body gains optional `expected_chart_id` +
+   `expected_updated_at`; `save_builder_chart` RPC asserts the current slot row
+   still matches before the upsert, raising a conflict the route maps to **409**
+   (§4.4). Create path passes them null → behaviour unchanged. (Migration: the RPC
+   signature changes — add the two nullable params with a no-op default so existing
+   create callers are untouched.)
+3. **Builder edit mode** — `RoadmapBuilder` optional `editChart` prop
+   `{chartId, role, spec, updatedAt}`: mount in Review, seed `specToView`, lock
+   role, thread the precondition into save (§4.3). `onSaved` as today.
+4. **ManageChartsModal Edit affordance** — `is_builder`-gated row button that GETs
+   the spec then opens the builder in edit mode (§4.1). Loading/error states,
+   including a 409-on-save "reload, this chart changed" path.
+5. **Round-trip golden test** (§6) — the fidelity guard, incl. `held` +
+   `barsPerLine`.
+6. **(Deferred, NOT 5c)** `source_prompt` column + save-body `prompt` + refine
    pre-fill (§7).
 
-## 11. Open questions (for Graham / Codex)
+## 11. Resolved decisions (Graham + Codex R1)
 
-1. **Edit vs Replace labeling.** For a builder chart, is the row **Preview · Edit ·
-   Replace · Delete** (Edit = spec, Replace = file), or should "Replace" be reworded
-   for builder charts (e.g. "Replace with file") to make the spec-vs-file distinction
-   obvious? (Lean: keep Replace, add Edit; reword only if it tests confusingly.)
-2. **Empty refine box on re-open.** Accept the v1 empty box (manual-default,
-   regenerate opt-in), or is pre-filling the prompt important enough to pull the
-   `source_prompt` follow-on (§7) into 5c? (Lean: ship v1; prompt persistence is a
-   clean separate increment.)
-3. **Authored-key edit surface (§8).** Does 5c need an explicit "change authored
-   key" affordance, or does the existing Numbers⇄Letters key toggle (which already
-   sets `renderKey`) suffice for now? (Lean: toggle suffices; revisit with chunk-4 Q5.)
-4. **GET response status for non-builder id.** 409 vs 422 vs 404 when a chartId
-   exists but carries no `source_spec`. (Minor; lean 422 — the row exists, it's just
-   not editable-as-spec.)
+1. **Edit vs Replace labeling — RESOLVED.** Keep both actions; **reword "Replace" →
+   "Replace with file"** on builder rows so Edit (= spec) vs Replace-with-file
+   (= static import) reads unambiguously (§4.1).
+2. **Empty refine box on re-open — RESOLVED: ship v1.** Manual-editor default,
+   regenerate opt-in, empty refine box. Prompt persistence (`source_prompt`, §7) is
+   the clean separate follow-on, not pulled into 5c.
+3. **Authored-key edit surface (§8) — RESOLVED.** The existing Numbers⇄Letters key
+   toggle (which already sets `renderKey`) suffices; no separate "change authored
+   key" affordance in 5c.
+4. **GET status for non-builder/corrupt id — RESOLVED: 422.** The row exists, it's
+   just not editable-as-spec (or its spec is corrupt). 404 would lie about
+   existence; 409 implies a state conflict that isn't happening (§4.2).
+
+(Codex R1 blocking gap — the stale-edit guard — is folded as **§4.4**; the
+idempotency claim narrowed in §3/§6; the golden set widened to `held` +
+`barsPerLine` in §6; the read door now validates `source_spec` before returning, §4.2.)
 
 ## 12. Why this is the right shape
 
