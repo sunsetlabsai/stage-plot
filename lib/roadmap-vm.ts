@@ -533,6 +533,9 @@ export function applyOverride(compiled: CompiledRoadmap, stateIn: VMState, direc
       return s;
     }
     case 'hold': {
+      // Unknown repeat targets are no-ops (mirrors anotherRound) — never park a
+      // vamp on an id that isn't a real repeat, which would pollute the wire state.
+      if (!compiled.repeatStartById.has(directive.repeatStartId)) return s;
       s.holding = directive.repeatStartId;
       return s;
     }
@@ -555,13 +558,24 @@ export function applyOverride(compiled: CompiledRoadmap, stateIn: VMState, direc
       // Leave repeat counters as-is. exit arms the al-Coda/al-Fine out (§3.3); a
       // redirect landing before an already-`fired` jump stays inert by default
       // (Rule 3 won't re-fire) unless an explicit resetJump precedes it.
-      // alCoda starts a FRESH al-Coda path: also clear toCodaFired so Rule 4
-      // (alCodaArmed && !toCodaFired) takes To Coda again even after a prior fire.
+      // §3.4: an MD-specified exit WINS — it is the active exit mode, so it must
+      // clear any stale opposite arming. Otherwise a leftover al-Fine could stop
+      // an explicit al-Coda at Fine, or a leftover armed al-Coda could divert an
+      // explicit al-Fine at To Coda.
       if (directive.exit?.kind === 'alCoda') {
+        // FRESH al-Coda path: arm Coda, clear toCodaFired so Rule 4
+        // (alCodaArmed && !toCodaFired) takes To Coda again even after a prior
+        // fire, and disarm any stale al-Fine.
         s.flags.alCodaArmed = true;
         s.flags.toCodaFired = false;
+        s.flags.alFineActive = false;
       }
-      if (directive.exit?.kind === 'alFine') s.flags.alFineActive = true;
+      if (directive.exit?.kind === 'alFine') {
+        // FRESH al-Fine path: arm Fine and disarm any stale al-Coda so a leftover
+        // To Coda divert can't intercept (Rule 4 needs alCodaArmed).
+        s.flags.alFineActive = true;
+        s.flags.alCodaArmed = false;
+      }
       return s;
     }
     case 'resetJump': {

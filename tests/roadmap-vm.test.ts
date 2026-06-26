@@ -291,6 +291,38 @@ describe('roadmap-vm — jumpTo exit policy', () => {
     const again = runCollect(c, override(c, state, { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alCoda' } }));
     expect(again.ids).toEqual(['b1', 'b2', 'b4']);
   });
+
+  it('an explicit exit WINS: al-Coda clears a stale al-Fine (does not stop at Fine)', () => {
+    // b1 b2[fine] b3[toCoda] b4[coda] — Fine precedes To Coda.
+    const c = compileOrThrow(['b1', 'b2', 'b3', 'b4'], [fine('fn', 'b2'), toCoda('tc', 'b3'), coda('cd', 'b4')]);
+    const stale = runCollect(c, override(c, initVM(c), { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alFine' } }));
+    expect(stale.ids).toEqual(['b1', 'b2']); // stale run stops at Fine, arming alFineActive
+    expect(stale.state.flags.alFineActive).toBe(true);
+    // explicit al-Coda must disarm the stale al-Fine, run past Fine, divert at To Coda.
+    const after = runCollect(c, override(c, stale.state, { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alCoda' } }));
+    expect(after.ids).toEqual(['b1', 'b2', 'b3', 'b4']);
+  });
+
+  it('exit modes are mutually exclusive at the flag level (each disarms the other)', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3', 'b4'], [fine('fn', 'b2'), toCoda('tc', 'b3'), coda('cd', 'b4')]);
+    const a1 = override(c, initVM(c), { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alFine' } });
+    const a2 = override(c, a1, { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alCoda' } });
+    expect(a2.flags.alCodaArmed).toBe(true);
+    expect(a2.flags.alFineActive).toBe(false);
+    const b1 = override(c, initVM(c), { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alCoda' } });
+    const b2 = override(c, b1, { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alFine' } });
+    expect(b2.flags.alFineActive).toBe(true);
+    expect(b2.flags.alCodaArmed).toBe(false);
+  });
+});
+
+// ── hold guards unknown targets (parity with anotherRound) ───────────────────
+describe('roadmap-vm — hold on an unknown repeat is a no-op', () => {
+  it('does not park a vamp on a non-existent repeat id', () => {
+    const c = compileOrThrow(['b1', 'b2'], [rstart('rs', 'b1'), rend('re', 'b2', 'rs', 2)]);
+    const s0 = initVM(c);
+    expect(override(c, s0, { kind: 'hold', repeatStartId: 'nope' })).toEqual(s0);
+  });
 });
 
 // ── purity ───────────────────────────────────────────────────────────────────
