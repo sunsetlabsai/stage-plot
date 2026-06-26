@@ -99,7 +99,17 @@ export type RefResolution =
 // authority — unmatched sections degrade to `unmapped` (→ review), they are not
 // silently forced together.
 export function normalizeLabel(label: string): string {
-  return label.trim().toLowerCase().replace(/\s+/g, ' ');
+  return label
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    // Strip a run of trailing punctuation ("Chorus:" / "Verse 1 ." → "chorus" /
+    // "verse 1"). BOUNDED to at most one separating space (`\s?`) so we only
+    // clean decoration ADJACENT to the label — we never reach across a word to
+    // grab punctuation that rightly belongs to something else ("Solo - to coda"
+    // keeps "- to coda"; only a true trailing "!" / ":" / "." is removed). Both
+    // charts normalize identically, so like still matches like.
+    .replace(/\s?[^\w\s]+$/, '');
 }
 
 // ordinal = 1-based occurrence index of a section among same-normalized-label

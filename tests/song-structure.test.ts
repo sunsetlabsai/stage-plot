@@ -71,6 +71,20 @@ describe('song-structure — normalizeLabel', () => {
     expect(normalizeLabel('  Chorus ')).toBe('chorus');
     expect(normalizeLabel('Guitar   Solo')).toBe('guitar solo');
   });
+
+  it('strips trailing punctuation adjacent (≤1 space) to the label', () => {
+    expect(normalizeLabel('Chorus:')).toBe('chorus');
+    expect(normalizeLabel('Verse 1 .')).toBe('verse 1');
+    expect(normalizeLabel('Bridge -')).toBe('bridge');
+    expect(normalizeLabel('Outro!!!')).toBe('outro');
+  });
+
+  it('does NOT reach across a word to strip far-off punctuation (the bound)', () => {
+    // The dash here joins meaningful content, not trailing decoration — keep it.
+    expect(normalizeLabel('Solo - to coda')).toBe('solo - to coda');
+    expect(normalizeLabel('Chorus (x2)')).toBe('chorus (x2'); // only the very-trailing ")" is decoration; mid-text survives
+    expect(normalizeLabel('Verse - then bridge')).toBe('verse - then bridge');
+  });
 });
 
 describe('song-structure — seedAlignment (label+ordinal seed)', () => {
