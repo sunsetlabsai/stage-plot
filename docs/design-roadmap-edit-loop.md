@@ -69,12 +69,15 @@ The edit loop is mostly assembled — three load-bearing pieces are already live
 
 The renderer is deterministic, so **re-opening and saving an unedited chart with
 unchanged render metadata re-derives byte-identical PDF/calibration → same hash →
-an idempotent no-op overwrite.** The narrowing matters: *render metadata* = song
-title + artist, read from the `songs` row at save time (`route.ts:76–85`), not from
-the spec. If the title/artist changed since the chart was built, the music-body
+an idempotent no-op overwrite.** The narrowing matters: *render metadata* = the
+**`song_title` from the save request** + the **`artist` reloaded from the `songs`
+row** at save time (`route.ts:76–85`) — title rides the request, only artist is
+re-read server-side. If either changed since the chart was built, the music-body
 geometry/calibration stays stable but the header re-renders to a **new hash** —
 still correct, just not byte-identical. So the precise claim is *same spec + same
-render metadata = idempotent*; spec-level geometry is always stable. That
+request `song_title` + same current `songs.artist` = idempotent*; spec-level
+geometry is always stable. (If the build later reloads title server-side too, fold
+title into "current `songs.*`" — but as written, title is request-supplied.) That
 determinism is the safety net under the whole loop.
 
 ## 4. The four gaps 5c fills
@@ -152,11 +155,21 @@ have changed in between. The dangerous interleave:
 **Fix — optimistic concurrency on the edit path only:**
 - The save body gains two **optional** fields, sent only by the edit flow:
   `expected_chart_id` and `expected_updated_at` (the values the GET door returned).
-- `save_builder_chart` gains matching optional params. When present, it asserts —
-  inside the same atomic commit, before the upsert — that the current row at
-  `(owner, song_key, role)` still has `id = expected_chart_id` **and**
-  `updated_at = expected_updated_at`. On mismatch it raises a conflict the route
-  maps to **409 Conflict** ("this chart changed since you opened it — reload").
+- `save_builder_chart` gains matching optional params. When present, the check must
+  be **race-free against a concurrent Replace landing between check and write** — a
+  plain read-then-upsert (even in one transaction) reopens the R1 hole: another
+  session can `UPDATE` the same `(owner, song_key, role)` row after the assertion and
+  before this save's `ON CONFLICT DO UPDATE`. So the guard is one of two atomic forms,
+  not a bare `SELECT` + upsert:
+  1. **`SELECT ... FOR UPDATE`** the slot row first (locking it for the txn), then
+     check `id = expected_chart_id` **and** `updated_at = expected_updated_at`, then
+     upsert — the lock serializes the concurrent Replace behind us; **or**
+  2. a **conditional edit-path `UPDATE ... WHERE id = expected_chart_id AND
+     updated_at = expected_updated_at`**, with **zero rows affected mapped to 409**
+     (no separate read at all — the WHERE *is* the precondition).
+  On mismatch the route maps to **409 Conflict** ("this chart changed since you
+  opened it — reload"). Transaction atomicity alone is **not** sufficient; the lock
+  or the conditional-WHERE is required.
 - When absent (the create flow), behaviour is **exactly today's** — no precondition.
 
 Why `updated_at` and not `chart_id` alone: Replace-with-file upserts **in place**,
@@ -184,8 +197,16 @@ This is the honest v1 — "dump-and-replace" literally means "describe it again.
 ## 6. Round-trip fidelity (the risk to verify)
 
 The load-bearing correctness claim: **`specToView` → `viewToSpec` is identity** for
-any spec the builder can produce, so opening a chart and saving it without edits
-never silently mutates it. Two known, accepted edges to pin (not regressions):
+any **canonical builder spec** — i.e. the specs `RoadmapBuilder` actually emits and
+that all existing builder saves hold — so opening a chart and saving it without edits
+never silently mutates it. The claim is **not** "identity for every
+`validateRoadmapSpec`-valid JSON": valid-but-noncanonical inputs (`quality: ''`,
+`alter: 0`, `held: false`, explicit even/single-chord beats, empty `changes: []`)
+normalize away on the round trip. That gap is **not blocking** — builder output is
+canonical and the live data is builder-written — but the **golden fixtures in §6's
+test must be explicitly canonical** (assert they match what the builder emits, not
+hand-rolled edge JSON), so the test guards the real invariant and isn't a false
+positive on noncanonical shapes. Two known, accepted edges to pin (not regressions):
 
 - **`held` chords.** Carried through `spec → view` but **not expressible in the
   per-beat text grammar**, so manually *re-typing* a held bar loses `held`. Opening
