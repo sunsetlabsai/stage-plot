@@ -19,6 +19,10 @@ interface PostBody {
   spec?: unknown;
   song_title?: string;
   role?: string;
+  // Optimistic-concurrency precondition, sent ONLY by the edit flow (the values
+  // the GET read door returned). Absent on the create flow → no precondition.
+  expected_chart_id?: string;
+  expected_updated_at?: string;
 }
 
 // POST /api/charts/roadmap/save — commit a builder chart. The client sends the
@@ -66,6 +70,12 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Invalid song title — cannot be empty or punctuation-only' }, { status: 400 });
   }
   const role = canonicalizeRole(body.role);
+
+  // Edit-path precondition (optional). When present, the RPC refuses the save if
+  // the slot no longer matches what the editor loaded (§4.4). Round-tripped from
+  // the GET read door; the client never interprets them.
+  const expectedChartId = typeof body.expected_chart_id === 'string' ? body.expected_chart_id : null;
+  const expectedUpdatedAt = typeof body.expected_updated_at === 'string' ? body.expected_updated_at : null;
 
   const admin = getSupabaseAdmin();
 
@@ -137,9 +147,20 @@ export async function POST(request: NextRequest) {
       bars: calibration.bars,
       roadmap: calibration.roadmap,
     },
+    p_expected_chart_id: expectedChartId,
+    p_expected_updated_at: expectedUpdatedAt,
   });
 
   if (rpcError) {
+    // Stale edit (§4.4): the slot changed since the editor loaded it. The RPC
+    // raises SQLSTATE 'PT409' under its row lock, so this is a genuine conflict,
+    // not a transient error — surface 409 so the client can prompt a reload.
+    if (rpcError.code === 'PT409') {
+      return Response.json(
+        { error: 'This chart changed since you opened it — reload and try again.' },
+        { status: 409 },
+      );
+    }
     // Do NOT delete the staged object here. The path is content-addressed
     // (…/${sourceHash}.pdf), so a concurrent save of the SAME spec stages and
     // commits the SAME object; removing it on our failure could yank the PDF a

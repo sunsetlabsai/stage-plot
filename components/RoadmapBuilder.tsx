@@ -44,17 +44,33 @@ import type { RoadmapSpec, SectionRepeat } from '@/lib/roadmap-spec';
 
 const KEYS = ['C', 'G', 'D', 'A', 'E', 'B', 'F', 'Bb', 'Eb', 'Ab', 'Am', 'Em', 'Dm', 'Bm'];
 
+// Re-opening a saved builder chart for editing. The spec + slot identity come from
+// the GET read door; the builder mounts straight into Review with the role locked
+// to overwrite, and threads the slot identity into save as the stale-edit
+// precondition (§4.3/§4.4).
+export interface EditChart {
+  chartId: string;
+  role: string;
+  spec: RoadmapSpec;
+  updatedAt: string;
+}
+
 interface Props {
   songTitle: string;          // fixed: this builder authors charts for THIS song
   charts: Chart[];            // existing charts → which roles are still free
+  editChart?: EditChart;      // present = re-open an existing builder chart to edit
   onClose: () => void;
   onSaved: (chart: Chart) => void;
 }
 
-export default function RoadmapBuilder({ songTitle, charts, onClose, onSaved }: Props) {
+export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, onSaved }: Props) {
   const [description, setDescription] = useState('');
   const [composeKey, setComposeKey] = useState(''); // '' = Auto (let L0 resolve)
-  const [view, setView] = useState<ViewModel | null>(null);
+  // Edit mode seeds the view from the saved spec → mounts directly in Review,
+  // skipping Compose. A fresh build starts null (Compose first). The refine box
+  // stays empty on re-open (v1): the manual editor is the default, Regenerate is
+  // opt-in (§5).
+  const [view, setView] = useState<ViewModel | null>(editChart ? specToView(editChart.spec) : null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
   const [specErrors, setSpecErrors] = useState<string[]>([]);
@@ -101,7 +117,7 @@ export default function RoadmapBuilder({ songTitle, charts, onClose, onSaved }: 
     >
       <header className="border-b border-zinc-800 px-6 py-3 flex items-center justify-between shrink-0">
         <div>
-          <h1 className="text-lg font-bold text-white">Build a Chart</h1>
+          <h1 className="text-lg font-bold text-white">{editChart ? 'Edit Chart' : 'Build a Chart'}</h1>
           <p className="text-xs text-zinc-500">{songTitle}</p>
         </div>
         <button onClick={onClose} className="text-zinc-500 hover:text-white text-2xl leading-none">
@@ -125,6 +141,7 @@ export default function RoadmapBuilder({ songTitle, charts, onClose, onSaved }: 
         <Review
           songTitle={songTitle}
           charts={charts}
+          editChart={editChart}
           view={view}
           setView={setView}
           description={description}
@@ -226,6 +243,7 @@ function Compose({
 function Review({
   songTitle,
   charts,
+  editChart,
   view,
   setView,
   description,
@@ -237,6 +255,7 @@ function Review({
 }: {
   songTitle: string;
   charts: Chart[];
+  editChart?: EditChart;
   view: ViewModel;
   setView: React.Dispatch<React.SetStateAction<ViewModel | null>>;
   description: string;
@@ -246,7 +265,9 @@ function Review({
   onRegenerate: () => void;
   onSaved: (chart: Chart) => void;
 }) {
-  const [role, setRole] = useState<ChartRole | ''>('');
+  // Edit mode locks the role to the chart being overwritten; a fresh build picks a
+  // free role at save time.
+  const [role, setRole] = useState<ChartRole | ''>(editChart ? canonicalizeRole(editChart.role) : '');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [mode, setMode] = useState<'numbers' | 'letters'>('numbers');
@@ -317,16 +338,30 @@ function Review({
       const res = await fetch('/api/charts/roadmap/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ spec, song_title: songTitle, role }),
+        body: JSON.stringify({
+          spec,
+          song_title: songTitle,
+          role,
+          // Edit mode threads the stale-edit precondition (§4.4); a fresh build
+          // omits it and the save route applies no precondition.
+          ...(editChart
+            ? { expected_chart_id: editChart.chartId, expected_updated_at: editChart.updatedAt }
+            : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        // 409 = the slot changed under this edit (Replace / another edit landed).
+        // The precondition is one-shot, so the loaded updatedAt is now stale —
+        // tell the owner to reopen rather than retry against a moving target.
         setSaveError(
-          data.error
-            ? data.details
-              ? `${data.error}: ${(data.details as string[]).slice(0, 3).join('; ')}`
-              : data.error
-            : 'Save failed.',
+          res.status === 409
+            ? data.error || 'This chart changed since you opened it — close and reopen to edit the latest.'
+            : data.error
+              ? data.details
+                ? `${data.error}: ${(data.details as string[]).slice(0, 3).join('; ')}`
+                : data.error
+              : 'Save failed.',
         );
         return;
       }
@@ -456,8 +491,22 @@ function Review({
         </div>
 
         <div className="border-t border-zinc-800 p-4 space-y-2 shrink-0">
-          <label className="block text-xs text-zinc-500">Save as role</label>
-          {free.length === 0 ? (
+          <label className="block text-xs text-zinc-500">{editChart ? 'Saving to role' : 'Save as role'}</label>
+          {editChart ? (
+            // Edit overwrites one chart — role is fixed, not a free-role pick.
+            <div className="flex items-center gap-2">
+              <span className="flex-1 px-2 py-1.5 text-sm text-white bg-zinc-800 border border-zinc-700 rounded">
+                {displayRole(canonicalizeRole(editChart.role))}
+              </span>
+              <button
+                onClick={save}
+                disabled={saving}
+                className="px-3 py-1.5 rounded bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-40"
+              >
+                {saving ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          ) : free.length === 0 ? (
             <p className="text-xs text-zinc-500">All roles already have a chart for this song.</p>
           ) : (
             <div className="flex gap-2">

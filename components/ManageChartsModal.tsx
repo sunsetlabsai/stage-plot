@@ -7,7 +7,7 @@ import { canonicalizeRole, displayRole, type ChartRole } from '@/lib/normalize';
 import { uploadChart, ChartUploadError, type ConvertResult } from '@/lib/chart-upload';
 import { availableRoles, applyUploadedChart, removeChartById } from '@/lib/chart-management';
 import { loadPdfDoc, renderPage } from '@/lib/pdf-viewer';
-import RoadmapBuilder from '@/components/RoadmapBuilder';
+import RoadmapBuilder, { type EditChart } from '@/components/RoadmapBuilder';
 
 const ACCEPT = '.pdf,.png,.jpg,.jpeg';
 
@@ -28,6 +28,9 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [building, setBuilding] = useState(false);
+  // The builder chart being re-opened for edit (its spec + slot identity loaded
+  // lazily from the GET read door); null = not editing.
+  const [editTarget, setEditTarget] = useState<EditChart | null>(null);
   const [addRole, setAddRole] = useState<ChartRole | ''>('');
   // Track the previewed chart by id and derive the chart from the latest list:
   // Replace preserves chart_library.id but swaps the file, so deriving keeps the
@@ -82,12 +85,41 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
     }
   }
 
-  // A chart built from a RoadmapSpec is persisted server-side by the builder's
-  // /save route; we only fold the returned chart into the live list (replacing
-  // any existing chart for that role, like an upload).
+  // A chart built (or edited) from a RoadmapSpec is persisted server-side by the
+  // builder's /save route; we only fold the returned chart into the live list
+  // (replacing any existing chart for that role, like an upload).
   function onBuilt(chart: Chart) {
     onChartsChanged(applyUploadedChart(charts, chart));
     setBuilding(false);
+    setEditTarget(null);
+  }
+
+  // Re-open a builder chart for editing: lazily fetch its source_spec + slot
+  // identity from the owner-gated read door, then mount the builder in edit mode.
+  // Non-builder charts have no Edit affordance, so this is only reached for charts
+  // that carry a spec.
+  async function startEdit(chart: Chart) {
+    if (!chart.fileId) return;
+    setBusy(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/charts/roadmap/${chart.fileId}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error || 'Could not open this chart for editing.');
+        return;
+      }
+      setEditTarget({
+        chartId: data.chart_id,
+        role: data.role,
+        spec: data.source_spec,
+        updatedAt: data.updated_at,
+      });
+    } catch {
+      setError('Could not open this chart for editing.');
+    } finally {
+      setBusy(false);
+    }
   }
 
   function onAddFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -178,12 +210,25 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
                 </button>
                 {isOwner && (
                   <>
+                    {/* Edit (spec) is offered only for builder charts — an
+                        uploaded/converted chart has no source_spec to edit. */}
+                    {c.is_builder && (
+                      <button
+                        onClick={() => startEdit(c)}
+                        disabled={busy}
+                        className="text-xs text-zinc-400 hover:text-blue-400 disabled:opacity-40"
+                      >
+                        Edit
+                      </button>
+                    )}
                     <button
                       onClick={() => startReplace(c.role)}
                       disabled={busy}
                       className="text-xs text-zinc-400 hover:text-blue-400 disabled:opacity-40"
                     >
-                      Replace
+                      {/* Reworded on builder rows so "Edit" (spec) vs file-replace
+                          reads unambiguously (§4.1). */}
+                      {c.is_builder ? 'Replace with file' : 'Replace'}
                     </button>
                     <button
                       onClick={() => c.fileId && handleDelete(c.fileId)}
@@ -258,11 +303,15 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
         </div>
       </div>
 
-      {building && (
+      {(building || editTarget) && (
         <RoadmapBuilder
           songTitle={songTitle}
           charts={charts}
-          onClose={() => setBuilding(false)}
+          editChart={editTarget ?? undefined}
+          onClose={() => {
+            setBuilding(false);
+            setEditTarget(null);
+          }}
           onSaved={onBuilt}
         />
       )}

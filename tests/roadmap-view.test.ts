@@ -456,3 +456,170 @@ describe('parseBarInput — letter-aware in key context', () => {
     expect(parseBarInput('4 5', 4, 'D')).toEqual({ ok: true, cells: [cell(4, 2), cell(5, 2)] });
   });
 });
+
+// ── §6 golden round-trip (the edit-loop fidelity guard) ──────────────────────
+// The load-bearing claim for re-open: viewToSpec(specToView(spec)) is IDENTITY for
+// any CANONICAL builder spec, so opening a saved chart and saving it without edits
+// never silently mutates it. These fixtures are deliberately CANONICAL — the shapes
+// the builder actually emits (Codex R2 LOW): the claim is NOT identity for every
+// validateRoadmapSpec-valid JSON (noncanonical fields normalize away; see the last
+// test). held + barsPerLine are pinned explicitly because both ride the ViewModel
+// and a regression would silently drop a hold or re-flow the chart on save.
+describe('§6 golden round-trip — canonical specs are identity', () => {
+  const GOLDEN: Array<{ name: string; spec: RoadmapSpec }> = [
+    {
+      name: 'linear (sparse changes, single + inherited bars)',
+      spec: {
+        version: 1,
+        timeSig: { beats: 4, unit: 4 },
+        renderKey: 'G',
+        sections: [{ id: 'intro', label: 'Intro', bars: 4, changes: [{ bar: 1, chords: [{ degree: 1 }] }] }],
+      },
+    },
+    {
+      name: 'split bars (even division + uneven explicit beats)',
+      spec: {
+        version: 1,
+        timeSig: { beats: 4, unit: 4 },
+        renderKey: 'C',
+        sections: [
+          {
+            id: 'v',
+            label: 'Verse',
+            bars: 2,
+            changes: [
+              { bar: 1, chords: [{ degree: 1 }, { degree: 4 }] },
+              { bar: 2, chords: [{ degree: 1, beats: 3 }, { degree: 5, beats: 1 }] },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      name: 'plain repeat',
+      spec: {
+        version: 1,
+        timeSig: { beats: 4, unit: 4 },
+        renderKey: 'D',
+        sections: [
+          {
+            id: 'ch',
+            label: 'Chorus',
+            bars: 4,
+            repeat: { kind: 'plain', times: 2 },
+            changes: [{ bar: 1, chords: [{ degree: 1 }] }],
+          },
+        ],
+      },
+    },
+    {
+      name: 'volta endings',
+      spec: {
+        version: 1,
+        timeSig: { beats: 4, unit: 4 },
+        renderKey: 'A',
+        sections: [
+          {
+            id: 'v',
+            label: 'Verse',
+            bars: 6,
+            repeat: {
+              kind: 'volta',
+              endings: [
+                { bars: { start: 5, count: 1 }, passes: [1] },
+                { bars: { start: 6, count: 1 }, passes: [2] },
+              ],
+            },
+            changes: [{ bar: 1, chords: [{ degree: 1 }] }],
+          },
+        ],
+      },
+    },
+    {
+      name: 'alters (♭VII), quality, and a diatonic slash bass',
+      spec: {
+        version: 1,
+        timeSig: { beats: 4, unit: 4 },
+        renderKey: 'D',
+        sections: [
+          {
+            id: 'br',
+            label: 'Bridge',
+            bars: 2,
+            changes: [
+              { bar: 1, chords: [{ degree: 7, alter: -1 }] },
+              { bar: 2, chords: [{ degree: 4, quality: 'm7' }, { degree: 5, bass: 7 }] },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      name: 'held chords (diamond whole-bar)',
+      spec: {
+        version: 1,
+        timeSig: { beats: 4, unit: 4 },
+        renderKey: 'G',
+        sections: [{ id: 'out', label: 'Outro', bars: 2, changes: [{ bar: 1, chords: [{ degree: 1, held: true }] }] }],
+      },
+    },
+    {
+      name: 'non-default barsPerLine',
+      spec: {
+        version: 1,
+        timeSig: { beats: 4, unit: 4 },
+        renderKey: 'C',
+        barsPerLine: 2,
+        sections: [{ id: 'a', label: 'A', bars: 4, changes: [{ bar: 1, chords: [{ degree: 1 }] }] }],
+      },
+    },
+    {
+      name: 'full navigation (D.S. al Coda)',
+      spec: {
+        version: 1,
+        timeSig: { beats: 4, unit: 4 },
+        renderKey: 'C',
+        sections: [
+          { id: 'a', label: 'A', bars: 4 },
+          { id: 'b', label: 'B', bars: 4 },
+        ],
+        navigation: {
+          segno: { section: 0, bar: 1 },
+          coda: { section: 1, bar: 3 },
+          toCoda: { section: 0, bar: 4 },
+          jump: { at: { section: 1, bar: 4 }, from: 'segno', until: 'coda' },
+        },
+      },
+    },
+  ];
+
+  for (const { name, spec } of GOLDEN) {
+    it(`${name}: is a valid spec`, () => {
+      expect(validateRoadmapSpec(spec).ok).toBe(true);
+    });
+    it(`${name}: viewToSpec(specToView(spec)) === spec`, () => {
+      expect(viewToSpec(specToView(spec))).toEqual(spec);
+    });
+    it(`${name}: round-tripped spec stays valid`, () => {
+      expect(validateRoadmapSpec(viewToSpec(specToView(spec))).ok).toBe(true);
+    });
+  }
+
+  it('noncanonical-but-valid fields normalize away (NOT identity — by design)', () => {
+    // quality:'', alter:0, held:false are all valid per validateRoadmapSpec but are
+    // NOT the canonical form the builder emits, so the round trip drops them. This
+    // pins the scoped claim: identity holds for canonical specs, not arbitrary JSON.
+    const noncanonical: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'C',
+      sections: [
+        { id: 'a', label: 'A', bars: 1, changes: [{ bar: 1, chords: [{ degree: 1, quality: '', alter: 0, held: false }] }] },
+      ],
+    };
+    expect(validateRoadmapSpec(noncanonical).ok).toBe(true);
+    const round = viewToSpec(specToView(noncanonical));
+    expect(round.sections[0].changes![0].chords[0]).toEqual({ degree: 1 });
+    expect(round).not.toEqual(noncanonical);
+  });
+});
