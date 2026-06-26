@@ -1,4 +1,10 @@
 import type { Bar, ChartCalibration, RoadmapMarker, SectionAnchor, System } from './types';
+import { compileRoadmap, initVM, stepVM } from './roadmap-vm';
+import type { TraversalStep, RoadmapError } from './roadmap-vm';
+
+// The traversal vocabulary now lives with the VM core; re-exported so existing
+// importers (`import { TraversalStep } from './chart-calibration'`) are unbroken.
+export type { TraversalStep, RoadmapError } from './roadmap-vm';
 
 // ── Chart Calibration — v3: sections + system/bar geometry + nav roadmap ────
 // Pure helpers for the navigation/timeline calibration sidecar. v1 modeled a
@@ -790,307 +796,33 @@ export function prevBar(cal: ChartCalibration, currentBarId: string): Bar | null
 //
 // `pass` on each traversal step = 1-based count of entries into that bar.
 
-export interface TraversalStep {
-  barId: string;
-  pass: number;
-}
-
-export interface RoadmapError {
-  markerIds: string[];
-  reason: string;
-}
-
 export type RoadmapResult =
   | { ok: true; traversal: TraversalStep[] }
   | { ok: false; error: RoadmapError };
 
-const ROADMAP_TERMINATION_K = 8;
-
-interface EndingSpan {
-  marker: Extract<RoadmapMarker, { kind: 'ending' }>;
-  repeatStartId: string;
-  startPos: number;
-  lastPos: number;
-}
-
+// The played traversal of a chart's roadmap. Now a thin batch runner over the
+// extracted resumable VM core (lib/roadmap-vm.ts): compile → init → step to
+// completion. The musical semantics live ONCE in the core, shared with the live
+// conductor VM (design-conductor-authority.md §3.1). The termination cap (a
+// non-terminating roadmap is a structural error) applies only here — live
+// stepping is MD-bounded.
 export function resolveRoadmap(cal: ChartCalibration): RoadmapResult {
-  const bars = barsInOrder(cal);
-  const markers = cal.roadmap ?? [];
+  const compiled = compileRoadmap(barsInOrder(cal), cal.roadmap ?? []);
+  if (!compiled.ok) return { ok: false, error: compiled.error };
 
-  // Degenerate case: no roadmap ⇒ linear playback (clean back-compat).
-  if (markers.length === 0) {
-    return { ok: true, traversal: bars.map((b) => ({ barId: b.id, pass: 1 })) };
-  }
-
-  const barPos = new Map<string, number>();
-  bars.forEach((b, i) => barPos.set(b.id, i));
-
-  const err = (markerIds: string[], reason: string): RoadmapResult => ({
-    ok: false,
-    error: { markerIds, reason },
-  });
-
-  // Marker buckets.
-  type M<K extends RoadmapMarker['kind']> = Extract<RoadmapMarker, { kind: K }>;
-  const repeatStarts = markers.filter((m): m is M<'repeatStart'> => m.kind === 'repeatStart');
-  const repeatEnds = markers.filter((m): m is M<'repeatEnd'> => m.kind === 'repeatEnd');
-  const endings = markers.filter((m): m is M<'ending'> => m.kind === 'ending');
-  const segnos = markers.filter((m): m is M<'segno'> => m.kind === 'segno');
-  const codas = markers.filter((m): m is M<'coda'> => m.kind === 'coda');
-  const fines = markers.filter((m): m is M<'fine'> => m.kind === 'fine');
-  const toCodas = markers.filter((m): m is M<'toCoda'> => m.kind === 'toCoda');
-  const jumps = markers.filter((m): m is M<'jump'> => m.kind === 'jump');
-
-  // Defensive FK guard (the API path already structurally validated, but the
-  // resolver also runs on hand-edited DB rows). §5 #7.
-  const repeatStartById = new Map(repeatStarts.map((m) => [m.id, m]));
-  for (const m of markers) {
-    if (m.kind === 'ending') {
-      if (!m.barIds.every((b) => barPos.has(b))) return err([m.id], 'ending references a missing bar');
-    } else if (!barPos.has(m.barId)) {
-      return err([m.id], `${m.kind} references a missing bar`);
-    }
-    if ((m.kind === 'repeatEnd' || m.kind === 'ending') && !repeatStartById.has(m.repeatStartId)) {
-      return err([m.id], `${m.kind} is not bound to a repeatStart`);
-    }
-  }
-
-  // §5 — no two same-kind markers may share a bar. The walk keys its
-  // action lookups (repeatEndAt / jumpAt / toCodaAt) by bar position, so a
-  // second same-kind marker on the same bar would silently overwrite the first
-  // and drive the wrong traversal. Reject as contradictory (endings handled by
-  // their own overlap checks). v1 also rejects two repeats closing on one bar.
-  const byKindBar = new Map<string, string[]>();
-  for (const m of markers) {
-    if (m.kind === 'ending') continue;
-    const key = `${m.kind}\u0000${m.barId}`;
-    const arr = byKindBar.get(key) ?? [];
-    arr.push(m.id);
-    byKindBar.set(key, arr);
-  }
-  for (const [key, ids] of byKindBar) {
-    if (ids.length > 1) {
-      return err(ids, `duplicate ${key.split('\u0000')[0]} markers on the same bar`);
-    }
-  }
-
-  // §5 #2 — at most one segno/coda/fine.
-  if (segnos.length > 1) return err(segnos.map((m) => m.id), 'multiple Segno markers');
-  if (codas.length > 1) return err(codas.map((m) => m.id), 'multiple Coda markers');
-  if (fines.length > 1) return err(fines.map((m) => m.id), 'multiple Fine markers');
-
-  // §5 #1 — jump / Coda resolvability.
-  for (const j of jumps) {
-    if (j.from === 'segno' && segnos.length === 0) return err([j.id], 'D.S. has no Segno');
-    if (j.until === 'fine' && fines.length === 0) return err([j.id], 'al Fine has no Fine');
-    if (j.until === 'coda' && codas.length === 0) return err([j.id], 'al Coda has no Coda');
-    if (j.until === 'coda' && toCodas.length === 0) return err([j.id], 'al Coda has no To Coda');
-  }
-  for (const tc of toCodas) {
-    if (codas.length === 0) return err([tc.id], 'To Coda has no Coda');
-  }
-
-  // Per-repeat structure: times, span ordering (#5), ending ranges (#6),
-  // partition (#3), mixed expression (#4).
-  const times = new Map<string, number>();
-  const endingSpansByRepeat = new Map<string, EndingSpan[]>();
-
-  for (const R of repeatStarts) {
-    const rPos = barPos.get(R.barId)!;
-    const boundEnds = repeatEnds.filter((m) => m.repeatStartId === R.id);
-    const boundEndings = endings.filter((m) => m.repeatStartId === R.id);
-
-    // §5 #4 — a repeat is expressed EITHER plain OR as voltas, never both.
-    if (boundEnds.length > 0 && boundEndings.length > 0) {
-      return err([R.id, ...boundEnds.map((m) => m.id), ...boundEndings.map((m) => m.id)],
-        'repeat has both a plain repeatEnd and volta endings');
-    }
-    // Two :| for one |: makes the back-jump ambiguous.
-    if (boundEnds.length > 1) {
-      return err([R.id, ...boundEnds.map((m) => m.id)], 'repeat has multiple repeatEnd markers');
-    }
-
-    if (boundEndings.length > 0) {
-      // §5 #5 — every volta bar must come after the repeatStart.
-      for (const e of boundEndings) {
-        for (const b of e.barIds) {
-          if (barPos.get(b)! <= rPos) return err([R.id, e.id], 'volta ending precedes its repeatStart');
-        }
-      }
-      // §5 #6 — each ending's bars contiguous in reading order.
-      const spans: EndingSpan[] = [];
-      for (const e of boundEndings) {
-        const positions = e.barIds.map((b) => barPos.get(b)!).sort((a, b) => a - b);
-        const unique = new Set(positions);
-        if (unique.size !== positions.length) return err([e.id], 'ending has duplicate bars');
-        if (positions[positions.length - 1] - positions[0] !== positions.length - 1) {
-          return err([e.id], 'ending bars are not contiguous');
-        }
-        spans.push({ marker: e, repeatStartId: R.id, startPos: positions[0], lastPos: positions[positions.length - 1] });
-      }
-      // §5 #6 — endings sorted, non-overlapping, no shared bar.
-      spans.sort((a, b) => a.startPos - b.startPos);
-      for (let i = 1; i < spans.length; i++) {
-        if (spans[i].startPos <= spans[i - 1].lastPos) {
-          return err([spans[i - 1].marker.id, spans[i].marker.id], 'endings overlap or share a bar');
-        }
-      }
-      // §5 #3 — passes partition 1..max with no gap/overlap.
-      const all = boundEndings.flatMap((e) => e.numbers);
-      const seen = new Set<number>();
-      for (const n of all) {
-        if (seen.has(n)) return err(boundEndings.map((e) => e.id), 'volta passes overlap');
-        seen.add(n);
-      }
-      const max = Math.max(...all);
-      for (let n = 1; n <= max; n++) {
-        if (!seen.has(n)) return err(boundEndings.map((e) => e.id), 'volta passes do not partition 1..max');
-      }
-      times.set(R.id, max);
-      endingSpansByRepeat.set(R.id, spans);
-    } else if (boundEnds.length === 1) {
-      const e = boundEnds[0];
-      // §5 #5 — repeatEnd must come after its repeatStart.
-      if (barPos.get(e.barId)! <= rPos) return err([R.id, e.id], 'repeatEnd precedes its repeatStart');
-      times.set(R.id, e.times ?? 2);
-    } else {
-      // Lone repeatStart — cosmetic no-op (never a back-jump target).
-      times.set(R.id, 1);
-    }
-  }
-
-  // Walk lookups.
-  const segno = segnos[0];
-  const coda = codas[0];
-  const endingStartAt = new Map<number, EndingSpan>();
-  const endingEndAt = new Map<number, EndingSpan>();
-  const endingStartsByRepeat = new Map<string, number[]>();
-  const groupLastPosByRepeat = new Map<string, number>();
-  for (const [rsId, spans] of endingSpansByRepeat) {
-    for (const span of spans) {
-      endingStartAt.set(span.startPos, span);
-      endingEndAt.set(span.lastPos, span);
-    }
-    endingStartsByRepeat.set(rsId, spans.map((s) => s.startPos).sort((a, b) => a - b));
-    groupLastPosByRepeat.set(rsId, Math.max(...spans.map((s) => s.lastPos)));
-  }
-  const repeatEndAt = new Map<number, M<'repeatEnd'>>();
-  for (const e of repeatEnds) repeatEndAt.set(barPos.get(e.barId)!, e);
-  const jumpAt = new Map<number, M<'jump'>>();
-  for (const j of jumps) jumpAt.set(barPos.get(j.barId)!, j);
-  const toCodaAt = new Map<number, M<'toCoda'>>();
-  for (const tc of toCodas) toCodaAt.set(barPos.get(tc.barId)!, tc);
-  const fineAt = new Set<number>(fines.map((f) => barPos.get(f.barId)!));
-
-  // §4 termination backstop (multiplicative for nesting + additive for jumps).
-  let timesProduct = 1;
-  for (const t of times.values()) timesProduct *= t;
-  const cap = bars.length * timesProduct * (jumps.length + 1) + ROADMAP_TERMINATION_K;
-
-  // Walk state.
-  const completedPasses = new Map<string, number>();
-  for (const R of repeatStarts) completedPasses.set(R.id, 0);
-  const fired = new Map<string, boolean>();
-  let toCodaFired = false;
-  let alFineActive = false;
-  let alCodaArmed = false;
-  const passCount = new Map<string, number>();
+  const program = compiled.compiled;
   const traversal: TraversalStep[] = [];
-
-  const backJumpTo = (rsId: string, triggerPos: number): number => {
-    const target = barPos.get(repeatStartById.get(rsId)!.barId)!;
-    // Nested-reset: replay inner repeats on each outer pass (§4).
-    for (const R of repeatStarts) {
-      if (R.id === rsId) continue;
-      const sp = barPos.get(R.barId)!;
-      if (sp > target && sp <= triggerPos) completedPasses.set(R.id, 0);
-    }
-    return target;
-  };
-
-  let cursor = 0;
-  while (cursor < bars.length) {
-    // Rule 1 — volta entry-select. Skip an ending whose numbers exclude the
-    // current pass; fall through to the next ending (or past the group).
-    const startSpan = endingStartAt.get(cursor);
-    if (startSpan) {
-      const k = completedPasses.get(startSpan.repeatStartId)! + 1;
-      if (!startSpan.marker.numbers.includes(k)) {
-        const starts = endingStartsByRepeat.get(startSpan.repeatStartId)!;
-        const next = starts.find((p) => p > cursor);
-        cursor = next ?? groupLastPosByRepeat.get(startSpan.repeatStartId)! + 1;
-        continue;
+  let state = initVM(program);
+  while (!state.done) {
+    const { transition, state: next } = stepVM(program, state);
+    if (transition) {
+      traversal.push(transition);
+      if (traversal.length > program.cap) {
+        return { ok: false, error: { markerIds: (cal.roadmap ?? []).map((m) => m.id), reason: 'roadmap does not terminate' } };
       }
     }
-
-    // Record the bar.
-    const bar = bars[cursor];
-    const pass = (passCount.get(bar.id) ?? 0) + 1;
-    passCount.set(bar.id, pass);
-    traversal.push({ barId: bar.id, pass });
-    if (traversal.length > cap) {
-      return err(markers.map((m) => m.id), 'roadmap does not terminate');
-    }
-
-    // End-edge rules, in priority order. `handled` ⇒ cursor already repositioned.
-    let handled = false;
-
-    // Rule 2a — exit of a taken volta (back-jump point).
-    const exitSpan = endingEndAt.get(cursor);
-    if (exitSpan) {
-      const R = exitSpan.repeatStartId;
-      completedPasses.set(R, completedPasses.get(R)! + 1);
-      if (completedPasses.get(R)! < times.get(R)!) {
-        cursor = backJumpTo(R, cursor);
-        handled = true;
-      }
-      // else fall through past the group (lower rules may still apply).
-    }
-
-    // Rule 2b — plain repeatEnd.
-    if (!handled) {
-      const re = repeatEndAt.get(cursor);
-      if (re) {
-        const R = re.repeatStartId;
-        completedPasses.set(R, completedPasses.get(R)! + 1);
-        if (completedPasses.get(R)! < times.get(R)!) {
-          cursor = backJumpTo(R, cursor);
-          handled = true;
-        }
-      }
-    }
-
-    // Rule 3 — jump (D.C./D.S.), fires at most once.
-    if (!handled) {
-      const j = jumpAt.get(cursor);
-      if (j && !fired.get(j.id)) {
-        fired.set(j.id, true);
-        if (j.until === 'fine') alFineActive = true;
-        if (j.until === 'coda') alCodaArmed = true;
-        cursor = j.from === 'capo' ? 0 : barPos.get(segno!.barId)!;
-        handled = true;
-      }
-    }
-
-    // Rule 4 — To Coda (only once an al Coda jump has armed it).
-    if (!handled && alCodaArmed && !toCodaFired) {
-      const tc = toCodaAt.get(cursor);
-      if (tc) {
-        toCodaFired = true;
-        cursor = barPos.get(coda!.barId)!;
-        handled = true;
-      }
-    }
-
-    // Rule 5 — Fine (only once an al Fine jump has activated it). Stop.
-    if (!handled && alFineActive && fineAt.has(cursor)) {
-      break;
-    }
-
-    // Rule 6 — advance.
-    if (!handled) cursor++;
+    state = next;
   }
-
   return { ok: true, traversal };
 }
 
