@@ -140,6 +140,19 @@ function withinSectionOffset(structure: SongStructure, barId: string): { section
   return { sectionId: bar.sectionId, offset };
 }
 
+function sectionBarCount(structure: SongStructure, sectionId: string): number {
+  return structure.bars.filter((b) => b.sectionId === sectionId).length;
+}
+
+// A resolved within-section offset must name a REAL canonical bar (§2.3.1 — a
+// barOffset is a "bounded, proven convenience," never a free portable number).
+// Bounding against the CANONICAL bar count is this pure layer's job (distinct
+// from local geometry, which the renderer owns): an isomorphic span has equal
+// counts, so a valid canonical offset is also a valid local one.
+function offsetInRange(offset: number, sectionId: string, structure: SongStructure): boolean {
+  return Number.isInteger(offset) && offset >= 0 && offset < sectionBarCount(structure, sectionId);
+}
+
 function markerBarId(structure: SongStructure, kind: 'segno' | 'coda' | 'fine'): string | null {
   const m = structure.roadmap.find((mk) => mk.kind === kind);
   return m && 'barId' in m ? m.barId : null;
@@ -162,14 +175,25 @@ export function locateRef(
     }
     case 'section': {
       if (!structure.sections.some((s) => s.id === ref.sectionId)) return null;
-      return { sectionId: ref.sectionId, offset: Math.max(0, ref.barOffset ?? 0) };
+      // No barOffset = section-level (head) — always valid for an existing section.
+      if (ref.barOffset === undefined) return { sectionId: ref.sectionId, offset: 0 };
+      // An explicit offset must name a real canonical bar in the section, else
+      // it's a corrupt/non-portable directive → null → self-nav (never guessed).
+      if (!offsetInRange(ref.barOffset, ref.sectionId, structure)) return null;
+      return { sectionId: ref.sectionId, offset: ref.barOffset };
     }
     case 'repeatStart': {
       const m = structure.roadmap.find((mk) => mk.id === ref.markerId && mk.kind === 'repeatStart');
       if (!m || !('barId' in m)) return null;
       const base = withinSectionOffset(structure, m.barId);
       if (!base) return null;
-      return { sectionId: base.sectionId, offset: base.offset + Math.max(0, ref.barOffset ?? 0) };
+      if (ref.barOffset === undefined) return base;
+      if (!Number.isInteger(ref.barOffset) || ref.barOffset < 0) return null;
+      const resolved = base.offset + ref.barOffset;
+      // The offset is relative to the repeat-start bar but must stay within that
+      // bar's canonical section (a barOffset can't run past the section).
+      if (!offsetInRange(resolved, base.sectionId, structure)) return null;
+      return { sectionId: base.sectionId, offset: resolved };
     }
   }
 }
@@ -200,6 +224,11 @@ export function resolveRef(
   alignment: ChartAlignment,
   ref: CanonicalRef,
 ): RefResolution {
+  // Fail closed across songs: SongStructure is song-scoped and stable ids
+  // (intro/solo/…) can coincide between songs, so a stale/cross-song alignment
+  // must never resolve against the wrong structure.
+  if (alignment.songId !== structure.songId) return { status: 'unresolved' };
+
   const loc = locateRef(structure, ref);
   if (!loc) return { status: 'unresolved' };
 
@@ -269,16 +298,27 @@ export function seedAlignment(
   const localOrdinals = sectionOrdinals(cal.sections);
   const canonOrdinals = sectionOrdinals(structure.sections);
 
-  // Index local sections by (normalized label, ordinal) for O(1) lookup.
+  // Index local sections by (normalized label, ordinal) for O(1) lookup. A blank
+  // normalized label is NOT usable evidence — never seed a key from it (else two
+  // untagged sections would match by ordinal alone, manufacturing a confirmed
+  // `local` from "no label" — exactly the silent guess the seed rule forbids).
   const localByKey = new Map<string, SectionAnchor>();
   for (const ls of cal.sections) {
-    localByKey.set(`${normalizeLabel(ls.label)}#${localOrdinals.get(ls.id)}`, ls);
+    const norm = normalizeLabel(ls.label);
+    if (norm === '') continue;
+    localByKey.set(`${norm}#${localOrdinals.get(ls.id)}`, ls);
   }
 
   const sections: Record<string, NodeAlignment> = {};
   for (const cs of structure.sections) {
-    const key = `${normalizeLabel(cs.label)}#${canonOrdinals.get(cs.id)}`;
-    const match = localByKey.get(key);
+    const norm = normalizeLabel(cs.label);
+    // A blank-labeled canonical section has no usable evidence → unmapped (loud,
+    // → review), never a guessed local.
+    if (norm === '') {
+      sections[cs.id] = { status: 'unmapped' };
+      continue;
+    }
+    const match = localByKey.get(`${norm}#${canonOrdinals.get(cs.id)}`);
     sections[cs.id] = match
       ? { status: 'local', localSectionId: match.id, barIsomorphic: isBarIsomorphic(structure, cs.id, cal, match.id) }
       : { status: 'unmapped' };

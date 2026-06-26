@@ -152,6 +152,57 @@ describe('song-structure — §2.4 divergence (same place, different charts)', (
   });
 });
 
+describe('song-structure — barOffset bounds (§2.3.1, must name a real canonical bar)', () => {
+  it('an in-range offset resolves; an out-of-range one self-navs (never a phantom bar)', () => {
+    const s = makeStructure(); // solo has 8 canonical bars (indices 0..7)
+    const g = seedAlignment(s, 'guitar', guitarCal());
+    expect(resolveRef(s, g, { kind: 'section', sectionId: 'solo', barOffset: 7 }))
+      .toEqual({ status: 'local', localSectionId: 'g-solo', barOffset: 7, barApproximate: false });
+    expect(locateRef(s, { kind: 'section', sectionId: 'solo', barOffset: 8 })).toBeNull();
+    expect(resolveRef(s, g, { kind: 'section', sectionId: 'solo', barOffset: 999 })).toEqual({ status: 'unresolved' });
+  });
+
+  it('rejects a non-integer offset', () => {
+    const s = makeStructure();
+    expect(locateRef(s, { kind: 'section', sectionId: 'solo', barOffset: 1.5 })).toBeNull();
+  });
+
+  it('a repeatStart offset that runs past its section self-navs', () => {
+    const s = makeStructure();
+    s.roadmap = [{ id: 'rs', kind: 'repeatStart', barId: 'c-s3', edge: 'start' }]; // section index 2
+    expect(locateRef(s, { kind: 'repeatStart', markerId: 'rs', barOffset: 5 })).toEqual({ sectionId: 'solo', offset: 7 });
+    expect(locateRef(s, { kind: 'repeatStart', markerId: 'rs', barOffset: 6 })).toBeNull(); // 2+6=8 ≥ 8 bars
+  });
+});
+
+describe('song-structure — fail closed across songs (§2 song-scoped)', () => {
+  it('an alignment whose songId differs from the structure resolves to unresolved', () => {
+    const s = makeStructure();
+    const a = seedAlignment(s, 'guitar', guitarCal());
+    const crossSong: ChartAlignment = { ...a, songId: 'a-different-song' };
+    expect(resolveRef(s, crossSong, { kind: 'section', sectionId: 'solo' })).toEqual({ status: 'unresolved' });
+  });
+});
+
+describe('song-structure — blank labels never seed-match (MED fix)', () => {
+  it('a blank-labeled section is unmapped, never matched to another blank by ordinal', () => {
+    const s: SongStructure = {
+      songId: 'song-3',
+      sections: [cs('a', ''), cs('b', 'Chorus')],
+      bars: [cbar('ba', 'a'), cbar('bb', 'b')],
+      roadmap: [],
+    };
+    const cal = {
+      sections: [sa('la', '   '), sa('lb', 'Chorus')],
+      bars: [bar('lba', 'la', 1), bar('lbb', 'lb', 2)],
+      roadmap: [],
+    };
+    const a = seedAlignment(s, 'c', cal);
+    expect(a.sections['a']).toEqual({ status: 'unmapped' });
+    expect((a.sections['b'] as { localSectionId: string }).localSectionId).toBe('lb');
+  });
+});
+
 describe('song-structure — tacet (rest + re-home, §2.2.0)', () => {
   it('resolves to tacet with the next present local section as re-home target', () => {
     const s = makeStructure();
