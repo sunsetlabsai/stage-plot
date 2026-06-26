@@ -219,13 +219,30 @@ describe('roadmap-vm — §3.4 exit semantics', () => {
       ['b1', 'b2', 'b3', 'b4'],
       [rstart('rs', 'b1'), ending('e1', 'rs', ['b3'], [1]), ending('e2', 'rs', ['b4'], [2])],
     );
-    const held = stepN(c, override(c, initVM(c), { kind: 'hold', repeatStartId: 'rs' }), 9);
-    // Under hold it loops body + first ending forever, never the final ending.
-    expect(held.ids).toEqual(['b1', 'b2', 'b3', 'b1', 'b2', 'b3', 'b1', 'b2', 'b3']);
+    const held = stepN(c, override(c, initVM(c), { kind: 'hold', repeatStartId: 'rs' }), 6);
+    // Under hold it loops the BODY ONLY (stays before the endings), never an ending.
+    expect(held.ids).toEqual(['b1', 'b2', 'b1', 'b2', 'b1', 'b2']);
     expect(held.state.completedPasses['rs']).toBe(0); // exit-increment suppressed
     const released = runCollect(c, override(c, held.state, { kind: 'release', repeatStartId: 'rs' }));
-    expect(released.ids).toEqual(['b1', 'b2', 'b4']); // final ending on release
+    expect(released.ids).toEqual(['b4']); // release clamps to times-1 ⇒ final ending next
     expect(released.state.done).toBe(true);
+  });
+
+  it('plain-repeat vamp loops the whole body; release takes the natural exit', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3'], [rstart('rs', 'b1'), rend('re', 'b3', 'rs', 2)]);
+    const held = stepN(c, override(c, initVM(c), { kind: 'hold', repeatStartId: 'rs' }), 6);
+    // No ending group ⇒ the whole body (b1..b3) loops; the repeatEnd never increments.
+    expect(held.ids).toEqual(['b1', 'b2', 'b3', 'b1', 'b2', 'b3']);
+    expect(held.state.completedPasses['rs']).toBe(0);
+    const released = runCollect(c, override(c, held.state, { kind: 'release', repeatStartId: 'rs' }));
+    expect(released.ids).toEqual(['b1', 'b2', 'b3']); // one final pass then exits
+    expect(released.state.done).toBe(true);
+  });
+
+  it('release on a repeat that is not held is a no-op', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3'], [rstart('rs', 'b1'), rend('re', 'b3', 'rs', 2)]);
+    const s0 = initVM(c);
+    expect(override(c, s0, { kind: 'release', repeatStartId: 'rs' })).toEqual(s0);
   });
 
   it('jump to a non-adjacent section: continue forward from the target', () => {
@@ -264,6 +281,15 @@ describe('roadmap-vm — jumpTo exit policy', () => {
     expect(runToIds(c)).toEqual(['b1', 'b2', 'b3', 'b4']);
     const after = runCollect(c, override(c, initVM(c), { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alCoda' } }));
     expect(after.ids).toEqual(['b1', 'b2', 'b4']); // diverts at To Coda → Coda
+  });
+
+  it('a second al-Coda redirect re-takes To Coda after a prior coda fire', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3', 'b4'], [toCoda('tc', 'b2'), coda('cd', 'b4')]);
+    const { state } = runCollect(c, override(c, initVM(c), { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alCoda' } }));
+    expect(state.flags.toCodaFired).toBe(true);
+    // arming again clears the prior fire so the divert takes a second time.
+    const again = runCollect(c, override(c, state, { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alCoda' } }));
+    expect(again.ids).toEqual(['b1', 'b2', 'b4']);
   });
 });
 

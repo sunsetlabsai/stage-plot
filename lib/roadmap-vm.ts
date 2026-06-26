@@ -398,6 +398,14 @@ export function stepVM(compiled: CompiledRoadmap, stateIn: VMState): { transitio
   while (s.cursor < compiled.bars.length) {
     const startSpan = compiled.endingStartAt.get(s.cursor);
     if (startSpan) {
+      // §3.3 vamp: while holding this repeat, do NOT enter the ending group —
+      // loop the body only (back-jump to the repeat start), keeping the band
+      // BEFORE the endings until release. (Plain repeats have no ending group;
+      // their hold is handled at the repeatEnd edge below.)
+      if (s.holding === startSpan.repeatStartId) {
+        s.cursor = backJump(compiled, s, startSpan.repeatStartId, s.cursor);
+        continue;
+      }
       const k = (s.completedPasses[startSpan.repeatStartId] ?? 0) + 1;
       if (!startSpan.marker.numbers.includes(k)) {
         const starts = compiled.endingStartsByRepeat.get(startSpan.repeatStartId)!;
@@ -422,8 +430,10 @@ export function stepVM(compiled: CompiledRoadmap, stateIn: VMState): { transitio
   // End-edge rules, in priority order. `handled` ⇒ cursor already repositioned.
   let handled = false;
 
-  // Rule 2a — exit of a taken volta (back-jump point). Under a vamp hold on this
-  // repeat, loop body-only (suppress the increment, §3.3).
+  // Rule 2a — exit of a taken volta (back-jump point). If a vamp hold was placed
+  // mid-ending (after the band already entered it), loop instead of exiting
+  // (suppress the increment); subsequent body passes are intercepted before the
+  // ending group by Rule 1 above (§3.3).
   const exitSpan = compiled.endingEndAt.get(s.cursor);
   if (exitSpan) {
     const R = exitSpan.repeatStartId;
@@ -527,7 +537,11 @@ export function applyOverride(compiled: CompiledRoadmap, stateIn: VMState, direc
       return s;
     }
     case 'release': {
-      if (s.holding === directive.repeatStartId) s.holding = null;
+      // Release applies ONLY to the repeat currently being vamped — a stale or
+      // accidental release of an unheld repeat must not clamp its counter (which
+      // would make a future traversal take the final ending / exit early).
+      if (s.holding !== directive.repeatStartId) return s;
+      s.holding = null;
       // Clamp so the next exit takes the final ending (§3.3).
       const t = compiled.times.get(directive.repeatStartId);
       if (t !== undefined) s.completedPasses[directive.repeatStartId] = t - 1;
@@ -538,10 +552,15 @@ export function applyOverride(compiled: CompiledRoadmap, stateIn: VMState, direc
       if (pos === undefined) return s;
       s.cursor = pos;
       s.done = false;
-      // Leave counters as-is. exit arms the al-Coda/al-Fine out (§3.3); a
+      // Leave repeat counters as-is. exit arms the al-Coda/al-Fine out (§3.3); a
       // redirect landing before an already-`fired` jump stays inert by default
       // (Rule 3 won't re-fire) unless an explicit resetJump precedes it.
-      if (directive.exit?.kind === 'alCoda') s.flags.alCodaArmed = true;
+      // alCoda starts a FRESH al-Coda path: also clear toCodaFired so Rule 4
+      // (alCodaArmed && !toCodaFired) takes To Coda again even after a prior fire.
+      if (directive.exit?.kind === 'alCoda') {
+        s.flags.alCodaArmed = true;
+        s.flags.toCodaFired = false;
+      }
       if (directive.exit?.kind === 'alFine') s.flags.alFineActive = true;
       return s;
     }
