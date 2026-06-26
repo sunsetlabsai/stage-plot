@@ -166,7 +166,11 @@ have changed in between. The dangerous interleave:
      upsert — the lock serializes the concurrent Replace behind us; **or**
   2. a **conditional edit-path `UPDATE ... WHERE id = expected_chart_id AND
      updated_at = expected_updated_at`**, with **zero rows affected mapped to 409**
-     (no separate read at all — the WHERE *is* the precondition).
+     (no separate read at all — the WHERE *is* the precondition). Since this is a
+     service-role write, keep the WHERE **slot/owner-scoped** —
+     `owner_id = p_owner AND song_key = p_song_key AND role = p_role` **alongside**
+     `id` + `updated_at` — so it can never degrade into an id-only update that
+     escapes the owner/slot boundary.
   On mismatch the route maps to **409 Conflict** ("this chart changed since you
   opened it — reload"). Transaction atomicity alone is **not** sufficient; the lock
   or the conditional-WHERE is required.
