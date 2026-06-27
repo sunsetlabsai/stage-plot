@@ -76,6 +76,14 @@ describe('serializeProgram / programHash', () => {
     expect(a).toBe(b);
   });
 
+  it('normalizes ending.barIds to canonical bar order (a permuted span hashes identically)', () => {
+    // compileRoadmap sorts an ending span by bar position (roadmap-vm.ts:231), so two
+    // devices that receive the same span in different array order are the SAME program.
+    const a = serializeProgram(bars.map((id) => ({ id })), [ending('E', 'R1', ['b3', 'b4'], [1, 2])]);
+    const b = serializeProgram(bars.map((id) => ({ id })), [ending('E', 'R1', ['b4', 'b3'], [1, 2])]);
+    expect(a).toBe(b);
+  });
+
   it('IS sensitive to bar ORDER (it is the index identity)', () => {
     const a = serializeProgram(bars.map((id) => ({ id })), markers);
     const b = serializeProgram(['b2', 'b1', 'b3', 'b4'].map((id) => ({ id })), markers);

@@ -93,23 +93,31 @@ const RECORD = '\u001e'; // between markers
 const SECTION = '\u0000'; // between the prefix / bars / markers sections
 const SCHEMA = 'chunk3-v1';
 
-// Total order independent of input order: marker position, then kind, then unique id.
-function markerSortKey(m: RoadmapMarker): [string, string, string] {
-  const pos = m.kind === 'ending' ? [...m.barIds].sort()[0] ?? '' : m.barId;
+// Total order independent of input order: marker position (CANONICAL bar order, the
+// same index space cursor runs on), then kind, then unique id. An ending's position is
+// its MINIMUM canonical bar index — barId text is NOT a stable order (lexicographic
+// "b10" < "b9"), and the input barIds array may be permuted device-to-device.
+function markerSortKey(m: RoadmapMarker, barPos: Map<string, number>): [number, string, string] {
+  const pos = m.kind === 'ending'
+    ? Math.min(...m.barIds.map((b) => barPos.get(b) ?? Infinity))
+    : barPos.get(m.barId) ?? Infinity;
   return [pos, m.kind, m.id];
 }
 
 // Fixed field order per kind; inner arrays normalized so input order never matters.
-function encodeMarker(m: RoadmapMarker): string {
+function encodeMarker(m: RoadmapMarker, barPos: Map<string, number>): string {
   switch (m.kind) {
     case 'repeatStart':
       return ['repeatStart', m.id, m.barId, m.edge].join(FIELD);
     case 'repeatEnd':
       return ['repeatEnd', m.id, m.barId, m.edge, m.repeatStartId, m.times === undefined ? '' : String(m.times)].join(FIELD);
     case 'ending':
-      // barIds stay in reading order (validated contiguous, identical across devices);
-      // numbers normalized ascending.
-      return ['ending', m.id, m.repeatStartId, m.barIds.join(','), [...m.numbers].sort((a, b) => a - b).join(',')].join(FIELD);
+      // barIds normalized to CANONICAL bar order (compileRoadmap sorts the span the same
+      // way at roadmap-vm.ts:231) so a permuted input array hashes identically; numbers
+      // normalized ascending.
+      return ['ending', m.id, m.repeatStartId,
+        [...m.barIds].sort((a, b) => (barPos.get(a) ?? Infinity) - (barPos.get(b) ?? Infinity)).join(','),
+        [...m.numbers].sort((a, b) => a - b).join(',')].join(FIELD);
     case 'segno':
       return ['segno', m.id, m.barId, m.edge].join(FIELD);
     case 'coda':
@@ -124,18 +132,20 @@ function encodeMarker(m: RoadmapMarker): string {
 }
 
 export function serializeProgram(bars: { id: string }[], markers: RoadmapMarker[]): string {
+  // The canonical index space cursor runs on: bar ORDER. Sort/encode endings against it.
+  const barPos = new Map(bars.map((b, i) => [b.id, i]));
   const barPart = bars.map((b) => b.id).join(FIELD);
   const markerPart = [...markers]
     .sort((a, b) => {
-      const ka = markerSortKey(a);
-      const kb = markerSortKey(b);
+      const ka = markerSortKey(a, barPos);
+      const kb = markerSortKey(b, barPos);
       for (let i = 0; i < 3; i++) {
         if (ka[i] < kb[i]) return -1;
         if (ka[i] > kb[i]) return 1;
       }
       return 0;
     })
-    .map(encodeMarker)
+    .map((m) => encodeMarker(m, barPos))
     .join(RECORD);
   return [SCHEMA, barPart, markerPart].join(SECTION);
 }
