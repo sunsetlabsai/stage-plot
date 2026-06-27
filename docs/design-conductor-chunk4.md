@@ -96,10 +96,12 @@ export function dispatch(
   - **`redirect` is ALWAYS admitted** (`applied`) and **burns a seq even when it no-ops**
     (reducer:221 applies `applyOverride` unconditionally; `applyOverride` silently no-ops an
     unknown `repeatStartId`/`jumpId`/`barId` — roadmap-vm.ts:535/538/554). The reducer does
-    NOT validate redirect targets. **Therefore redirect validity is the UI's job:** the
-    immediate-redirect controls (§5) MUST enumerate only the live program's real repeat/jump
-    targets and disable an inapplicable `release`/`resetJump`, so the MD can never fire a
-    silent seq-burning no-op. (This is why open-Q (b) resolves to *target-constrained*.)
+    NOT validate redirect targets. **Therefore redirect validity is enforced in the PURE layer,
+    not the UI (Codex R3 Low / R2 High-2):** the pure `availableRedirects(compiled, vm)`
+    enumerator (§5) is the single source of *applicable* redirects — it omits an inapplicable
+    `release`/`resetJump`/held-repeat `hold`, the hook can render nothing else, and it is
+    unit-tested. The MD can never fire a silent seq-burning no-op. (This is why open-Q (b)
+    resolves to *target-constrained*.)
 - **Loopback IS the single-device state seam (Codex R3 High-1 — scoped honestly).**
   `dispatch` = mint → `reduceConductor` → keep the new state. On one device 3b swaps "keep
   locally" for "broadcast + apply locally" with the **same** message contract and reducer.
@@ -116,7 +118,7 @@ export function dispatch(
 | MD verb | payload | effect (via chunk-3 reducer) |
 |---|---|---|
 | `advance()` | `{ kind: 'advance' }` | playhead steps one bar; `current` = emitted bar |
-| `redirect(d)` | `{ kind: 'redirect', directive }` | immediate VM redirect (anotherRound/hold/release/jumpTo/resetJump) — NOT telegraphed |
+| `redirect(opt)` | `{ kind: 'redirect', directive }` | immediate VM redirect — NOT telegraphed. The chunk-3 reducer accepts any `Directive` (incl. `jumpTo`), but the chunk-4 hook exposes ONLY the `availableRedirects` set (anotherRound/hold/release/resetJump). `jumpTo` is the ARMABLE path (§2), never an immediate-redirect button (Codex R3 Med). |
 | `arm(target, exit?)` | `{ kind: 'arm', armed }` | drop the telegraphed change marker; `exit` is re-checked against `target.exitOptions` and dropped if out-of-set (§2) before minting `Armed.directive` |
 | `commit()` | `{ kind: 'commit' }` | go-tap: fire the armed jumpTo + step once |
 | `disarm()` | `{ kind: 'disarm' }` | "never mind" — clear the marker |
@@ -148,7 +150,7 @@ crosses that boundary. Therefore `armableTargets` takes the **local** `ChartCali
 
 ```ts
 // lib/conductor-targets.ts
-import type { ChartCalibration, RoadmapMarker, Bar, SectionAnchor } from './types';
+import type { ChartCalibration } from './types';      // impl body also pulls Bar/SectionAnchor/RoadmapMarker
 import { barsInOrder } from './chart-calibration';
 import type { CompiledRoadmap, ExitPolicy } from './roadmap-vm';
 
@@ -189,13 +191,18 @@ export function armableTargets(compiled: CompiledRoadmap, cal: ChartCalibration)
     (`compiled.fineAt` is likewise a Set).
   A target with neither reachable → `exitOptions: []` (the picker offers no exit). Default
   (no exit selected) is always available.
-- **`arm` ENFORCES `exit ∈ t.exitOptions` in the pure layer (Codex R3 Med).** The picker
-  *offers* only legal exits, but the controller's `arm(t, exit?)` must not trust that — chunk-3
-  `arm` accepts any `exit` and the reducer does not re-derive eligibility from the target. So the
-  `arm` wrapper (§1.1) re-checks `exit` against the freshly-computed `t.exitOptions` and **drops
-  an out-of-set exit** (mints `jumpTo` with no exit) before building `Armed.directive` — a
-  stale/spoofed exit can never reach the reducer. A `target`/`exit` pair the helper rejects yields
-  the default no-exit jumpTo, never an `alCoda`/`alFine` the target can't honor.
+- **`arm` RE-RESOLVES the target + enforces `exit` in the pure layer (Codex R3 High/Med).**
+  The picker *offers* only legal exits, but the controller's `arm(t, exit?)` must not trust the
+  passed `JumpTarget` AT ALL — a stale/spoofed object can carry both a bad `barId` AND a spoofed
+  `exitOptions`, so checking `exit` against `t.exitOptions` would just trust the caller's own
+  claim. Instead the `arm` wrapper **re-derives the target from scratch**: it looks up
+  `armableTargets(compiled, cal)` by `t.barId`, and
+  - if no current target has that `barId` → the arm is rejected (no `Armed` minted — the UI
+    surfaces it as disabled, consistent with the §2 "validity at both ends" rule);
+  - else it keeps `exit` ONLY if it is in the **recomputed** target's `exitOptions`, dropping an
+    out-of-set exit (mints `jumpTo` with no exit) before building `Armed.directive`.
+  So neither a stale `barId` nor a spoofed `exitOptions` can reach the reducer; the authoritative
+  eligibility is always the fresh `armableTargets` computation, never the passed object.
 - **Validity is enforced at BOTH ends.** The picker only offers `compiled.barPos`-present
   targets; `arm` re-checks (chunk-3 reducer:227) and the controller surfaces an `ignored`
   as a disabled control. Defense in depth, no new reducer path.
@@ -219,7 +226,7 @@ gates anything this chunk — it only places the badge.
   Chunk-4 go-tap fires on the MD's tap regardless of where `fireAt` sits, so re-tap may point
   at ANY real bar — including one at or behind the current cursor. Harmless here. But it would
   leave a **dead marker** for chunk-5 auto-fire (a `fireAt` the playhead never reaches again
-  never triggers). The rule — **a `fireAt` at or behind the VM position when armed is
+  never triggers). The rule — **a `fireAt` strictly BEHIND the next-step cursor when armed is
   auto-fire-INELIGIBLE** — depends on the cursor *at arm time*, which a post-advance
   `shouldAutoFire(session)` cannot reconstruct (`Armed` stores only `{fireAt, directive}`,
   conductor-state.ts:44, and chunk 4 makes ZERO changes to that type). So eligibility is a
@@ -228,7 +235,11 @@ gates anything this chunk — it only places the badge.
   ```ts
   // lib/conductor-targets.ts — eligibility decided when the marker is placed
   export function fireAtEligible(compiled: CompiledRoadmap, vm: VMState, fireAt: string): boolean;
-  // true iff fireAt's bar position is strictly AHEAD of the arming cursor (forward-reachable).
+  // true iff barPos(fireAt) >= vm.cursor (forward-reachable). CRITICAL (Codex R3 High):
+  // vm.cursor is the NEXT-step index (chunk-3 D2), so the NEXT bar the VM emits is AT
+  // pos === vm.cursor — that includes the DEFAULT fireAt = compiled.bars[vm.cursor]. The bound
+  // is `>=` (NOT strictly `>`), else the natural next-bar marker is wrongly ineligible.
+  // false for an unknown bar (barPos miss) and at song end (vm.done / cursor out of range).
   ```
   Chunk 4 ships + tests this helper and uses it to flag an ineligible placement in the
   telegraph (advisory). **Honest correction to the chunk-5 claim (R3 Med):** auto-fire is NOT
@@ -420,9 +431,12 @@ hook is a thin binding.
 - **arm → commit (go-tap):** arm sets `armed`; commit clears it AND `current` = the real
   emitted jumpTo target (1-based pass); commit with nothing armed = no-op; double-commit
   idempotent. (Re-asserts the chunk-3 contract through the controller.)
-- **arm exit enforcement (Codex R3 Med):** `arm(t, exit)` with `exit ∉ t.exitOptions` mints
-  `Armed.directive` with NO exit (the out-of-set exit is dropped, never reaches the reducer);
-  `exit ∈ t.exitOptions` is preserved verbatim.
+- **arm target re-resolution + exit enforcement (Codex R3 High/Med):** `arm(t, exit)` re-derives
+  the target from `armableTargets(compiled, cal)` by `t.barId` — a passed `t` with a `barId` no
+  current target has → rejected (no `Armed` minted); a passed `t.exitOptions` that is SPOOFED (lists
+  an exit the recomputed target does not) → the spoofed exit is dropped (mints `jumpTo` with no
+  exit); an `exit` in the RECOMPUTED target's `exitOptions` is preserved verbatim. Pins that
+  eligibility comes from the fresh computation, never the passed object.
 - **disarm:** clears `armed`, `current`/`vm` unchanged.
 - **self-invalid arm/commit:** `arm` at a bar not in `compiled.barPos` → outcome
   `ignored`, session UNCHANGED (the UI disables the control); commit on a corrupt armed
@@ -438,13 +452,18 @@ hook is a thin binding.
   it → `exitOptions` includes `alCoda`; with NONE after it → excludes it; **multiple To-Coda
   markers** are handled (existential over `compiled.toCodaAt`, not "the trigger"); `alFine`
   likewise over `compiled.fineAt`; a target with neither → `[]`.
-- **availableRedirects (pure, the High-2 safety net):** lists `anotherRound`/`hold` for every
-  real repeatStart; `release{rs}` ONLY when `vm.holding === rs`; `resetJump{j}` ONLY when
-  `vm.fired[j]`; excludes a `release`/`resetJump` that would no-op against the given `vm`
-  (regression: an inapplicable redirect can never be enumerated → never emitted → never burns
-  seq).
+- **availableRedirects (pure, the High-2 safety net):** lists `anotherRound` for every real
+  repeatStart; `hold{rs}` for every real repeatStart **EXCEPT the currently-held one**
+  (`vm.holding === rs` → excluded, since re-holding burns a seq for no change — Codex R3 High-2);
+  `release{rs}` ONLY when `vm.holding === rs`; `resetJump{j}` ONLY when `vm.fired[j]`; excludes a
+  `release`/`resetJump`/held-repeat-`hold` that would no-op against the given `vm` (regression: an
+  inapplicable redirect can never be enumerated → never emitted → never burns seq).
 - **fireAt song-end guard:** at `vm.done` (or `cursor >= bars.length`) there is no default
   fireAt and arm is disabled (the controller/helper reports "no armable position").
+- **fireAtEligible (Codex R3 Med — explicit tests):** the DEFAULT next bar
+  (`compiled.bars[vm.cursor]`) → **eligible** (the `>= vm.cursor` boundary, the case strict-`>`
+  would wrongly fail); a bar strictly behind the cursor (already emitted) → ineligible; an
+  unknown bar id (barPos miss) → false; at song end (`vm.done` / cursor out of range) → false.
 - **shouldAutoFire:** returns `false` for every session (chunk-4 invariant — a guard test so
   chunk 5's change is visible and intentional). Contract test: an `advance` that lands
   `current.barId === armed.fireAt` still injects NO commit in chunk 4 (go-tap only), and the
@@ -457,9 +476,11 @@ Target: `tests/conductor-session.test.ts` + `tests/conductor-targets.test.ts` co
 
 ## 8. What this unblocks / what it does NOT do
 
-- **Unblocks:** chunk 5 (clock) — implements `shouldAutoFire`'s body + feeds the `clock`
-  directive through `dispatch`; the §3.5 gate has a home. Linkage step 6 may slot around
-  here per the locked sequence (confirm with Graham).
+- **Unblocks:** chunk 5 (clock) — (a) replaces `shouldAutoFire`'s body with the §3.5 gate,
+  (b) records the §3 arm-time `fireAtEligible` result as **local hook state** ANDed into that
+  gate (the wire `ConductorState` stays chunk-3-frozen — Codex R3 Med, NOT a pure body-swap),
+  and (c) feeds the `clock` directive through `dispatch`; the §3.5 gate has a home. Linkage
+  step 6 may slot around here per the locked sequence (confirm with Graham).
 - **Explicitly NOT in chunk 4:** any network / relay (3b); multi-device telegraph;
   auto-fire enablement; armable `anotherRound`; persisting an arrangement variant
   (deliberate separate owner action, never from live state). These stay gated where the
