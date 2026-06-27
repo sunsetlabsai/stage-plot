@@ -9,9 +9,9 @@
 ## 0. Why a fresh design (two things the parent left to chunk-3 time)
 
 1. **The §8.2-2 gate splits this chunk.** The parent (§8.2 "Still open") states **failover + session discovery on a backhaul-less relay gates chunk-3 *transport*** — the `claim` discovery protocol (how a new MD is found/accepted post-death) and room discovery (QR / mDNS / room code) are **not designed yet.** So chunk 3 cleanly splits:
-   - **3a — the pure state machine (this doc, buildable now):** `ConductorState`, the directive envelope, `(epoch, seq)` idempotency, the reducer, claim *as a reducer rule* (higher accepted epoch wins), late-join snapshot. Zero network. Fully unit-testable, mirrors the chunk-1/2 "pure core first" pattern.
+   - **3a — the pure state machine (this doc, buildable now):** `ConductorState`, the directive envelope, `(epoch, seq)` idempotency, the reducer, claim *as a reducer rule* (a higher-epoch claim is a **snapshot boundary** → `needsSnapshot`, D4), late-join snapshot. Zero network. Fully unit-testable, mirrors the chunk-1/2 "pure core first" pattern.
    - **3b — the transport (deferred, gated by §8.2-2):** the own-AP WebSocket relay, room discovery, and the relay-arbitrated claim *protocol*. Needs §8.2-2 closed first.
-   - **Why the split is honest:** the reducer rule "a higher *accepted* epoch supersedes" is well-defined regardless of *how* a claim is arbitrated — the **relay** is the arbiter (§5), the reducer just adopts what the relay already accepted. So 3a does not depend on §8.2-2; only 3b does.
+   - **Why the split is honest:** the reducer rule "a higher-epoch claim forces a re-base" is well-defined regardless of *how* a claim is arbitrated — the **relay** is the arbiter (§5), and the reducer never *adopts* a claim into local state (its local VM may be stale); it routes to a snapshot that the new MD already minted authoritatively (D4). So 3a does not depend on §8.2-2; only 3b does.
 
 2. **§6 `ConductorState.cursor` predates the real `VMState`.** §6 sketches `cursor: { node: CanonicalRef; completedPasses; fired; flags; passCount }` — illustrative, written before chunk 2 existed. Chunk 2 produced the **actual** serializable snapshot `VMState` (`roadmap-vm.ts:75`): `{ cursor: number; completedPasses; fired; flags; passCount; holding; done }`, and the file header already declares "VMState is the serializable wire snapshot (design §6 ConductorState.cursor)." **Decision D2 below** reconciles them.
 
@@ -35,8 +35,13 @@ Out of scope (named so the boundary is explicit):
 // The authoritative shared state. The MD owns it; followers mirror it verbatim.
 export interface ConductorState {
   sessionId: string;
-  songRef: string;        // which SongStructure this VM runs on
-  epoch: number;          // baton generation; a higher ACCEPTED epoch supersedes
+  songRef: string;        // which SongStructure this VM runs on (song identity)
+  programHash: string;    // D10: identity of the EXACT compiled program the indices below
+                          // run against — hash(ordered bar ids + roadmap markers). vm.cursor
+                          // is a numeric index into compiled.bars and every counter/fired flag
+                          // keys to THIS roadmap; a different revision silently remaps them.
+                          // The session is bound to an immutable (songRef, programHash).
+  epoch: number;          // baton generation; a higher-epoch claim forces a re-base (D4)
   seq: number;            // monotonic per-epoch, MD-only; orders + supersedes
   vm: VMState;            // D2: the chunk-2 resumable seed, verbatim (the NEXT-step state)
   current: TraversalStep | null;  // D2: the last bar the shared VM EMITTED — what
@@ -72,6 +77,10 @@ export interface ClockState {
 export interface ConductorMessage {
   sessionId: string;      // MUST match state.sessionId or the message is `ignored`
   songRef: string;        // MUST match state.songRef or the message is `ignored`
+  programHash: string;    // D10: MUST match state.programHash or the message is `ignored` —
+                          // a message keyed to a different roadmap revision cannot be applied
+                          // to these numeric indices. Structure edit = new session, never a
+                          // silent remap within a live one.
   epoch: number;
   seq: number;            // ignored for `claim` (a claim → needsSnapshot, D4); required otherwise
   sentAt: number;         // MD wall clock at emit — the ONLY time source (MED-2); copied
@@ -117,18 +126,19 @@ export type ReduceOutcome =
 ```ts
 export function reduceConductor(
   compiled: CompiledRoadmap,        // recomputed from the SongStructure, never wired
+  programHash: string,              // D10: identity of THAT compiled program (loader-computed)
   state: ConductorState,
   msg: ConductorMessage,
 ): ReduceOutcome                     // D7 — typed result, not bare state
 ```
 
-Pure. Recompute `compiled` once per song load on each device (it never travels — same as the batch path). The reducer is the only authority gate. **Deltas, not snapshots:** every non-claim message mutates the prior state, so admission must guarantee *contiguity* — a follower may never apply delta N+2 over state N (HIGH-1). Any gap routes to `needsSnapshot`, the **same recovery door as a fresh join** (§3.3).
+Pure. Recompute `compiled` once per song load on each device (it never travels — same as the batch path); the loader computes `programHash` from the same inputs. The reducer is the only authority gate. **Program-pinned (D10):** `compiled` is an *external* argument whose `bars` array gives `vm.cursor` its meaning, so the reducer **fails closed** unless the local program, the state, and the message all name the same roadmap revision — `programHash !== state.programHash` is a caller bug (the loader handed a mismatched `compiled`); `msg.programHash !== state.programHash` is a cross-revision message → `{ ignored }` (§3.1.1). **Deltas, not snapshots:** every non-claim message mutates the prior state, so admission must guarantee *contiguity* — a follower may never apply delta N+2 over state N (HIGH-1). Any gap routes to `needsSnapshot`, the **same recovery door as a fresh join** (§3.3).
 
 ### 3.1 Admission (the gate) — applied first, to every message
 
 In order. Each rule returns one `ReduceOutcome`; only the last admits.
 
-1. **Session/song scope (MED-1).** `msg.sessionId !== state.sessionId || msg.songRef !== state.songRef` → `{ ignored }` (state unchanged). The pure reducer fails closed; it does not trust transport to scope.
+1. **Session / song / program scope (MED-1, D10).** `msg.sessionId !== state.sessionId || msg.songRef !== state.songRef || msg.programHash !== state.programHash` → `{ ignored }` (state unchanged). The pure reducer fails closed; it does not trust transport to scope. `programHash` is what stops a same-`songRef` message from a *different roadmap revision* from being silently applied to these numeric indices (Codex R3 HIGH). (Precondition, asserted by the harness: the local `programHash` argument equals `state.programHash` — else the loader compiled the wrong structure.)
 2. **`claim` (D4).** Claims are the *only* epoch-raiser, and they carry the **relay-accepted** epoch (the relay already arbitrated *which* claim won — §5). A claim is a **snapshot boundary, not a follower-applicable delta** (Codex R2 HIGH): the follower's local `vm`/`current` may be stale on the *old* epoch, so re-basing to `seq = 0` on top of it would diverge permanently. Therefore the reducer never *adopts* a claim into local state:
    - `msg.epoch > state.epoch` → `{ needsSnapshot }`. The follower pulls the new generation's full `ConductorState` (§3.3) — the only safe baseline for a new baton.
    - `msg.epoch <= state.epoch` → `{ ignored }` (a replayed / equal / stale claim is a no-op — never bumps epoch; this is why epoch is **carried**, never `state.epoch + 1`).
@@ -149,14 +159,16 @@ The admitted message sets `seq = msg.seq` and `updatedAt = msg.sentAt`, then:
 
 - **`advance`** (D8) → `const r = stepVM(compiled, vm); vm = r.state; if (r.transition) current = r.transition`. This is the **only** message that advances the playhead normally; `current` becomes the bar just emitted (so late-joiners read a *real* current bar, not the next-step index — HIGH-2). At song end `stepVM` returns no transition; `current` holds the last bar and `vm.done` is true.
 - **`redirect`** → `vm = applyOverride(compiled, vm, directive)` (chunk-2, pure). Moves the *next-step* seed only; `current` is unchanged until the following `advance` re-emits onto the new location (the live gesture: point the baton, then downbeat). Redirect carries any directive — incl. `hold`/`release`/`resetJump`, which only touch counters/flags — so it must **never** auto-step (that would advance the playhead a bar on a pure counter change). D2.
-- **`arm`** → `armed = msg.payload.armed`. (No VM change yet; advisory display.)
+- **`arm`** → validate the target first (Codex R3 MED): `!compiled.barPos.has(msg.payload.armed.directive.barId)` → `{ ignored }` (never store a marker that points at no bar — a poison pill that `commit` couldn't honor). Else `armed = msg.payload.armed`. (No VM change yet; advisory display.)
 - **`disarm`** → `armed = null`. (D5.)
-- **`commit`** → if `armed === null`, no-op (idempotent). Else **"go now"** (D2, Codex R2 HIGH): apply the armed jumpTo **and step once in the same message**, so the committed position is immediately visible to a mid-cue joiner — `vm = applyOverride(compiled, vm, armed.directive)`, then `const r = stepVM(compiled, vm); vm = r.state; if (r.transition) current = r.transition`, then `armed = null`. `current` becomes the **real emitted** target transition (a true 1-based `pass` from `stepVM`, never an invented `passCount ?? 0`); `vm` is seeded for the next `advance`. This satisfies the parent's "post-fire = committed cursor with `armed` cleared." (In a volta edge case `stepVM` may skip a pass-excluded target forward to the first reachable bar — the correct, roadmap-consistent landing.)
+- **`commit`** → if `armed === null`, no-op (idempotent). **Defensive re-validation (Codex R3 MED):** if `!compiled.barPos.has(armed.directive.barId)` (a corrupt/stale target that slipped past arm — e.g. via a snapshot), **clear `armed` WITHOUT stepping** and stop. This is the crux of the finding: chunk 2 makes an unknown `jumpTo` a *no-op* (`roadmap-vm.ts:553`), so blindly `applyOverride`-then-`stepVM` on a bad target would advance one *normal* bar and clear armed — a silent wrong jump. Only with a valid target do we **"go now"** (D2, R2 HIGH): apply the armed jumpTo **and step once in the same message**, so the committed position is immediately visible to a mid-cue joiner — `vm = applyOverride(compiled, vm, armed.directive)`, then `const r = stepVM(compiled, vm); vm = r.state; if (r.transition) current = r.transition`, then `armed = null`. `current` becomes the **real emitted** target transition (a true 1-based `pass` from `stepVM`, never an invented `passCount ?? 0`); `vm` is seeded for the next `advance`. This satisfies the parent's "post-fire = committed cursor with `armed` cleared." (In a volta edge case `stepVM` may skip a pass-excluded target forward to the first reachable bar — the correct, roadmap-consistent landing.)
 - **`clock`** → `clock = msg.payload.clock`. (Pure store; chunk 5 supplies it.)
 
 ### 3.3 Late-join / reconnect / gap recovery — one door
 
 No event replay. Whenever a follower is **not converged** — a fresh join, a `needsSnapshot` seq gap, a higher-epoch baton claim, or a future epoch — it pulls the full `ConductorState` (3b delivers it; 3a just *is* the value) and resumes mirroring from it. The snapshot **resets the follower's `(epoch, seq)` baseline** to the MD's, so the very next in-order delta admits cleanly. Because the state carries `current` + `armed`, a mid-cue joiner sees both the live position and any pending change (§3.5 "why it must be state, not an event"). The reducer's job is only to *detect* the gap (`needsSnapshot`) and stay pure; the *fetch* is 3b's.
+
+**Program-reload precondition (D10).** Before adopting a snapshot the follower checks `snapshot.programHash` against its **local** compiled program. If they differ (the MD is on a structure revision the follower hasn't loaded), the follower must **reload the SongStructure and recompile** *before* it can mirror — the numeric indices are meaningless otherwise. Within a live session this never happens (the session is pinned to one immutable `(songRef, programHash)`; a structure edit ends the session and everyone rejoins). This reload step is a 3b/loader concern; 3a only *names* the invariant via `programHash`.
 
 ---
 
@@ -168,10 +180,11 @@ No event replay. Whenever a follower is **not converged** — a fresh join, a `n
 - **D3 — Envelope naming `ConductorMessage`/`ConductorPayload`; `redirect` wraps the chunk-2 `Directive`** (avoid the name collision). Recommend YES.
 - **D4 — `claim` is the only epoch-raiser and a SNAPSHOT BOUNDARY, not a follower-applicable delta** (Codex R2 HIGH). A higher-epoch claim (`msg.epoch > state.epoch`, the relay-accepted value — never `state.epoch + 1`) → `{ needsSnapshot }`: the follower's local `vm`/`current` may be stale on the old epoch, so re-basing to `seq = 0` on top of it diverges permanently — the only safe baseline for a new baton is the new generation's full snapshot. Equal/lower-epoch claim → `{ ignored }` (replay no-op). The *new MD* mints the new generation **out of band** (accept-baton helper: `epoch+1`, `seq = 0`, `armed = null`, its **own** authoritative `vm`/`current`/`clock`), which the relay then serves as the snapshot (3b). Recommend YES (claim → needsSnapshot; MD-local mint).
 - **D5 — Add a `disarm` directive** (MD cancels a telegraphed change before commit). Not in §6's set, but the change-marker UX needs "never mind." Recommend YES (cheap, obviously needed for chunk 4).
-- **D6 — Only `jumpTo`-shaped changes are *armable*, carried as a directive not bare fields** — `Armed.directive: Extract<Directive, { kind: 'jumpTo' }>` (Codex LOW). `anotherRound`/`hold`/`release`/`resetJump` are *immediate* `redirect`s, not telegraphed. The directive-shaped envelope lets chunk 4 widen the armable set (e.g. telegraphed `anotherRound`) without touching commit semantics. Open: should "one more time" be armable too? Musically you *do* signal it early. Recommend: ship 3a jumpTo-only armed; revisit in chunk 4.
+- **D6 — Only `jumpTo`-shaped changes are *armable*, carried as a directive not bare fields** — `Armed.directive: Extract<Directive, { kind: 'jumpTo' }>` (Codex LOW). `anotherRound`/`hold`/`release`/`resetJump` are *immediate* `redirect`s, not telegraphed. The directive-shaped envelope lets chunk 4 widen the armable set (e.g. telegraphed `anotherRound`) without touching commit semantics. *(Deferred to chunk 4, NOT an open chunk-3 decision: whether "one more time"/`anotherRound` should also be armable — musically you do signal it early; the directive shape already accommodates it.)* Recommend: ship 3a jumpTo-only armed.
 - **D7 — The reducer returns `ReduceOutcome` (`applied` / `ignored` / `needsSnapshot`), not bare `ConductorState`** (Codex HIGH-1/HIGH-3, MED-1). This is the root fix: a pure delta reducer must be able to tell transport "I am behind — pull a snapshot," or a single dropped message diverges the follower forever. `needsSnapshot` unifies seq-gap, missed-claim, and future-epoch recovery into the one late-join door (§3.3). Recommend YES.
 - **D8 — Add an `advance` payload** — the only message that calls chunk-2 `stepVM` and moves `current` (Codex HIGH-2b). Without it the shared VM can only be *redirected*, never progress bar-to-bar normally. It is an ordinary `(epoch, seq)` delta (idempotent, contiguity-gated) and the primary live message. Recommend YES.
-- **D9 — Envelope is self-*scoping* (not self-authenticating — Codex R2 LOW): `sessionId` + `songRef` (fail-closed scope, MED-1) and `sentAt` (the ONLY time source, MED-2).** Scoping fails closed on a cross-room / replayed message, but it is **not authentication** — the reducer still trusts that 3b filtered senders; **sender authenticity remains a relay responsibility.** The reducer copies `sentAt → updatedAt` so followers converge byte-for-byte; it never reads a local clock. Recommend YES.
+- **D9 — Envelope is self-*scoping* (not self-authenticating — Codex R2 LOW): `sessionId` + `songRef` + `programHash` (fail-closed scope, MED-1/D10) and `sentAt` (the ONLY time source, MED-2).** Scoping fails closed on a cross-room / cross-revision / replayed message, but it is **not authentication** — the reducer still trusts that 3b filtered senders; **sender authenticity remains a relay responsibility.** The reducer copies `sentAt → updatedAt` so followers converge byte-for-byte; it never reads a local clock. Recommend YES.
+- **D10 — Pin the exact compiled program with `programHash` on state + envelope; fail closed on any mismatch** (Codex R3 HIGH). `vm.cursor` is a numeric index into `compiled.bars` and every counter/`fired` flag keys to *that* roadmap, so `songRef` (song identity) is not enough — a structure revision under the same song silently remaps every index. `programHash = hash(ordered bar ids + roadmap markers)`, loader-computed alongside `compiled`. A session is bound to an **immutable `(songRef, programHash)`**; a cross-revision message → `{ ignored }` (§3.1.1); a structure edit ends the session (everyone rejoins) rather than mutating the program live. Snapshot adoption verifies `programHash` and reloads the SongStructure first if it differs (§3.3, a 3b/loader step). Recommend YES.
 
 ---
 
@@ -180,6 +193,8 @@ No event replay. Whenever a follower is **not converged** — a fresh join, a `n
 Every assertion is on the `ReduceOutcome.status` AND the resulting state (D7).
 
 - **Outcome discrimination:** in-order delta → `applied`; duplicate/lower seq → `ignored` + unchanged; **seq gap (`seq > state.seq+1`) → `needsSnapshot` + unchanged** (HIGH-1 regression test); stale epoch → `ignored`; **future non-claim epoch → `needsSnapshot`** (HIGH-3); session/song mismatch → `ignored` (MED-1).
+- **Program pin (R3 HIGH/D10):** `msg.programHash !== state.programHash` → `{ ignored }`, state unchanged (a same-`songRef` message from a different roadmap revision must NOT touch the numeric indices); harness asserts the local `programHash` argument equals `state.programHash`.
+- **Corrupt armed target (R3 MED):** `arm` with a `barId` not in `compiled.barPos` → `{ ignored }` (poison pill never stored); `commit` with an armed target that is invalid (injected via snapshot) → `armed` cleared, **`vm`/`current` UNCHANGED, no stepVM** (regression: must NOT advance one normal bar via the chunk-2 unknown-jumpTo no-op).
 - **Contiguity (HIGH-1):** apply seq 1,2,**4** → the 4 is `needsSnapshot` and state stays at seq 2; then snapshot-reset to MD state + seq 3,4 converges. Prove the pre-fix bug is gone: arm(2) dropped, commit(3) must NOT silently no-op-then-advance past the lost arm.
 - **Claim = snapshot boundary (R2 HIGH/D4):** higher-epoch claim → **`needsSnapshot`, state UNCHANGED** (NOT applied — regression test for the stale-VM divergence: a follower behind on the old epoch must NOT re-base to seq 0 on its own stale `vm`); **equal/lower-epoch claim → `ignored`, epoch NOT bumped** (replay-bump regression); post-snapshot the follower converges on the new generation.
 - **advance (HIGH-2/D8):** N advances over a known roadmap → `current` equals the chunk-2 `stepVM` transition stream bar-for-bar; `current` is the EMITTED bar (not `vm.cursor`'s next index); song-end advance → no `current` change, `vm.done` true; idempotent under repeated seq.
