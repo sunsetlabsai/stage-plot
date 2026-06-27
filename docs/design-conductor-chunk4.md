@@ -32,6 +32,12 @@ go-tap = chunk 4 (this doc). Clock detection + auto-fire enablement = chunk 5. M
 device telegraph = 3b. Chunk 4 introduces **zero** new wire types and **zero** changes
 to `lib/conductor-state.ts` — it is a consumer.
 
+**Identity layer (Codex R2 Block — pinned up front):** chunk 4, being single-device, runs
+entirely on the MD's **local `ChartCalibration`** (local `Bar` / `SectionAnchor` ids — what
+`compileRoadmap` already consumes). The **canonical** `SongStructure` layer is the chunk-1
+**cross-chart** bridge and is a **3b** concern (resolving a `StructuralRef` to a *different*
+follower's coords). Chunk 4 never crosses into the canonical namespace. See §2.
+
 ## 1. The session controller — `lib/conductor-session.ts` (pure, the testable core)
 
 Following the chunk-1/2/3 "pure first" pattern, the live logic lives in a pure module;
@@ -118,44 +124,57 @@ enumerable set of canonical positions in the MD's program (parent locked decisio
 "redirect = jump to an EXISTING node; overlay, never edit"). No free-form bar entry, no
 inventing a node.
 
-**Input — `compiled` is NOT enough (Codex R1 Block).** `CompiledRoadmap.bars` is only
-`{ id: string }[]` (roadmap-vm.ts:48); it carries NO section labels. Section identity
-lives on `Bar.sectionId` (types.ts) → `CanonicalSection.label` (song-structure.ts:24).
-So a "section head by label + ordinal" target is unreachable from `compiled` alone —
-`armableTargets` MUST also receive the source bars (sectionId-bearing) and the ordered
-sections. The loader already has both alongside `compiled` (it compiled them).
+**Identity layer — chunk 4 runs on the LOCAL chart, NOT the canonical layer (Codex R2
+Block).** This is the root of the R1 type mix-up, so pin it: the live VM compiles from the
+MD's own `ChartCalibration` — `resolveRoadmap(cal)` = `compileRoadmap(barsInOrder(cal),
+cal.roadmap)` (chart-calibration.ts:810). So **every id the session touches is LOCAL**:
+`compiled.bars[].id` = `ChartCalibration.bars[].id` (types.ts `Bar`, `sectionId` →
+`SectionAnchor.id`), and `Armed.directive.barId` is a local bar id. The canonical
+`SongStructure` / `CanonicalBar` / `CanonicalSection` layer (song-structure.ts) is the
+chunk-1 **cross-chart** bridge — it only matters once a `StructuralRef` must be resolved to
+a *different* follower's coords, which is **3b**. Chunk 4, being single-device, never
+crosses that boundary. Therefore `armableTargets` takes the **local** `ChartCalibration`
+(its `sections: SectionAnchor[]` carry the `label`, types.ts:70), never `CanonicalSection`.
 
 ```ts
 // lib/conductor-targets.ts
+import type { ChartCalibration, RoadmapMarker, Bar, SectionAnchor } from './types';
+import type { CompiledRoadmap, ExitPolicy } from './roadmap-vm';
+
 export interface JumpTarget {
-  barId: string;             // the Armed.directive.barId
-  label: string;             // human label for the picker + telegraph badge
+  barId: string;                       // the Armed.directive.barId (a LOCAL bar id)
+  label: string;                       // human label for the picker + telegraph badge
   kind: 'segno' | 'coda' | 'fine' | 'section' | 'repeatStart' | 'bar';
+  exitOptions: ExitPolicy['kind'][];   // target-aware exit eligibility (High-1): which of
+                                       // alCoda/alFine are MEANINGFUL from THIS target ([] = none)
 }
 
-// Enumerate legal jumpTo targets. Needs the SOURCE structure, not just `compiled`:
-//   bars     — sectionId-bearing (types.ts Bar), to map a section to its HEAD bar
-//   sections — ordered { id, label } (CanonicalSection), for the label + ordinal
-//   markers  — the roadmap, for segno/coda/fine + repeatStart landmarks
-// `compiled.barPos` is still the validity oracle (every emitted target is a present bar).
-export function armableTargets(
-  compiled: CompiledRoadmap,
-  source: { bars: Bar[]; sections: { id: string; label: string }[]; markers: RoadmapMarker[] },
-): JumpTarget[];
+// Enumerate legal jumpTo targets from the MD's LOCAL chart. `cal` carries everything:
+//   cal.bars     — sectionId-bearing local Bar[], to map a section to its HEAD bar
+//   cal.sections — local SectionAnchor[] (id + label), for the label + ordinal
+//   cal.roadmap  — local RoadmapMarker[], for segno/coda/fine + repeatStart landmarks
+// `compiled.barPos` is the validity oracle (every emitted target is a present local bar).
+export function armableTargets(compiled: CompiledRoadmap, cal: ChartCalibration): JumpTarget[];
 ```
 
 - **Named landmarks first** (the calls an MD actually makes): Coda, Segno, Fine (from
-  `markers`), then **section heads** — each section's first bar in reading order, labelled
-  by `CanonicalSection.label` + ordinal among same-`normalizeLabel` sections (chunk-1
-  `sectionOrdinals` vocabulary, song-structure.ts:117) — then repeat starts. Plain bars are
-  available but de-emphasized (a bar number is the fallback, not the call — parent §locked
-  "bar number = label + fine fallback ONLY"). A linear/section-less chart yields bar targets
-  only (no crash on absent sections).
-- **`exit` policy is TARGET-aware, not just program-aware (Codex R1 Low).** A jumpTo MAY
-  carry `exit?: alCoda | alFine` (chunk-2 `ExitPolicy`). Offer `alCoda` only when the
-  program has a To-Coda AND the selected target sits at/before that To-Coda trigger (else
-  the exit is inert/surprising); `alFine` likewise relative to the Fine bar. Position is
-  read from `compiled.barPos` / `compiled.toCodaAt` / `compiled.fineAt`. Default = no exit.
+  `cal.roadmap`), then **section heads** — each `SectionAnchor`'s first local bar in reading
+  order (`cal.bars` filtered by `sectionId`, min `absNumber`), labelled by
+  `SectionAnchor.label` + ordinal among same-`normalizeLabel(label)` anchors. `normalizeLabel`
+  IS exported (song-structure.ts:101); `sectionOrdinals` is NOT (it is private) — so
+  `conductor-targets.ts` **recomputes the ordinal locally** over `cal.sections` via the
+  exported `normalizeLabel` (Codex R2 Low). Then repeat starts. Plain bars are available but
+  de-emphasized (parent §locked "bar number = label + fine fallback ONLY"). A
+  linear/section-less chart yields bar targets only (no crash on absent sections).
+- **`exit` eligibility is computed PER TARGET in the pure helper (High-1 + Codex R2 Med).**
+  `JumpTarget.exitOptions` is filled by `armableTargets`, so the React UI never recomputes it:
+  - include `alCoda` iff **there EXISTS a To-Coda trigger at or after the target's bar
+    position** — `compiled.toCodaAt` is a Map (a program may carry several To-Codas;
+    `compileRoadmap` does not reject multiples), so the test is existential, not "the trigger";
+  - include `alFine` iff there EXISTS a Fine at or after the target's position
+    (`compiled.fineAt` is likewise a Set).
+  A target with neither reachable → `exitOptions: []` (the picker offers no exit). Default
+  (no exit selected) is always available.
 - **Validity is enforced at BOTH ends.** The picker only offers `compiled.barPos`-present
   targets; `arm` re-checks (chunk-3 reducer:227) and the controller surfaces an `ignored`
   as a disabled control. Defense in depth, no new reducer path.
@@ -175,13 +194,24 @@ gates anything this chunk — it only places the badge.
   end of the song is meaningless, and `armed.fireAt` is a raw string the reducer does not
   position-validate). The MD MAY re-place fireAt by tapping another **real** bar (any
   `compiled.barPos`-present id); the re-tap target is validated the same way.
+- **fireAt placement vs auto-fire eligibility (Codex R2 Med).** Chunk-4 go-tap fires on the
+  MD's tap regardless of where `fireAt` sits, so re-tap may point at ANY real bar — including
+  one at or behind the current cursor. That is harmless here. But it would leave a **dead
+  marker** for chunk-5 auto-fire (a `fireAt` the playhead never reaches again never
+  triggers). Pin the rule now so chunk 5 inherits it: **a `fireAt` at or behind the current
+  VM position is display-only and auto-fire-INELIGIBLE** (go-tap still works); auto-fire
+  (chunk 5) triggers only on a future-reachable `fireAt`. Chunk 4 does not constrain the
+  re-tap — it only records this eligibility rule.
 - **Telegraph render:** an **ephemeral, overlay-only** badge — "**→ {target.label}**" (e.g.
   "→ Coda") near `fireAt`, reusing the `RoadmapOverlayLayer` / `SectionMarker` visual
   vocabulary (page.tsx:1900, :1656) so it reads native. **Never persisted** — honors the
   parent boundary ("ephemeral by default; no write-back path from live state"). It lives
   in `ConductorState.armed`, not in the chart's `calibration.roadmap`.
-- **Commit feedback:** on go-tap the badge clears and the redline lands on the committed
-  bar (`current` = the real emitted target, chunk-3 D2). On disarm it clears with no move.
+- **Commit feedback:** on go-tap the badge clears and the redline lands on the **real
+  emitted landing bar** — `current` after the commit's `applyOverride` + single `stepVM`
+  (chunk-3 D2). This is NOT necessarily the armed `barId`: chunk 3 lets `stepVM` skip a
+  pass-excluded target to the first reachable bar (Codex R2 Low), so "landing bar" is the
+  honest term. On disarm the badge clears with no move.
 
 ## 4. The auto-fire seam (defined, stubbed OFF)
 
@@ -204,6 +234,15 @@ genuinely unblock chunk 5 without an API change, the **evaluation contract is pi
   seq), so auto-fire flows through the identical reducer path as a go-tap. A normal advance
   with no match returns `false` and dispatches nothing extra (no spurious commit). Because
   `commit` clears `armed`, the predicate cannot re-fire on a later bar.
+- **Same-tick handoff — render only the committed state (Codex R2 Med).** Auto-fire is two
+  sequential reducer messages: the `advance` emits the `fireAt` bar, then the injected
+  `commit` emits the landing bar. Without care a follower briefly paints the `fireAt` bar
+  before the target. Pin it: when `shouldAutoFire` returns `true`, the hook issues the
+  `commit` in the **same tick** as the advance and the UI renders **only the final committed
+  `current`** (no intermediate paint of the `fireAt` bar). A go-tap, by contrast, is a real
+  two-step gesture (the playhead sits at `fireAt` until the MD taps Go) and DOES paint both.
+  The reducer is unchanged either way — this is a chunk-5 render-coalescing rule, recorded
+  here so the seam is honest about the two-message shape.
 
 ```ts
 // lib/conductor-session.ts
@@ -223,16 +262,35 @@ Go / disarm) stays live regardless — parent §3.5 "with an MD override always 
 
 A thin hook wraps the pure controller; all logic that matters lives in §1.
 
+**Redirect validity lives in the PURE layer, not React (Codex R2 High-2).** The reducer
+deliberately admits + seq-burns an invalid redirect (§1), so "don't emit invalid ones"
+cannot rest on React discipline. `lib/conductor-targets.ts` exports a pure enumerator that
+is the single source of *applicable* immediate redirects given the current VM state; the
+hook renders exactly its output and can emit nothing else. It is unit-tested (§7).
+
+```ts
+// lib/conductor-targets.ts — the only legal immediate redirects right now
+export interface RedirectOption { label: string; directive: Directive; }
+
+// Enumerate ONLY directives that will actually do something against THIS vm state:
+//   anotherRound{rs} / hold{rs}  — for each real repeatStart (compiled.repeatStartById)
+//   release{rs}                  — ONLY when vm.holding === rs (else a no-op)
+//   resetJump{jumpId}            — ONLY when vm.fired[jumpId] (re-arm an already-fired jump)
+// jumpTo is the ARMABLE path (§2), not an immediate-redirect option here.
+export function availableRedirects(compiled: CompiledRoadmap, vm: VMState): RedirectOption[];
+```
+
 ```ts
 // in app/[owner]/[show]/page.tsx (or a colocated hook file)
 function useConductorSession(args): {
   state: ConductorState;
   current: TraversalStep | null;        // = state.current, the bar to redline
   armed: Armed | null;
-  targets: JumpTarget[];
+  targets: JumpTarget[];                // armable jumpTo targets (§2), each w/ exitOptions
+  redirects: RedirectOption[];          // applicable immediate redirects (pure-enumerated)
   advance: () => void;
-  redirect: (d: Directive) => void;
-  arm: (t: JumpTarget, exit?: ExitPolicy) => void;
+  redirect: (opt: RedirectOption) => void;        // only ever an enumerated option
+  arm: (t: JumpTarget, exit?: ExitPolicy['kind']) => void; // exit ∈ t.exitOptions
   commit: () => void;
   disarm: () => void;
 };
@@ -247,37 +305,40 @@ must NOT imply relay authority over other players (there is no transport until 3
   already computes pass ordinals), plus a primary **Advance** control (tap = next bar).
   The redline renders `current` via the existing SectionMarker/redline path.
 - **Change-marker controls** — an **Arm** affordance opening the §2 target picker (disabled
-  at song end per §3), plus, while armed, the §3 telegraph badge and a prominent **Go**
-  (commit) / **Cancel** (disarm).
-- **Immediate-redirect controls are TARGET-CONSTRAINED (Codex R1 Medium / open-Q b).**
-  anotherRound / hold / release / resetJump call `redirect` directly (no telegraph), but —
-  because the reducer admits and seq-burns an invalid redirect (§1) — these controls
-  enumerate ONLY the live program's real repeat/jump targets (`compiled.repeatStartById` /
-  jump markers) and **disable an inapplicable `release`/`resetJump`** (e.g. release when not
-  holding, resetJump for a not-yet-fired jump). No control can fire a silent no-op.
+  at song end per §3); the picker exposes a target's `exitOptions` only (no invalid exit),
+  plus, while armed, the §3 telegraph badge and a prominent **Go** (commit) / **Cancel**
+  (disarm).
+- **Immediate-redirect controls** render one button per `redirects` entry — so an
+  inapplicable `release`/`resetJump` is simply absent, never a disabled-on-faith control.
+  No control can fire a silent seq-burning no-op (the enforcement is the pure enumerator,
+  not the component).
 - **Non-MD / no-session:** Perform renders exactly as today (zero change for followers
   this chunk; the telegraph is single-device until 3b).
 
 ## 6. Decisions (recommend YES unless noted)
 
+- **D0 — Identity layer is the LOCAL `ChartCalibration`, not canonical (Codex R2 Block).**
+  Single-device runs on the MD's own chart (local `Bar`/`SectionAnchor` ids, what
+  `compileRoadmap` already consumes); the canonical `SongStructure` layer is the chunk-1
+  cross-chart bridge and is purely a 3b concern. Every chunk-4 id is local. Recommend YES.
 - **D1 — Pure lib core, React hook is a thin binding.** `lib/conductor-session.ts`
   (`initSession` / `dispatch` / `shouldAutoFire`) + `lib/conductor-targets.ts`
-  (`armableTargets`, which needs the source `{ bars, sections, markers }` so it lives apart
-  from the session state). Keeps the live logic in the lib gate (no jsdom), mirrors chunks
-  1-3. Recommend YES.
+  (`armableTargets` + `availableRedirects`, the pure target/redirect enumerators that take
+  the local `ChartCalibration` / `compiled`+`vm` so validity lives in the gate, not React).
+  Keeps the live logic in the lib gate (no jsdom), mirrors chunks 1-3. Recommend YES.
 - **D2 — The MD is its own relay on one device: `dispatch` = mint → `reduceConductor` →
   loopback.** This loopback is the explicit 3b seam (swap "keep locally" for "broadcast +
   apply"); message contract + reducer untouched. Recommend YES.
 - **D3 — `dispatch` is the sole seq-issuer** (`seq+1`, `epoch` held, `sentAt = now`
   injected). Single-device never produces `needsSnapshot`. Two invalid-payload behaviors
   (§1): `arm`/`commit` self-validate → `ignored` → disabled control; `redirect` always
-  admits + burns seq, so redirect validity is UI-enforced via target enumeration. Recommend
-  YES.
-- **D4 — Armable = jumpTo only (carry D6); `armableTargets(compiled, { bars, sections,
-  markers })` (Codex R1 Block — section labels need the SOURCE structure, not `compiled`),
-  named landmarks first, plain bars de-emphasized; `exit` offered TARGET-aware (target
-  at/before the To-Coda/Fine trigger), not merely program-aware.** No free-form bar entry.
-  Recommend YES.
+  admits + burns seq, so redirect validity is enforced by the **pure** `availableRedirects`
+  enumerator (Codex R2 High-2) — the UI can only emit an enumerated option. Recommend YES.
+- **D4 — Armable = jumpTo only (carry D6); `armableTargets(compiled, cal: ChartCalibration)`
+  (Codex R2 Block — local chart, not canonical); named landmarks first, plain bars
+  de-emphasized; `JumpTarget.exitOptions` computed per target (Codex R2 High-1) — include
+  `alCoda`/`alFine` iff a To-Coda/Fine EXISTS at-or-after the target (existential over the
+  Map/Set, not "the trigger"; Codex R2 Med).** No free-form bar entry. Recommend YES.
 - **D5 — `fireAt` = advisory display only this chunk; default to the next bar (disabled at
   song end — §3 guard), optional re-tap to any real bar.** Precise placement earns its keep
   in chunk 5 when auto-fire makes the bar a trigger. Recommend YES (keep re-tap — Codex (a)
@@ -290,12 +351,11 @@ must NOT imply relay authority over other players (there is no transport until 3
   mode"** so it never implies relay authority before 3b (Codex (c)). Honors the
   never-write-back boundary. Recommend YES.
 
-**Open Qs — resolved with Codex R1, no open chunk-4 decisions remain:** (a) keep `fireAt`
-re-tap — adopted, now safe given the Block fix's validated bar source + song-end disable;
-(b) surface immediate redirects now BUT target-constrained (enumerate valid targets, disable
-inapplicable release/resetJump) — adopted, since "free" was untrue while invalid redirects
-silently burn seq; (c) `isOwner` is an acceptable interim gate, labelled "Local MD mode" in
-copy + state — adopted.
+**Open Qs — resolved across Codex R1+R2, no open chunk-4 decisions remain:** (a) keep
+`fireAt` re-tap — adopted (chunk-4 unconstrained; a fireAt at/behind the cursor is
+auto-fire-ineligible in chunk 5, §3); (b) surface immediate redirects now BUT enforced by
+the pure `availableRedirects` enumerator (not React discipline) — adopted; (c) `isOwner`
+interim gate labelled "Local MD mode" — adopted.
 
 ## 7. Test plan (pure controller — the gate stays lib-tested)
 
@@ -317,23 +377,31 @@ hook is a thin binding.
 - **self-invalid arm/commit:** `arm` at a bar not in `compiled.barPos` → outcome
   `ignored`, session UNCHANGED (the UI disables the control); commit on a corrupt armed
   target (injected) → `armed` cleared, no step.
-- **armableTargets:** given `{ bars, sections, markers }`, **section-head targets carry the
-  `CanonicalSection.label` + ordinal** and point at the section's first bar (the Block
-  regression — a `compiled`-only enumeration could not produce these); named landmarks
-  first; a To-Coda/Fine program offers `exit` ONLY when the target sits at/before the
-  trigger (target-aware, not program-aware); a linear/section-less program yields bar
-  targets only with no crash.
+- **armableTargets (local `ChartCalibration`):** **section-head targets carry the
+  `SectionAnchor.label` + locally-recomputed ordinal** and point at the section's first
+  local bar (the Block regression — a `compiled`-only or canonical enumeration is wrong);
+  named landmarks first; a linear/section-less chart yields bar targets only with no crash;
+  every `barId` is a `compiled.barPos`-present local id.
+- **JumpTarget.exitOptions (target-aware, existential):** a target with a To-Coda at/after
+  it → `exitOptions` includes `alCoda`; with NONE after it → excludes it; **multiple To-Coda
+  markers** are handled (existential over `compiled.toCodaAt`, not "the trigger"); `alFine`
+  likewise over `compiled.fineAt`; a target with neither → `[]`.
+- **availableRedirects (pure, the High-2 safety net):** lists `anotherRound`/`hold` for every
+  real repeatStart; `release{rs}` ONLY when `vm.holding === rs`; `resetJump{j}` ONLY when
+  `vm.fired[j]`; excludes a `release`/`resetJump` that would no-op against the given `vm`
+  (regression: an inapplicable redirect can never be enumerated → never emitted → never burns
+  seq).
 - **fireAt song-end guard:** at `vm.done` (or `cursor >= bars.length`) there is no default
   fireAt and arm is disabled (the controller/helper reports "no armable position").
 - **shouldAutoFire:** returns `false` for every session (chunk-4 invariant — a guard test so
   chunk 5's change is visible and intentional). Contract test: an `advance` that lands
   `current.barId === armed.fireAt` still injects NO commit in chunk 4 (go-tap only), and the
   helper is evaluated post-advance.
-- **redirect equivalence:** `redirect(d)` yields a `vm` equal to a direct chunk-2
-  `applyOverride` (the controller adds nothing but seq/sentAt).
+- **redirect equivalence:** `redirect(opt)` yields a `vm` equal to a direct chunk-2
+  `applyOverride` on `opt.directive` (the controller adds nothing but seq/sentAt).
 
-Target: a `tests/conductor-session.test.ts` companion (~20 assertions), gate green,
-test-count delta reported on the build PR.
+Target: `tests/conductor-session.test.ts` + `tests/conductor-targets.test.ts` companions
+(~24 assertions total), gate green, test-count delta reported on the build PR.
 
 ## 8. What this unblocks / what it does NOT do
 
