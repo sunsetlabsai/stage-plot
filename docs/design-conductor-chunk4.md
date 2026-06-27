@@ -203,6 +203,10 @@ export function armableTargets(compiled: CompiledRoadmap, cal: ChartCalibration)
     out-of-set exit (mints `jumpTo` with no exit) before building `Armed.directive`.
   So neither a stale `barId` nor a spoofed `exitOptions` can reach the reducer; the authoritative
   eligibility is always the fresh `armableTargets` computation, never the passed object.
+  *(Note, Codex R5 Low: re-resolution is by `barId`, and `exitOptions` is position-based so it is
+  identical for any targets sharing a bar — but the `label`/`kind` of two targets at the SAME
+  `barId` may differ. That is safe for arming; only matters if a test asserts the recomputed
+  target's label, so label-asserting fixtures use DISTINCT bar ids.)*
 - **Validity is enforced at BOTH ends.** The picker only offers `compiled.barPos`-present
   targets; `arm` re-checks (chunk-3 reducer:227) and the controller surfaces an `ignored`
   as a disabled control. Defense in depth, no new reducer path.
@@ -214,20 +218,27 @@ export function armableTargets(compiled: CompiledRoadmap, cal: ChartCalibration)
 only**: the MD taps Go to commit regardless of where the playhead is. So fireAt never
 gates anything this chunk — it only places the badge.
 
-- **Default fireAt = the MD's current bar's *next* bar** (`compiled.bars[vm.cursor]` —
-  recall `vm.cursor` is the NEXT index, chunk-3 D2), i.e. "the change lands at the next
-  downbeat," the natural telegraph. **End-of-song guard (Codex R1 Medium):** when
-  `vm.done` or `vm.cursor >= compiled.bars.length` there is no next bar, so there is no
-  valid default fireAt — the Arm affordance is **disabled** at song end (a jumpTo off the
-  end of the song is meaningless, and `armed.fireAt` is a raw string the reducer does not
-  position-validate). The MD MAY re-place fireAt by tapping another **real** bar (any
+- **Default fireAt = the next EMITTED bar, via a pure `stepVM` PEEK — NOT `bars[vm.cursor]`
+  (Codex R5 High).** `vm.cursor` is only the next *candidate* index: `stepVM`'s Rule-1
+  volta-entry-select loop (roadmap-vm.ts:396-418) advances the cursor PAST a pass-excluded
+  ending span before recording a bar, so `compiled.bars[vm.cursor]` can be a bar the VM will
+  SKIP. The honest "next downbeat" is whatever `stepVM` actually emits next, so:
+  ```ts
+  const peek = stepVM(compiled, vm);           // pure: clones, does not mutate vm
+  const defaultFireAt = peek.transition?.barId; // the REAL next emitted bar (or undefined)
+  ```
+  **End-of-song guard (Codex R1 Medium, now subsumed):** when the peek yields no
+  `transition` (`vm.done`, or the walk falls off the end / past the last group) there is no
+  next emitted bar → no valid default fireAt → the Arm affordance is **disabled** (a jumpTo
+  off the end of the song is meaningless, and `armed.fireAt` is a raw string the reducer does
+  not position-validate). The MD MAY re-place fireAt by tapping another **real** bar (any
   `compiled.barPos`-present id); the re-tap target is validated the same way.
 - **fireAt placement vs auto-fire eligibility — an ARM-TIME fact (Codex R2 Med + R3 Med).**
   Chunk-4 go-tap fires on the MD's tap regardless of where `fireAt` sits, so re-tap may point
-  at ANY real bar — including one at or behind the current cursor. Harmless here. But it would
+  at ANY real bar — including one at or behind the current position. Harmless here. But it would
   leave a **dead marker** for chunk-5 auto-fire (a `fireAt` the playhead never reaches again
-  never triggers). The rule — **a `fireAt` strictly BEHIND the next-step cursor when armed is
-  auto-fire-INELIGIBLE** — depends on the cursor *at arm time*, which a post-advance
+  never triggers). The rule — **a `fireAt` BEHIND the next emitted bar when armed is
+  auto-fire-INELIGIBLE** — depends on the VM position *at arm time*, which a post-advance
   `shouldAutoFire(session)` cannot reconstruct (`Armed` stores only `{fireAt, directive}`,
   conductor-state.ts:44, and chunk 4 makes ZERO changes to that type). So eligibility is a
   **pure helper evaluated at arm/re-tap time**, not a post-hoc derivation:
@@ -235,11 +246,22 @@ gates anything this chunk — it only places the badge.
   ```ts
   // lib/conductor-targets.ts — eligibility decided when the marker is placed
   export function fireAtEligible(compiled: CompiledRoadmap, vm: VMState, fireAt: string): boolean;
-  // true iff barPos(fireAt) >= vm.cursor (forward-reachable). CRITICAL (Codex R3 High):
-  // vm.cursor is the NEXT-step index (chunk-3 D2), so the NEXT bar the VM emits is AT
-  // pos === vm.cursor — that includes the DEFAULT fireAt = compiled.bars[vm.cursor]. The bound
-  // is `>=` (NOT strictly `>`), else the natural next-bar marker is wrongly ineligible.
-  // false for an unknown bar (barPos miss) and at song end (vm.done / cursor out of range).
+  // A FORWARD-POSITION check anchored to the REAL next emitted bar (Codex R5 High/Med):
+  //   const peek = stepVM(compiled, vm);
+  //   if (!peek.transition) return false;                 // vm.done / walks off the end
+  //   const nextEmitPos = compiled.barPos.get(peek.transition.barId)!;
+  //   const pos = compiled.barPos.get(fireAt);
+  //   return pos !== undefined && pos >= nextEmitPos;
+  // The floor is the PEEKED next-emit position, NOT raw vm.cursor: a pass-excluded volta bar
+  // that stepVM skips sits at pos < nextEmitPos and is correctly INELIGIBLE; the DEFAULT
+  // fireAt (= peek.transition.barId) is eligible by construction (pos === nextEmitPos). Unknown
+  // bar → false; song end → false.
+  //
+  // SCOPE/HONESTY (Codex R5 Med): this is a forward-POSITION heuristic, NOT a full-traversal
+  // reachability proof — repeats/jumps/Coda/Fine can revisit or skip bars, so `pos >= nextEmitPos`
+  // does not PROVE the playhead reaches fireAt. It is sufficient for chunk 4 (advisory display)
+  // and is the floor chunk-5 auto-fire ANDs with the §3.5 confidence gate; if chunk 5 needs true
+  // reachability it upgrades this to a bounded VM walk (the SIGNATURE stays the same).
   ```
   Chunk 4 ships + tests this helper and uses it to flag an ineligible placement in the
   telegraph (advisory). **Honest correction to the chunk-5 claim (R3 Med):** auto-fire is NOT
@@ -273,6 +295,17 @@ genuinely unblock chunk 5 without an API change, the **evaluation contract is pi
   fire bar) AND `armed !== null`. No clock/confidence inputs are consulted in chunk 4; chunk
   5 ANDs the §3.5 gate (clock present, bars-since-anchor bound, confidence high, no
   unresolved hold) onto that same predicate.
+- **Call shape — the arm-time eligibility is ANDed by the HOOK, OUTSIDE `shouldAutoFire`
+  (Codex R5 Med).** `shouldAutoFire(session)` reads only the wire `ConductorState`; the §3
+  `fireAtEligible` result is captured at arm time into **local hook state** (`armedFireAtEligible`),
+  which `session` does not carry. So chunk 5's post-advance decision is composed in the hook,
+  not inside the predicate:
+  ```ts
+  // chunk-5 hook, post-advance:
+  if (armedFireAtEligible && shouldAutoFire(session)) commit();
+  ```
+  `shouldAutoFire`'s SIGNATURE is unchanged (still `(session) => boolean`); the eligibility AND
+  lives in the hook because it is local, not wire, state.
 - **Return = "the hook should now `dispatch({ kind: 'commit' })`."** `true` does NOT itself
   mutate state — it tells the hook to issue exactly ONE additional `commit` message (its own
   seq), so auto-fire flows through the identical reducer path as a go-tap. A normal advance
@@ -318,9 +351,15 @@ hook renders exactly its output and can emit nothing else. It is unit-tested (§
 // lib/conductor-targets.ts — the only legal immediate redirects right now
 export interface RedirectOption { label: string; directive: Directive; }
 
-// Enumerate ONLY directives that will actually do something against THIS vm state:
-//   anotherRound{rs}  — for each real repeatStart (compiled.repeatStartById)
-//   hold{rs}          — each real repeatStart EXCEPT the one already vamping: hold sets
+// Enumerate ONLY directives that are not a REDUCER/seq-burning no-op against THIS vm state.
+// SCOPE (Codex R5 Med): the guarantee is "won't silently burn a seq for zero STATE change,"
+// NOT "guaranteed musically audible." So anotherRound/hold are scoped to repeatStarts that
+// compile to a REAL repeat (a body the directive can affect): rs with `compiled.times.get(rs) > 1`
+// OR an ending group (`compiled.endingStartsByRepeat.has(rs)`). A lone/cosmetic repeatStart
+// (times === 1, no ending group) is excluded — anotherRound clamps completedPasses to a value
+// the exit edge never consults, so it is musically inert (Codex R5 Med).
+//   anotherRound{rs}  — each real-repeat rs (per the scope above)
+//   hold{rs}          — each real-repeat rs EXCEPT the one already vamping: hold sets
 //                       vm.holding := rs, so hold{rs} when vm.holding === rs re-sets the
 //                       same value and burns a seq for no change (Codex R3 High-2,
 //                       roadmap-vm.ts:535) → exclude the currently-held repeat
@@ -409,7 +448,7 @@ must NOT imply relay authority over other players (there is no transport until 3
   mode"** so it never implies relay authority before 3b (Codex (c)). Honors the
   never-write-back boundary. Recommend YES.
 
-**Open Qs — resolved across Codex R1+R2, no open chunk-4 decisions remain:** (a) keep
+**Open Qs — resolved across Codex R1-R5, no open chunk-4 decisions remain:** (a) keep
 `fireAt` re-tap — adopted (chunk-4 unconstrained; a fireAt at/behind the cursor is
 auto-fire-ineligible in chunk 5, §3); (b) surface immediate redirects now BUT enforced by
 the pure `availableRedirects` enumerator (not React discipline) — adopted; (c) `isOwner`
@@ -452,18 +491,26 @@ hook is a thin binding.
   it → `exitOptions` includes `alCoda`; with NONE after it → excludes it; **multiple To-Coda
   markers** are handled (existential over `compiled.toCodaAt`, not "the trigger"); `alFine`
   likewise over `compiled.fineAt`; a target with neither → `[]`.
-- **availableRedirects (pure, the High-2 safety net):** lists `anotherRound` for every real
-  repeatStart; `hold{rs}` for every real repeatStart **EXCEPT the currently-held one**
-  (`vm.holding === rs` → excluded, since re-holding burns a seq for no change — Codex R3 High-2);
-  `release{rs}` ONLY when `vm.holding === rs`; `resetJump{j}` ONLY when `vm.fired[j]`; excludes a
-  `release`/`resetJump`/held-repeat-`hold` that would no-op against the given `vm` (regression: an
-  inapplicable redirect can never be enumerated → never emitted → never burns seq).
+- **availableRedirects (pure, the High-2 safety net):** lists `anotherRound`/`hold` only for a
+  **real repeat** (`compiled.times.get(rs) > 1` OR an ending group) — a lone/cosmetic repeatStart
+  (times 1, no endings) is excluded (Codex R5 Med, musically inert); `hold{rs}` additionally
+  **EXCLUDES the currently-held one** (`vm.holding === rs` → re-holding burns a seq for no change —
+  Codex R3 High-2); `release{rs}` ONLY when `vm.holding === rs`; `resetJump{j}` ONLY when
+  `vm.fired[j]`; excludes a `release`/`resetJump`/held-repeat-`hold`/cosmetic-repeat that would
+  no-op against the given `vm` (regression: an inapplicable redirect can never be enumerated →
+  never emitted → never burns seq).
 - **fireAt song-end guard:** at `vm.done` (or `cursor >= bars.length`) there is no default
   fireAt and arm is disabled (the controller/helper reports "no armable position").
-- **fireAtEligible (Codex R3 Med — explicit tests):** the DEFAULT next bar
-  (`compiled.bars[vm.cursor]`) → **eligible** (the `>= vm.cursor` boundary, the case strict-`>`
-  would wrongly fail); a bar strictly behind the cursor (already emitted) → ineligible; an
-  unknown bar id (barPos miss) → false; at song end (`vm.done` / cursor out of range) → false.
+- **default fireAt = next EMITTED bar (Codex R5 High):** in a fixture where `vm.cursor` sits on a
+  **pass-excluded volta span** (stepVM Rule-1 skips it, roadmap-vm.ts:396-418), the default fireAt
+  is the PEEKED `stepVM(compiled, vm).transition.barId` — the bar actually emitted next — NOT the
+  skipped `compiled.bars[vm.cursor]`. (The regression a raw-`vm.cursor` default would introduce.)
+- **fireAtEligible (Codex R3 Med + R5 High — explicit tests):** the DEFAULT next emitted bar
+  (peek `transition.barId`) → **eligible** (`pos === nextEmitPos`, the `>=` boundary the case
+  strict-`>` would wrongly fail); a **pass-excluded volta bar at raw `vm.cursor`** (skipped by
+  stepVM) → INELIGIBLE (`pos < nextEmitPos` — the R5 High regression); a bar behind the next-emit
+  position (already emitted) → ineligible; an unknown bar id (barPos miss) → false; at song end
+  (`vm.done` / no peek transition) → false.
 - **shouldAutoFire:** returns `false` for every session (chunk-4 invariant — a guard test so
   chunk 5's change is visible and intentional). Contract test: an `advance` that lands
   `current.barId === armed.fireAt` still injects NO commit in chunk 4 (go-tap only), and the
