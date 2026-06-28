@@ -91,6 +91,8 @@ import {
 } from '@/lib/chart-snap';
 import { reviewFlags } from '@/lib/chart-review';
 import type { FlaggedRef } from '@/lib/chart-review';
+import { useConductorSession } from '@/lib/use-conductor-session';
+import ConductorCluster from '@/components/ConductorCluster';
 import { useShow } from '@/lib/use-show';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { normalizeSongKeySafe, displayRole } from '@/lib/normalize';
@@ -960,6 +962,8 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, is
           isOffline={isOffline}
           accessToken={accessToken}
           isOwner={isOwner}
+          owner={owner}
+          slug={slug}
           onChangeIdx={setNavigatorSongIdx}
           onChangeRole={handleRoleChange}
           onClose={() => setNavigatorSongIdx(null)}
@@ -1530,6 +1534,8 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
                 isOffline={isOffline}
                 accessToken={accessToken}
                 isOwner={isOwner}
+                owner={owner}
+                slug={slug}
                 onChangeIdx={setNavigatorSongIdx}
                 onChangeRole={handleRoleChange}
                 onClose={() => setNavigatorSongIdx(null)}
@@ -2458,7 +2464,7 @@ function RoadmapToolbar({
 }
 
 function ChartNavigator({
-  setlist, currentIdx, roleFilter, allRoles, isOffline, accessToken, isOwner = false, onChangeIdx, onChangeRole, onClose,
+  setlist, currentIdx, roleFilter, allRoles, isOffline, accessToken, isOwner = false, owner, slug, onChangeIdx, onChangeRole, onClose,
 }: {
   setlist: SetlistSong[];
   currentIdx: number;
@@ -2467,6 +2473,8 @@ function ChartNavigator({
   isOffline: boolean;
   accessToken?: string;
   isOwner?: boolean;
+  owner: string;
+  slug: string;
   onChangeIdx: (idx: number) => void;
   onChangeRole: (role: string) => void;
   onClose: () => void;
@@ -2498,6 +2506,9 @@ function ChartNavigator({
   // Position in the PLAYED traversal (index, not bar id): a bar can recur across
   // passes (repeats/voltas), so the index is what disambiguates which pass we're on.
   const [barSeekIdx, setBarSeekIdx] = useState<number | null>(null);
+  // "Local MD mode" toggle (Q2): the owner explicitly takes the baton. OFF lets the
+  // owner rehearse with the free self-drive seek without minting/advancing a session.
+  const [conducting, setConducting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [calTool, setCalTool] = useState<'sections' | 'bars' | 'roadmap'>('sections');
   const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
@@ -2870,13 +2881,35 @@ function ChartNavigator({
     const resolved = resolveRoadmap(barCal);
     return resolved.ok ? resolved.traversal : barsInOrder(barCal).map((b) => ({ barId: b.id, pass: 1 }));
   }, [barCal]);
+  // ── Conductor authority, chunk 4: the MD's own single-device session ──
+  // The pure controller drives a redline by emitting `current` (a TraversalStep —
+  // the same shape as the self-drive's `currentStep`), so a live session simply
+  // REPLACES barSeekIdx as the source below (one redline, one driver — §1). Per-song,
+  // single-device, advance-by-tap; no relay, no clock (those are 3b / chunk 5).
+  const conductorEnabled = isOwner && conducting && barMode;
+  const conductor = useConductorSession({
+    enabled: conductorEnabled,
+    // Q1: stable per (chart-in-show) — changing it mints a fresh session.
+    sessionId: `${chartFileId ?? 'none'}::${owner}/${slug}`,
+    songRef: chartFileId ?? 'none',
+    cal: barCal,
+  });
+  const sessionDriving = conducting && conductor.active;
+
   // Effective (clamped) seek index: a stored index can fall out of range when the
   // traversal shrinks under it (a roadmap/bar edit, or leaving perform for
   // calibrate where the traversal is empty). Reading it as null when stale keeps
   // the redline and the Next/Prev disabled logic correct at render time — no
   // setState-in-effect, no flash of a vanished redline with Next stuck disabled.
   const seekIdx = barSeekIdx !== null && barSeekIdx < traversal.length ? barSeekIdx : null;
-  const currentStep = barCal && seekIdx !== null ? traversal[seekIdx] : null;
+  // Driver swap: when the conductor session is live it sources currentStep; else the
+  // self-drive seek. The derivation below (bar → system → page-turn → redline) is the
+  // same for both — the session is purely a WHICH-bar driver, not a render change.
+  const currentStep = sessionDriving
+    ? conductor.current
+    : barCal && seekIdx !== null
+      ? traversal[seekIdx]
+      : null;
   const currentBar = currentStep && barCal ? (barCal.bars ?? []).find((b) => b.id === currentStep.barId) ?? null : null;
   const currentSystem = currentBar && barCal ? findSystem(barCal, currentBar.systemId) : null;
   const barRedline = currentBar && currentSystem ? { bar: currentBar, system: currentSystem } : null;
@@ -2898,6 +2931,22 @@ function ChartNavigator({
   };
   const stepNextBar = () => seekToIndex(seekIdx === null ? 0 : seekIdx + 1);
   const stepPrevBar = () => { if (seekIdx !== null) seekToIndex(seekIdx - 1); };
+
+  // Page-turn parity for the conductor session: the self-drive turns the page inside
+  // seekToIndex (an event handler), but the session advances its playhead inside the
+  // pure controller, so the page-turn rides a reaction to `conductor.current` instead.
+  // Deferred to a microtask (the repo's no-sync-setState-in-effect rule); a cancelled
+  // guard drops a stale turn if current/page changed under it.
+  const drivenBarId = sessionDriving ? conductor.current?.barId ?? null : null;
+  useEffect(() => {
+    if (!drivenBarId || !barCal) return;
+    const bar = (barCal.bars ?? []).find((b) => b.id === drivenBarId);
+    const sys = bar ? findSystem(barCal, bar.systemId) : null;
+    if (!sys || sys.page === pageNum) return;
+    let cancelled = false;
+    Promise.resolve().then(() => { if (!cancelled) setPageNum(sys.page); });
+    return () => { cancelled = true; };
+  }, [drivenBarId, barCal, pageNum]);
 
   const saveCalibration = async (promote: boolean) => {
     if (!calibration || !chartFileId || !sourceHash) return;
@@ -2928,6 +2977,7 @@ function ChartNavigator({
       setSeekId(null);
       setHoldId(null);
       setBarSeekIdx(null);
+      setConducting(false);
       setEditingId(null);
       setCalTool('sections');
       setSelectedSystemId(null);
@@ -3451,8 +3501,35 @@ function ChartNavigator({
         </div>
       )}
 
-      {/* Perform bar transport (redline sweeps L→R through the bars) */}
-      {calMode === 'perform' && barMode && (
+      {/* Perform bar transport — the self-drive seek, OR (when the MD takes the baton)
+          the Local MD conductor cluster in its place. Mutually exclusive (§1 / Q3). */}
+      {calMode === 'perform' && barMode && conducting && isOwner ? (() => {
+        const armed = conductor.armed;
+        const armedTarget = armed ? conductor.targets.find((t) => t.barId === armed.directive.barId) : null;
+        const fireAtBar = armed ? (barCal?.bars ?? []).find((b) => b.id === armed.fireAt) : null;
+        return (
+          <ConductorCluster
+            active={conductor.active}
+            readout={currentBar
+              ? { absNumber: currentBar.absNumber, passLabel: currentStep && currentStep.pass > 1 ? passOrdinal(currentStep.pass) : null }
+              : null}
+            armedSummary={armed
+              ? { targetLabel: armedTarget?.label ?? 'target', fireAtLabel: fireAtBar ? String(fireAtBar.absNumber) : '?' }
+              : null}
+            targets={conductor.targets}
+            redirects={conductor.redirects}
+            canAdvance={!conductor.done}
+            canArm={!conductor.done}
+            ignored={conductor.outcome === 'ignored'}
+            onAdvance={conductor.advance}
+            onArm={conductor.arm}
+            onCommit={conductor.commit}
+            onDisarm={conductor.disarm}
+            onRedirect={conductor.redirect}
+            onStop={() => setConducting(false)}
+          />
+        );
+      })() : calMode === 'perform' && barMode ? (
         <div className="flex items-center justify-center gap-3 py-1.5 text-xs bg-zinc-900 border-t border-zinc-800">
           <button
             onClick={stepPrevBar}
@@ -3483,8 +3560,13 @@ function ChartNavigator({
               clear
             </button>
           )}
+          {isOwner && (
+            <button onClick={() => setConducting(true)} className="text-amber-400 hover:text-amber-300 underline">
+              Conduct
+            </button>
+          )}
         </div>
-      )}
+      ) : null}
 
       {/* Perform seek status (a section is parked under the redline) */}
       {calMode === 'perform' && !barMode && seekId && overlayCalibration && (() => {
