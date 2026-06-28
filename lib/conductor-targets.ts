@@ -7,6 +7,7 @@ import {
   type ExitPolicy,
   type Directive,
   stepVM,
+  applyOverride,
 } from './roadmap-vm';
 import type { Armed } from './conductor-state';
 
@@ -134,40 +135,61 @@ export function armableTargets(compiled: CompiledRoadmap, cal: ChartCalibration)
   return targets;
 }
 
-// Enumerate ONLY directives that are not a REDUCER/seq-burning no-op against THIS
-// vm state (design §5). The guarantee is "won't silently burn a seq for zero STATE
-// change," NOT "guaranteed musically audible" — so anotherRound/hold are scoped to
-// repeatStarts that compile to a REAL repeat (a body the directive can affect):
-// times > 1 OR an ending group. A lone/cosmetic repeatStart is excluded
-// (anotherRound clamps a counter the exit edge never consults → inert).
+// Structural VMState equality — both operands always share the SAME key sets here
+// (applyOverride only mutates existing keys, never adds/removes), so a record-wise
+// scalar compare is exact. Used to enforce the "no seq for zero STATE change" rule.
+function sameRecord<T>(a: Record<string, T>, b: Record<string, T>): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const k of keys) if (a[k] !== b[k]) return false;
+  return true;
+}
+function sameVM(a: VMState, b: VMState): boolean {
+  return (
+    a.cursor === b.cursor &&
+    a.holding === b.holding &&
+    a.done === b.done &&
+    a.flags.toCodaFired === b.flags.toCodaFired &&
+    a.flags.alFineActive === b.flags.alFineActive &&
+    a.flags.alCodaArmed === b.flags.alCodaArmed &&
+    sameRecord(a.completedPasses, b.completedPasses) &&
+    sameRecord(a.fired, b.fired) &&
+    sameRecord(a.passCount, b.passCount)
+  );
+}
+
+// Enumerate ONLY directives that actually MOVE this vm (design §5). The guarantee is
+// "won't silently burn a seq for zero STATE change," NOT "guaranteed musically
+// audible." Candidates are SEMANTICALLY scoped first — anotherRound/hold only for a
+// REAL repeat (times > 1 OR an ending group; a lone/cosmetic repeatStart is inert),
+// release per repeat, resetJump per jump — then the AUTHORITATIVE no-op filter drops
+// any whose applyOverride leaves the vm byte-identical. That filter (not the
+// per-candidate scoping) owns the seq-burn guarantee: it also closes the case Codex
+// found where an ending group with max pass 1 compiles to times === 1, so
+// anotherRound clamps completedPasses to t-1 === 0 and changes nothing.
 export function availableRedirects(compiled: CompiledRoadmap, vm: VMState): RedirectOption[] {
-  const out: RedirectOption[] = [];
+  const candidates: RedirectOption[] = [];
 
   for (const rs of compiled.repeatStarts) {
     const real = (compiled.times.get(rs.id) ?? 0) > 1 || compiled.endingStartsByRepeat.has(rs.id);
     if (real) {
-      out.push({ label: 'Another round', directive: { kind: 'anotherRound', repeatStartId: rs.id } });
-      // hold sets vm.holding := rs; holding the already-held repeat re-sets the same
-      // value and burns a seq for no change — exclude the currently-held repeat.
-      if (vm.holding !== rs.id) {
-        out.push({ label: 'Vamp (hold)', directive: { kind: 'hold', repeatStartId: rs.id } });
-      }
+      candidates.push({ label: 'Another round', directive: { kind: 'anotherRound', repeatStartId: rs.id } });
+      candidates.push({ label: 'Vamp (hold)', directive: { kind: 'hold', repeatStartId: rs.id } });
     }
-    // release applies ONLY to the repeat currently being vamped (else a no-op).
-    if (vm.holding === rs.id) {
-      out.push({ label: 'Release vamp', directive: { kind: 'release', repeatStartId: rs.id } });
-    }
+    // release is musically meaningful only for the held repeat; the no-op filter
+    // below is what actually enforces that (applyOverride release on an unheld
+    // repeat returns the vm unchanged).
+    candidates.push({ label: 'Release vamp', directive: { kind: 'release', repeatStartId: rs.id } });
   }
 
-  // resetJump re-arms an already-fired D.S./D.C. — offered ONLY when it has fired.
-  // "Re-arm jump" (NOT "Reset" — that misreads as resetting playback; design §5 Low).
+  // resetJump re-arms an already-fired D.S./D.C. — "Re-arm jump" (NOT "Reset", which
+  // misreads as resetting playback; design §5 Low). The no-op filter keeps only the
+  // jumps that have actually fired.
   for (const j of compiled.jumps) {
-    if (vm.fired[j.id]) {
-      out.push({ label: 'Re-arm jump', directive: { kind: 'resetJump', jumpId: j.id } });
-    }
+    candidates.push({ label: 'Re-arm jump', directive: { kind: 'resetJump', jumpId: j.id } });
   }
 
-  return out;
+  return candidates.filter((c) => !sameVM(vm, applyOverride(compiled, vm, c.directive)));
 }
 
 // The REAL next emitted bar (the natural "next downbeat" telegraph default) — a

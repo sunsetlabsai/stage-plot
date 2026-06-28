@@ -158,6 +158,19 @@ describe('availableRedirects', () => {
     expect(availableRedirects(compileCal(loneCal), initVM(compileCal(loneCal)))).toEqual([]);
   });
 
+  it('drops a no-op anotherRound (max-pass-1 ending group ⇒ times===1, clamp is inert)', () => {
+    // compileRoadmap accepts an ending group whose only pass is [1] → times === 1,
+    // yet endingStartsByRepeat.has(R) is true. anotherRound clamps completedPasses to
+    // t-1 === 0 (unchanged) and parks the cursor on the already-current repeat start,
+    // so against the initial VM it changes NOTHING and must NOT be offered (Codex).
+    const cal = makeCal([{ id: 'b1' }, { id: 'b2' }], [], [rstart('R', 'b1'), ending('E', 'R', ['b2'], [1])]);
+    const c = compileCal(cal);
+    expect(c.times.get('R')).toBe(1); // the trap: a "real" ending group at times === 1
+    const labels = availableRedirects(c, initVM(c)).map((o) => o.label);
+    expect(labels).not.toContain('Another round'); // no-op filtered out
+    expect(labels).toEqual(['Vamp (hold)']); // hold (null→R) is the only real delta
+  });
+
   it('offers Re-arm jump ONLY once the D.C./D.S. has fired', () => {
     const jCal = makeCal([{ id: 'b1' }, { id: 'b2' }, { id: 'b3' }], [], [dc('J', 'b3')]);
     const c = compileCal(jCal);
