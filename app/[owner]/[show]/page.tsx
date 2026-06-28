@@ -64,6 +64,7 @@ import {
   isPerformable,
   tapToBar,
   findSystem,
+  performDisplayPage,
   barsInOrder,
   resolveRoadmap,
   enclosingRepeatStartId,
@@ -2914,6 +2915,13 @@ function ChartNavigator({
   const currentSystem = currentBar && barCal ? findSystem(barCal, currentBar.systemId) : null;
   const barRedline = currentBar && currentSystem ? { bar: currentBar, system: currentSystem } : null;
 
+  // Render-derived display page (§1 page-turn parity). While a session drives the
+  // redline, the displayed page FOLLOWS the current bar's system IN THE SAME COMMIT
+  // as `currentStep` — so the page and the redline are never inconsistent for a
+  // render (no stale-page frame where the overlay suppresses the redline). Off
+  // session, `pageNum` (taps / arrows / ref-jumps) is the source, unchanged.
+  const displayPage = performDisplayPage(sessionDriving, currentSystem, pageNum);
+
   const seekToIndex = (idx: number) => {
     if (!barCal || idx < 0 || idx >= traversal.length) return;
     setBarSeekIdx(idx);
@@ -2932,11 +2940,13 @@ function ChartNavigator({
   const stepNextBar = () => seekToIndex(seekIdx === null ? 0 : seekIdx + 1);
   const stepPrevBar = () => { if (seekIdx !== null) seekToIndex(seekIdx - 1); };
 
-  // Page-turn parity for the conductor session: the self-drive turns the page inside
-  // seekToIndex (an event handler), but the session advances its playhead inside the
-  // pure controller, so the page-turn rides a reaction to `conductor.current` instead.
-  // Deferred to a microtask (the repo's no-sync-setState-in-effect rule); a cancelled
-  // guard drops a stale turn if current/page changed under it.
+  // Keep `pageNum` eventually-consistent with the session's render-derived
+  // `displayPage`, so handing back to the self-drive (the MD exits Conduct) lands on
+  // the page the redline left off on — not a stale pre-session page. This is a SYNC,
+  // NOT the page-turn driver: `displayPage` already turned the page in-commit above,
+  // so the redline never waits on this effect (the prior flash is gone). Deferred to
+  // a microtask (the repo's no-sync-setState-in-effect rule); a cancelled guard drops
+  // a stale sync if the driven page changed under it.
   const drivenBarId = sessionDriving ? conductor.current?.barId ?? null : null;
   useEffect(() => {
     if (!drivenBarId || !barCal) return;
@@ -3056,12 +3066,14 @@ function ChartNavigator({
     return () => { cancelled = true; };
   }, [chartFileId, chartModifiedTime, accessToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-render on page change (then re-measure the canvas for overlay alignment)
+  // Re-render on page change (then re-measure the canvas for overlay alignment).
+  // Keyed on the render-derived `displayPage` (not raw `pageNum`) so a session
+  // page-turn renders the new PDF page in the SAME commit the redline moves to it.
   useEffect(() => {
-    if (docRef.current && canvasRef.current && pageNum >= 1 && pageNum <= numPages) {
-      renderPage(docRef.current, pageNum, canvasRef.current).then(() => updateCanvasBox());
+    if (docRef.current && canvasRef.current && displayPage >= 1 && displayPage <= numPages) {
+      renderPage(docRef.current, displayPage, canvasRef.current).then(() => updateCanvasBox());
     }
-  }, [pageNum, numPages, updateCanvasBox]);
+  }, [displayPage, numPages, updateCanvasBox]);
 
   // Keep the overlay aligned to the canvas across any layout change — viewport
   // resize/rotate, the canvas re-clamping, or the calibrate toolbar opening
@@ -3264,7 +3276,7 @@ function ChartNavigator({
           <CalibrationOverlay
             calibration={calMode === 'calibrate' ? (calibration ?? emptyCalibration()) : overlayCalibration}
             box={canvasBox}
-            page={pageNum}
+            page={displayPage}
             mode={calMode}
             calTool={calTool}
             seekId={seekId}
@@ -3586,7 +3598,7 @@ function ChartNavigator({
       {/* Page indicator */}
       {numPages > 1 && (
         <div className="text-center py-1 text-xs text-zinc-500 bg-zinc-900 border-t border-zinc-800">
-          Page {pageNum} of {numPages} &middot; tap left/right on chart to turn
+          Page {displayPage} of {numPages} &middot; tap left/right on chart to turn
         </div>
       )}
 

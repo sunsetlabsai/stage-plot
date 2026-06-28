@@ -41,6 +41,7 @@ import {
   addRoadmapMarker,
   removeRoadmapMarker,
   summarizeTraversal,
+  performDisplayPage,
 } from '../lib/chart-calibration';
 import type { ChartCalibration, System, Bar, RoadmapMarker } from '../lib/types';
 
@@ -2088,5 +2089,42 @@ describe('removeBarline — bounded resolver sweep', () => {
     const next = removeBarline(c, 'sys1', 2);
     expect(next.roadmap!.map((m) => m.id)).toEqual(['rs']);
     expect(resolveRoadmap(next).ok).toBe(true);
+  });
+});
+
+// ── performDisplayPage: render-derived page-turn parity (chunk-4 §1) ──────────
+// The High-finding regression guard. When a conductor session drives the redline,
+// the displayed page MUST equal the current bar's system page in the SAME render
+// commit — so the overlay's `system.page === page` gate (page.tsx) never suppresses
+// the live redline on a stale frame. A deferred (effect/microtask) page-turn is what
+// produced the old-page / no-redline flash; this is the pure seam that replaces it.
+describe('performDisplayPage', () => {
+  const sysP1: System = { id: 's1', page: 1, yTop: 0, yBottom: 0.2, xStart: 0, xEnd: 1 };
+  const sysP2: System = { id: 's2', page: 2, yTop: 0, yBottom: 0.2, xStart: 0, xEnd: 1 };
+
+  it('follows the driven bar across a page boundary in-commit (no stale page)', () => {
+    // pageNum still 1 (the deferred sync has not run), but the bar lives on page 2:
+    // the render-derived page is 2 immediately, so the redline shows on page 2.
+    expect(performDisplayPage(true, sysP2, 1)).toBe(2);
+  });
+
+  it('INVARIANT: a driving session never page-suppresses its own redline', () => {
+    // The overlay shows the redline iff `system.page === displayPage`. While driving,
+    // displayPage === currentSystem.page for ANY page, so the gate is always open.
+    for (const sys of [sysP1, sysP2]) {
+      for (const pageNum of [1, 2, 3]) {
+        const displayPage = performDisplayPage(true, sys, pageNum);
+        expect(displayPage).toBe(sys.page); // never the stale pageNum
+      }
+    }
+  });
+
+  it('falls back to pageNum off-session (self-drive taps / arrows own the page)', () => {
+    expect(performDisplayPage(false, sysP2, 1)).toBe(1);
+    expect(performDisplayPage(false, null, 3)).toBe(3);
+  });
+
+  it('uses pageNum when driving but nothing has been emitted yet (current null)', () => {
+    expect(performDisplayPage(true, null, 1)).toBe(1);
   });
 });

@@ -763,6 +763,21 @@ export function findSystem(cal: ChartCalibration, systemId: string): System | nu
   return (cal.systems ?? []).find((s) => s.id === systemId) ?? null;
 }
 
+// Render-derived display page for the Perform redline (design-conductor-chunk4-ui
+// §1, page-turn parity). When a conductor session drives the redline, the displayed
+// page must follow the current bar's system IN THE SAME render commit as the bar —
+// so the overlay's `system.page === page` gate never suppresses the live redline on
+// a stale frame. A deferred (effect/microtask) page-turn would leave exactly such a
+// frame (the High finding). Off session, the caller's own `pageNum` (taps / arrows /
+// ref-jumps) is the source, unchanged.
+export function performDisplayPage(
+  sessionDriving: boolean,
+  currentSystem: System | null,
+  pageNum: number,
+): number {
+  return sessionDriving && currentSystem ? currentSystem.page : pageNum;
+}
+
 // Bars on a given page, in reading order (left→right within each system band).
 export function barsForPage(cal: ChartCalibration, page: number): Bar[] {
   const pageSystemIds = new Set(systemsForPage(cal, page).map((s) => s.id));

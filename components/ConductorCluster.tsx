@@ -126,7 +126,10 @@ export default function ConductorCluster({
                 </div>
                 <div className="flex flex-wrap gap-1">
                   {targets.map((t) => (
-                    <span key={t.barId} className="inline-flex items-center gap-1">
+                    // Composite key: armableTargets can legally emit several targets for
+                    // one bar (e.g. Coda + a section head + Repeat all on bar 1), so barId
+                    // alone is not unique.
+                    <span key={`${t.kind}:${t.barId}:${t.label}`} className="inline-flex items-center gap-1">
                       <button
                         onClick={() => {
                           onArm(t);
