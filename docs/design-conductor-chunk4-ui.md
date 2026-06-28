@@ -22,6 +22,33 @@ the page wiring open; everything below is that.
   that is a finding to raise, not a reason to edit `conductor-session.ts` / `conductor-targets.ts`
   in this chunk (they're frozen + reviewed).
 
+### 0.1 Where this sits in the ladder (read before reviewing — what it is, and is NOT yet)
+
+This slice delivers exactly **the MD's own manual baton on one screen** — nothing more. Read it
+against the full epic (`design-conductor-authority.md`) so neither reviewer nor builder expects
+follower or auto-follow behavior that lives in later chunks:
+
+- **What chunk 4 IS:** on the MD's *own* device, a per-song session whose redline the MD **advances
+  by manual tap** (the "go-tap is the floor," §3.5 — the baton, digitized), plus armable
+  change-markers and immediate redirects, all single-device. No network, no clock, no automatic
+  motion.
+- **Followers do NOT opt in here.** Chunk 4 is single-device, MD-only; a non-MD Perform tab is
+  byte-identical to today. The follower opt-in (an *aligned/verified* chart joins the band-owned
+  relay room and **mirrors** the MD's VM; detach = private override + one-tap resync) is the **3b
+  transport** chunk — and its join/discovery protocol is **§8.2-2, still OPEN** (gates 3b).
+- **It does NOT "follow along" by tempo or audio.** The redline moves **only when the MD taps
+  Advance.** The BPM/audio clock is **chunk 5** (§5.1) — and even there tempo is a dead-reckoned
+  *motion-smoother between anchors* re-zeroed at every section boundary + MD cue, gated on
+  **§8.2-1 (listener/latency), also OPEN** — never unconditional auto-play.
+- **Scope is per-SONG, not per-show.** A session wraps one VM = one compiled roadmap = one chart
+  (`songRef`). A show is a *sequence* of per-song sessions; **cross-song advance for the band is
+  NOT modeled in conductor state** — today it's the existing per-device Perform "Prev/Next Song."
+  That seam (who moves the whole band to the next setlist song) is an acknowledged, deliberately
+  out-of-scope gap for a later chunk, not something this slice covers.
+
+The ladder: **chunk 4 = MD's manual baton (here)** → 3b = followers mirror it (needs §8.2-2) →
+chunk 5 = audio-tempo auto-motion between the MD's cues (needs §8.2-1).
+
 ## 1. The integration crux — one redline, two drivers
 
 `PerformTab` ALREADY has a bar-level redline driven by a **self-drive** seek
