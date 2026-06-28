@@ -96,7 +96,8 @@ interface UseConductorArgs {
   enabled: boolean;                 // isOwner && a performable bar-cal is loaded (see §3 gate)
   sessionId: string;                // stable per chart-in-show (TBD source — see Q1)
   songRef: string;                  // the chart/song identity for this session
-  programHash: string;              // loader-computed hash of the EXACT compiled program (async)
+  programHash: string | null;       // loader-computed hash of the EXACT compiled program;
+                                    //   null until the async hash resolves (⇒ active === false)
   compiled: CompiledRoadmap | null; // compileRoadmap(barCal); null ⇒ no session
   cal: ChartCalibration | null;     // the MD's LOCAL chart (D0) — armableTargets source
 }
@@ -118,7 +119,11 @@ function useConductorSession(args: UseConductorArgs): {
 ```
 
 - **State:** one `useState<ConductorSession | null>`. Built by `initSession(...)` once
-  `programHash` resolves (it's async — until then `active === false`, surface renders nothing).
+  `programHash` is non-null (it's async — until then `active === false`, surface renders nothing).
+  `programHash` MUST be the hash of the EXACT same inputs `compiled` came from — i.e. either the
+  caller passes `programHash: string | null` computed from the same `compileRoadmap` source, or the
+  hook owns `await programHash(barsInOrder(cal), cal.roadmap ?? [])` itself; do not let `compiled`
+  and `programHash` derive from divergent inputs (the reducer fails closed on a hash mismatch).
   Mint-fresh on identity change (new chart / new programHash) — the cross-chart reset already
   modeled at `page.tsx:2921` (`resetCalState`) is the precedent; a stale session must never bleed
   across charts.
@@ -142,7 +147,10 @@ compiled program **in the pure layer**, returning `Armed | null`. The hook's `ar
    end** per §3 guard — D5);
 2. `const armed = resolveArm(compiled, cal, t.barId, exit, fireAt)`; if `null`, no-op (the picker
    never offered an invalid combo, but the pure check is the guarantee, not the picker);
-3. `dispatch(session, { kind: 'arm', ...armed }, now)`.
+3. `dispatch(session, { kind: 'arm', armed }, now)` — the payload nests the resolved `Armed` under
+   the `armed` key (`ConductorPayload` = `{ kind: 'arm'; armed: Armed }`, conductor-state.ts:72); do
+   NOT spread it (`{ ...armed }` would flatten `fireAt`/`directive` onto the payload and fail to
+   typecheck — Codex R1 Block).
 
 The component never constructs a directive. This is the one hard constraint this chunk inherits.
 
@@ -205,7 +213,7 @@ aliases — the existing `PerformTab` test infra):
 - redirects: exactly `conductor.redirects` rendered, inapplicable ones absent; tap dispatches.
 - `ignored` surfaces the dead-tap affordance, no phantom state change.
 
-**Gate:** full local gate before any push — `tsc` + `turbo lint` + `npm test` (report the test-count
+**Gate:** full local gate before any push — `npx tsc --noEmit` + `npm run lint` (eslint) + `npm test` (report the test-count
 delta) + `build`. ShowRunr conductor chunks land ff-merge after Codex-green.
 
 ## 6. Decisions for Graham
