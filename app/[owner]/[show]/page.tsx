@@ -2931,6 +2931,11 @@ function ChartNavigator({
   };
   const seekBarAt = (x: number, y: number) => {
     if (!barCal) return;
+    // While a conductor session drives the redline, the self-drive is fully
+    // suppressed — a surface tap is inert (no second driver, and no dormant
+    // barSeekIdx left to surface on hand-off when Conduct stops). The session is
+    // the sole WHICH-bar authority; the MD advances via the cluster, not by tapping.
+    if (sessionDriving) return;
     const bar = tapToBar(barCal, pageNum, x, y);
     if (!bar) return;
     // Tapping a bar jumps to its FIRST occurrence in the played order.
