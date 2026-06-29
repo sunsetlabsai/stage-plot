@@ -152,6 +152,120 @@ export function isPerformable(cal: ChartCalibration): boolean {
   return cal.status === 'verified' && canVerify(cal);
 }
 
+// ── Perform readiness (the can't-Perform/Conduct diagnosis) ─────────────────
+// Pure classifier that EXPLAINS the Perform gates without re-deciding them — it
+// reuses isPerformable / canVerify / resolveRoadmap verbatim so it can never
+// drift from the live gate (invariants pinned in tests). It surfaces, in Perform
+// mode, WHY a chart has no bar transport / isn't conductable and the owner's one
+// next step. See docs/design-perform-readiness.md.
+
+export type PerformReadiness =
+  | { state: 'none' } // no calibration at all
+  | {
+      state: 'unverifiable'; // draft, and can't be promoted yet
+      reason: 'no-sections' | 'unlabeled-section' | 'roadmap-unresolved';
+    }
+  | { state: 'verifiable' } // canVerify true, status still draft
+  | { state: 'section-only' } // verified, no bars (section rail works)
+  | { state: 'bar-ready' }; // verified + bars (full transport + conduct)
+
+export function performReadiness(cal: ChartCalibration | null): PerformReadiness {
+  if (cal == null) return { state: 'none' };
+  if (isPerformable(cal)) {
+    return (cal.bars?.length ?? 0) > 0 ? { state: 'bar-ready' } : { state: 'section-only' };
+  }
+  if (canVerify(cal)) return { state: 'verifiable' };
+  // Decompose the SAME canVerify conditions (for messaging only) in canVerify's
+  // own short-circuit order: sections present → labeled → roadmap resolves.
+  if (cal.sections.length === 0) return { state: 'unverifiable', reason: 'no-sections' };
+  if (cal.sections.some((s) => s.label.trim() === '')) {
+    return { state: 'unverifiable', reason: 'unlabeled-section' };
+  }
+  return { state: 'unverifiable', reason: 'roadmap-unresolved' };
+}
+
+// The load/status layer above the (pure-on-cal) classifier. `cal === null` is
+// overloaded in the live load effect — in-flight, a clean 404, a fetch failure,
+// AND a no-PDF-bytes bail all yield null — so feeding raw null to the classifier
+// would flash "no map" during load and misdiagnose load failures as "no map."
+// This assembler keeps the classifier pure and resolves the ambiguity from the
+// load signals the page already tracks.
+export type PerformReadinessView =
+  | { phase: 'loading' } // fetch in flight ⇒ strip renders nothing
+  | { phase: 'load-error' } // PDF-bytes OR calibration fetch failed / unavailable
+  | { phase: 'unreadable'; reason: 'unsupported-schema' | 'invalid' } // row exists, build refused it
+  | { phase: 'ready'; readiness: PerformReadiness }; // settled — classify cal
+
+export function performReadinessView(args: {
+  loading: boolean;
+  loadError: boolean; // PDF-bytes OR calibration fetch failed
+  unreadable: { reason: 'unsupported-schema' | 'invalid' } | null; // §3.2 owner-only signal
+  cal: ChartCalibration | null;
+}): PerformReadinessView {
+  if (args.loading) return { phase: 'loading' };
+  if (args.loadError) return { phase: 'load-error' };
+  if (args.unreadable) return { phase: 'unreadable', reason: args.unreadable.reason };
+  return { phase: 'ready', readiness: performReadiness(args.cal) };
+}
+
+// Pure GET-route taxonomy decision, factored out so the data-safety logic is
+// unit-testable without a Supabase harness (the route is a thin adapter that does
+// the DB read then calls this). The input is a DISCRIMINATED UNION, not a flat
+// bag: it enforces the live route's required check order (schema → valid →
+// performable) by making `performable` representable ONLY on a schemaOk && valid
+// row — isPerformable → canVerify → s.label.trim() THROWS on a malformed row, so
+// the adapter must compute `performable` only after validity holds. A bad row is
+// owner-only 409 (existence admitted, graph never returned); non-owner stays 404.
+export type CalibrationGetInput =
+  | { hasRow: false }
+  | { hasRow: true; schemaOk: false; isOwner: boolean }
+  | { hasRow: true; schemaOk: true; valid: false; isOwner: boolean }
+  | { hasRow: true; schemaOk: true; valid: true; performable: boolean; isOwner: boolean };
+
+export type CalibrationGetDisposition =
+  | { status: 200 }
+  | { status: 404 }
+  | { status: 409; reason: 'unsupported-schema' | 'invalid' };
+
+export function calibrationGetDisposition(input: CalibrationGetInput): CalibrationGetDisposition {
+  if (!input.hasRow) return { status: 404 };
+  if (!input.schemaOk) {
+    return input.isOwner ? { status: 409, reason: 'unsupported-schema' } : { status: 404 };
+  }
+  if (!input.valid) {
+    return input.isOwner ? { status: 409, reason: 'invalid' } : { status: 404 };
+  }
+  // Only here — schemaOk && valid — is `performable` available to read.
+  if (input.performable) return { status: 200 };
+  return input.isOwner ? { status: 200 } : { status: 404 };
+}
+
+// Pure response shaper: maps a disposition to the {status, body} the route emits.
+// This pins the fail-closed promise that the status code alone can't — the
+// calibration graph is returned ONLY on a 200; a 404/409 body carries no graph.
+// (The route is a thin adapter: Response.json(body, { status }).)
+export type CalibrationGetResponse =
+  | { status: 200; body: { calibration: ChartCalibration } }
+  | { status: 404; body: { error: string } }
+  | { status: 409; body: { unreadable: true; reason: 'unsupported-schema' | 'invalid' } };
+
+export function calibrationGetResponse(
+  disposition: CalibrationGetDisposition,
+  calibration: ChartCalibration | null,
+): CalibrationGetResponse {
+  switch (disposition.status) {
+    case 200:
+      // A 200 always carries the graph; no row can reach 200, so null here is a
+      // programming error, not a servable state.
+      if (calibration == null) throw new Error('calibrationGetResponse: 200 requires a calibration');
+      return { status: 200, body: { calibration } };
+    case 409:
+      return { status: 409, body: { unreadable: true, reason: disposition.reason } };
+    case 404:
+      return { status: 404, body: { error: 'No calibration for this chart + hash' } };
+  }
+}
+
 // ── System helpers ──────────────────────────────────────────────────────────
 
 // Reading order for systems: page → yTop → xStart.

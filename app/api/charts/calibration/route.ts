@@ -7,8 +7,11 @@ import {
   isValidCalibration,
   resolveRoadmap,
   upgradeCalibration,
+  calibrationGetDisposition,
+  calibrationGetResponse,
   CALIBRATION_SCHEMA_VERSION,
 } from '@/lib/chart-calibration';
+import type { CalibrationGetInput } from '@/lib/chart-calibration';
 import type { Bar, ChartCalibration, RoadmapMarker, SectionAnchor, System } from '@/lib/types';
 
 // A no-roadmap calibration is persisted at v2 so an old v2 build still serves it
@@ -88,32 +91,44 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: error.message }, { status: 500 });
   }
 
-  const notFound = Response.json(
-    { error: 'No calibration for this chart + hash' },
-    { status: 404 },
-  );
-  if (!data) return notFound;
-
-  const calibration = rowToCalibration(data);
-
-  // Fail closed on an unsupported (future) schema version. rowToCalibration
-  // upgrades known-old rows up to CALIBRATION_SCHEMA_VERSION; anything still
-  // above that is a row this build can't safely interpret, so serve nothing
-  // rather than risk driving the redline off a shape we don't understand.
-  if (calibration.schemaVersion !== CALIBRATION_SCHEMA_VERSION) return notFound;
-
-  // Fail closed on a structurally invalid stored row (the hand-edited DB
-  // boundary). isPerformable only checks status + labels, not geometry, so a
-  // 'verified' row with garbage anchors could otherwise drive the redline —
-  // re-validate the full shape and serve nothing if it doesn't hold.
-  if (!isValidCalibration(calibration)) return notFound;
-
-  // Perform boundary: non-owners only ever see a performable calibration.
-  if (!isPerformable(calibration) && !(await isOwnerOfChart(chartId))) {
-    return notFound;
+  // The taxonomy decision lives in the pure `calibrationGetDisposition` (tested
+  // without a Supabase harness). We feed it a DISCRIMINATED input built in the
+  // route's required check order — schema → valid → performable — because
+  // `isPerformable → canVerify → s.label.trim()` THROWS on a malformed row, so
+  // `performable` must only be computed once schemaOk && valid both hold. The
+  // disposition decides the status; the route only ever returns the calibration
+  // on a 200, so the unusable graph is never served (fail-closed preserved).
+  let input: CalibrationGetInput;
+  let calibration: ChartCalibration | null = null;
+  if (!data) {
+    input = { hasRow: false };
+  } else {
+    calibration = rowToCalibration(data);
+    // rowToCalibration upgrades known-old rows; anything still above the current
+    // version is a future shape this build can't safely interpret.
+    const schemaOk = calibration.schemaVersion === CALIBRATION_SCHEMA_VERSION;
+    if (!schemaOk) {
+      input = { hasRow: true, schemaOk: false, isOwner: await isOwnerOfChart(chartId) };
+    } else if (!isValidCalibration(calibration)) {
+      // Structurally invalid stored row (the hand-edited DB boundary).
+      input = { hasRow: true, schemaOk: true, valid: false, isOwner: await isOwnerOfChart(chartId) };
+    } else {
+      // Only here — schemaOk && valid — is it safe to compute performability.
+      const performable = isPerformable(calibration);
+      // A performable row is served to anyone; ownership only matters for a draft.
+      input = {
+        hasRow: true,
+        schemaOk: true,
+        valid: true,
+        performable,
+        isOwner: performable ? false : await isOwnerOfChart(chartId),
+      };
+    }
   }
 
-  return Response.json({ calibration });
+  const disposition = calibrationGetDisposition(input);
+  const { status, body } = calibrationGetResponse(disposition, calibration);
+  return Response.json(body, { status });
 }
 
 interface PutBody {

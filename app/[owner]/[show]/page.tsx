@@ -79,8 +79,10 @@ import {
   addBarline,
   removeBarline,
   systemsForPage,
+  performReadinessView,
 } from '@/lib/chart-calibration';
 import type { TraversalStep } from '@/lib/chart-calibration';
+import PerformReadinessStrip, { type CalTool } from '@/components/PerformReadinessStrip';
 import {
   detectBarlines,
   snapBarsToLines,
@@ -2502,6 +2504,14 @@ function ChartNavigator({
   // a snapshot captured before any concurrent add/remove/drag/stepper edit.
   const calibrationRef = useRef(calibration);
   const [sourceHash, setSourceHash] = useState<string | null>(null);
+  // Perform-readiness load/status signals (design-perform-readiness.md §3.1/§3.2).
+  // loadError: the PDF bytes OR the calibration fetch failed — distinct from a
+  // clean 404 (genuinely no map). calUnreadable: a row EXISTS but this build
+  // refused it (owner-only 409); never collapse either into `none`.
+  const [loadError, setLoadError] = useState(false);
+  const [calUnreadable, setCalUnreadable] = useState<{
+    reason: 'unsupported-schema' | 'invalid';
+  } | null>(null);
   const [seekId, setSeekId] = useState<string | null>(null);
   const [holdId, setHoldId] = useState<string | null>(null);
   // Position in the PLAYED traversal (index, not bar id): a bar can recur across
@@ -2537,6 +2547,30 @@ function ChartNavigator({
   const [nextUntil, setNextUntil] = useState<'end' | 'fine' | 'coda'>('end');
   const [canvasBox, setCanvasBox] = useState<CanvasBox | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
+  // Calibrate entry/exit. All THREE entry points — the top toggle, the tool tabs,
+  // and the perform-readiness strip CTAs — share resetCalSelections so the
+  // full-union reset can't drift between them (design-perform-readiness.md §4.1).
+  // enterCalibrate is enter-only; the top toggle keeps its "Done exits Perform"
+  // by branching to exitCalibrate when already in calibrate.
+  const resetCalSelections = () => {
+    setSelectedSystemId(null);
+    setEditingId(null);
+    setSelectedBarId(null);
+    setSelectedMarkerId(null);
+    setEndingDraft(null);
+    setAddBarMode(false);
+    setSelectedBoundary(null);
+  };
+  const enterCalibrate = (tool: CalTool) => {
+    setCalTool(tool);
+    resetCalSelections();
+    setCalMode('calibrate');
+  };
+  const exitCalibrate = () => {
+    resetCalSelections();
+    setCalMode('perform');
+  };
   // ── Review queue (converter chunk 3) ──
   // reviewIdx = position in the page→top→left walk of flagged elements; the
   // everReviewed latch lets the chip show "✓ Reviewed" once a draft that DID
@@ -2989,6 +3023,8 @@ function ChartNavigator({
       setCalMode('perform');
       setCalibration(null);
       setSourceHash(null);
+      setLoadError(false);
+      setCalUnreadable(null);
       setSeekId(null);
       setHoldId(null);
       setBarSeekIdx(null);
@@ -3024,9 +3060,12 @@ function ChartNavigator({
         const loaded = await loadPdfDoc(activeChart!, accessToken);
         if (cancelled) return;
         if (!loaded) {
+          // PDF bytes failed to load: no sourceHash ⇒ a `none`/"Calibrate" CTA
+          // would Save-no-op. Surface load-error, never "no map" (§3.1 case d).
           docRef.current = null;
           setNumPages(0);
           setPageNum(1);
+          if (!cancelled) setLoadError(true);
           return;
         }
         const { doc, sourceHash: loadedHash } = loaded;
@@ -3058,9 +3097,19 @@ function ChartNavigator({
                 // any model flags (low-confidence ∪ resolve-error).
                 if (reviewFlags(loadedCal).count > 0) setEverReviewed(true);
               }
+            } else if (res.status === 409) {
+              // A row EXISTS but this build refused it (owner-only). Do NOT show
+              // `none`/"Calibrate" — that would clobber the unreadable map (§3.2).
+              const json = await res.json().catch(() => null);
+              const reason = json?.reason === 'unsupported-schema' ? 'unsupported-schema' : 'invalid';
+              if (!cancelled) setCalUnreadable({ reason });
+            } else if (res.status !== 404) {
+              // A clean 404 is honest `none` (no map for these bytes). Any other
+              // non-ok (500, …) is a load failure, not "no map".
+              if (!cancelled) setLoadError(true);
             }
           } catch {
-            if (!cancelled) { setSourceHash(null); setCalibration(null); }
+            if (!cancelled) { setSourceHash(null); setCalibration(null); setLoadError(true); }
           }
         }
       } finally {
@@ -3209,7 +3258,7 @@ function ChartNavigator({
           )}
           {calibratable && (
             <button
-              onClick={() => { setCalMode((m) => (m === 'calibrate' ? 'perform' : 'calibrate')); setEditingId(null); setSelectedSystemId(null); setAddBarMode(false); setSelectedBoundary(null); }}
+              onClick={() => (calMode === 'calibrate' ? exitCalibrate() : enterCalibrate(calTool))}
               className={`px-2 py-1 rounded text-xs font-bold transition-colors ${
                 calMode === 'calibrate'
                   ? 'bg-sky-500 text-white'
@@ -3327,12 +3376,7 @@ function ChartNavigator({
               {(['sections', 'bars', 'roadmap'] as const).map((tool) => (
                 <button
                   key={tool}
-                  onClick={() => {
-                    setCalTool(tool);
-                    setSelectedSystemId(null); setEditingId(null);
-                    setSelectedBarId(null); setSelectedMarkerId(null); setEndingDraft(null);
-                    setAddBarMode(false); setSelectedBoundary(null);
-                  }}
+                  onClick={() => enterCalibrate(tool)}
                   className={`px-2 py-1 rounded text-[11px] font-bold capitalize transition-colors ${
                     calTool === tool ? 'bg-sky-500 text-white' : 'text-zinc-400 hover:text-white'
                   }`}
@@ -3583,6 +3627,15 @@ function ChartNavigator({
             </button>
           )}
         </div>
+      ) : calMode === 'perform' && !barMode ? (
+        /* The transport hole: no bar transport ⇒ surface WHY + the one next step
+           (design-perform-readiness.md §4). Renders exactly where the conditional
+           used to fall to `: null`. */
+        <PerformReadinessStrip
+          view={performReadinessView({ loading, loadError, unreadable: calUnreadable, cal: calibration })}
+          calibratable={calibratable}
+          onCalibrate={enterCalibrate}
+        />
       ) : null}
 
       {/* Perform seek status (a section is parked under the redline) */}

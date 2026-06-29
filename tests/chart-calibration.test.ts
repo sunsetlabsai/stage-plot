@@ -42,6 +42,10 @@ import {
   removeRoadmapMarker,
   summarizeTraversal,
   performDisplayPage,
+  performReadiness,
+  performReadinessView,
+  calibrationGetDisposition,
+  calibrationGetResponse,
 } from '../lib/chart-calibration';
 import type { ChartCalibration, System, Bar, RoadmapMarker } from '../lib/types';
 
@@ -2126,5 +2130,224 @@ describe('performDisplayPage', () => {
 
   it('uses pageNum when driving but nothing has been emitted yet (current null)', () => {
     expect(performDisplayPage(true, null, 1)).toBe(1);
+  });
+});
+
+describe('performReadiness (the can\'t-Perform diagnosis — pinned to the live gates)', () => {
+  // A verified, performable, multi-bar chart (clears every gate).
+  function barReadyChart(): ChartCalibration {
+    let c = addSection(emptyCalibration(), 1, 0.05, 0.05, 'A');
+    c = addSystem(c, 1, 0.1, 0.3, 0.0, 1.0);
+    c = autoDistributeBars(c, c.systems![0].id, 4);
+    return verify(c);
+  }
+  // Verified but no bars — the section rail still drives.
+  function sectionOnlyChart(): ChartCalibration {
+    return verify(addSection(emptyCalibration(), 1, 0.05, 0.05, 'A'));
+  }
+
+  it('null calibration ⇒ none', () => {
+    expect(performReadiness(null)).toEqual({ state: 'none' });
+  });
+
+  it('draft with no sections ⇒ unverifiable/no-sections', () => {
+    expect(performReadiness(emptyCalibration())).toEqual({
+      state: 'unverifiable',
+      reason: 'no-sections',
+    });
+  });
+
+  it('draft with an unlabeled section ⇒ unverifiable/unlabeled-section', () => {
+    const c = addSection(emptyCalibration(), 1, 0.05, 0.05); // no label
+    expect(performReadiness(c)).toEqual({ state: 'unverifiable', reason: 'unlabeled-section' });
+  });
+
+  it('draft, sections labeled, roadmap does not resolve ⇒ unverifiable/roadmap-unresolved', () => {
+    // barsChart carries a labeled section; this jump references a missing segno.
+    const c = barsChart(8, [
+      { id: 'ds', kind: 'jump', barId: 'b8', edge: 'end', from: 'segno', until: 'end' },
+    ]);
+    expect(canVerify(c)).toBe(false); // sanity: the roadmap is the blocker, not labels
+    expect(performReadiness(c)).toEqual({ state: 'unverifiable', reason: 'roadmap-unresolved' });
+  });
+
+  it('draft but canVerify (labeled section, resolvable) ⇒ verifiable', () => {
+    const c = addSection(emptyCalibration(), 1, 0.05, 0.05, 'A');
+    expect(canVerify(c)).toBe(true);
+    expect(c.status).toBe('draft');
+    expect(performReadiness(c)).toEqual({ state: 'verifiable' });
+  });
+
+  it('verified, no bars ⇒ section-only', () => {
+    expect(performReadiness(sectionOnlyChart())).toEqual({ state: 'section-only' });
+  });
+
+  it('verified + bars ⇒ bar-ready', () => {
+    expect(performReadiness(barReadyChart())).toEqual({ state: 'bar-ready' });
+  });
+
+  // ── Invariants: the classifier may never diverge from the live gates ──
+  it('invariant: bar-ready ⟺ isPerformable && bars>0', () => {
+    const fixtures: (ChartCalibration | null)[] = [
+      null,
+      emptyCalibration(),
+      addSection(emptyCalibration(), 1, 0.05, 0.05, 'A'),
+      sectionOnlyChart(),
+      barReadyChart(),
+    ];
+    for (const cal of fixtures) {
+      const isBarReady = performReadiness(cal).state === 'bar-ready';
+      const live = cal != null && isPerformable(cal) && (cal.bars?.length ?? 0) > 0;
+      expect(isBarReady).toBe(live);
+    }
+  });
+
+  it('invariant: {section-only, bar-ready} ⟺ isPerformable', () => {
+    const fixtures: (ChartCalibration | null)[] = [
+      null,
+      emptyCalibration(),
+      addSection(emptyCalibration(), 1, 0.05, 0.05, 'A'),
+      sectionOnlyChart(),
+      barReadyChart(),
+    ];
+    for (const cal of fixtures) {
+      const performableByState = ['section-only', 'bar-ready'].includes(
+        performReadiness(cal).state,
+      );
+      const live = cal != null && isPerformable(cal);
+      expect(performableByState).toBe(live);
+    }
+  });
+});
+
+describe('performReadinessView (load/status precedence above the classifier)', () => {
+  const cal = addSection(emptyCalibration(), 1, 0.05, 0.05, 'A'); // verifiable
+
+  it('loading wins over every other input', () => {
+    expect(
+      performReadinessView({ loading: true, loadError: true, unreadable: { reason: 'invalid' }, cal }),
+    ).toEqual({ phase: 'loading' });
+  });
+
+  it('loadError (not loading) ⇒ load-error, regardless of unreadable/cal', () => {
+    expect(
+      performReadinessView({
+        loading: false,
+        loadError: true,
+        unreadable: { reason: 'unsupported-schema' },
+        cal,
+      }),
+    ).toEqual({ phase: 'load-error' });
+  });
+
+  it('unreadable (not loading, no loadError) ⇒ unreadable carrying the reason', () => {
+    expect(
+      performReadinessView({
+        loading: false,
+        loadError: false,
+        unreadable: { reason: 'unsupported-schema' },
+        cal,
+      }),
+    ).toEqual({ phase: 'unreadable', reason: 'unsupported-schema' });
+  });
+
+  it('settled ⇒ ready with the classified cal', () => {
+    expect(
+      performReadinessView({ loading: false, loadError: false, unreadable: null, cal }),
+    ).toEqual({ phase: 'ready', readiness: { state: 'verifiable' } });
+  });
+
+  it('a clean 404 (null cal, no error) ⇒ ready/none — NOT load-error/unreadable', () => {
+    expect(
+      performReadinessView({ loading: false, loadError: false, unreadable: null, cal: null }),
+    ).toEqual({ phase: 'ready', readiness: { state: 'none' } });
+  });
+});
+
+describe('calibrationGetDisposition (GET-route taxonomy — fail-closed, owner-only 409)', () => {
+  it('no row ⇒ 404', () => {
+    expect(calibrationGetDisposition({ hasRow: false })).toEqual({ status: 404 });
+  });
+
+  it('unsupported schema ⇒ 409 for owner, 404 for non-owner', () => {
+    expect(calibrationGetDisposition({ hasRow: true, schemaOk: false, isOwner: true })).toEqual({
+      status: 409,
+      reason: 'unsupported-schema',
+    });
+    expect(calibrationGetDisposition({ hasRow: true, schemaOk: false, isOwner: false })).toEqual({
+      status: 404,
+    });
+  });
+
+  it('structurally invalid ⇒ 409 for owner, 404 for non-owner', () => {
+    expect(
+      calibrationGetDisposition({ hasRow: true, schemaOk: true, valid: false, isOwner: true }),
+    ).toEqual({ status: 409, reason: 'invalid' });
+    expect(
+      calibrationGetDisposition({ hasRow: true, schemaOk: true, valid: false, isOwner: false }),
+    ).toEqual({ status: 404 });
+  });
+
+  it('valid + performable ⇒ 200 for anyone', () => {
+    for (const isOwner of [true, false]) {
+      expect(
+        calibrationGetDisposition({
+          hasRow: true,
+          schemaOk: true,
+          valid: true,
+          performable: true,
+          isOwner,
+        }),
+      ).toEqual({ status: 200 });
+    }
+  });
+
+  it('valid + draft (not performable) ⇒ 200 for owner, 404 for non-owner', () => {
+    expect(
+      calibrationGetDisposition({
+        hasRow: true,
+        schemaOk: true,
+        valid: true,
+        performable: false,
+        isOwner: true,
+      }),
+    ).toEqual({ status: 200 });
+    expect(
+      calibrationGetDisposition({
+        hasRow: true,
+        schemaOk: true,
+        valid: true,
+        performable: false,
+        isOwner: false,
+      }),
+    ).toEqual({ status: 404 });
+  });
+});
+
+describe('calibrationGetResponse (the graph is served ONLY on 200)', () => {
+  const someCal = verify(addSection(emptyCalibration(), 1, 0.05, 0.05, 'A'));
+
+  it('200 carries the calibration', () => {
+    const r = calibrationGetResponse({ status: 200 }, someCal);
+    expect(r).toEqual({ status: 200, body: { calibration: someCal } });
+  });
+
+  it('200 with a null calibration is a programming error (throws)', () => {
+    expect(() => calibrationGetResponse({ status: 200 }, null)).toThrow();
+  });
+
+  it('409 body is EXACTLY { unreadable, reason } — never the graph, even if a cal is passed', () => {
+    for (const reason of ['unsupported-schema', 'invalid'] as const) {
+      const r = calibrationGetResponse({ status: 409, reason }, someCal);
+      expect(r).toEqual({ status: 409, body: { unreadable: true, reason } });
+      expect(r.body).not.toHaveProperty('calibration');
+    }
+  });
+
+  it('404 body carries only the error message — never the graph', () => {
+    const r = calibrationGetResponse({ status: 404 }, someCal);
+    expect(r.status).toBe(404);
+    expect(r.body).not.toHaveProperty('calibration');
+    expect(Object.keys(r.body)).toEqual(['error']);
   });
 });
