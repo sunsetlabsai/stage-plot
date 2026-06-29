@@ -54,7 +54,9 @@ sections-only chart → verifiable but no bar transport).
 **Important nuance — bars-absent is not fully dead.** A *verified* sections-only chart still drives
 the **section** redline and section-tap seek (`page.tsx:3589`). So the diagnosis must distinguish
 "not performable at all" (loud — draft/unverifiable) from "performable at the section level but not
-bar-level / not conductable" (a quiet nudge, not an error).
+bar-level / not conductable" (a minimal nudge, not an error). Note the section seek-status block at
+`:3589` only renders *after* a section is tapped (`seekId` set) — so for `section-only` the strip is
+the one thing advertising the affordance before any interaction (this drives D4).
 
 ## 3. The pure diagnosis — `performReadiness`
 
@@ -95,31 +97,38 @@ session/PDF/validity). Props:
 ```ts
 interface PerformReadinessStripProps {
   readiness: PerformReadiness;
-  isOwner: boolean;
+  calibratable: boolean;     // NOT isOwner — see boundary note below
   onCalibrate: () => void;   // enter Calibrate (where section labels, bars, and Verify & save live)
 }
 ```
 
-Per state (owner column actionable; non-owner never gets a false promise):
+Per state (the `calibratable` column is actionable; a non-calibratable viewer never gets a false
+promise):
 
-| state | owner | non-owner |
+| state | calibratable | not calibratable |
 |---|---|---|
 | `none` | "No chart map yet — Calibrate to set up Perform." + **Calibrate** | — (nothing) |
 | `unverifiable: no-sections` | "Add a section to verify this chart." + **Calibrate** | — |
 | `unverifiable: unlabeled-section` | "Label every section to verify." + **Calibrate** | — |
 | `unverifiable: roadmap-unresolved` | "The roadmap doesn't resolve — fix it in Calibrate." + **Calibrate** | — |
 | `verifiable` | "Draft — Verify to perform." + **Calibrate** | — |
-| `section-only` | quiet — section rail already shows (`:3589`); optional subtle "Add bars to conduct" | — |
+| `section-only` | "Tap a section to seek · Add bars to Conduct." (no button — Conduct needs bars; see D4) | — |
 | `bar-ready` | renders nothing (the transport / Conduct already shows) | renders nothing |
 
 **Mount:** replace the transport conditional's terminal `: null` (`page.tsx:3586`) with the strip,
 gated `calMode === 'perform' && !barMode`. It appears in exactly the hole — when there is no bar
 transport — and never competes with it.
 
-**Owner-only actions are principled, not arbitrary:** only the owner can Calibrate/Verify
-(`calibratable = isOwner && calibrationChartId`, the v1 source-scope boundary). A non-owner can't act
-on any of these states, so an actionable label would be noise; today's "show nothing" is preserved
-for them (no false Perform promise).
+**Why `calibratable`, not `isOwner` (the v1 source-scope boundary).** The live affordance gate is
+`calibratable = isOwner && !!calibrationChartId` (`page.tsx:2602`), and the Calibrate toggle itself
+is gated on it (`page.tsx:3210`). A **Drive-resolved chart** carries no `calibrationChartId`, so the
+owner is `isOwner` but **not** `calibratable` — there is no calibrate mode to enter. Keying the strip
+on `isOwner` would hand that owner a **Calibrate** button that can't do anything (a dead/false
+promise). The strip's mount has no calibration gate (`!barMode` is true for any uncalibrated chart,
+Drive charts included), so it *will* render there. Therefore the actionable column keys on
+`calibratable`: a non-calibratable viewer (non-owner, **or** an owner on a Drive chart) gets the
+"nothing" column — identical to today's behavior for those charts. `isOwner` alone is the wrong
+predicate.
 
 ## 5. Re-verify honesty (the third gap, folded in for free)
 
@@ -136,12 +145,16 @@ silent. The loop becomes legible: **edit → strip shows `verifiable` → Calibr
   the `performDisplayPage` precedent that carried the chunk-4 page-turn regression).
 - **D2 — extract the strip vs inline JSX.** REC: extract `PerformReadinessStrip` so it's
   jsdom-testable like `ConductorCluster` (page.tsx render stays manual-UAT by repo precedent).
-- **D3 (open) — non-owner on a non-performable chart:** show nothing (preserve today) vs an honest
-  "not set up to perform." REC: **nothing** for `none`/`unverifiable` (a performer can't fix it; a
-  label is noise). Graham's call.
-- **D4 (open) — `section-only` owner nudge:** subtle "add bars to conduct" vs stay quiet. REC:
-  **quiet** (the section rail is a legitimate Perform mode; nudging implies it's broken). Graham's
-  call.
+- **D3 (open) — non-calibratable viewer on a non-performable chart:** show nothing (preserve today)
+  vs an honest "not set up to perform." REC: **nothing** for `none`/`unverifiable` (a viewer who
+  can't Calibrate can't fix it; a label is noise). Graham's call.
+- **D4 (open) — `section-only` calibratable nudge: REC FLIPPED to a minimal nudge.** Original rec was
+  "stay quiet (the section rail at `:3589` already shows)." But that rail only renders **after** the
+  performer taps a section (`seekId` set) — before any tap, a verified sections-only chart shows
+  *nothing* in the transport zone, reopening the same silent-absence this doc closes (just smaller).
+  So REC: a one-line "Tap a section to seek · Add bars to Conduct" — it advertises the section-seek
+  affordance *and* is the honest on-ramp to Conduct (which requires bars). No button (no single
+  action fits). Graham's call.
 - **D5 (open) — inline Verify in the strip vs route-to-Calibrate only.** REC: **route only** for
   `verifiable` (Verify & save lives in the calibrate toolbar with the full reviewed-calibration
   context; an inline verify would duplicate the gate). Could add inline later if the extra hop annoys.
@@ -153,8 +166,9 @@ silent. The loop becomes legible: **edit → strip shows `verifiable` → Calibr
   verified no-bars → `section-only`; verified + bars → `bar-ready`. **Invariant tests** assert the
   classifier agrees with the live gates: `bar-ready ⟺ isPerformable && bars>0`, and
   `{section-only, bar-ready} ⟺ isPerformable` (would fail if the classifier ever diverges).
-- **jsdom (`tests/perform-readiness-strip.test.tsx`):** renders the right copy per state, owner vs
-  non-owner (non-owner gets nothing for the actionable states), fires `onCalibrate`. Reuses the
+- **jsdom (`tests/perform-readiness-strip.test.tsx`):** renders the right copy per state,
+  `calibratable` vs not (a non-calibratable viewer — non-owner **or** owner on a Drive chart with no
+  `calibrationChartId` — gets nothing for the actionable states), fires `onCalibrate`. Reuses the
   chunk-4 harness (`// @vitest-environment jsdom` + `afterEach(cleanup)`).
 - **Manual UAT:** the page.tsx mount/wiring (consistent with `ChartNavigator` staying manual-UAT).
 
