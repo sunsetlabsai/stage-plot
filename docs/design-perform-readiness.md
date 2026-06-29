@@ -19,6 +19,11 @@ Adjacent: `docs/design-perform-tab.md`, `docs/design-nav-graph.md` (the resolver
 - **Out — do not touch the gates.** `isPerformable` / `canVerify` / `barMode` / `resolveRoadmap`
   are unchanged; the classifier only *explains* them, never re-decides them. No auto-verify, no new
   calibration mutators, no conductor/session changes, no follower-facing pixels.
+- **One surgical read-side API addition (in scope, §3.2).** The GET route currently collapses
+  *several* server states into one 404; closing the loop honestly requires letting a calibratable
+  **owner** distinguish "no row" from "a row exists but this build refused to interpret it." This is
+  additive and read-only — it still **never serves** an unusable calibration (fail-closed preserved),
+  changes none of the four gates, and stays invisible to non-owners.
 - **Non-goal — no new verify path.** "Verify & save" already exists (the calibrate toolbar,
   `page.tsx:3510`). The strip routes the owner *to* it; it does not duplicate the promotion.
 
@@ -106,24 +111,63 @@ unit-tested), and the classifier itself is unchanged:
 export type PerformReadinessView =
   | { phase: 'loading' }                              // fetch in flight ⇒ strip renders nothing
   | { phase: 'load-error' }                           // calibration fetch failed / unavailable
+  | { phase: 'unreadable'; reason:                    // a row EXISTS but this build refused it (§3.2)
+      'unsupported-schema' | 'invalid' }
   | { phase: 'ready'; readiness: PerformReadiness };  // settled — classify cal
 
 export function performReadinessView(args: {
   loading: boolean;
   loadError: boolean;                                 // true only on fetch throw / non-404 failure
+  unreadable: { reason: 'unsupported-schema' | 'invalid' } | null;  // §3.2 owner-only signal
   cal: ChartCalibration | null;
 }): PerformReadinessView;
 //  loading            → { phase: 'loading' }
 //  else loadError     → { phase: 'load-error' }
+//  else unreadable    → { phase: 'unreadable', reason }
 //  else               → { phase: 'ready', readiness: performReadiness(cal) }
 ```
 
-**A 404 is *not* `loadError`.** No row for the bytes you're viewing (fresh chart or stale hash after
-a re-upload) leaves `cal = null` with `loadError = false` ⇒ `ready` → `none`, which honestly says
-"Calibrate to set up Perform **for these bytes**." `loadError` is reserved for the `catch`/non-404
-path (network/unavailable), where claiming "no map" would be a lie. Build wires a `calFetchError`
-boolean: reset false at load start, set true in the `:3062` catch (and on a non-404 `!res.ok`); a
-404 leaves it false.
+`loadError` is reserved for the `catch`/non-404 path (network/unavailable), where claiming "no map"
+would be a lie. Build wires a `calFetchError` boolean: reset false at load start, set true in the
+`:3062` catch (and on a non-404 `!res.ok` other than the §3.2 distinction); a clean 404 leaves it
+false.
+
+### 3.2 The 404 taxonomy — `none` must not invite a clobber
+
+The GET route returns **one shared 404** (`route.ts:91`) for four distinct server states: no row
+(`:95`), a **future/unsupported schema** row (`:103`), a **structurally invalid** stored row (`:109`),
+and a hidden non-owner draft (`:113`). The first three are fail-closed *by design* — this build won't
+drive Perform off a shape it can't interpret. But folding all of them into client `none` ("No chart
+map — Calibrate") is a **trap for a calibratable owner**: a future-schema/invalid row is keyed by the
+*same* `(chart_id, source_hash)` the owner is viewing, so a fresh Calibrate + "Verify & save" PUTs to
+that same PK and **silently overwrites the map this build deliberately refused to interpret** (e.g. a
+v4 map after a rollback to this v3 build). Stale-hash and genuinely-fresh charts are *not* this case —
+they have no row at the current hash, so `none`/"for these bytes" is honest and a fresh save can't
+clobber anything (different PK).
+
+**Fix (owner-only, fail-closed preserved):** for an authenticated **owner**, split the `:103`/`:109`
+cases out of the 404 into a distinct **`409`** with `{ unreadable: true, reason:
+'unsupported-schema' | 'invalid' }`. The route still **never returns the unusable graph** — it only
+admits that a row exists that this build won't interpret. **Non-owners are unchanged** (still `404`,
+fail-closed, no existence leak). Sketch:
+
+```ts
+const unreadable =
+  calibration.schemaVersion !== CALIBRATION_SCHEMA_VERSION ? 'unsupported-schema'
+  : !isValidCalibration(calibration) ? 'invalid'
+  : null;
+if (unreadable) {
+  return (await isOwnerOfChart(chartId))
+    ? Response.json({ unreadable: true, reason: unreadable }, { status: 409 })
+    : notFound;                                  // non-owner: hidden, fail-closed (unchanged)
+}
+// …existing non-owner performable gate (:112) and success (:116) unchanged…
+```
+
+Client: `res.status === 409` → `setCalUnreadable({ reason })`; a clean `404` → `none`. With
+`:103`/`:109` carved out, an owner's remaining `404` genuinely means "no row for these bytes" — so the
+**`none` copy "No chart map for these bytes — Calibrate" is honest again** (fresh or stale-hash, no
+clobber). The dangerous case routes to the new `unreadable` phase instead (§4).
 
 ## 4. The strip — `PerformReadinessStrip` (presentational)
 
@@ -142,7 +186,12 @@ interface PerformReadinessStripProps {
 
 `phase: 'loading'` → render nothing (no flash). `phase: 'load-error'` → a non-actionable line
 "Couldn't load this chart's map." for **every** viewer (honest; no dead button — reload is the
-recourse). `phase: 'ready'` → the per-state table below.
+recourse). `phase: 'unreadable'` (owner-only by construction, §3.2) → an honest line that does **not**
+invite a blind clobber: `unsupported-schema` → "This chart's map was made by a newer version of the
+app — update to edit it." / `invalid` → "This chart's stored map is corrupt." A destructive
+**"Replace map"** action (→ `onCalibrate('sections')`, which on save overwrites the row) is *optional*
+and must be explicitly labeled as replacing — never the innocent "Calibrate" CTA (D6). `phase:
+'ready'` → the per-state table below.
 
 The split is **two orthogonal axes**, not one owner column: (a) does an affordance exist for *any*
 viewer (section seek does — `page.tsx:1683` / `:2075` — for owner and performer alike), vs (b) is
@@ -168,14 +217,35 @@ states never reach them. A non-calibratable viewer can therefore only land in `n
 gated `calMode === 'perform' && !barMode`. It appears in exactly the hole — when there is no bar
 transport — and never competes with it.
 
-### 4.1 `onCalibrate(tool)` — route to the repair surface, not just the mode
+### 4.1 `onCalibrate(tool)` — route to the repair surface, via a shared `enterCalibrate(tool)`
 
-The live Calibrate toggle (`page.tsx:3212`) only flips `calMode` and **preserves the current
-`calTool`** — so "one next step" would otherwise dump the owner on whatever tool was last active. The
-strip therefore passes the tool that fixes *this* state, and the mount sets both
-(`setCalTool(tool); setCalMode('calibrate')`, reusing the toggle's existing reset side-effects —
-`setEditingId(null)` etc.): `none`/`no-sections`/`unlabeled-section`/`verifiable` → `sections`;
-`roadmap-unresolved` → `roadmap`; `section-only`'s "Add bars" → `bars`.
+The strip passes the tool that fixes *this* state: `none`/`no-sections`/`unlabeled-section`/
+`verifiable` → `sections`; `roadmap-unresolved` → `roadmap`; `section-only`'s "Add bars" → `bars`.
+But wiring it as a naive `setCalTool(tool); setCalMode('calibrate')` is **not enough** — and "reuse
+the toggle's resets" is wrong, because the two existing entry points reset *different* state:
+
+- the **mode toggle** (`page.tsx:3212`) clears `editingId` / `selectedSystemId` / `addBarMode` /
+  `selectedBoundary`;
+- the **tool switch** (`page.tsx:3330`) clears a **superset** — additionally `selectedBarId` /
+  `selectedMarkerId` / `endingDraft`.
+
+So a CTA that lands on Bars/Roadmap while only running the mode-toggle's reset leaves **stale
+`selectedBarId` / `selectedMarkerId` / `endingDraft`**. Fix: factor a single
+`enterCalibrate(tool: CalTool)` helper used by the strip CTA **and** (refactor) both existing entry
+points, doing the full union reset:
+
+```ts
+function enterCalibrate(tool: CalTool) {
+  setCalTool(tool);
+  setSelectedSystemId(null); setEditingId(null);
+  setSelectedBarId(null); setSelectedMarkerId(null); setEndingDraft(null);
+  setAddBarMode(false); setSelectedBoundary(null);
+  setCalMode('calibrate');
+}
+```
+
+`onCalibrate = enterCalibrate`. Routing the existing toggle/tool-switch through the same helper keeps
+the three entry points from drifting.
 
 **Why `calibratable`, not `isOwner` (the v1 source-scope boundary).** The live affordance gate is
 `calibratable = isOwner && !!calibrationChartId` (`page.tsx:2602`), and the Calibrate toggle itself
@@ -217,6 +287,10 @@ silent. The loop becomes legible: **edit → strip shows `verifiable` → Calibr
 - **D5 (open) — inline Verify in the strip vs route-to-Calibrate only.** REC: **route only** for
   `verifiable` (Verify & save lives in the calibrate toolbar with the full reviewed-calibration
   context; an inline verify would duplicate the gate). Could add inline later if the extra hop annoys.
+- **D6 (open) — `unreadable`: honest dead-stop vs offer "Replace map".** REC: **honest message only**
+  for v1 (no action) — the safe owner move is to update the app; an explicitly-labeled destructive
+  "Replace map" can come later if owners actually hit it. Never surface the innocent "Calibrate" CTA
+  here (that's the clobber this fix exists to prevent). Graham's call.
 
 ## 7. Test plan
 
@@ -225,28 +299,34 @@ silent. The loop becomes legible: **edit → strip shows `verifiable` → Calibr
   verified no-bars → `section-only`; verified + bars → `bar-ready`. **Invariant tests** assert the
   classifier agrees with the live gates: `bar-ready ⟺ isPerformable && bars>0`, and
   `{section-only, bar-ready} ⟺ isPerformable` (would fail if the classifier ever diverges).
-  Plus `performReadinessView`: `loading → loading` (regardless of cal); `!loading && loadError →
-  load-error`; `!loading && !loadError → ready` with the classified cal (incl. `null → ready/none`,
-  proving a 404 is `none` not `load-error`).
+  Plus `performReadinessView` precedence: `loading → loading` (regardless of the other inputs);
+  `!loading && loadError → load-error`; `!loading && !loadError && unreadable → unreadable` (carries
+  reason); else `ready` with the classified cal (incl. `null → ready/none`, proving a clean 404 is
+  `none` not `load-error`/`unreadable`).
 - **jsdom (`tests/perform-readiness-strip.test.tsx`):** `loading` → renders nothing; `load-error` →
-  the error line for both calibratable and not; each `ready` state's copy; the `section-only` **split**
-  (non-calibratable still shows "Tap a section to seek" with no button; calibratable adds "Add bars"
-  → `onCalibrate('bars')`); and `onCalibrate` fires the **correct tool** per state
-  (`no-sections`/`unlabeled-section`/`verifiable`→`sections`, `roadmap-unresolved`→`roadmap`). Reuses
-  the chunk-4 harness (`// @vitest-environment jsdom` + `afterEach(cleanup)`).
+  the error line for both calibratable and not; `unreadable` → the version/corrupt line and **no**
+  innocent Calibrate CTA (D6); each `ready` state's copy; the `section-only` **split** (non-calibratable
+  still shows "Tap a section to seek" with no button; calibratable adds "Add bars" → `onCalibrate('bars')`);
+  and `onCalibrate` fires the **correct tool** per state (`no-sections`/`unlabeled-section`/`verifiable`→
+  `sections`, `roadmap-unresolved`→`roadmap`). Reuses the chunk-4 harness (`// @vitest-environment
+  jsdom` + `afterEach(cleanup)`).
 - **Manual UAT:** the page.tsx mount/wiring (consistent with `ChartNavigator` staying manual-UAT).
 
 ## 8. Build outline (after sign-off)
 
 1. `performReadiness` **and** `performReadinessView` in `lib/chart-calibration.ts` (beside
-   `isPerformable`/`performDisplayPage`) + pure tests (both — incl. the 404-is-`none`-not-`load-error`
-   invariant).
-2. `PerformReadinessStrip` component (`view`/`calibratable`/`onCalibrate(tool)`) + jsdom tests.
-3. Wire into the Perform transport terminal (`page.tsx:3586`) — manual UAT. This step also adds the
-   `calFetchError` state (reset false at load start `:3021`, set true in the `:3062` catch and on a
-   non-404 `!res.ok`), assembles `performReadinessView({ loading, loadError: calFetchError, cal:
-   calibration })`, and wires `onCalibrate={(tool) => { setCalTool(tool); /* + toggle resets */
-   setCalMode('calibrate'); }}`.
+   `isPerformable`/`performDisplayPage`) + pure tests (incl. the view precedence + clean-404-is-`none`
+   invariants).
+2. **GET route owner distinction (`route.ts:103`/`:109`):** carve unsupported-schema / invalid into a
+   `409 { unreadable, reason }` for owners only; non-owner stays `404` (§3.2). Fail-closed preserved
+   (never serves the unusable graph).
+3. `PerformReadinessStrip` component (`view`/`calibratable`/`onCalibrate(tool)`) + jsdom tests.
+4. Wire into the Perform transport terminal (`page.tsx:3586`) — manual UAT. This step adds the
+   `calFetchError` **and** `calUnreadable` state (reset at load start `:3021`; on fetch settle:
+   `409` → `setCalUnreadable({reason})`, `catch`/non-404-non-409 → `calFetchError`), factors the
+   `enterCalibrate(tool)` helper (§4.1, also refactoring the existing toggle `:3212` + tool-switch
+   `:3330` through it), assembles `performReadinessView({ loading, loadError: calFetchError,
+   unreadable: calUnreadable, cal: calibration })`, and sets `onCalibrate = enterCalibrate`.
 
 Each step is independently gate-greenable; nothing here touches the conductor libs (frozen) or the
 verify/perform gates. This closes the upstream loop so the conductor work is actually exercisable
