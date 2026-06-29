@@ -361,25 +361,35 @@ function sameNav(a: VMState, b: VMState): boolean {
 
 export function applyOverride(compiled, stateIn, directive): VMState {
   const s = applyOverrideCore(compiled, stateIn, directive); // existing switch, unchanged + pendingReturn-blind
-  // ── single pendingReturn policy ──────────────────────────────────────────
-  if (!sameNav(stateIn, s)) s.pendingReturn = null;          // any genuine nav override supersedes (D5)
-  if (directive.kind === 'jumpTo' && directive.return && !directive.exit) {
-    const returnPos = compiled.barPos.get(directive.return.returnBarId);
-    if (returnPos !== undefined) {                           // set LAST (overwrites the clear above)
-      s.pendingReturn = { afterPos: directive.return.afterPos, returnPos };
+  // ── single pendingReturn policy: act ONLY when this override genuinely changed nav ──
+  if (!sameNav(stateIn, s)) {
+    s.pendingReturn = null;                                  // any genuine nav override supersedes (D5)
+    // Install the fresh return leg INSIDE the same guard — a no-op jumpTo (unknown
+    // barId, or same-cursor no-exit) leaves nav unchanged, so it must NOT install a
+    // return for a jump that never applied (Codex R6 HIGH). For a no-exit jumpTo,
+    // !sameNav is exactly "the cursor actually repositioned."
+    if (directive.kind === 'jumpTo' && directive.return && !directive.exit) {
+      const returnPos = compiled.barPos.get(directive.return.returnBarId);
+      if (returnPos !== undefined) {
+        s.pendingReturn = { afterPos: directive.return.afterPos, returnPos };
+      }
     }
   }
   return s;
 }
 ```
 
-This is one rule, applied once. Every effect-no-op — unknown `jumpTo`, same-cursor
-no-exit `jumpTo`, `resetJump` on a not-fired jump, `release` while not holding,
-duplicate `hold`, duplicate `anotherRound` — leaves `stateIn` nav-equal to `s`, so
-`pendingReturn` is preserved automatically, with no per-case reasoning to maintain.
-A genuine override (cursor moved, counter bumped, flag armed, vamp parked/released)
-clears it. (`shallowEqualRecord` = same keys + same values; `completedPasses`/`fired`
-are flat `Record<string, number|boolean>`.)
+This is one rule, applied once. Every effect-no-op — unknown `jumpTo` (even one
+**carrying a valid `returnBarId`** — Codex R6), same-cursor no-exit `jumpTo`,
+`resetJump` on a not-fired jump, `release` while not holding, duplicate `hold`,
+duplicate `anotherRound` — leaves `stateIn` nav-equal to `s`, so the whole policy
+block is skipped and `pendingReturn` is preserved automatically, with no per-case
+reasoning to maintain. A genuine override (cursor moved, counter bumped, flag armed,
+vamp parked/released) clears it — and, **iff** that genuine override is a no-exit
+`jumpTo` with a return leg, re-installs the fresh return. The clear and the set share
+one `!sameNav` guard, so a return is never installed for a jump that didn't apply.
+(`shallowEqualRecord` = same keys + same values; `completedPasses`/`fired` are flat
+`Record<string, number|boolean>`.)
 
 **`exit` XOR `return` (D10, Codex R3 HIGH).** The fresh return leg is set **only
 when the `jumpTo` carries no explicit `exit`**. See §4.2 — an MD-named exit defines
@@ -585,6 +595,12 @@ vitest node env (these are pure modules; no jsdom). New cases:
     on a known-but-not-fired jump; `release` while not holding; duplicate `hold`
     on the held repeat; **duplicate `anotherRound`** re-seating already-held values
     (R3 MEDIUM).
+  - **no-op `jumpTo` CARRYING a valid `return` does NOT install one (Codex R6 HIGH):**
+    an unknown-barId `jumpTo` whose `return.returnBarId` happens to be a **valid** bar
+    leaves nav unchanged (`sameNav` true) → the policy block is skipped → **no fresh
+    `pendingReturn` is installed**, and any prior `pendingReturn` is preserved. Same for
+    a **same-cursor no-exit `jumpTo` with a `return`**. (The set is nested under the
+    `!sameNav` guard, so a return is only installed when the jump actually applied.)
   - **`exit` XOR `return` (D10):** a `jumpTo` carrying an `exit` (al Coda/al Fine)
     sets **no** `pendingReturn`, even on a backward section target.
 - `resolveArm` (target-identity re-derivation + exit suppression — §4.3, Codex R5):
@@ -630,8 +646,9 @@ Report the test-count delta on the build PR.
 
 1. `roadmap-vm.ts`: add `pendingReturn` to `VMState` (+ `initVM` null);
    `jumpTo.return` optional field; `applyOverride` left `pendingReturn`-blind +
-   the single `sameNav`-driven policy clause (clear iff nav changed; set fresh on a
-   **no-exit** `jumpTo.return` — §5.2, D10); `stepVM` §5.3 interception via the
+   the single `sameNav`-driven policy clause (clear AND set both **nested under the
+   `!sameNav` guard** so a no-op jumpTo never installs a return; set fresh only on a
+   genuinely-applied **no-exit** `jumpTo.return` — §5.2, D10, Codex R6); `stepVM` §5.3 interception via the
    shared `applyPendingReturn` helper at the **two natural-advance points only** —
    the linear branch (:393) and the **Rule-6 `if (!handled)` block** (:499-502),
    NOT the shared :504 return (HIGH — keeps notated end-edge nav authoritative). +
