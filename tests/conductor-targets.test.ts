@@ -351,6 +351,31 @@ describe('insert-and-return', () => {
     });
   });
 
+  it('NON-CONTIGUOUS target section → fail closed (null), no silent tail-skip', () => {
+    // Intro is split by a null-section bar: Intro(b1) / null(b2) / Intro(b3) / Verse(b4,b5).
+    // A backward Intro insert from Verse must NOT bake a return after b1 (which would
+    // skip b3). resolveInsertReturn fails closed → resolveArm emits a plain jumpTo.
+    const split = makeCal(
+      [
+        { id: 'b1', sectionId: 'sI' },
+        { id: 'b2', sectionId: null },
+        { id: 'b3', sectionId: 'sI' },
+        { id: 'b4', sectionId: 'sV' },
+        { id: 'b5', sectionId: 'sV' },
+      ],
+      [sec('sI', 'Intro'), sec('sV', 'Verse')],
+    );
+    const cSplit = compileCal(split);
+    const introHead = byId(armableTargets(cSplit, split), 'b1')!; // section head = first Intro bar
+    expect(resolveInsertReturn(cSplit, split, introHead, 'b4')).toBeNull();
+    // …and the full arm path degrades to a plain continue-from-target jumpTo.
+    const id = { barId: 'b1', kind: 'section' as const, label: 'Intro' };
+    expect(resolveArm(cSplit, split, id, undefined, 'b5', 'b4')).toEqual({
+      fireAt: 'b5',
+      directive: { kind: 'jumpTo', barId: 'b1' },
+    });
+  });
+
   it('exit XOR return: a DROPPED (out-of-set) exit still suppresses the return', () => {
     // No Fine in this chart → alFine drops out, but because an exit was REQUESTED
     // the default return is still suppressed (keys on the exit ARG, not keepExit).

@@ -273,8 +273,18 @@ function nextSectionHeadAfter(ordered: Bar[], anchorSectionId: string): Bar | un
   return bestPos === undefined ? undefined : ordered[bestPos];
 }
 
-// Last contiguous bar of the target section starting at its head — the natural
-// forward exit of the inserted block (insert-return §3). Position in bar order.
+// Last bar of the target section starting at its head — the natural forward exit
+// of the inserted block (insert-return §3). Position in bar order.
+//
+// FAIL CLOSED on a NON-CONTIGUOUS section (Codex build review HIGH): the live
+// model permits null/interleaved sectionId membership (chart-calibration.ts
+// validation does not require contiguous ownership, and canVerify never checks
+// it), so a conductable chart may carry e.g. Intro:b1,b2 / null:b3 / Intro:b4.
+// The first contiguous run from the head would end at b2 and silently SKIP b4 on
+// the return. Rather than guess (span the gap vs. truncate), we return undefined
+// when the section reappears after its first run → resolveInsertReturn yields null
+// → resolveArm bakes NO return → plain continue-from-target jumpTo (the safe
+// pre-feature behavior). Insert-return supports CONTIGUOUS sections only.
 function lastBarPosOfSection(ordered: Bar[], targetBarId: string): number | undefined {
   const startPos = ordered.findIndex((b) => b.id === targetBarId);
   if (startPos < 0) return undefined;
@@ -282,6 +292,10 @@ function lastBarPosOfSection(ordered: Bar[], targetBarId: string): number | unde
   if (sectionId == null) return undefined;
   let last = startPos;
   for (let i = startPos + 1; i < ordered.length && ordered[i].sectionId === sectionId; i++) last = i;
+  // Section reappears after a gap → non-contiguous → fail closed (no return baked).
+  for (let i = last + 1; i < ordered.length; i++) {
+    if (ordered[i].sectionId === sectionId) return undefined;
+  }
   return last;
 }
 
