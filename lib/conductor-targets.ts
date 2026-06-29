@@ -244,59 +244,69 @@ export function resolveInsertReturn(
   if (targetPos >= curPos) return null; // forward → no return (D1)
 
   const ordered = barsInOrder(cal); // == compiled.bars order (compile runs on this)
+
+  // CONTIGUITY is required on BOTH sides (Codex build review R1/R2 HIGH). The live
+  // model permits null/interleaved sectionId membership (chart-calibration.ts does
+  // not require contiguous ownership, canVerify never checks it), so a conductable
+  // chart may carry e.g. Intro:b1,b2 / null:b3 / Intro:b4, or a disjoint anchor run
+  // (Verse:b3 … Verse:b5). Either side being non-contiguous makes "the section" /
+  // "its successor" ambiguous, so we fail closed → resolveArm bakes NO return →
+  // plain continue-from-target jumpTo (the safe pre-feature behavior).
+
+  // Anchor = the section of the currently-playing bar; must be a single contiguous
+  // run so its successor is unambiguous. (Non-contiguous anchor: a first-occurrence
+  // successor would point BEHIND the live playhead — the R2 case.)
   const anchorSectionId = ordered[curPos]?.sectionId;
-  if (!anchorSectionId) return null; // section-less anchor (D8)
+  if (anchorSectionId == null) return null; // section-less anchor (D8)
+  const anchorRun = sectionRun(ordered, anchorSectionId);
+  if (!anchorRun) return null; // non-contiguous anchor → fail closed
+  const successor = successorSectionHead(ordered, anchorRun.end);
+  if (!successor) return null; // anchor is the last section, or its successor is unclean
 
-  const successor = nextSectionHeadAfter(ordered, anchorSectionId);
-  if (!successor) return null; // anchor is the last section (D8)
-
-  const afterPos = lastBarPosOfSection(ordered, target.barId);
-  if (afterPos === undefined) return null;
-  return { afterPos, returnBarId: successor.id };
+  // Target = the inserted section; afterPos is the END of its contiguous run.
+  const targetSectionId = ordered[targetPos]?.sectionId;
+  if (targetSectionId == null) return null;
+  const targetRun = sectionRun(ordered, targetSectionId);
+  if (!targetRun) return null; // non-contiguous target → fail closed (no tail-skip)
+  return { afterPos: targetRun.end, returnBarId: successor.id };
 }
 
-// The head bar of the section whose head sits at the SMALLEST traversal position
-// after the anchor section's head — the anchor's successor (insert-return §2).
-// undefined when the anchor is the last section. Null-sectionId bars are not heads.
-function nextSectionHeadAfter(ordered: Bar[], anchorSectionId: string): Bar | undefined {
-  const headPos = new Map<string, number>();
+// The single contiguous run [start,end] of bars owning `sectionId`, or null when
+// the section is non-contiguous (reappears after a gap) or absent. Insert-return
+// supports CONTIGUOUS section ownership only and fails closed otherwise.
+function sectionRun(ordered: Bar[], sectionId: string): { start: number; end: number } | null {
+  let start = -1;
+  let end = -1;
+  for (let i = 0; i < ordered.length; i++) {
+    if (ordered[i].sectionId !== sectionId) continue;
+    if (start < 0) {
+      start = i;
+      end = i;
+    } else if (i === end + 1) {
+      end = i;
+    } else {
+      return null; // a gap then a reappearance → non-contiguous
+    }
+  }
+  return start < 0 ? null : { start, end };
+}
+
+// The anchor's successor section head: the FIRST non-null-section bar strictly
+// after the anchor run's end (skipping inter-section null bars). It must be that
+// section's FIRST occurrence (a clean head); a later occurrence of an already-seen
+// section (a repeating/non-contiguous successor) is ambiguous → undefined (fail
+// closed). undefined also when nothing follows (anchor is the last section).
+function successorSectionHead(ordered: Bar[], anchorEnd: number): Bar | undefined {
+  const firstOf = new Map<string, number>();
   ordered.forEach((b, i) => {
-    if (b.sectionId != null && !headPos.has(b.sectionId)) headPos.set(b.sectionId, i);
+    if (b.sectionId != null && !firstOf.has(b.sectionId)) firstOf.set(b.sectionId, i);
   });
-  const anchorHead = headPos.get(anchorSectionId);
-  if (anchorHead === undefined) return undefined;
-  let bestPos: number | undefined;
-  for (const [sid, pos] of headPos) {
-    if (sid === anchorSectionId) continue;
-    if (pos > anchorHead && (bestPos === undefined || pos < bestPos)) bestPos = pos;
+  for (let i = anchorEnd + 1; i < ordered.length; i++) {
+    const sid = ordered[i].sectionId;
+    if (sid == null) continue; // skip inter-section null bars
+    return firstOf.get(sid) === i ? ordered[i] : undefined; // clean head, else fail closed
   }
-  return bestPos === undefined ? undefined : ordered[bestPos];
-}
-
-// Last bar of the target section starting at its head — the natural forward exit
-// of the inserted block (insert-return §3). Position in bar order.
-//
-// FAIL CLOSED on a NON-CONTIGUOUS section (Codex build review HIGH): the live
-// model permits null/interleaved sectionId membership (chart-calibration.ts
-// validation does not require contiguous ownership, and canVerify never checks
-// it), so a conductable chart may carry e.g. Intro:b1,b2 / null:b3 / Intro:b4.
-// The first contiguous run from the head would end at b2 and silently SKIP b4 on
-// the return. Rather than guess (span the gap vs. truncate), we return undefined
-// when the section reappears after its first run → resolveInsertReturn yields null
-// → resolveArm bakes NO return → plain continue-from-target jumpTo (the safe
-// pre-feature behavior). Insert-return supports CONTIGUOUS sections only.
-function lastBarPosOfSection(ordered: Bar[], targetBarId: string): number | undefined {
-  const startPos = ordered.findIndex((b) => b.id === targetBarId);
-  if (startPos < 0) return undefined;
-  const sectionId = ordered[startPos].sectionId;
-  if (sectionId == null) return undefined;
-  let last = startPos;
-  for (let i = startPos + 1; i < ordered.length && ordered[i].sectionId === sectionId; i++) last = i;
-  // Section reappears after a gap → non-contiguous → fail closed (no return baked).
-  for (let i = last + 1; i < ordered.length; i++) {
-    if (ordered[i].sectionId === sectionId) return undefined;
-  }
-  return last;
+  return undefined;
 }
 
 // Re-resolve an arm request in the PURE layer and mint the Armed marker (design §2

@@ -352,18 +352,19 @@ describe('insert-and-return', () => {
   });
 
   it('NON-CONTIGUOUS target section → fail closed (null), no silent tail-skip', () => {
-    // Intro is split by a null-section bar: Intro(b1) / null(b2) / Intro(b3) / Verse(b4,b5).
-    // A backward Intro insert from Verse must NOT bake a return after b1 (which would
-    // skip b3). resolveInsertReturn fails closed → resolveArm emits a plain jumpTo.
+    // Intro is split by a null-section bar: Intro(b1) / null(b2) / Intro(b3) /
+    // Verse(b4) / Chorus(b5). The anchor (Verse) is contiguous and HAS a successor
+    // (Chorus), so only the TARGET's non-contiguity drives the fail-closed: a return
+    // after b1 would skip b3. resolveInsertReturn → null → resolveArm plain jumpTo.
     const split = makeCal(
       [
         { id: 'b1', sectionId: 'sI' },
         { id: 'b2', sectionId: null },
         { id: 'b3', sectionId: 'sI' },
         { id: 'b4', sectionId: 'sV' },
-        { id: 'b5', sectionId: 'sV' },
+        { id: 'b5', sectionId: 'sC' },
       ],
-      [sec('sI', 'Intro'), sec('sV', 'Verse')],
+      [sec('sI', 'Intro'), sec('sV', 'Verse'), sec('sC', 'Chorus')],
     );
     const cSplit = compileCal(split);
     const introHead = byId(armableTargets(cSplit, split), 'b1')!; // section head = first Intro bar
@@ -374,6 +375,27 @@ describe('insert-and-return', () => {
       fireAt: 'b5',
       directive: { kind: 'jumpTo', barId: 'b1' },
     });
+  });
+
+  it('NON-CONTIGUOUS anchor section → fail closed (no behind-the-playhead return)', () => {
+    // Intro(b1,b2) / Verse(b3) / Bridge(b4) / Verse(b5) / Chorus(b6). Playing the
+    // SECOND Verse run (current b5), call back to Intro. Anchor Verse is disjoint;
+    // a first-occurrence successor would resolve to Bridge (b4) — BEHIND b5 — so we
+    // must fail closed rather than bake a backward/wrong return.
+    const split = makeCal(
+      [
+        { id: 'b1', sectionId: 'sI' },
+        { id: 'b2', sectionId: 'sI' },
+        { id: 'b3', sectionId: 'sV' },
+        { id: 'b4', sectionId: 'sB' },
+        { id: 'b5', sectionId: 'sV' },
+        { id: 'b6', sectionId: 'sC' },
+      ],
+      [sec('sI', 'Intro'), sec('sV', 'Verse'), sec('sB', 'Bridge'), sec('sC', 'Chorus')],
+    );
+    const cSplit = compileCal(split);
+    const introHead = byId(armableTargets(cSplit, split), 'b1')!;
+    expect(resolveInsertReturn(cSplit, split, introHead, 'b5')).toBeNull();
   });
 
   it('exit XOR return: a DROPPED (out-of-set) exit still suppresses the return', () => {
