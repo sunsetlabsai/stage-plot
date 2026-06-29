@@ -130,16 +130,22 @@ lines 12-16). We do not break that. Instead:
 New resolver (sketch, `conductor-targets.ts`):
 
 ```ts
-// Resolve the return leg for a backward section call. Returns the positions the
-// VM needs, or null when the call is forward / has no anchor / has no successor
-// (in all of which cases the caller emits a plain continue-from-target jumpTo).
+// Resolve the return leg for a backward SECTION call. Returns the positions the
+// VM needs, or null when the call is not a section / forward / has no anchor /
+// has no successor (in all of which cases the caller emits a plain
+// continue-from-target jumpTo).
 export function resolveInsertReturn(
   compiled: CompiledRoadmap,
   cal: ChartCalibration,
   vm: VMState,
-  targetBarId: string,
+  target: JumpTarget,        // pass the whole target, NOT just the bar id — see D9
 ): { afterPos: number; returnBarId: string } | null {
-  const targetPos = compiled.barPos.get(targetBarId);
+  // D9 (Codex R1 MEDIUM-2): insert-and-return is a LIVE SECTION-JUMP default ONLY.
+  // armableTargets also yields coda/segno/fine landmarks, repeat starts, and plain
+  // bars — a backward jump to any of those stays continue-from-target. Gate on kind.
+  if (target.kind !== 'section') return null;
+
+  const targetPos = compiled.barPos.get(target.barId);
   const curPos = vm.cursor === 0 ? 0 : vm.cursor - 1; // last EMITTED bar's pos (see note)
   if (targetPos === undefined) return null;
   if (targetPos >= curPos) return null;               // forward → no return (D1)
@@ -154,7 +160,7 @@ export function resolveInsertReturn(
   if (!successor) return null;                         // anchor is last (D8)
 
   // afterPos = last contiguous bar of the TARGET section in bar order
-  const afterPos = lastBarPosOfSection(compiled, ordered, targetBarId);
+  const afterPos = lastBarPosOfSection(compiled, ordered, target.barId);
   return { afterPos, returnBarId: successor.id };
 }
 ```
@@ -239,23 +245,48 @@ case 'jumpTo': {
 The return must fire **only** when the inserted section completes and the VM
 would advance **forward** past it — never when an internal repeat back-jumps
 inside the section (so a section containing its own repeats loops correctly
-first, then returns). Concretely, after `stepVM` computes its next cursor by the
-normal rules, add a final interception:
+first, then returns).
+
+**CRITICAL (Codex R1 HIGH-1): there are TWO emission paths.** `stepVM` has an
+**early `compiled.linear` branch** (`roadmap-vm.ts:383`) that records → advances →
+returns *before* the non-linear end-edge rules ever run — and a chart with
+**sections but no roadmap markers compiles `linear`** (`compileRoadmap`,
+`roadmap-vm.ts:120`). That is the **most common "plain section" case** — exactly
+the one this feature targets. An interception placed only after the end-edge
+rules would **never fire** for it. So the interception is factored into a shared
+helper applied **immediately before each transition-carrying `return`** — in the
+linear branch AND in the main path:
 
 ```ts
-// After the normal end-edge rules + advance have set s.cursor for the NEXT step,
-// and we have just emitted the bar at `transition.barId`:
-if (s.pendingReturn && barPos(transition.barId) === s.pendingReturn.afterPos
-    && s.cursor > s.pendingReturn.afterPos) {     // advanced FORWARD, not back-jumped
-  s.cursor = s.pendingReturn.returnPos;
-  s.pendingReturn = null;
-  s.done = false;
+// roadmap-vm.ts — applied right before BOTH `return { transition, state: s }`
+// statements (linear branch :393 and main path :504). s.cursor has already been
+// set to the NEXT step by that branch's own advance logic.
+function applyPendingReturn(s: VMState, emittedPos: number): void {
+  if (s.pendingReturn
+      && emittedPos === s.pendingReturn.afterPos
+      && s.cursor > s.pendingReturn.afterPos) {   // advanced FORWARD, not back-jumped
+    s.cursor = s.pendingReturn.returnPos;
+    s.pendingReturn = null;
+    s.done = false;                                // cancel an end-of-song done if we just hit it
+  }
 }
 ```
 
-- Guard `s.cursor > afterPos` distinguishes a **forward exit** (return now) from
-  a **back-jump** caused by an internal repeat (let it loop; the register
-  survives until the section's final forward pass).
+`emittedPos` is the **bar order position** of the bar we just emitted
+(`compiled.barPos.get(transition.barId)` — equivalently `compiled.bars[k]` in the
+linear branch). Both call sites already hold it.
+
+- **Linear branch:** after `s.cursor++` and its `done` check, call
+  `applyPendingReturn(s, posOfEmittedBar)` before the early return. In a linear
+  chart `s.cursor === emittedPos + 1 > afterPos` on the section's last bar, so the
+  return fires; the Rule-5 `Fine` early-return path (non-linear) carries no
+  pending-return concern (a Fine ends the song) but gets the same treatment for
+  uniformity — harmless, `pendingReturn` is virtually never set under an active
+  al-Fine.
+- **Main path:** call it before the final `return { transition, state: s }`
+  (after Rule 6 advance). Guard `s.cursor > afterPos` distinguishes a **forward
+  exit** (return now) from a **back-jump** caused by an internal repeat (let it
+  loop; the register survives until the section's final forward pass).
 - One-shot: cleared on fire.
 - The return is **automatic** — it rides the band's natural advance to the
   section boundary. No MD tap, no clock. This is why it's a `stepVM` mechanic,
@@ -278,6 +309,7 @@ No double-handling.
 
 | Case | Behavior |
 | --- | --- |
+| Non-section target (coda/segno/fine/repeatStart/plain bar) | continue-from-target — insert-and-return is section-only. D9. |
 | Forward target (`targetPos >= curPos`) | continue-from-target (no return). D1. |
 | Anchor is the last section | no successor → plain `jumpTo`, no return. D8. |
 | Section-less / linear chart | no anchor → plain `jumpTo`, no return. D8. |
@@ -329,6 +361,10 @@ build PR so the canonical spec stays honest.
   **Graham-locked.**
 - **D8** — No successor / section-less ⇒ fall back to continue-from-target.
   **Recommend YES.**
+- **D9** — Insert-and-return is gated to **`kind: 'section'`** targets only
+  (Codex R1 MEDIUM-2). Backward jumps to coda/segno/fine landmarks, repeat starts,
+  and plain bars stay continue-from-target — the resolver takes the whole
+  `JumpTarget` and bails unless it's a section. **Recommend YES.**
 
 ---
 
@@ -358,6 +394,8 @@ vitest node env (these are pure modules; no jsdom). New cases:
 - `resolveInsertReturn`:
   - backward call inside section E → returns `{ afterPos = last bar of C,
     returnBarId = F.head }`.
+  - **non-section target** (coda/segno/fine/repeatStart/plain bar), even backward
+    → `null` (D9).
   - forward call → `null`.
   - anchor is last section → `null`.
   - section-less / null `sectionId` → `null`.
@@ -368,6 +406,9 @@ vitest node env (these are pure modules; no jsdom). New cases:
 - `stepVM`:
   - plays the inserted section once, then lands on the return target on the
     natural forward exit; `pendingReturn` cleared.
+  - **marker-less `linear` chart** (sections, no roadmap markers — the common
+    case): the return fires from the **linear branch** path, not just the
+    non-linear end-edge path (HIGH-1 regression guard).
   - inserted section with an internal repeat: loops the repeat first, returns on
     the final forward exit (the §5.3 guard).
   - a second override before the boundary pre-empts the return.
@@ -382,13 +423,17 @@ Report the test-count delta on the build PR.
 
 1. `roadmap-vm.ts`: add `pendingReturn` to `VMState` (+ `initVM` null);
    `jumpTo.return` optional field; `applyOverride` clear-then-set; `stepVM`
-   §5.3 interception. + tests.
-2. `conductor-targets.ts`: `resolveInsertReturn` + the two helpers
-   (`nextSectionHeadAfter`, `lastBarPosOfSection`). + tests.
+   §5.3 interception via the **shared `applyPendingReturn` helper**, called before
+   BOTH transition-carrying returns (linear branch :393 + main path :504 —
+   HIGH-1). + tests, **including the marker-less `linear`-chart case**.
+2. `conductor-targets.ts`: `resolveInsertReturn` (takes the whole `JumpTarget`,
+   gates on `kind === 'section'` — D9) + the two helpers (`nextSectionHeadAfter`,
+   `lastBarPosOfSection`). + tests.
 3. Wire the resolver into the arm/commit path (`use-conductor-session.ts` /
-   `conductor-session.ts`): a backward `jumpTo` target carries the resolved
-   return leg; forward stays plain. (This is the chunk-4/5 seam; coordinate with
-   chunk 5's arming.)
+   `conductor-session.ts`): a backward **section** `jumpTo` target carries the
+   resolved return leg; forward + non-section stays plain. Pass the full
+   `JumpTarget` (kind), not just the bar id. (This is the chunk-4/5 seam;
+   coordinate with chunk 5's arming.)
 4. Amend `design-conductor-authority.md` §3.3/§3.4 line per §7.
 5. MD readout/telegraph copy (OQ2) — only if confirmed; else defer to chunk 5.
 
