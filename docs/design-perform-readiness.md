@@ -322,13 +322,34 @@ silent. The loop becomes legible: **edit → strip shows `verifiable` → Calibr
   && !loadError && unreadable → unreadable` (carries reason); else `ready` with the classified cal
   (incl. `null → ready/none`, proving a clean 404 is `none` not `load-error`/`unreadable`).
 - **Pure GET disposition (`lib/chart-calibration.ts` or a route-local pure module):** the route's
-  taxonomy decision is factored into a pure `calibrationGetDisposition({ hasRow, schemaOk, valid,
-  performable, isOwner }) → { status: 200 | 404 | 409; reason? }` so the data-safety logic is
-  unit-tested without a Supabase harness (mirrors the `performDisplayPage` pure-seam precedent; the
-  route becomes a thin adapter that does the DB read then calls it). Cases: no row → 404; bad schema /
-  invalid → **409 for owner, 404 for non-owner**, and **never returns the graph**; valid+performable →
-  200; valid+draft → 200 for owner, 404 for non-owner. This is the §-Medium route coverage Codex
-  asked for, sited where it's testable.
+  taxonomy decision is factored into a pure `calibrationGetDisposition(...) → { status: 200 | 404 |
+  409; reason? }` so the data-safety logic is unit-tested without a Supabase harness (mirrors the
+  `performDisplayPage` pure-seam precedent; the route becomes a thin adapter that does the DB read
+  then calls it). **The input is a discriminated union, not a flat bag — this enforces the live
+  route's check order (`route.ts:103` schema → `:109` valid → `:112` performable), which is
+  load-bearing:** `isPerformable → canVerify → s.label.trim()` *throws* on a malformed row, so
+  `performable` must be computed by the adapter **only after** `schemaOk && valid` both hold. Making
+  it a type error to even supply `performable` on a non-valid row removes the crash path by
+  construction:
+
+  ```ts
+  type CalibrationGetInput =
+    | { hasRow: false }
+    | { hasRow: true; schemaOk: false; isOwner: boolean }
+    | { hasRow: true; schemaOk: true; valid: false; isOwner: boolean }
+    | { hasRow: true; schemaOk: true; valid: true; performable: boolean; isOwner: boolean };
+  // adapter computes `performable: isPerformable(cal)` ONLY in the schemaOk&&valid branch —
+  // it is unreachable code on a row that would throw.
+  ```
+
+  Cases: no row → 404; bad schema / invalid → **409 for owner, 404 for non-owner** (and the adapter
+  **never returns the graph** — see below); valid+performable → 200; valid+draft → 200 for owner, 404
+  for non-owner. This is the route coverage Codex asked for, sited where it's testable.
+- **Adapter response-shape (the "never serves the graph" guarantee):** the pure helper proves the
+  *status* taxonomy but not that the 409 body withholds the unusable calibration. Add a thin adapter
+  assertion (route-local, no live DB needed — a stub read feeding the disposition): a `409` body is
+  **exactly `{ unreadable: true, reason }`** with **no `calibration` field**, and a `404` carries only
+  the error message. This pins the fail-closed promise (§0, §3.2) that the status code alone can't.
 - **jsdom (`tests/perform-readiness-strip.test.tsx`):** `loading` → renders nothing; `load-error` →
   the error line for both calibratable and not; `unreadable` → the version/corrupt line and **no**
   innocent Calibrate CTA (D6); each `ready` state's copy; the `section-only` **split** (non-calibratable
@@ -344,9 +365,13 @@ silent. The loop becomes legible: **edit → strip shows `verifiable` → Calibr
    `isPerformable`/`performDisplayPage`) + pure tests (incl. the view precedence + clean-404-is-`none`
    invariants).
 2. **GET route owner distinction (`route.ts:103`/`:109`):** factor the taxonomy into a pure
-   `calibrationGetDisposition(...)` (+ unit tests, §7) and make the route a thin adapter over it —
-   carving unsupported-schema / invalid into a `409 { unreadable, reason }` for owners only; non-owner
-   stays `404` (§3.2). Fail-closed preserved (never serves the unusable graph).
+   `calibrationGetDisposition(...)` over the **discriminated `CalibrationGetInput`** (§7) — so the
+   adapter computes `performable` only in the `schemaOk && valid` branch, preserving the live check
+   order (`:103`→`:109`→`:112`) and never calling `isPerformable` on a row that would throw. Make the
+   route a thin adapter over it, carving unsupported-schema / invalid into a `409 { unreadable, reason }`
+   for owners only; non-owner stays `404` (§3.2). Tests (§7): pure status taxonomy **and** the adapter
+   response-shape assertion (409 body is exactly `{ unreadable, reason }`, no `calibration`; 404 leaks
+   nothing). Fail-closed preserved (never serves the unusable graph).
 3. `PerformReadinessStrip` component (`view`/`calibratable`/`onCalibrate(tool)`) + jsdom tests.
 4. Wire into the Perform transport terminal (`page.tsx:3586`) — manual UAT. This step adds the
    `loadError` **and** `calUnreadable` state (both reset at load start `:3021`; set `loadError` true in
