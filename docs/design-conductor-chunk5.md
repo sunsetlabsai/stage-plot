@@ -286,16 +286,20 @@ THEN store the local eligibility bit + dispatch — never mutate `armedFireAtEli
 before the arm is known to succeed (a rejected arm must not clobber the bit for the
 *previous* armed marker).
 
-**Insert-and-return is resolved HERE, at arm time (insert-return §4.1, Codex R4).**
+**Insert-and-return is resolved HERE, at arm time (insert-return §4.1/§4.3, Codex R4/R5).**
 `commit` applies `Armed.directive` **verbatim** (`conductor-state.ts:242`) — it never
 re-resolves — so the return leg must already be **baked into the armed directive**.
-`arm` therefore passes the **full `JumpTarget`** (not just `t.barId`) and the
-**last-emitted bar** (`currentBarId`) into `resolveArm`, which calls
-`resolveInsertReturn(compiled, cal, t, currentBarId)` and attaches the resolved
-`return` field to the `jumpTo` — but **only when `t` carries no explicit `exit`**
-(exit XOR return, insert-return §4.2/D10). Forward, non-section, and exit-bearing
-targets stay plain. Auto-fire then commits the directive unchanged, return leg and
-all (it's transparent to chunk 5):
+`arm` therefore forwards a **stable identity** `{ barId: t.barId, kind: t.kind,
+label: t.label }` (NOT the raw `t` object — don't-trust-the-object safety rule,
+insert-return §4.3) plus `exit`, `fireBar`, and the **last-emitted bar**
+(`currentBarId`) into `resolveArm`. `resolveArm` **re-derives** the authoritative
+target from `armableTargets` (rejecting a no-match or an ambiguous identity → `null`,
+since several targets can share a `barId`), then bakes `resolveInsertReturn` against
+the *re-derived* target — but **only when the `exit` ARGUMENT is absent** (exit XOR
+return, insert-return §4.2/§4.3/D10; suppression keys on the requested `exit`, not
+the validated one, so a stale/dropped exit still suppresses the return). Forward,
+non-section, and exit-bearing targets stay plain. Auto-fire then commits the directive
+unchanged, return leg and all (it's transparent to chunk 5):
 
 ```ts
 arm: (t, exit, fireAt = 'next-bar') => {
@@ -305,9 +309,10 @@ arm: (t, exit, fireAt = 'next-bar') => {
     ? nextSectionBoundaryBarId(compiled, cal, session.state.vm, currentBarId)
     : nextEmittedBarId(compiled, session.state.vm);
   if (!fireBar) return;                                  // no such boundary ahead — nothing to arm against
-  // resolveArm bakes the insert-return leg (no-exit backward section only) into
-  // Armed.directive via resolveInsertReturn — takes the full target + currentBarId.
-  const armed = resolveArm(compiled, cal, t, exit, fireBar, currentBarId);
+  // Forward a STABLE IDENTITY, not the raw t — resolveArm re-derives the fresh target
+  // (insert-return §4.3) and bakes the insert-return leg (no-exit backward section only).
+  const id = { barId: t.barId, kind: t.kind, label: t.label };
+  const armed = resolveArm(compiled, cal, id, exit, fireBar, currentBarId);
   if (!armed) return;                                    // reject FIRST — no local-state mutation yet
   setArmedFireAtEligible(true);                          // only after the arm succeeds (see eligibility note)
   run({ kind: 'arm', armed });
@@ -498,6 +503,12 @@ Hook (jsdom, `// @vitest-environment jsdom`, `afterEach(cleanup)`, renderHook + 
 - auto-fire ON but `holding`: advance onto the fire bar does **not** fire (gate refuses);
   dispatch the Release vamp redirect (which clears `holding`), then the next advance fires.
 - toggle OFF mid-arm → reverts to go-tap.
+- **arm seam — exit XOR return at the seam (insert-return §4.3/D10, Codex R5):** arm a
+  **backward section** target **with** an explicit `exit` (al Coda/al Fine); assert the
+  resulting `Armed.directive` carries the `exit` and **no `return`** *before* commit
+  (the seam baked the right directive). Companion: arm the **same backward section with
+  no `exit`** → `Armed.directive.return` is **present**, proving suppression keys on the
+  requested exit, not the target.
 
 Cluster (jsdom, RTL): toggle renders + flips `onToggleAutoFire`; armed-summary copy keys
 on `autoFire` + holding (three variants); Go + Disarm always present.
@@ -517,11 +528,13 @@ regression guard.
 3. **Hook** (`lib/use-conductor-session.ts`) — `autoFireOn`/`setAutoFire` state,
    `armedFireAtEligible` capture-at-arm/clear-on-fire-or-disarm, the synchronous
    advance→auto-commit chain (§3), and (D6-YES) `arm(fireAt: 'next-bar' | 'next-section')`
-   via `nextSectionBoundaryBarId` (§3.1). **arm passes the full `JumpTarget` +
-   `currentBarId`** so `resolveArm` can bake the insert-return leg (§3.1; depends on the
-   insert-return build having extended `resolveArm`'s signature — that doc lands first).
-   Hook tests, **including the arm-time return-resolution case** (arm in E, advance, fire,
-   returns to F — insert-return §10).
+   via `nextSectionBoundaryBarId` (§3.1). **arm forwards a stable identity
+   `{ barId, kind, label }` (NOT the raw `t`) + `exit` + `currentBarId`** so `resolveArm`
+   can re-derive the fresh target and bake the insert-return leg (§3.1/insert-return §4.3;
+   depends on the insert-return build having reshaped `resolveArm`'s signature — that doc
+   lands first). Hook tests, **including the arm-time return-resolution case** (arm in E,
+   advance, fire, returns to F) **and the arm-seam exit-XOR-return case** (backward
+   section + explicit exit → no baked return — insert-return §10).
 4. **Cluster** (`components/ConductorCluster.tsx`) — `autoFire` + `onToggleAutoFire` props,
    toggle in the header, hold-aware armed-summary copy (§4), and (D6-YES) the "fire at"
    Next bar / Next section selector; cluster tests.
