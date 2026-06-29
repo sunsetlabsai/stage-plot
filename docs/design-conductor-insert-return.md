@@ -414,8 +414,10 @@ returns *before* the non-linear end-edge rules ever run — and a chart with
 `roadmap-vm.ts:120`). That is the **most common "plain section" case** — exactly
 the one this feature targets. An interception placed only after the end-edge
 rules would **never fire** for it. So the interception is factored into a shared
-helper applied **immediately before each transition-carrying `return`** — in the
-linear branch AND in the main path:
+helper applied at the **two natural-forward-advance points only** — the linear
+branch and the Rule-6 `if (!handled)` advance block — and **NOT** before the shared
+main-path `:504` return (which every end-edge rule reaches; see the main-path bullet
+below for why gating there would clobber a notated To Coda):
 
 ```ts
 // roadmap-vm.ts — called on the NATURAL FORWARD ADVANCE only: the linear branch
