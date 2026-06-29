@@ -110,20 +110,23 @@ Chunk 4 deliberately split the auto-fire condition across the pure lib and the h
   state: is something armed, is the playhead AT its fire bar, and is the §3.5 hold/vamp
   guard clear. Signature unchanged.
 - **`armedFireAtEligible` — local hook state, captured at ARM time.** The frozen contract
-  ANDs it in: `if (armedFireAtEligible && shouldAutoFire(session)) commit()`. It is the
-  arm-time forward-position check (`fireAtEligible`, `conductor-targets.ts:216`) stored in
-  React because the chunk-3 `ConductorState` does NOT carry it.
+  ANDs it in: `if (armedFireAtEligible && shouldAutoFire(session)) commit()`. It captures
+  arm-time forward reachability of the fire bar (the chunk-4 `fireAtEligible` heuristic,
+  `conductor-targets.ts:216`) stored in React because the chunk-3 `ConductorState` does
+  NOT carry it — but see below: in 5a the fire bar is reachable by walk-construction, so
+  the heuristic is not invoked.
 
-**`armedFireAtEligible` — vestigial under D6-NO, load-bearing under D6-YES:**
-
-- **D6-NO (next-bar-only):** the hook arms only at `fireAt = nextEmittedBarId(...)`
-  (`use-conductor-session.ts:132`), eligible by construction, so `armedFireAtEligible` is
-  **invariantly true** — kept only to honour the frozen contract + 5b forward-compat.
-- **D6-YES (boundary-snap):** the section-snap fire bar can be several bars ahead, and a
-  section head the VM will *skip* this pass (e.g. a pass-excluded volta on the way to it)
-  is forward-unreachable, so `fireAtEligible` returns false at arm time →
-  `armedFireAtEligible` is **load-bearing** (it blocks arming a dead marker). This is the
-  case the chunk-4 contract reserved it for.
+**`armedFireAtEligible` — invariantly true in 5a (both D6 forms), load-bearing in 5b
+(Codex R1 MEDIUM-1):** in 5a both fire bars come from an **actual forward `stepVM`
+walk** (`nextEmittedBarId` for next-bar, `nextSectionBoundaryBarId` for next-section),
+so the fire bar is forward-reachable **by construction** — the walk *is* the eligibility
+proof. We therefore do **not** run the chunk-4 `fireAtEligible` raw-position heuristic on
+the walk-derived bar (it would false-reject a boundary legitimately reached via a notated
+backward jump, §3.1). The bit is set `true` when an arm succeeds, kept to honour the
+frozen contract `if (armedFireAtEligible && shouldAutoFire(...))` and to stay the
+genuinely load-bearing check in **5b** (dead-reckoning may miss `fireAt` exactly →
+arm-time forward reachability matters; `fireAtEligible` then upgraded to a bounded
+VM-walk per the chunk-4 Codex R5 note, §7).
 
 Either way the AND stays verbatim. 5a does **not** add a *behind-the-cursor* re-tap
 (firing at a bar already passed is incoherent); the only fire bars 5a offers are the
@@ -187,12 +190,18 @@ advance: () => {
   // gate is opt-in; armedFireAtEligible is local hook state (see §1)
   if (autoFireOn && armedFireAtEligible && shouldAutoFire(afterAdvance.session)) {
     const afterFire = dispatch(afterAdvance.session, { kind: 'commit' }, Date.now());
+    setOutcome(afterFire.outcome);   // LOW-2: surface the COMMIT result, not the stale advance one
     setSession(afterFire.outcome === 'applied' ? afterFire.session : afterAdvance.session);
     return;
   }
   setSession(afterAdvance.session);
 },
 ```
+
+The auto-commit's `outcome` is reported (not left as the earlier `advance` result),
+so a future transport path where `commit` is `ignored`/`needsSnapshot` surfaces the
+right last-action (Codex R1 LOW-2). In 5a (single device) the commit always applies,
+but the honest report costs nothing.
 
 - **Two dispatches, one render.** `advance` then `commit` both run against the returned
   `ConductorSession` (a value, not React state) — no read-after-setState hazard, no effect
@@ -201,9 +210,10 @@ advance: () => {
   cursor).
 - **`autoFireOn`** — the opt-in toggle (D3), local hook state, default `false`. When off,
   this collapses to the verbatim chunk-4 `advance`.
-- **`armedFireAtEligible`** — local hook state set in `arm` (= `fireAtEligible(compiled,
-  session.state.vm, fireAt)` at arm time), cleared on `commit`/`disarm`/`redirect`/identity
-  change. Invariantly true under D6-NO; load-bearing under D6-YES (§1).
+- **`armedFireAtEligible`** — local hook state set `true` when an `arm` succeeds (the
+  fire bar is walk-proven reachable in 5a, §1/§3.1), cleared on
+  `commit`/`disarm`/`redirect`/identity change. Invariantly true in 5a; the genuinely
+  load-bearing check in 5b (§1, §7).
 - **`shouldAutoFire(afterAdvance.session)`** — evaluated on the **post-advance** session,
   so `current` is the bar we just landed on. Exactly the contract's "post-advance,
   `current.barId === armed.fireAt`."
@@ -238,17 +248,26 @@ export function nextSectionBoundaryBarId(
   const secOf = new Map(ordered.map((b) => [b.id, b.sectionId]));
   const here = currentBarId ? secOf.get(currentBarId) ?? null : null; // current section
   let cur = vm;
-  for (;;) {
+  // BOUNDED (Codex R1 HIGH-3): if vm.holding is set, stepVM loops the held repeat
+  // forever (roadmap-vm.ts:405/457) and would never reach a new section → freeze.
+  // Cap the walk by compiled.cap (the VM's own termination backstop); undefined if
+  // no boundary is found within it (a vamp with no section change ahead).
+  for (let i = 0; i < compiled.cap; i++) {
     const step = stepVM(compiled, cur);
     if (!step.transition) return undefined;           // off the song end → no boundary ahead
     if ((secOf.get(step.transition.barId) ?? null) !== here) return step.transition.barId;
-    cur = step.next;                                   // same section → keep walking (pure)
+    cur = step.state;                                  // same section → keep walking (pure; stepVM returns {transition, state})
   }
+  return undefined;                                    // no section change within the cap (e.g. an active hold)
 }
 ```
 
 The hook's `arm` takes an optional `fireAt: 'next-bar' | 'next-section'` (default
-`'next-bar'` = chunk-4 behaviour) — a **structural** choice, never a raw count:
+`'next-bar'` = chunk-4 behaviour) — a **structural** choice, never a raw count.
+**Order matters (Codex R1 HIGH-2):** resolve the boundary, resolve the arm, and only
+THEN store the local eligibility bit + dispatch — never mutate `armedFireAtEligible`
+before the arm is known to succeed (a rejected arm must not clobber the bit for the
+*previous* armed marker):
 
 ```ts
 arm: (t, exit, fireAt = 'next-bar') => {
@@ -257,19 +276,27 @@ arm: (t, exit, fireAt = 'next-bar') => {
     ? nextSectionBoundaryBarId(compiled, cal, session.state.vm, session.state.current?.barId)
     : nextEmittedBarId(compiled, session.state.vm);
   if (!fireBar) return;                                  // no such boundary ahead — nothing to arm against
-  const eligible = fireAtEligible(compiled, session.state.vm, fireBar);
-  setArmedFireAtEligible(eligible);                      // local state; load-bearing under D6-YES
   const armed = resolveArm(compiled, cal, t.barId, exit, fireBar);
-  if (!armed) return;
+  if (!armed) return;                                    // reject FIRST — no local-state mutation yet
+  setArmedFireAtEligible(true);                          // only after the arm succeeds (see eligibility note)
   run({ kind: 'arm', armed });
 },
 ```
 
-Both resolvers are deterministic forward previews of *the bars that will be emitted if
-the MD keeps advancing*; if the MD `redirect`s in between, the marked bar may fall off the
-path → the marker lingers (D4). This is the same forward-position honesty bound
-`fireAtEligible` already documents (`conductor-targets.ts:211` — a heuristic, not a
-full-traversal reachability proof). Sufficient for an advisory marker.
+**Eligibility in 5a is satisfied by construction (resolves Codex R1 MEDIUM-1).** Both
+resolvers return a bar drawn from an **actual forward `stepVM` walk** — the
+authoritative preview of what `advance` will emit — so the fire bar is forward-reachable
+*by the walk itself*. The chunk-4 `fireAtEligible` (`conductor-targets.ts:211`) is a
+**raw-bar-position heuristic**; running it here would *false-reject* a legitimate
+boundary reached via a notated backward jump (its position is behind the cursor though
+the walk reaches it). So 5a does **not** call `fireAtEligible` on the walk-derived bar —
+the walk is the eligibility proof. `armedFireAtEligible` is therefore **invariantly true
+when an arm succeeds in 5a**; it is retained (set `true`) to honour the chunk-4 frozen
+contract `if (armedFireAtEligible && shouldAutoFire(...))` and stays the genuinely
+load-bearing bit in **5b**, where dead-reckoning means the playhead may *not* hit
+`fireAt` exactly and the arm-time forward check matters (then upgraded to a bounded
+VM-walk per the chunk-4 Codex R5 note, §7). If the MD `redirect`s between arm and fire
+the marked bar may fall off the path → the marker lingers as advisory (D4).
 
 ---
 
@@ -284,9 +311,10 @@ full-traversal reachability proof). Sufficient for an advisory marker.
 - **(D6-YES only) "fire at" structural choice** in the arm flow — a two-way selector
   `Next bar / Next section` (`onArm` gains `fireAt: 'next-bar' | 'next-section'`).
   Default `Next bar`. This is a **structural** pick, never a raw bar count. When the
-  chosen boundary is ineligible (`armedFireAtEligible` false — e.g. a section head behind
-  a pass-excluded volta), the arm button disables with "can't fire there" — the
-  load-bearing arm-time guard, surfaced. Under D6-NO this control is absent; arm is
+  resolver finds **no boundary ahead** (`nextSectionBoundaryBarId` → `undefined` — e.g.
+  the MD is vamping, or already in the last section), the `Next section` option disables
+  with "no section ahead." (There is no "ineligible fire bar" state in 5a — the walk only
+  ever returns a reachable bar; §3.1.) Under D6-NO this control is absent; arm is
   next-bar-only.
 - **Armed-summary copy keys on the toggle + hold state:**
   - auto-fire ON, not holding → `→ Chorus · fires at bar 24` (it will commit on arrival).
@@ -355,8 +383,9 @@ callbacks, no session/PDF/validity), so it remains jsdom-testable with no chart 
   - **D6-YES (boundary-snap, §3.1):** the MD picks `Next bar` (default) or `Next section`.
     The section option gives a real telegraph window aligned to musical structure and
     makes auto-fire meaningfully different from a go-tap. Cost: a `nextSectionBoundaryBarId`
-    resolver (~12 lines, pure, section-aware), an `arm` arg, and a two-way selector in the
-    cluster. Makes `armedFireAtEligible` load-bearing (its intended job).
+    resolver (~14 lines, pure, section-aware, bounded by `compiled.cap`), an `arm` arg, and
+    a two-way selector in the cluster. (`armedFireAtEligible` stays invariantly-true in 5a
+    — the walk proves reachability — and becomes load-bearing only in 5b; §1.)
   - **D6-NO (next-bar-only):** auto-fire fires on the very next downbeat. Smallest possible
     build, but the telegraph window is one bar and `armedFireAtEligible` stays vestigial —
     auto-fire becomes "your next advance also commits the armed jump," a thin win over the
@@ -421,8 +450,11 @@ Pure-lib (vitest node default), mirroring the chunk-4 seam tests:
   `sectionId` differs from the current section; mid-section cursor walks to the next head;
   last section (no boundary ahead) → `undefined`; section-less / null `sectionId` chart →
   `undefined` (no snap, falls back to next-bar at the call site); across a repeat/volta the
-  walked boundary matches the bars `advance` actually emits (walk-equivalence). A boundary
-  behind a pass-excluded volta → `fireAtEligible` false (the load-bearing arm-time guard).
+  walked boundary matches the bars `advance` actually emits (walk-equivalence); a
+  **pass-excluded volta on the way** is skipped by the walk → it returns the *real* next
+  section bar (never an unreachable one — MEDIUM-1). **Vamping (`vm.holding` set) with no
+  section change ahead → `undefined` within `compiled.cap`** (bounded-walk guard, HIGH-3),
+  NOT an infinite loop.
 
 Hook (jsdom, `// @vitest-environment jsdom`, `afterEach(cleanup)`, renderHook + act):
 
