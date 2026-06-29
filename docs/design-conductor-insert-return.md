@@ -334,10 +334,12 @@ build PR so the canonical spec stays honest.
 
 ## 9. Open questions
 
-- **OQ1** — Re-cue while a return is pending: spec assumes each new backward cue
-  recomputes its anchor from the **current** section (so jumping C→A while
-  pending-return-to-F yields a new return to D, not F). Confirm this "insert
-  relative to where we are now" model vs. "preserve the original return."
+- **OQ1 — RESOLVED (Graham).** Re-cue while a return is pending: each new backward
+  cue recomputes its anchor from the **current** section (jumping C→A while
+  pending-return-to-F yields a new return to D, not F) — the "insert relative to
+  where we are now" model. Graham: *"fine with your framing. we can change later if
+  need be, post actual user testing."* Revisit post-UAT if it confuses MDs in the
+  room.
 - **OQ2** — MD readout / telegraph: should the change-marker badge show the
   return target ("**C** ↩ then **F**") and, on the inserted section's last bar,
   telegraph the imminent return? Pure UI; lands in chunk 5's telegraph work, but
