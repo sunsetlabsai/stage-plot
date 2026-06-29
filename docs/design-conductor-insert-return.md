@@ -200,6 +200,36 @@ wire enum), add an **optional** return leg to the existing `jumpTo`:
 (`conductor-state.ts`), so the armed envelope carries the return leg for free —
 **no chunk-3/4 wire change** beyond the new optional field on the one directive.
 
+### 4.1 WHEN the return leg is resolved — at ISSUE time, never at fire time (HIGH, Codex R3)
+
+**This is load-bearing.** `commit` applies `state.armed.directive` **verbatim** —
+it does **not** re-run any resolver (`conductor-state.ts:233-244`,
+`applyOverride(compiled, state.vm, state.armed.directive)`). So the resolved
+`return` leg **must already be baked into `Armed.directive` when the jump is
+armed.** Likewise the immediate `redirect` path applies the directive as issued
+(`:221-223`). In both cases `resolveInsertReturn` runs at the moment the MD
+**issues the gesture** (arm or redirect-now), using the **last-emitted bar at
+that instant** (`state.current.barId`) as `currentBarId`, and the result is
+stored in the directive.
+
+Why it cannot be deferred to fire/commit: the anchor is *"the section of the
+currently-playing bar **at override time**"* (D2). Between arm and auto-fire the
+band keeps advancing — the playhead may move from E to F. If the return leg were
+resolved at fire time, an `E → C` call would compute its return against F and
+yield `F → C → G` instead of the intended `E → C → F`. Resolving at issue time
+freezes the anchor correctly.
+
+Concretely the arm seam is `arm(target, exit, fireAt, currentBarId)`:
+
+1. resolve the fire bar (chunk 5's boundary-snap);
+2. `resolveInsertReturn(compiled, cal, target, currentBarId)` → return leg or null;
+3. build the `jumpTo` directive **with** the resolved `return` field (null ⇒ omit);
+4. `resolveArm` stores that directive in `Armed.directive`;
+5. `commit` later applies it unchanged — the return rides along transparently.
+
+(`armableTargets` already hands the picker the full `JumpTarget` incl. `kind`, so
+the seam passes the whole target, not just the bar id — D9.)
+
 ---
 
 ## 5. The VM rule (`applyOverride` + `stepVM`)
@@ -221,19 +251,33 @@ stays position-only.)
 A real MD override supersedes a pending return (Graham: *"in lieu of a subsequent
 manual override"*) — but **only a real one**.
 
-**HIGH-2 (Codex R2): do NOT clear at the top.** `applyOverride`'s standing contract
-is that an unknown/stale/corrupt directive is a **no-op** — `applyOverride` returns the
-clone unchanged (`roadmap-vm.ts:508`). A top-of-function `s.pendingReturn = null` would
-let a bogus `jumpTo`/`hold`/`release`/`resetJump` silently **cancel a live pending
-return** while changing nothing else — a state mutation from a no-op, breaking the
-invariant. So each case clears `pendingReturn` **only after its own validity guard
-passes** (the point at which it is a genuine, applied override):
+**The clearing rule: clear iff the directive ACTUALLY MUTATES VM nav state** —
+not merely that its id/target is known. `applyOverride`'s standing contract is
+that an unknown/stale/corrupt directive is a **no-op** (returns the clone
+unchanged, `roadmap-vm.ts:508`); a no-op must leave `pendingReturn` exactly as it
+was. A top-of-function `s.pendingReturn = null` (Codex R2 HIGH) would let a bogus
+directive cancel a live return while changing nothing else.
+
+**HIGH-2 (Codex R3): "validity guard passes" is NOT the same as "state changed."**
+Some directives pass their id-known guard yet are **effect-no-ops** — and those must
+*also* preserve `pendingReturn`:
+
+- **`resetJump` known-but-not-fired** (`roadmap-vm.ts:581-583`): `directive.jumpId in
+  s.fired` is true even when `s.fired[jumpId]` is already `false`, so the assignment
+  flips nothing. Clear only inside the branch where the flag was actually `true`.
+- **duplicate `hold` on the already-held repeat** (`:535-540`): `repeatStartById.has`
+  passes but `s.holding === directive.repeatStartId` already, so `holding` doesn't
+  change. Clear only when `s.holding !== directive.repeatStartId`.
+- **`release` while not holding that repeat** (`:546`) already early-returns at its
+  guard — so it preserves `pendingReturn` for free.
+
+So the clear rides the **mutation condition**, the tighter of the two:
 
 ```ts
 case 'jumpTo': {
   const pos = compiled.barPos.get(directive.barId);
   if (pos === undefined) return s;       // unknown target → no-op, pendingReturn UNTOUCHED
-  s.pendingReturn = null;                // validated override → supersede the old plan (D5)
+  s.pendingReturn = null;                // a valid jumpTo always moves the cursor → real override (D5)
   s.cursor = pos;
   s.done = false;
   if (directive.return) {
@@ -245,14 +289,21 @@ case 'jumpTo': {
   // ... exit-arming unchanged ...
   return s;
 }
-// hold:        after `repeatStartById.has(...)` passes → s.pendingReturn = null
-// release:     after `s.holding === directive.repeatStartId` passes → s.pendingReturn = null
-// anotherRound:after `rs && t !== undefined` passes → s.pendingReturn = null
-// resetJump:   after `directive.jumpId in s.fired` passes → s.pendingReturn = null
+// anotherRound: a valid (rs && t!==undefined) always re-seats the cursor → clear.
+// hold:         clear ONLY when s.holding !== directive.repeatStartId (it actually
+//               parks a new vamp). A duplicate hold on the held repeat changes
+//               nothing → leave pendingReturn.
+// release:      the early `s.holding !== id` guard returns before the body; reaching
+//               the body means it genuinely clears the vamp → clear.
+// resetJump:    clear ONLY inside `if (s.fired[directive.jumpId] === true)` — i.e. when
+//               the flag actually flips false. A known-but-not-fired id changes
+//               nothing → leave pendingReturn.
 ```
 
-i.e. the clear rides each case's **existing** guard — no new validity logic, just
-ordering. A no-op directive leaves `pendingReturn` exactly as it was.
+i.e. the clear is **gated on the same condition as the actual mutation** — no new
+validity logic invented, but it must follow the *effect*, not the id-known test. An
+inert/no-op directive (unknown jumpTo, not-fired resetJump, duplicate hold, release
+while not holding) leaves `pendingReturn` exactly as it was.
 
 ### 5.3 `stepVM` — fire on the natural FORWARD exit (D6)
 
@@ -421,8 +472,14 @@ vitest node env (these are pure modules; no jsdom). New cases:
   - section-less / null `sectionId` → `null`.
 - `applyOverride`:
   - `jumpTo` with `return` sets `pendingReturn`; without, leaves it null.
-  - any other directive issued afterward clears `pendingReturn`.
+  - any other directive that **actually mutates** state (valid jumpTo, valid
+    anotherRound, new hold, real release, resetJump that flips a fired flag) clears
+    an existing `pendingReturn`.
   - unknown `returnBarId` ⇒ `pendingReturn` stays null (safe).
+  - **no-op-preserves-pendingReturn invariant (Codex R3 HIGH-2 regression guard):**
+    with a `pendingReturn` set, each of these EFFECT-NO-OPs leaves it intact —
+    unknown `jumpTo` target; `resetJump` on a known-but-not-fired jump; `release`
+    while not holding that repeat; duplicate `hold` on the already-held repeat.
 - `stepVM`:
   - plays the inserted section once, then lands on the return target on the
     natural forward exit; `pendingReturn` cleared.
@@ -434,6 +491,11 @@ vitest node env (these are pure modules; no jsdom). New cases:
   - a second override before the boundary pre-empts the return.
   - notated repeats/jumps elsewhere unaffected (regression: existing roadmap
     fixtures still resolve identically).
+- **arm/commit seam (arm-time resolution, Codex R3 HIGH):** arm an `E → C` section
+  jump while the last-emitted bar is in **E**, advance the VM forward (so the
+  playhead would now be in F), then auto-fire/commit — the committed directive
+  still returns to **F** (E's successor, frozen at arm time), NOT G. Proves the
+  return leg is baked into `Armed.directive` at arm time, not re-resolved at fire.
 
 Report the test-count delta on the build PR.
 
@@ -449,11 +511,14 @@ Report the test-count delta on the build PR.
 2. `conductor-targets.ts`: `resolveInsertReturn` (takes the whole `JumpTarget`,
    gates on `kind === 'section'` — D9) + the two helpers (`nextSectionHeadAfter`,
    `lastBarPosOfSection`). + tests.
-3. Wire the resolver into the arm/commit path (`use-conductor-session.ts` /
-   `conductor-session.ts`): a backward **section** `jumpTo` target carries the
-   resolved return leg; forward + non-section stays plain. Pass the full
+3. Wire the resolver into the arm/redirect path (`use-conductor-session.ts` /
+   `conductor-session.ts`) **at issue time** (§4.1, HIGH): `arm(target, exit,
+   fireAt, currentBarId)` runs `resolveInsertReturn` with the last-emitted bar and
+   **bakes** the return leg into `Armed.directive` — `commit` applies it verbatim
+   (`conductor-state.ts:242`), never re-resolving. A backward **section** target
+   carries the resolved leg; forward + non-section stays plain. Pass the full
    `JumpTarget` (kind), not just the bar id. (This is the chunk-4/5 seam;
-   coordinate with chunk 5's arming.)
+   coordinate with chunk 5's arming.) + the arm-time-freeze test (§10).
 4. Amend `design-conductor-authority.md` §3.3/§3.4 line per §7.
 5. MD readout/telegraph copy (OQ2) — only if confirmed; else defer to chunk 5.
 
