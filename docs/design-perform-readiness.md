@@ -204,6 +204,16 @@ app — update to edit it." / `invalid` → "This chart's stored map is corrupt.
 and must be explicitly labeled as replacing — never the innocent "Calibrate" CTA (D6). `phase:
 'ready'` → the per-state table below.
 
+**The header Calibrate button is a SECOND innocent path — suppress it too.** The strip hiding its own
+CTA is necessary but not sufficient: the always-present top-right **Calibrate** toggle (`page.tsx:3259`,
+gated only on `calibratable`) is still live during `load-error`/`unreadable`. For an owner `409` the
+`sourceHash` is already set (`:3047`), so entering Calibrate there and Saving would PUT to the **same
+`(chart_id, source_hash)`** and clobber the row this build refused to interpret — the exact trap the
+`409` exists to prevent. So gate the header **enter** path off when `loadError || calUnreadable` (the
+load reset forces `perform` mode when either is set, so condition it on `calMode === 'perform'` to keep
+the in-calibrate **Done** exit reachable). This is the same D6 invariant applied to both Calibrate
+surfaces — no innocent entry into a clobbering Save.
+
 The split is **two orthogonal axes**, not one owner column: (a) does an affordance exist for *any*
 viewer (section seek does — `page.tsx:1683` / `:2075` — for owner and performer alike), vs (b) is
 this viewer `calibratable` (can enter Calibrate / add bars / verify). So `section-only`'s "Tap a
@@ -380,7 +390,9 @@ silent. The loop becomes legible: **edit → strip shows `verifiable` → Calibr
    (§4.1, refactoring the top toggle `:3212` — `calMode==='calibrate' ? exitCalibrate() :
    enterCalibrate(calTool)` — and tool-switch `:3330` through them), assembles
    `performReadinessView({ loading, loadError, unreadable: calUnreadable, cal: calibration })`, and
-   sets `onCalibrate = enterCalibrate`.
+   sets `onCalibrate = enterCalibrate`. **It also gates the header Calibrate ENTER path off on an
+   errored/unreadable chart** — `calibratable && !(calMode === 'perform' && (loadError ||
+   calUnreadable))` (§4) — so the second innocent clobber path is closed, not just the strip's CTA.
 
 Each step is independently gate-greenable; nothing here touches the conductor libs (frozen) or the
 verify/perform gates. This closes the upstream loop so the conductor work is actually exercisable

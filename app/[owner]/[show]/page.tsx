@@ -3256,7 +3256,13 @@ function ChartNavigator({
               OFFLINE
             </span>
           )}
-          {calibratable && (
+          {/* Suppress the ENTER path on a load-error / unreadable chart: entering
+              Calibrate there would let a Save PUT to the same (chart_id, source_hash)
+              and clobber the very map this build refused to interpret — the innocent
+              CTA the strip already hides (design-perform-readiness.md §3.2/§4, D6).
+              The load reset forces perform mode when these set, so "Done" is never
+              trapped; the guard is conditioned on perform to keep exit reachable. */}
+          {calibratable && !(calMode === 'perform' && (loadError || !!calUnreadable)) && (
             <button
               onClick={() => (calMode === 'calibrate' ? exitCalibrate() : enterCalibrate(calTool))}
               className={`px-2 py-1 rounded text-xs font-bold transition-colors ${
