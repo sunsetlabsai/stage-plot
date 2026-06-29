@@ -231,8 +231,8 @@ The fire bar is one of two **structural** boundaries ahead of the cursor:
   bars away. The VM is section-blind, so this resolver lives in `conductor-targets.ts`
   (which already has `cal` + the section-head machinery of `armableTargets`). It walks
   `stepVM` forward — the deterministic preview of the bars the MD's advances will emit —
-  until the emitted bar's `sectionId` differs from the section we're in now, and returns
-  that boundary bar:
+  until the emitted bar enters a **new, non-null** section (different from the one we're
+  in now), and returns that boundary bar:
 
 ```ts
 // lib/conductor-targets.ts — next section/marker head ahead (forward stepVM preview).
@@ -255,8 +255,13 @@ export function nextSectionBoundaryBarId(
   for (let i = 0; i < compiled.cap; i++) {
     const step = stepVM(compiled, cur);
     if (!step.transition) return undefined;           // off the song end → no boundary ahead
-    if ((secOf.get(step.transition.barId) ?? null) !== here) return step.transition.barId;
-    cur = step.state;                                  // same section → keep walking (pure; stepVM returns {transition, state})
+    const newSec = secOf.get(step.transition.barId) ?? null;
+    // Codex R2 MEDIUM: only a NON-NULL section that differs is a boundary. A bar with
+    // sectionId === null is a valid unassigned gap (types.ts:97; canVerify doesn't require
+    // full assignment, chart-calibration.ts:136) — skip it so a gap between sections A and B
+    // is not mistaken for "the next section". Walk on until a real labelled head.
+    if (newSec != null && newSec !== here) return step.transition.barId;
+    cur = step.state;                                  // same section / null gap → keep walking (pure; stepVM returns {transition, state})
   }
   return undefined;                                    // no section change within the cap (e.g. an active hold)
 }
@@ -447,8 +452,10 @@ Pure-lib (vitest node default), mirroring the chunk-4 seam tests:
   produces) — the regression guard that auto-fire ≡ go-tap in outcome, differing only in
   trigger.
 - **`nextSectionBoundaryBarId` (pure, D6-YES):** returns the first emitted bar whose
-  `sectionId` differs from the current section; mid-section cursor walks to the next head;
-  last section (no boundary ahead) → `undefined`; section-less / null `sectionId` chart →
+  `sectionId` is **non-null and differs** from the current section; mid-section cursor walks
+  to the next head; **a null-`sectionId` gap between two labelled sections is skipped, not
+  returned** — walking past unassigned bars to the real next head (Codex R2 MEDIUM);
+  last section (no boundary ahead) → `undefined`; section-less / all-null `sectionId` chart →
   `undefined` (no snap, falls back to next-bar at the call site); across a repeat/volta the
   walked boundary matches the bars `advance` actually emits (walk-equivalence); a
   **pass-excluded volta on the way** is skipped by the walk → it returns the *real* next
@@ -463,7 +470,7 @@ Hook (jsdom, `// @vitest-environment jsdom`, `afterEach(cleanup)`, renderHook + 
 - auto-fire ON: advance onto the fire bar auto-commits in the **same** act (single
   `setSession`); `armed` cleared, cursor jumped.
 - auto-fire ON but `holding`: advance onto the fire bar does **not** fire (gate refuses);
-  release then advance fires.
+  dispatch the Release vamp redirect (which clears `holding`), then the next advance fires.
 - toggle OFF mid-arm → reverts to go-tap.
 
 Cluster (jsdom, RTL): toggle renders + flips `onToggleAutoFire`; armed-summary copy keys
