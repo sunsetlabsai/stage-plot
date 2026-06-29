@@ -219,16 +219,69 @@ resolved at fire time, an `E → C` call would compute its return against F and
 yield `F → C → G` instead of the intended `E → C → F`. Resolving at issue time
 freezes the anchor correctly.
 
-Concretely the arm seam is `arm(target, exit, fireAt, currentBarId)`:
+Concretely the arm seam is `arm(target, exit, fireAt, currentBarId)`, but the
+resolution happens **inside `resolveArm` against a freshly re-derived target** — not
+in the hook against the passed object (§4.3). The hook only forwards a **stable
+identity** + the `currentBarId`; `resolveArm` re-derives, bakes the return leg, and
+mints `Armed.directive`; `commit` later applies it unchanged.
 
-1. resolve the fire bar (chunk 5's boundary-snap);
-2. `resolveInsertReturn(compiled, cal, target, currentBarId)` → return leg or null;
-3. build the `jumpTo` directive **with** the resolved `return` field (null ⇒ omit);
-4. `resolveArm` stores that directive in `Armed.directive`;
-5. `commit` later applies it unchanged — the return rides along transparently.
+### 4.3 `resolveArm` reshape — re-derive identity, then bake (HIGH, Codex R5)
 
-(`armableTargets` already hands the picker the full `JumpTarget` incl. `kind`, so
-the seam passes the whole target, not just the bar id — D9.)
+`resolveArm` (`conductor-targets.ts:225`) carries a standing safety rule: **the
+controller must NOT trust the passed target object** — a stale/spoofed envelope can
+carry a bad `barId` *and* a spoofed `exitOptions`, so it re-derives from a fresh
+`armableTargets(compiled, cal)`. Two things change now that `kind` decides whether a
+return is baked:
+
+1. **Re-derive by a stable identity, not `barId` alone.** `armableTargets` legally
+   emits **several targets for one bar** (Coda + a section head + Repeat-all can all
+   sit on bar 1 — `ConductorCluster.tsx:129-132`, composite key `kind:barId:label`).
+   `find(t => t.barId === barId)` would pick an arbitrary one, and `kind` now controls
+   return-baking. So match on `{ barId, kind, label }` and **reject (null) on no-match
+   OR ambiguity** — never guess.
+2. **The default return is suppressed by a REQUESTED exit (the `exit` ARG), not the
+   kept/validated one (D10, Codex R5 MEDIUM).** `JumpTarget` does not carry the chosen
+   exit; the `exit` argument does. If a requested exit is *dropped* during validation
+   (out of the recomputed `exitOptions`), the code must **still not** bake a return —
+   else *"back to C, al Coda"* with a stale exit would silently become *"back to C,
+   return to F."* So gate on `exit === undefined` (nothing requested), independent of
+   whether the exit survives validation.
+
+```ts
+export function resolveArm(
+  compiled: CompiledRoadmap,
+  cal: ChartCalibration,
+  id: { barId: string; kind: JumpTarget['kind']; label: string },  // stable identity, NOT the raw object
+  exit: ExitPolicy['kind'] | undefined,
+  fireAt: string,
+  currentBarId: string | undefined,
+): Armed | null {
+  if (!compiled.barPos.has(fireAt)) return null;
+  const matches = armableTargets(compiled, cal).filter(
+    (t) => t.barId === id.barId && t.kind === id.kind && t.label === id.label);
+  if (matches.length !== 1) return null;            // no match OR ambiguous → reject (stale/spoofed)
+  const target = matches[0];                         // FRESH, authoritative target
+
+  const keepExit = exit !== undefined && target.exitOptions.includes(exit) ? exit : undefined;
+  // exit XOR return (D10): a REQUESTED exit suppresses the default return — even a
+  // stale exit that fails validation (keepExit === undefined). Gate on `exit`, not keepExit.
+  const ret = (exit === undefined && target.kind === 'section')
+    ? resolveInsertReturn(compiled, cal, target, currentBarId)   // against the FRESH target
+    : null;
+
+  const directive = {
+    kind: 'jumpTo',
+    barId: id.barId,
+    ...(keepExit && { exit: { kind: keepExit } }),
+    ...(ret && { return: ret }),
+  } as const;
+  return { fireAt, directive };
+}
+```
+
+`resolveInsertReturn` runs against the **re-derived** target, so its `kind` gate (D9)
+is judged on the authoritative entry, never the passed object. (`commit` then applies
+`Armed.directive` verbatim — §4.1.)
 
 ### 4.2 `exit` and `return` are mutually exclusive (D10, HIGH — Codex R3)
 
@@ -332,7 +385,10 @@ are flat `Record<string, number|boolean>`.)
 when the `jumpTo` carries no explicit `exit`**. See §4.2 — an MD-named exit defines
 how the inserted material is left, so it suppresses the default return; arming an
 exit *and* a return would strand a live `alCodaArmed`/`alFineActive` after the return
-fired.
+fired. With R5's `resolveArm` reshape (§4.3) the XOR is already enforced **upstream**
+— no armed directive ever carries both — so this `!directive.exit` gate is
+**defense-in-depth**: it also covers any hand-built `redirect`-now directive and keeps
+`applyOverride` correct in isolation, without relying on the resolver's discipline.
 
 ### 5.3 `stepVM` — fire on the natural FORWARD exit (D6)
 
@@ -531,6 +587,20 @@ vitest node env (these are pure modules; no jsdom). New cases:
     (R3 MEDIUM).
   - **`exit` XOR `return` (D10):** a `jumpTo` carrying an `exit` (al Coda/al Fine)
     sets **no** `pendingReturn`, even on a backward section target.
+- `resolveArm` (target-identity re-derivation + exit suppression — §4.3, Codex R5):
+  - **bakes the return** on a backward `kind:'section'` id with **no** `exit` arg:
+    `Armed.directive.return` is present and points at the anchor's successor.
+  - **valid exit suppresses the return:** same backward section id **with** a valid
+    `exit` (in the re-derived `exitOptions`) → `Armed.directive.exit` present,
+    `return` **absent** (D10).
+  - **stale/invalid exit STILL suppresses the return:** a requested `exit` that is
+    **not** in the re-derived `exitOptions` is dropped (`keepExit === undefined`) yet
+    **still** bakes **no** `return` — gate is on the `exit` ARG, not `keepExit` (R5
+    MEDIUM). Result is a plain continue-from-target `jumpTo`, neither exit nor return.
+  - **ambiguous identity → `null`:** a `{ barId }` shared by multiple targets
+    (Coda + section head on bar 1) resolved with a `kind`/`label` matching **two**
+    entries, or matching **none**, returns `null` — never guesses (R5 HIGH).
+  - **forward / non-section id with no exit:** `return` absent (continue-from-target).
 - `stepVM`:
   - plays the inserted section once, then lands on the return target on the
     natural forward exit; `pendingReturn` cleared.
@@ -566,16 +636,26 @@ Report the test-count delta on the build PR.
    the linear branch (:393) and the **Rule-6 `if (!handled)` block** (:499-502),
    NOT the shared :504 return (HIGH — keeps notated end-edge nav authoritative). +
    tests, **including the marker-less `linear`-chart case and the To-Coda-defers case**.
-2. `conductor-targets.ts`: `resolveInsertReturn` (takes the whole `JumpTarget`,
-   gates on `kind === 'section'` — D9) + the two helpers (`nextSectionHeadAfter`,
-   `lastBarPosOfSection`). + tests.
-3. Wire the resolver into the arm/redirect path (`use-conductor-session.ts` /
-   `conductor-session.ts`) **at issue time** (§4.1, HIGH): `arm(target, exit,
-   fireAt, currentBarId)` runs `resolveInsertReturn` with the last-emitted bar and
-   **bakes** the return leg into `Armed.directive` — `commit` applies it verbatim
-   (`conductor-state.ts:242`), never re-resolving. A backward **section** target
-   carries the resolved leg; forward + non-section stays plain. Pass the full
-   `JumpTarget` (kind), not just the bar id. (This is the chunk-4/5 seam;
+2. `conductor-targets.ts`:
+   - `resolveInsertReturn` (takes the whole `JumpTarget`, gates on `kind === 'section'`
+     — D9) + the two helpers (`nextSectionHeadAfter`, `lastBarPosOfSection`).
+   - **`resolveArm` signature change (§4.3, R5):** takes a **stable identity**
+     `{ barId, kind, label }` (not the raw `JumpTarget`), `exit`, `fireAt`, **and a new
+     `currentBarId`** param. Re-derives the fresh target via
+     `armableTargets(...).filter(barId && kind && label)`, **rejects no-match OR
+     ambiguity → `null`**, then bakes the return **inside** by calling
+     `resolveInsertReturn` against the re-derived target **only when `exit === undefined`
+     && `kind === 'section'`**. Suppression keys on the `exit` ARG (D10), not the
+     validated `keepExit`. + tests (§10 `resolveArm` group).
+3. Wire the arm/redirect path (`use-conductor-session.ts` / `conductor-session.ts`)
+   **at issue time** (§4.1, HIGH): the hook forwards a **stable identity**
+   `{ barId: t.barId, kind: t.kind, label: t.label }` + `exit` + `fireAt` +
+   `currentBarId` (the last-emitted bar) into `resolveArm`, which **bakes** the return
+   leg into `Armed.directive` — `commit` applies it verbatim
+   (`conductor-state.ts:242`), never re-resolving. The hook does **not** pass the raw
+   `t` object and does **not** itself call `resolveInsertReturn` (don't-trust-the-object
+   safety rule, §4.3). A backward **section** call with no exit carries the resolved
+   leg; forward + non-section + exit-bearing stays plain. (This is the chunk-4/5 seam;
    coordinate with chunk 5's arming.) + the arm-time-freeze test (§10).
 4. Amend `design-conductor-authority.md` §3.3/§3.4 line per §7.
 5. MD readout/telegraph copy (OQ2) — only if confirmed; else defer to chunk 5.
