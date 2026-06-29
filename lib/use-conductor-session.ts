@@ -125,13 +125,17 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     redirects,
     advance: () => run({ kind: 'advance' }),
     // arm ALWAYS routes through resolveArm (the #101 forward-carry): the component
-    // never hand-builds a directive. fireAt defaults to the real next emitted bar;
-    // an out-of-set exit or an unknown bar yields null → no-op.
+    // never hand-builds a directive. It forwards a STABLE IDENTITY (not the raw
+    // target — don't-trust-the-object, insert-return §4.3) + the last-emitted bar
+    // (currentBarId) so resolveArm can re-derive the target and bake the
+    // insert-return leg at arm time (§4.1). fireAt defaults to the real next emitted
+    // bar; an out-of-set exit, ambiguous identity, or unknown bar yields null → no-op.
     arm: (t, exit) => {
       if (!compiled || !cal || !session) return;
       const fireAt = nextEmittedBarId(compiled, session.state.vm);
       if (!fireAt) return; // song end — nothing to arm against
-      const armed = resolveArm(compiled, cal, t.barId, exit, fireAt);
+      const id = { barId: t.barId, kind: t.kind, label: t.label };
+      const armed = resolveArm(compiled, cal, id, exit, fireAt, session.state.current?.barId);
       if (!armed) return;
       run({ kind: 'arm', armed });
     },

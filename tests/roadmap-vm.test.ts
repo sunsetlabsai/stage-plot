@@ -316,6 +316,92 @@ describe('roadmap-vm — jumpTo exit policy', () => {
   });
 });
 
+// ── insert-and-return (pendingReturn) ────────────────────────────────────────
+describe('roadmap-vm — insert-and-return', () => {
+  it('plays the inserted block once then returns at afterPos (linear)', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8'], []);
+    // Jump back to b3 (pos2); after emitting b4 (pos3) return to b7 (pos6).
+    const after = runCollect(
+      c,
+      override(c, initVM(c), { kind: 'jumpTo', barId: 'b3', return: { afterPos: 3, returnBarId: 'b7' } }),
+    );
+    expect(after.ids).toEqual(['b3', 'b4', 'b7', 'b8']);
+    expect(after.state.pendingReturn).toBeNull(); // consumed
+  });
+
+  it('an internal repeat inside the inserted span loops BEFORE the return fires', () => {
+    // b2..b4 is a 2x repeat; return is armed after b4 (pos3). The back-jump end-edge
+    // must win each pass (handled) — the return only fires on the clean forward exit.
+    const c = compileOrThrow(
+      ['b1', 'b2', 'b3', 'b4', 'b5', 'b6'],
+      [rstart('rs', 'b2'), rend('re', 'b4', 'rs', 2)],
+    );
+    const after = runCollect(
+      c,
+      override(c, initVM(c), { kind: 'jumpTo', barId: 'b2', return: { afterPos: 3, returnBarId: 'b6' } }),
+    );
+    expect(after.ids).toEqual(['b2', 'b3', 'b4', 'b2', 'b3', 'b4', 'b6']);
+  });
+
+  it('a notated To Coda at afterPos stays authoritative (defers the return)', () => {
+    // b3 carries a To Coda; with al-Coda armed, the divert (handled) wins over the
+    // pending return that happens to share that bar's position.
+    const c = compileOrThrow(
+      ['b1', 'b2', 'b3', 'b4', 'b5', 'b6'],
+      [toCoda('tc', 'b3'), coda('cd', 'b5')],
+    );
+    const crafted: VMState = {
+      ...initVM(c),
+      cursor: 2, // at b3 (the To Coda bar)
+      flags: { toCodaFired: false, alFineActive: false, alCodaArmed: true },
+      pendingReturn: { afterPos: 2, returnPos: 5 },
+    };
+    const r = stepVM(c, crafted);
+    expect(r.transition?.barId).toBe('b3');
+    expect(r.state.cursor).toBe(4); // diverted to the Coda (b5), NOT the return target
+    expect(r.state.pendingReturn).toEqual({ afterPos: 2, returnPos: 5 }); // untouched (deferred)
+  });
+
+  it('installs a fresh pendingReturn only on a GENUINE backward jumpTo', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3', 'b4'], []);
+    const s = override(c, { ...initVM(c), cursor: 3 }, {
+      kind: 'jumpTo', barId: 'b1', return: { afterPos: 0, returnBarId: 'b3' },
+    });
+    expect(s.pendingReturn).toEqual({ afterPos: 0, returnPos: 2 });
+  });
+
+  it('a no-op jumpTo (unknown barId) with a valid return installs nothing and preserves prior', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3', 'b4'], []);
+    const prior: VMState = { ...initVM(c), cursor: 1, pendingReturn: { afterPos: 0, returnPos: 3 } };
+    const s = override(c, prior, { kind: 'jumpTo', barId: 'nope', return: { afterPos: 0, returnBarId: 'b4' } });
+    expect(s.pendingReturn).toEqual({ afterPos: 0, returnPos: 3 }); // untouched (sameNav ⇒ block skipped)
+  });
+
+  it('a same-cursor jumpTo with a return is a no-op and installs nothing', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3', 'b4'], []);
+    const s = override(c, { ...initVM(c), cursor: 2 }, {
+      kind: 'jumpTo', barId: 'b3', return: { afterPos: 2, returnBarId: 'b4' },
+    });
+    expect(s.pendingReturn).toBeNull();
+  });
+
+  it('a genuine override CLEARS a prior pendingReturn', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3', 'b4'], []);
+    const prior: VMState = { ...initVM(c), cursor: 0, pendingReturn: { afterPos: 1, returnPos: 3 } };
+    const s = override(c, prior, { kind: 'jumpTo', barId: 'b3' }); // genuine, no return
+    expect(s.pendingReturn).toBeNull();
+  });
+
+  it('exit XOR return: a jumpTo carrying BOTH never installs a return (exit wins)', () => {
+    const c = compileOrThrow(['b1', 'b2', 'b3', 'b4'], [toCoda('tc', 'b2'), coda('cd', 'b4')]);
+    const s = override(c, { ...initVM(c), cursor: 3 }, {
+      kind: 'jumpTo', barId: 'b1', exit: { kind: 'alCoda' }, return: { afterPos: 0, returnBarId: 'b3' },
+    });
+    expect(s.pendingReturn).toBeNull();
+    expect(s.flags.alCodaArmed).toBe(true);
+  });
+});
+
 // ── hold guards unknown targets (parity with anotherRound) ───────────────────
 describe('roadmap-vm — hold on an unknown repeat is a no-op', () => {
   it('does not park a vamp on a non-existent repeat id', () => {

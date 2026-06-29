@@ -5,6 +5,7 @@ import {
   nextEmittedBarId,
   fireAtEligible,
   resolveArm,
+  resolveInsertReturn,
 } from '../lib/conductor-targets';
 import { compileRoadmap, initVM, type CompiledRoadmap, type VMState } from '../lib/roadmap-vm';
 import { barsInOrder } from '../lib/chart-calibration';
@@ -229,24 +230,36 @@ describe('resolveArm', () => {
   );
   const compiled = compileCal(cal);
 
+  // Identity helpers for this fixture. b2 carries TWO targets (Segno + the Verse
+  // section head) — matching by barId alone would be ambiguous, so every call
+  // forwards the stable { barId, kind, label } identity.
+  const segnoB2 = { barId: 'b2', kind: 'segno' as const, label: 'Segno' };
+  const bar6 = { barId: 'b6', kind: 'bar' as const, label: 'Bar 6' };
+
   it('mints an Armed for a present target + present fireAt', () => {
-    expect(resolveArm(compiled, cal, 'b2', undefined, 'b1')).toEqual({
+    // A segno target (kind !== 'section') never bakes a return leg.
+    expect(resolveArm(compiled, cal, segnoB2, undefined, 'b1', undefined)).toEqual({
       fireAt: 'b1',
       directive: { kind: 'jumpTo', barId: 'b2' },
     });
   });
 
   it('returns null for an unknown target barId (no Armed minted)', () => {
-    expect(resolveArm(compiled, cal, 'nope', undefined, 'b1')).toBeNull();
+    expect(resolveArm(compiled, cal, { barId: 'nope', kind: 'bar', label: 'Bar X' }, undefined, 'b1', undefined)).toBeNull();
+  });
+
+  it('returns null for an identity whose kind does not match any target (no guess)', () => {
+    // b2 exists, but no target with barId b2 + kind 'coda' → reject, never pick a sibling.
+    expect(resolveArm(compiled, cal, { barId: 'b2', kind: 'coda', label: 'Coda' }, undefined, 'b1', undefined)).toBeNull();
   });
 
   it('returns null for a fireAt that is not a present local bar', () => {
-    expect(resolveArm(compiled, cal, 'b2', undefined, 'nope')).toBeNull();
+    expect(resolveArm(compiled, cal, segnoB2, undefined, 'nope', undefined)).toBeNull();
   });
 
   it('keeps exit only if in the RECOMPUTED exitOptions', () => {
     // Segno@b2 (pos1) sits before Fine@b5 (pos4) → alFine is meaningful.
-    expect(resolveArm(compiled, cal, 'b2', 'alFine', 'b1')).toEqual({
+    expect(resolveArm(compiled, cal, segnoB2, 'alFine', 'b1', undefined)).toEqual({
       fireAt: 'b1',
       directive: { kind: 'jumpTo', barId: 'b2', exit: { kind: 'alFine' } },
     });
@@ -254,9 +267,97 @@ describe('resolveArm', () => {
 
   it('DROPS a spoofed exit absent from the recomputed target options', () => {
     // b6 (pos5) is past the Fine (pos4) → exitOptions [] → alFine dropped.
-    expect(resolveArm(compiled, cal, 'b6', 'alFine', 'b1')).toEqual({
+    expect(resolveArm(compiled, cal, bar6, 'alFine', 'b1', undefined)).toEqual({
       fireAt: 'b1',
       directive: { kind: 'jumpTo', barId: 'b6' },
+    });
+  });
+});
+
+// ── resolveInsertReturn + resolveArm return-baking (insert-and-return) ─────────
+describe('insert-and-return', () => {
+  // Intro(b1,b2) → Verse(b3,b4) → Chorus(b5,b6). A backward SECTION call inserts
+  // the target section once, then returns to the anchor section's successor head.
+  const cal = makeCal(
+    [
+      { id: 'b1', sectionId: 'sI' },
+      { id: 'b2', sectionId: 'sI' },
+      { id: 'b3', sectionId: 'sV' },
+      { id: 'b4', sectionId: 'sV' },
+      { id: 'b5', sectionId: 'sC' },
+      { id: 'b6', sectionId: 'sC' },
+    ],
+    [sec('sI', 'Intro'), sec('sV', 'Verse'), sec('sC', 'Chorus')],
+  );
+  const compiled = compileCal(cal);
+  const introTarget = byId(armableTargets(compiled, cal), 'b1')!; // Intro section head
+
+  it('backward SECTION call → returns to the anchor section successor head', () => {
+    // Playing in Verse (last-emitted b3 ⇒ anchor = Verse), call back to Intro (b1):
+    // after Intro's last bar (b2, pos1) return to the Verse SUCCESSOR head = Chorus (b5).
+    expect(resolveInsertReturn(compiled, cal, introTarget, 'b3')).toEqual({
+      afterPos: 1,
+      returnBarId: 'b5',
+    });
+  });
+
+  it('forward call → null (continue-from-target, no return)', () => {
+    const chorusTarget = byId(armableTargets(compiled, cal), 'b5')!;
+    expect(resolveInsertReturn(compiled, cal, chorusTarget, 'b3')).toBeNull();
+  });
+
+  it('non-section target → null (D9 section-only)', () => {
+    const barTarget = byId(
+      armableTargets(compiled, cal).filter((t) => t.kind === 'bar'),
+      'b4',
+    )!;
+    expect(resolveInsertReturn(compiled, cal, barTarget, 'b5')).toBeNull();
+  });
+
+  it('anchor in the LAST section → null (no successor)', () => {
+    // Last-emitted b5 is in Chorus (the final section) → no successor head.
+    expect(resolveInsertReturn(compiled, cal, introTarget, 'b5')).toBeNull();
+  });
+
+  it('resolveArm bakes the return leg for a backward section call (no exit)', () => {
+    const id = { barId: 'b1', kind: 'section' as const, label: 'Intro' };
+    // Playing in Verse (last-emitted b3 ⇒ anchor = Verse), fire at next bar b4. After
+    // Intro plays once (last bar b2, pos1) return to the Verse successor = Chorus (b5).
+    expect(resolveArm(compiled, cal, id, undefined, 'b4', 'b3')).toEqual({
+      fireAt: 'b4',
+      directive: { kind: 'jumpTo', barId: 'b1', return: { afterPos: 1, returnBarId: 'b5' } },
+    });
+  });
+
+  it('exit XOR return: a REQUESTED exit suppresses the default return', () => {
+    // Add a Fine after Intro so alFine is a real option from b1.
+    const calF = makeCal(
+      [
+        { id: 'b1', sectionId: 'sI' },
+        { id: 'b2', sectionId: 'sI' },
+        { id: 'b3', sectionId: 'sV' },
+        { id: 'b4', sectionId: 'sV' },
+        { id: 'b5', sectionId: 'sC' },
+        { id: 'b6', sectionId: 'sC' },
+      ],
+      [sec('sI', 'Intro'), sec('sV', 'Verse'), sec('sC', 'Chorus')],
+      [fine('F', 'b6')],
+    );
+    const cF = compileCal(calF);
+    const id = { barId: 'b1', kind: 'section' as const, label: 'Intro' };
+    expect(resolveArm(cF, calF, id, 'alFine', 'b4', 'b3')).toEqual({
+      fireAt: 'b4',
+      directive: { kind: 'jumpTo', barId: 'b1', exit: { kind: 'alFine' } },
+    });
+  });
+
+  it('exit XOR return: a DROPPED (out-of-set) exit still suppresses the return', () => {
+    // No Fine in this chart → alFine drops out, but because an exit was REQUESTED
+    // the default return is still suppressed (keys on the exit ARG, not keepExit).
+    const id = { barId: 'b1', kind: 'section' as const, label: 'Intro' };
+    expect(resolveArm(compiled, cal, id, 'alFine', 'b4', 'b3')).toEqual({
+      fireAt: 'b4',
+      directive: { kind: 'jumpTo', barId: 'b1' },
     });
   });
 });

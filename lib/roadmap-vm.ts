@@ -82,6 +82,11 @@ export interface VMState {
   // suppressed) until release; null = not holding.
   holding: string | null;
   done: boolean;
+  // Live insert-and-return (design-conductor-insert-return.md §5.1): after the
+  // inserted section's last bar exits FORWARD, jump here once, then clear. null =
+  // no pending return. Plain record (positions only) → wire-safe; the VM stays
+  // section-blind, the chart layer resolves the positions.
+  pendingReturn: { afterPos: number; returnPos: number } | null;
 }
 
 // ── MD overrides (design §3.2 / §3.3) ────────────────────────────────────────
@@ -100,7 +105,13 @@ export type Directive =
   // Release the vamp: clamp to times-1 so the next exit takes the final ending.
   | { kind: 'release'; repeatStartId: string }
   // Skip to a bar; leave counters as-is. exit arms the al-Coda/al-Fine path.
-  | { kind: 'jumpTo'; barId: string; exit?: ExitPolicy }
+  // Optional `return` (insert-return §4): a live backward/insert call plays the
+  // target section once then returns to the anchor's successor. Absent ⇒ today's
+  // continue-from-target (forward cuts + notated jumps). Mutually exclusive with
+  // `exit` (§4.2/D10 — the resolver never bakes both). Positions are chart-layer
+  // resolved; the VM stores them verbatim.
+  | { kind: 'jumpTo'; barId: string; exit?: ExitPolicy;
+      return?: { afterPos: number; returnBarId: string } }
   // Re-arm an already-fired D.S./D.C. (a redirect before it is otherwise inert).
   | { kind: 'resetJump'; jumpId: string };
 
@@ -334,6 +345,7 @@ export function initVM(compiled: CompiledRoadmap): VMState {
     passCount: {},
     holding: null,
     done: compiled.bars.length === 0,
+    pendingReturn: null,
   };
 }
 
@@ -346,6 +358,7 @@ function cloneState(s: VMState): VMState {
     passCount: { ...s.passCount },
     holding: s.holding,
     done: s.done,
+    pendingReturn: s.pendingReturn,
   };
 }
 
@@ -373,6 +386,26 @@ function repeatEndPos(compiled: CompiledRoadmap, rsId: string): number {
   return compiled.barPos.get(compiled.repeatStartById.get(rsId)!.barId)!;
 }
 
+// ── Live insert-and-return fire (insert-return §5.3, D6) ─────────────────────
+// Called ONLY on a natural FORWARD advance — the linear branch and the Rule-6
+// `if (!handled)` advance block — NEVER before the shared main-path return that
+// every end-edge rule reaches (a notated To Coda / D.S. / repeat back-jump must
+// stay authoritative; gating on the forward advance defers the return to the next
+// clean forward exit of `afterPos`). `s.cursor` has already advanced to
+// emittedPos+1, so `s.cursor > afterPos` proves we just exited the section forward
+// rather than looped an internal repeat inside it.
+function applyPendingReturn(s: VMState, emittedPos: number): void {
+  if (
+    s.pendingReturn &&
+    emittedPos === s.pendingReturn.afterPos &&
+    s.cursor > s.pendingReturn.afterPos
+  ) {
+    s.cursor = s.pendingReturn.returnPos;
+    s.pendingReturn = null;
+    s.done = false; // cancel an end-of-song done if we just hit it
+  }
+}
+
 // ── Step: produce the next transition (one iteration of the resolver walk) ────
 // Returns the next recorded bar plus the repositioned state. No transition +
 // state.done ⇒ the traversal is complete. Pure: never mutates the input.
@@ -385,11 +418,13 @@ export function stepVM(compiled: CompiledRoadmap, stateIn: VMState): { transitio
       s.done = true;
       return { state: s };
     }
+    const emittedPos = s.cursor;
     const bar = compiled.bars[s.cursor];
     const pass = (s.passCount[bar.id] ?? 0) + 1;
     s.passCount[bar.id] = pass;
     s.cursor++;
     if (s.cursor >= compiled.bars.length) s.done = true;
+    applyPendingReturn(s, emittedPos); // natural forward advance (a linear chart is all advances)
     return { transition: { barId: bar.id, pass }, state: s };
   }
 
@@ -422,6 +457,7 @@ export function stepVM(compiled: CompiledRoadmap, stateIn: VMState): { transitio
   }
 
   // Record the bar.
+  const emittedPos = s.cursor; // bar-order position of the bar we just recorded
   const bar = compiled.bars[s.cursor];
   const pass = (s.passCount[bar.id] ?? 0) + 1;
   s.passCount[bar.id] = pass;
@@ -495,20 +531,72 @@ export function stepVM(compiled: CompiledRoadmap, stateIn: VMState): { transitio
     return { transition, state: s };
   }
 
-  // Rule 6 — advance.
+  // Rule 6 — advance. The ONLY main-path forward advance, so the ONLY place the
+  // live insert-return may fire (notated end-edge repositions above stay
+  // authoritative — insert-return §5.3).
   if (!handled) {
     s.cursor++;
     if (s.cursor >= compiled.bars.length) s.done = true;
+    applyPendingReturn(s, emittedPos);
   }
 
   return { transition, state: s };
+}
+
+// Same keys + same scalar values. applyOverride only ever mutates existing keys
+// (never adds/removes), so a record-wise scalar compare is exact here.
+function shallowEqualRecord<T>(a: Record<string, T>, b: Record<string, T>): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const k of keys) if (a[k] !== b[k]) return false;
+  return true;
+}
+
+// Structural before/after compare of the 6 navigation-relevant VMState fields —
+// NOT passCount (telemetry) and NOT pendingReturn itself (the thing the policy
+// decides). insert-return §5.2: a directive is a genuine nav override iff this is
+// false; an effect-no-op leaves it true.
+function sameNav(a: VMState, b: VMState): boolean {
+  return (
+    a.cursor === b.cursor &&
+    a.holding === b.holding &&
+    a.done === b.done &&
+    shallowEqualRecord(a.completedPasses, b.completedPasses) &&
+    shallowEqualRecord(a.fired, b.fired) &&
+    a.flags.toCodaFired === b.flags.toCodaFired &&
+    a.flags.alFineActive === b.flags.alFineActive &&
+    a.flags.alCodaArmed === b.flags.alCodaArmed
+  );
 }
 
 // ── applyOverride: the MD redirect (design §3.3 counter policy) ───────────────
 // Pure: returns a new state. Unknown targets are no-ops (a stale/corrupt
 // directive must never crash the live VM). Idempotency under (epoch, seq) is the
 // state-machine layer's job (chunk 3); this is just the state delta.
+//
+// The core switch stays pendingReturn-BLIND (it never reads or writes it;
+// cloneState carries the prior value forward). A single trailing policy clause
+// owns pendingReturn (insert-return §5.2, D5/D10): act ONLY when the override
+// genuinely changed nav state — clear any pending return, and (iff that genuine
+// override is a no-exit jumpTo carrying a return leg) install the fresh one. A
+// no-op directive — even an unknown jumpTo carrying a valid returnBarId — leaves
+// sameNav true, so the whole block is skipped and pendingReturn is preserved; a
+// return is never installed for a jump that never applied (Codex R6).
 export function applyOverride(compiled: CompiledRoadmap, stateIn: VMState, directive: Directive): VMState {
+  const s = applyOverrideCore(compiled, stateIn, directive);
+  if (!sameNav(stateIn, s)) {
+    s.pendingReturn = null;
+    if (directive.kind === 'jumpTo' && directive.return && !directive.exit) {
+      const returnPos = compiled.barPos.get(directive.return.returnBarId);
+      if (returnPos !== undefined) {
+        s.pendingReturn = { afterPos: directive.return.afterPos, returnPos };
+      }
+    }
+  }
+  return s;
+}
+
+function applyOverrideCore(compiled: CompiledRoadmap, stateIn: VMState, directive: Directive): VMState {
   const s = cloneState(stateIn);
   switch (directive.kind) {
     case 'anotherRound': {

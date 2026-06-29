@@ -222,28 +222,106 @@ export function fireAtEligible(compiled: CompiledRoadmap, vm: VMState, fireAt: s
   return pos >= nextEmitPos;
 }
 
+// ── Insert-and-return: resolve the return leg for a backward SECTION call ──────
+// (design-conductor-insert-return.md §2/§3). Returns the bare positions the VM
+// needs, or null when the call is forward / not a section / has no anchor / has no
+// successor (caller then emits a plain continue-from-target jumpTo). The whole
+// JumpTarget is passed so we can gate on `kind` (D9): coda/segno/fine/repeatStart/
+// plain-bar backward jumps stay continue-from-target. `currentBarId` is the
+// LAST-EMITTED bar (NOT vm.cursor-1 — after a back-jump the cursor sits elsewhere);
+// it pins both the direction test and the anchor lookup.
+export function resolveInsertReturn(
+  compiled: CompiledRoadmap,
+  cal: ChartCalibration,
+  target: JumpTarget,
+  currentBarId: string | undefined,
+): { afterPos: number; returnBarId: string } | null {
+  if (target.kind !== 'section') return null; // D9 — section-only
+
+  const targetPos = compiled.barPos.get(target.barId);
+  const curPos = currentBarId ? compiled.barPos.get(currentBarId) : undefined;
+  if (targetPos === undefined || curPos === undefined) return null;
+  if (targetPos >= curPos) return null; // forward → no return (D1)
+
+  const ordered = barsInOrder(cal); // == compiled.bars order (compile runs on this)
+  const anchorSectionId = ordered[curPos]?.sectionId;
+  if (!anchorSectionId) return null; // section-less anchor (D8)
+
+  const successor = nextSectionHeadAfter(ordered, anchorSectionId);
+  if (!successor) return null; // anchor is the last section (D8)
+
+  const afterPos = lastBarPosOfSection(ordered, target.barId);
+  if (afterPos === undefined) return null;
+  return { afterPos, returnBarId: successor.id };
+}
+
+// The head bar of the section whose head sits at the SMALLEST traversal position
+// after the anchor section's head — the anchor's successor (insert-return §2).
+// undefined when the anchor is the last section. Null-sectionId bars are not heads.
+function nextSectionHeadAfter(ordered: Bar[], anchorSectionId: string): Bar | undefined {
+  const headPos = new Map<string, number>();
+  ordered.forEach((b, i) => {
+    if (b.sectionId != null && !headPos.has(b.sectionId)) headPos.set(b.sectionId, i);
+  });
+  const anchorHead = headPos.get(anchorSectionId);
+  if (anchorHead === undefined) return undefined;
+  let bestPos: number | undefined;
+  for (const [sid, pos] of headPos) {
+    if (sid === anchorSectionId) continue;
+    if (pos > anchorHead && (bestPos === undefined || pos < bestPos)) bestPos = pos;
+  }
+  return bestPos === undefined ? undefined : ordered[bestPos];
+}
+
+// Last contiguous bar of the target section starting at its head — the natural
+// forward exit of the inserted block (insert-return §3). Position in bar order.
+function lastBarPosOfSection(ordered: Bar[], targetBarId: string): number | undefined {
+  const startPos = ordered.findIndex((b) => b.id === targetBarId);
+  if (startPos < 0) return undefined;
+  const sectionId = ordered[startPos].sectionId;
+  if (sectionId == null) return undefined;
+  let last = startPos;
+  for (let i = startPos + 1; i < ordered.length && ordered[i].sectionId === sectionId; i++) last = i;
+  return last;
+}
+
 // Re-resolve an arm request in the PURE layer and mint the Armed marker (design §2
-// / Codex R3 High-3, R4 High-3). The controller must NOT trust the passed barId or
-// exit: a stale/spoofed object can carry a bad barId AND a spoofed exitOptions. So
-// re-derive the target from a fresh armableTargets(compiled, cal) by barId —
-//   • no current target has that barId  → return null (no Armed minted; UI disables);
-//   • fireAt is not a present local bar → return null (validity at both ends);
-//   • else keep `exit` ONLY if it is in the RECOMPUTED target's exitOptions, dropping
-//     an out-of-set exit (mints a jumpTo with no exit).
-// Authoritative eligibility is always the fresh computation, never the passed object.
+// / Codex R3 High-3, R4 High-3, R5). The controller must NOT trust the passed
+// target object: a stale/spoofed envelope can carry a bad barId AND a spoofed
+// exitOptions. So re-derive the authoritative target from a fresh
+// armableTargets(compiled, cal) by a STABLE IDENTITY { barId, kind, label } —
+// armableTargets legally emits several targets for ONE bar (Coda + a section head
+// + Repeat-all can co-sit on bar 1), and `kind` now decides whether a return is
+// baked, so matching on barId alone would pick an arbitrary one:
+//   • fireAt is not a present local bar     → null (validity at the fire end);
+//   • no match OR an ambiguous match        → null (never guess — stale/spoofed);
+//   • keep `exit` ONLY if it is in the RECOMPUTED target's exitOptions;
+//   • bake the insert-return leg via resolveInsertReturn against the RE-DERIVED
+//     target — but ONLY when no `exit` was REQUESTED (the `exit` ARG, not the kept
+//     one: a stale/dropped exit still suppresses the default return — §4.2/§4.3/D10).
 export function resolveArm(
   compiled: CompiledRoadmap,
   cal: ChartCalibration,
-  barId: string,
+  id: { barId: string; kind: JumpTarget['kind']; label: string },
   exit: ExitPolicy['kind'] | undefined,
   fireAt: string,
+  currentBarId: string | undefined,
 ): Armed | null {
   if (!compiled.barPos.has(fireAt)) return null;
-  const target = armableTargets(compiled, cal).find((t) => t.barId === barId);
-  if (!target) return null;
+  const matches = armableTargets(compiled, cal).filter(
+    (t) => t.barId === id.barId && t.kind === id.kind && t.label === id.label,
+  );
+  if (matches.length !== 1) return null; // no match OR ambiguous → reject
+  const target = matches[0];
+
   const keepExit = exit !== undefined && target.exitOptions.includes(exit) ? exit : undefined;
-  const directive = keepExit
-    ? ({ kind: 'jumpTo', barId, exit: { kind: keepExit } } as const)
-    : ({ kind: 'jumpTo', barId } as const);
+  const ret =
+    exit === undefined && target.kind === 'section'
+      ? resolveInsertReturn(compiled, cal, target, currentBarId)
+      : null;
+
+  const directive: Extract<Directive, { kind: 'jumpTo' }> = { kind: 'jumpTo', barId: id.barId };
+  if (keepExit) directive.exit = { kind: keepExit };
+  if (ret) directive.return = ret;
   return { fireAt, directive };
 }
