@@ -230,6 +230,32 @@ Concretely the arm seam is `arm(target, exit, fireAt, currentBarId)`:
 (`armableTargets` already hands the picker the full `JumpTarget` incl. `kind`, so
 the seam passes the whole target, not just the bar id — D9.)
 
+### 4.2 `exit` and `return` are mutually exclusive (D10, HIGH — Codex R3)
+
+A `jumpTo` may carry an MD-specified `exit` (`alCoda`/`alFine`) **or** an
+insert-`return`, **never both**. *"Back to C, al Coda"* is an explicit instruction
+about **how to leave** the inserted material — the MD has named the departure, so
+the default *"play it once and come back"* return does **not** apply. This matches
+the parent model (*MD-specified exit wins*) and D7 (notated/explicit nav is
+authoritative).
+
+Why not "define a precedence" instead of forbidding? Because an armed exit and a
+pending return are not orderable into one coherent outcome:
+
+- `applyOverride`'s exit-arming sets `alCodaArmed`/`alFineActive` (`roadmap-vm.ts:565-578`).
+  If a return *also* fired, the band would jump back to F **with the exit still
+  armed** — the next To Coda/Fine anywhere downstream would then divert
+  unexpectedly. A stranded armed exit is a latent bug, not a defined behavior.
+- Conversely, if the exit fires (To Coda → Coda), the band has left toward the
+  ending; there is no musical sense in which it then "returns to F." `al Coda`/
+  `al Fine` are terminal-ward by construction.
+
+So the **seam never sets both** (§5.2 sets the return leg only when `!directive.exit`),
+and the resolver is never asked to attach a return to an exit-bearing jump. A
+backward *"another chorus"* call with no named exit gets the default return; a
+backward call **with** a named exit is a plain exit-armed `jumpTo` (continue-from-
+target + the exit), today's behavior.
+
 ---
 
 ## 5. The VM rule (`applyOverride` + `stepVM`)
@@ -246,64 +272,67 @@ pendingReturn: { afterPos: number; returnPos: number } | null;
 (`returnPos` = `barPos(returnBarId)`, resolved in `applyOverride` so `stepVM`
 stays position-only.)
 
-### 5.2 `applyOverride` — clear AFTER validation, set on the `jumpTo` leg (D5)
+### 5.2 `applyOverride` — clear iff nav state actually changed; set on a no-exit `jumpTo` leg (D5)
 
 A real MD override supersedes a pending return (Graham: *"in lieu of a subsequent
 manual override"*) — but **only a real one**.
 
-**The clearing rule: clear iff the directive ACTUALLY MUTATES VM nav state** —
-not merely that its id/target is known. `applyOverride`'s standing contract is
-that an unknown/stale/corrupt directive is a **no-op** (returns the clone
-unchanged, `roadmap-vm.ts:508`); a no-op must leave `pendingReturn` exactly as it
-was. A top-of-function `s.pendingReturn = null` (Codex R2 HIGH) would let a bogus
-directive cancel a live return while changing nothing else.
+**Root cause, not per-case (Codex R3 MEDIUM): clear iff the directive ACTUALLY
+CHANGES VM nav state.** The previous drafts gated the clear on per-case
+*mutation conditions* hand-derived for each directive (`s.holding !== id`,
+`s.fired[id] === true`, "a valid jumpTo always moves the cursor", "a valid
+anotherRound always re-seats"). That is leak-prone — Codex found two more
+effect-no-ops it missed: a **same-cursor `jumpTo`** (`pos === s.cursor`, no
+exit) re-seats nothing, and a **duplicate `anotherRound`** re-seats the cursor
+and `completedPasses` to the values they already hold. Each new case is another
+place to get it wrong.
 
-**HIGH-2 (Codex R3): "validity guard passes" is NOT the same as "state changed."**
-Some directives pass their id-known guard yet are **effect-no-ops** — and those must
-*also* preserve `pendingReturn`:
-
-- **`resetJump` known-but-not-fired** (`roadmap-vm.ts:581-583`): `directive.jumpId in
-  s.fired` is true even when `s.fired[jumpId]` is already `false`, so the assignment
-  flips nothing. Clear only inside the branch where the flag was actually `true`.
-- **duplicate `hold` on the already-held repeat** (`:535-540`): `repeatStartById.has`
-  passes but `s.holding === directive.repeatStartId` already, so `holding` doesn't
-  change. Clear only when `s.holding !== directive.repeatStartId`.
-- **`release` while not holding that repeat** (`:546`) already early-returns at its
-  guard — so it preserves `pendingReturn` for free.
-
-So the clear rides the **mutation condition**, the tighter of the two:
+So `applyOverride`'s existing per-directive logic stays **`pendingReturn`-agnostic**
+(it never reads or writes `pendingReturn`; `cloneState` already carries the prior
+value forward), and a **single trailing policy clause** owns the register —
+driven by a structural before/after comparison of the navigation-relevant fields:
 
 ```ts
-case 'jumpTo': {
-  const pos = compiled.barPos.get(directive.barId);
-  if (pos === undefined) return s;       // unknown target → no-op, pendingReturn UNTOUCHED
-  s.pendingReturn = null;                // a valid jumpTo always moves the cursor → real override (D5)
-  s.cursor = pos;
-  s.done = false;
-  if (directive.return) {
+// the 6 nav-relevant VMState fields — NOT passCount (telemetry) and NOT
+// pendingReturn itself (the thing we're deciding).
+function sameNav(a: VMState, b: VMState): boolean {
+  return a.cursor === b.cursor
+    && a.holding === b.holding
+    && a.done === b.done
+    && shallowEqualRecord(a.completedPasses, b.completedPasses)
+    && shallowEqualRecord(a.fired, b.fired)
+    && a.flags.toCodaFired === b.flags.toCodaFired
+    && a.flags.alFineActive === b.flags.alFineActive
+    && a.flags.alCodaArmed === b.flags.alCodaArmed;
+}
+
+export function applyOverride(compiled, stateIn, directive): VMState {
+  const s = applyOverrideCore(compiled, stateIn, directive); // existing switch, unchanged + pendingReturn-blind
+  // ── single pendingReturn policy ──────────────────────────────────────────
+  if (!sameNav(stateIn, s)) s.pendingReturn = null;          // any genuine nav override supersedes (D5)
+  if (directive.kind === 'jumpTo' && directive.return && !directive.exit) {
     const returnPos = compiled.barPos.get(directive.return.returnBarId);
-    if (returnPos !== undefined) {
+    if (returnPos !== undefined) {                           // set LAST (overwrites the clear above)
       s.pendingReturn = { afterPos: directive.return.afterPos, returnPos };
     }
   }
-  // ... exit-arming unchanged ...
   return s;
 }
-// anotherRound: a valid (rs && t!==undefined) always re-seats the cursor → clear.
-// hold:         clear ONLY when s.holding !== directive.repeatStartId (it actually
-//               parks a new vamp). A duplicate hold on the held repeat changes
-//               nothing → leave pendingReturn.
-// release:      the early `s.holding !== id` guard returns before the body; reaching
-//               the body means it genuinely clears the vamp → clear.
-// resetJump:    clear ONLY inside `if (s.fired[directive.jumpId] === true)` — i.e. when
-//               the flag actually flips false. A known-but-not-fired id changes
-//               nothing → leave pendingReturn.
 ```
 
-i.e. the clear is **gated on the same condition as the actual mutation** — no new
-validity logic invented, but it must follow the *effect*, not the id-known test. An
-inert/no-op directive (unknown jumpTo, not-fired resetJump, duplicate hold, release
-while not holding) leaves `pendingReturn` exactly as it was.
+This is one rule, applied once. Every effect-no-op — unknown `jumpTo`, same-cursor
+no-exit `jumpTo`, `resetJump` on a not-fired jump, `release` while not holding,
+duplicate `hold`, duplicate `anotherRound` — leaves `stateIn` nav-equal to `s`, so
+`pendingReturn` is preserved automatically, with no per-case reasoning to maintain.
+A genuine override (cursor moved, counter bumped, flag armed, vamp parked/released)
+clears it. (`shallowEqualRecord` = same keys + same values; `completedPasses`/`fired`
+are flat `Record<string, number|boolean>`.)
+
+**`exit` XOR `return` (D10, Codex R3 HIGH).** The fresh return leg is set **only
+when the `jumpTo` carries no explicit `exit`**. See §4.2 — an MD-named exit defines
+how the inserted material is left, so it suppresses the default return; arming an
+exit *and* a return would strand a live `alCodaArmed`/`alFineActive` after the return
+fired.
 
 ### 5.3 `stepVM` — fire on the natural FORWARD exit (D6)
 
@@ -323,13 +352,13 @@ helper applied **immediately before each transition-carrying `return`** — in t
 linear branch AND in the main path:
 
 ```ts
-// roadmap-vm.ts — applied right before BOTH `return { transition, state: s }`
-// statements (linear branch :393 and main path :504). s.cursor has already been
-// set to the NEXT step by that branch's own advance logic.
+// roadmap-vm.ts — called on the NATURAL FORWARD ADVANCE only: the linear branch
+// (always a plain advance) and the Rule-6 advance block (the `if (!handled)` path).
+// s.cursor has already been advanced to emittedPos+1 by that advance logic.
 function applyPendingReturn(s: VMState, emittedPos: number): void {
   if (s.pendingReturn
       && emittedPos === s.pendingReturn.afterPos
-      && s.cursor > s.pendingReturn.afterPos) {   // advanced FORWARD, not back-jumped
+      && s.cursor > s.pendingReturn.afterPos) {   // forward advance (cursor = emittedPos+1)
     s.cursor = s.pendingReturn.returnPos;
     s.pendingReturn = null;
     s.done = false;                                // cancel an end-of-song done if we just hit it
@@ -341,23 +370,31 @@ function applyPendingReturn(s: VMState, emittedPos: number): void {
 (`compiled.barPos.get(transition.barId)` — equivalently `compiled.bars[k]` in the
 linear branch). Both call sites already hold it.
 
-- **Linear branch:** after `s.cursor++` and its `done` check, call
-  `applyPendingReturn(s, posOfEmittedBar)` before the early return. In a linear
-  chart `s.cursor === emittedPos + 1 > afterPos` on the section's last bar, so the
-  return fires.
-- **Main path:** call it before the final `return { transition, state: s }`
-  (after Rule 6 advance). Guard `s.cursor > afterPos` distinguishes a **forward
-  exit** (return now) from a **back-jump** caused by an internal repeat (let it
-  loop; the register survives until the section's final forward pass).
+- **Linear branch (`roadmap-vm.ts:383-393`):** after `s.cursor++` and its `done`
+  check, call `applyPendingReturn(s, posOfEmittedBar)` before the early return. A
+  linear chart has no end-edge rules — every step is a forward advance — so the
+  return fires on the section's last bar (`s.cursor === emittedPos + 1 > afterPos`).
+- **Main path — ONLY inside the Rule-6 `if (!handled)` advance block
+  (`roadmap-vm.ts:499-502`), NOT before the shared `:504` return (HIGH, Codex R3).**
+  The `:504` return is reached by *every* end-edge rule, several of which
+  **reposition the cursor**: Rule 2a/2b back-jumps (`:441/:446/:458/:463`), Rule 3
+  D.S./D.C. (`:477`), and Rule 4 **To Coda** (`:487`). If `applyPendingReturn` ran
+  before `:504` unconditionally, a notated **To Coda** that fires *on* `afterPos`
+  (landing the cursor forward at the Coda) would satisfy `s.cursor > afterPos` and
+  the return would silently **clobber the Coda** with `returnPos`. To Coda can be
+  armed by a **prior notated `D.S. al Coda`** (Rule 3 sets `alCodaArmed`, `:476`) —
+  entirely independent of our directive — so this collision is real even for a
+  no-exit insert. Gating on `!handled` makes any **notated** reposition
+  authoritative (D7): when an end-edge rule handled the step, the pending return
+  **defers** — it stays set and rides to the next clean forward advance of
+  `afterPos` (which may never come if notated nav carried the band elsewhere, in
+  which case it harmlessly never fires).
 - **Rule-5 `Fine` early-return path (`roadmap-vm.ts:495`) is DELIBERATELY
-  EXCLUDED (Codex R2 MEDIUM).** It is *not* one of the two call sites. A notated
-  `Fine` ends the song; a live pending return must **never** resurrect it. This
-  is D7 in the small — notated navigation is authoritative and a pending insert
-  return does not override it. (The earlier "gets the same treatment for
-  uniformity" framing was wrong: applying the helper there could clear the
-  `done` the Fine just set and bounce the cursor back into the chart, violating
-  the notated al-Fine.) So `applyPendingReturn` rides exactly TWO returns — the
-  linear branch and the main path — and the docstring's "BOTH" is literal.
+  EXCLUDED (Codex R2 MEDIUM).** Same principle: a notated `Fine` ends the song;
+  a live pending return must **never** resurrect it (applying the helper there
+  would clear the `done` the Fine just set and bounce the cursor back into the
+  chart). So `applyPendingReturn` rides exactly TWO advance points — the linear
+  branch and the Rule-6 block — and **no** end-edge (Rule 2a/2b/3/4/5) path.
 - One-shot: cleared on fire.
 - The return is **automatic** — it rides the band's natural advance to the
   section boundary. No MD tap, no clock. This is why it's a `stepVM` mechanic,
@@ -389,6 +426,10 @@ No double-handling.
 | Return target equals the inserted section (degenerate) | `returnPos === afterPos+...`; harmless one-shot. |
 | Inserted section never reached (`done` first, or another jump) | `pendingReturn` simply never fires; cleared by the next override or song end. |
 | Stale `afterPos` after a hand-edited chart | unknown/never-matched position ⇒ never fires (safe no-op), mirrors `applyOverride`'s unknown-target tolerance. |
+| Backward call **with an explicit `exit`** (e.g. "back to C, al Coda") | exit-armed plain `jumpTo`, **no return** baked (§4.2, D10). MD named the departure. |
+| **Notated To Coda inside the inserted section** (To Coda armed by a prior `D.S. al Coda`) | the notated To Coda is `handled` → authoritative; `applyPendingReturn` defers (§5.3). The Coda is taken; the return does not clobber it. |
+| Notated D.S./D.C. or repeat back-jump inside the inserted section | `handled` → return defers; the section's own internal nav runs first, return rides to the next clean forward exit of `afterPos`. |
+| Effect-no-op override while a return is pending (unknown/same-cursor `jumpTo`, not-fired `resetJump`, release-while-not-holding, duplicate `hold`/`anotherRound`) | `sameNav` true ⇒ `pendingReturn` preserved (§5.2). |
 
 ---
 
@@ -436,6 +477,13 @@ build PR so the canonical spec stays honest.
   (Codex R1 MEDIUM-2). Backward jumps to coda/segno/fine landmarks, repeat starts,
   and plain bars stay continue-from-target — the resolver takes the whole
   `JumpTarget` and bails unless it's a section. **Recommend YES.**
+- **D10** — `exit` and `return` are **mutually exclusive** on a `jumpTo` (Codex R3
+  HIGH). An explicit MD exit (al Coda / al Fine) defines the departure and
+  suppresses the default return; the seam never bakes a return onto an exit-bearing
+  jump (§4.2). Plus: `applyPendingReturn` fires only on the **natural forward
+  advance** (linear branch + Rule-6 `!handled`), never after a notated end-edge
+  reposition — so a notated To Coda/D.S./Fine inside the inserted section stays
+  authoritative (§5.3). **Recommend YES** (correctness).
 
 ---
 
@@ -470,16 +518,19 @@ vitest node env (these are pure modules; no jsdom). New cases:
   - forward call → `null`.
   - anchor is last section → `null`.
   - section-less / null `sectionId` → `null`.
-- `applyOverride`:
-  - `jumpTo` with `return` sets `pendingReturn`; without, leaves it null.
-  - any other directive that **actually mutates** state (valid jumpTo, valid
-    anotherRound, new hold, real release, resetJump that flips a fired flag) clears
-    an existing `pendingReturn`.
+- `applyOverride` (`sameNav`-driven clearing — §5.2):
+  - `jumpTo` with `return` (no `exit`) sets `pendingReturn`; without, leaves it null.
+  - any directive that **actually changes nav state** (cursor moved, counter bumped,
+    flag armed, vamp parked/released) clears an existing `pendingReturn`.
   - unknown `returnBarId` ⇒ `pendingReturn` stays null (safe).
-  - **no-op-preserves-pendingReturn invariant (Codex R3 HIGH-2 regression guard):**
-    with a `pendingReturn` set, each of these EFFECT-NO-OPs leaves it intact —
-    unknown `jumpTo` target; `resetJump` on a known-but-not-fired jump; `release`
-    while not holding that repeat; duplicate `hold` on the already-held repeat.
+  - **no-op-preserves-pendingReturn invariant (Codex R3 regression guard):** with a
+    `pendingReturn` set, each EFFECT-NO-OP leaves it intact — unknown `jumpTo`;
+    **same-cursor no-exit `jumpTo`** (`pos === s.cursor`, R3 MEDIUM); `resetJump`
+    on a known-but-not-fired jump; `release` while not holding; duplicate `hold`
+    on the held repeat; **duplicate `anotherRound`** re-seating already-held values
+    (R3 MEDIUM).
+  - **`exit` XOR `return` (D10):** a `jumpTo` carrying an `exit` (al Coda/al Fine)
+    sets **no** `pendingReturn`, even on a backward section target.
 - `stepVM`:
   - plays the inserted section once, then lands on the return target on the
     natural forward exit; `pendingReturn` cleared.
@@ -488,6 +539,10 @@ vitest node env (these are pure modules; no jsdom). New cases:
     non-linear end-edge path (HIGH-1 regression guard).
   - inserted section with an internal repeat: loops the repeat first, returns on
     the final forward exit (the §5.3 guard).
+  - **notated To Coda inside the inserted section, To Coda armed by a prior
+    `D.S. al Coda` (Codex R3 HIGH):** the To Coda fires and the return **defers**
+    (`!handled` gate) — the Coda is taken, NOT clobbered by `returnPos`. Likewise a
+    notated D.S./repeat back-jump inside the section: the return defers to it.
   - a second override before the boundary pre-empts the return.
   - notated repeats/jumps elsewhere unaffected (regression: existing roadmap
     fixtures still resolve identically).
@@ -504,10 +559,13 @@ Report the test-count delta on the build PR.
 ## 11. Build outline (DESIGN-ONLY — do not build until GO)
 
 1. `roadmap-vm.ts`: add `pendingReturn` to `VMState` (+ `initVM` null);
-   `jumpTo.return` optional field; `applyOverride` clear-then-set; `stepVM`
-   §5.3 interception via the **shared `applyPendingReturn` helper**, called before
-   BOTH transition-carrying returns (linear branch :393 + main path :504 —
-   HIGH-1). + tests, **including the marker-less `linear`-chart case**.
+   `jumpTo.return` optional field; `applyOverride` left `pendingReturn`-blind +
+   the single `sameNav`-driven policy clause (clear iff nav changed; set fresh on a
+   **no-exit** `jumpTo.return` — §5.2, D10); `stepVM` §5.3 interception via the
+   shared `applyPendingReturn` helper at the **two natural-advance points only** —
+   the linear branch (:393) and the **Rule-6 `if (!handled)` block** (:499-502),
+   NOT the shared :504 return (HIGH — keeps notated end-edge nav authoritative). +
+   tests, **including the marker-less `linear`-chart case and the To-Coda-defers case**.
 2. `conductor-targets.ts`: `resolveInsertReturn` (takes the whole `JumpTarget`,
    gates on `kind === 'section'` — D9) + the two helpers (`nextSectionHeadAfter`,
    `lastBarPosOfSection`). + tests.
