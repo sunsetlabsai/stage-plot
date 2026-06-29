@@ -209,9 +209,14 @@ CTA is necessary but not sufficient: the always-present top-right **Calibrate** 
 gated only on `calibratable`) is still live during `load-error`/`unreadable`. For an owner `409` the
 `sourceHash` is already set (`:3047`), so entering Calibrate there and Saving would PUT to the **same
 `(chart_id, source_hash)`** and clobber the row this build refused to interpret — the exact trap the
-`409` exists to prevent. So gate the header **enter** path off when `loadError || calUnreadable` (the
-load reset forces `perform` mode when either is set, so condition it on `calMode === 'perform'` to keep
-the in-calibrate **Done** exit reachable). This is the same D6 invariant applied to both Calibrate
+`409` exists to prevent. So gate the header **enter** path off when `loading || loadError ||
+calUnreadable` (the load reset forces `perform` mode when these are set, so condition it on `calMode
+=== 'perform'` to keep the in-calibrate **Done** exit reachable). **`loading` must be in that set:** the
+two error signals are *false in-flight*, but `sourceHash` is set before the GET awaits (`:3047`), so a
+click during loading could land the owner in Calibrate just before a `409` arrives — and the `409`
+sets `calUnreadable` *without* forcing `perform`. Blocking entry for the whole load window (load start
+already reset to `perform`) makes the "in Calibrate when a signal lands" state **unreachable**, so no
+defensive force-exit effect is needed. This is the same D6 invariant applied to both Calibrate
 surfaces — no innocent entry into a clobbering Save.
 
 The split is **two orthogonal axes**, not one owner column: (a) does an affordance exist for *any*
@@ -390,9 +395,10 @@ silent. The loop becomes legible: **edit → strip shows `verifiable` → Calibr
    (§4.1, refactoring the top toggle `:3212` — `calMode==='calibrate' ? exitCalibrate() :
    enterCalibrate(calTool)` — and tool-switch `:3330` through them), assembles
    `performReadinessView({ loading, loadError, unreadable: calUnreadable, cal: calibration })`, and
-   sets `onCalibrate = enterCalibrate`. **It also gates the header Calibrate ENTER path off on an
-   errored/unreadable chart** — `calibratable && !(calMode === 'perform' && (loadError ||
-   calUnreadable))` (§4) — so the second innocent clobber path is closed, not just the strip's CTA.
+   sets `onCalibrate = enterCalibrate`. **It also gates the header Calibrate ENTER path off on a
+   loading / errored / unreadable chart** — `calibratable && !(calMode === 'perform' && (loading ||
+   loadError || calUnreadable))` (§4) — so the second innocent clobber path is closed (incl. the
+   in-flight race where a click precedes a `409`), not just the strip's CTA.
 
 Each step is independently gate-greenable; nothing here touches the conductor libs (frozen) or the
 verify/perform gates. This closes the upstream loop so the conductor work is actually exercisable

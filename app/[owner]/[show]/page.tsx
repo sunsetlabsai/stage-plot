@@ -3260,9 +3260,14 @@ function ChartNavigator({
               Calibrate there would let a Save PUT to the same (chart_id, source_hash)
               and clobber the very map this build refused to interpret — the innocent
               CTA the strip already hides (design-perform-readiness.md §3.2/§4, D6).
-              The load reset forces perform mode when these set, so "Done" is never
-              trapped; the guard is conditioned on perform to keep exit reachable. */}
-          {calibratable && !(calMode === 'perform' && (loadError || !!calUnreadable)) && (
+              ALSO suppress while `loading`: the signals are false in-flight, but
+              `sourceHash` is set before the GET awaits (`:3047`), so a click during
+              loading could land the owner in Calibrate just before a 409 arrives —
+              and the 409 sets calUnreadable WITHOUT forcing perform. Blocking entry
+              for the whole load window (load start already reset to perform) makes
+              "in Calibrate when a signal lands" unreachable. Conditioned on perform
+              so the in-calibrate "Done" exit is never trapped. */}
+          {calibratable && !(calMode === 'perform' && (loading || loadError || !!calUnreadable)) && (
             <button
               onClick={() => (calMode === 'calibrate' ? exitCalibrate() : enterCalibrate(calTool))}
               className={`px-2 py-1 rounded text-xs font-bold transition-colors ${
