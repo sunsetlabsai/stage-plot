@@ -87,8 +87,11 @@ real gesture (Graham): an MD signals a change *at the top of the current bar* fo
 to take effect *at the top of the next bar* — "signal at top of N → fire at top of
 N+1." So the **default** fire bar is the **next bar downbeat** (`fireAt =
 nextEmittedBarId`, exactly chunk 4's arm point). The **richer** option snaps the fire
-to the **next section / marker head** instead — the natural "make the change when we
-hit the chorus" call — which can be several bars ahead. There is **no** raw "fire in N
+to the **next section head** instead — the natural "make the change when we
+hit the chorus" call — which can be several bars ahead. (Scope, Codex R3 MEDIUM: the
+snap is to **section heads only** — `bar.sectionId` changes. It does **not** snap to
+Coda/Segno/Fine/repeat marker heads unless one happens to coincide with a section
+change; marker-head snap is out of 5a scope.) There is **no** raw "fire in N
 bars" stepper; the only choices are *structural* (next bar | next section). D6 decides
 whether 5a includes the section-snap option. The body is written for the **D6-YES
 (boundary-snap)** shape and flags every spot the **D6-NO (next-bar-only)** fallback
@@ -227,15 +230,19 @@ The fire bar is one of two **structural** boundaries ahead of the cursor:
 
 - **`next-bar`** (the default) — the next downbeat, `nextEmittedBarId(compiled, vm)`,
   exactly chunk 4's arm point. The "signal at top of N → fire at top of N+1" gesture.
-- **`next-section`** — the next **section / marker head** ahead, which may be several
-  bars away. The VM is section-blind, so this resolver lives in `conductor-targets.ts`
+- **`next-section`** — the next **section head** ahead (a `bar.sectionId` change), which
+  may be several bars away. **Section heads only** — not Coda/Segno/Fine/repeat marker
+  heads (Codex R3 MEDIUM): the walk reads `bar.sectionId`, so a marker that does not
+  coincide with a section change is not a snap target. The VM is section-blind, so this
+  resolver lives in `conductor-targets.ts`
   (which already has `cal` + the section-head machinery of `armableTargets`). It walks
   `stepVM` forward — the deterministic preview of the bars the MD's advances will emit —
   until the emitted bar enters a **new, non-null** section (different from the one we're
   in now), and returns that boundary bar:
 
 ```ts
-// lib/conductor-targets.ts — next section/marker head ahead (forward stepVM preview).
+// lib/conductor-targets.ts — next SECTION head ahead (forward stepVM preview); section
+// heads only (bar.sectionId change), not Coda/Segno/Fine/repeat marker heads.
 // `currentBarId` = the last-emitted bar (session.state.current.barId); VMState itself
 // carries no `current`, so the caller passes it. undefined currentBarId ⇒ pre-roll.
 export function nextSectionBoundaryBarId(
