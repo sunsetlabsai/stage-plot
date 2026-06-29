@@ -137,8 +137,8 @@ New resolver (sketch, `conductor-targets.ts`):
 export function resolveInsertReturn(
   compiled: CompiledRoadmap,
   cal: ChartCalibration,
-  vm: VMState,
   target: JumpTarget,        // pass the whole target, NOT just the bar id — see D9
+  currentBarId: string | undefined,  // the LAST-EMITTED bar — see HIGH-1 note
 ): { afterPos: number; returnBarId: string } | null {
   // D9 (Codex R1 MEDIUM-2): insert-and-return is a LIVE SECTION-JUMP default ONLY.
   // armableTargets also yields coda/segno/fine landmarks, repeat starts, and plain
@@ -146,13 +146,12 @@ export function resolveInsertReturn(
   if (target.kind !== 'section') return null;
 
   const targetPos = compiled.barPos.get(target.barId);
-  const curPos = vm.cursor === 0 ? 0 : vm.cursor - 1; // last EMITTED bar's pos (see note)
-  if (targetPos === undefined) return null;
+  const curPos = currentBarId ? compiled.barPos.get(currentBarId) : undefined;
+  if (targetPos === undefined || curPos === undefined) return null;
   if (targetPos >= curPos) return null;               // forward → no return (D1)
 
   const ordered = barsInOrder(cal);
-  const curBar = ordered[curPos];
-  const anchorSectionId = curBar?.sectionId;
+  const anchorSectionId = ordered[curPos]?.sectionId;
   if (!anchorSectionId) return null;                  // section-less (D8)
 
   // successor section head, in traversal order
@@ -165,12 +164,15 @@ export function resolveInsertReturn(
 }
 ```
 
-> **`vm.cursor` vs last-emitted note.** `vm.cursor` is the *next candidate*
-> index, so the band's current bar is at `cursor - 1` after an emission. The
-> resolver runs against the **live** vm at override time; the session layer
-> already holds `state.current` (the last `TraversalStep`), so the build can
-> pass `current.barId` directly rather than re-deriving — cleaner and exact.
-> (Spec keeps the position form for clarity; build picks the tidier source.)
+> **HIGH-1 (Codex R2) — current bar is NOT `vm.cursor - 1`.** `vm.cursor` is the
+> *next candidate* index, and after a repeat back-jump (`roadmap-vm.ts:433`) or a
+> D.S./D.C. jump (`:470`) `stepVM` emits a bar and then repositions the cursor
+> **elsewhere**, so `cursor - 1` is not the bar the band just played. Deriving
+> direction/anchor from it would compute "forward vs backward" against the wrong
+> bar and pick the wrong return target. The resolver therefore takes the
+> **last-emitted bar id explicitly** — the session layer already holds it as
+> `state.current.barId` (the last `TraversalStep`). `barPos(currentBarId)` is the
+> position used for the direction test and the anchor lookup.
 
 `afterPos` is **the target section's last bar in bar order** — the natural
 forward exit of the inserted section. Computed by the section-aware layer so the
@@ -214,19 +216,24 @@ pendingReturn: { afterPos: number; returnPos: number } | null;
 (`returnPos` = `barPos(returnBarId)`, resolved in `applyOverride` so `stepVM`
 stays position-only.)
 
-### 5.2 `applyOverride` — set on this directive, CLEAR on any other (D5)
+### 5.2 `applyOverride` — clear AFTER validation, set on the `jumpTo` leg (D5)
 
-Every override first **clears** `pendingReturn` (a new live cue supersedes the
-old plan — Graham: *"in lieu of a subsequent manual override"*), then the
-`jumpTo` case sets it iff a return leg is present:
+A real MD override supersedes a pending return (Graham: *"in lieu of a subsequent
+manual override"*) — but **only a real one**.
+
+**HIGH-2 (Codex R2): do NOT clear at the top.** `applyOverride`'s standing contract
+is that an unknown/stale/corrupt directive is a **no-op** — `applyOverride` returns the
+clone unchanged (`roadmap-vm.ts:508`). A top-of-function `s.pendingReturn = null` would
+let a bogus `jumpTo`/`hold`/`release`/`resetJump` silently **cancel a live pending
+return** while changing nothing else — a state mutation from a no-op, breaking the
+invariant. So each case clears `pendingReturn` **only after its own validity guard
+passes** (the point at which it is a genuine, applied override):
 
 ```ts
-// every case begins by clearing the old plan:
-s.pendingReturn = null;
-// ... existing per-directive logic ...
 case 'jumpTo': {
   const pos = compiled.barPos.get(directive.barId);
-  if (pos === undefined) return s;
+  if (pos === undefined) return s;       // unknown target → no-op, pendingReturn UNTOUCHED
+  s.pendingReturn = null;                // validated override → supersede the old plan (D5)
   s.cursor = pos;
   s.done = false;
   if (directive.return) {
@@ -238,7 +245,14 @@ case 'jumpTo': {
   // ... exit-arming unchanged ...
   return s;
 }
+// hold:        after `repeatStartById.has(...)` passes → s.pendingReturn = null
+// release:     after `s.holding === directive.repeatStartId` passes → s.pendingReturn = null
+// anotherRound:after `rs && t !== undefined` passes → s.pendingReturn = null
+// resetJump:   after `directive.jumpId in s.fired` passes → s.pendingReturn = null
 ```
+
+i.e. the clear rides each case's **existing** guard — no new validity logic, just
+ordering. A no-op directive leaves `pendingReturn` exactly as it was.
 
 ### 5.3 `stepVM` — fire on the natural FORWARD exit (D6)
 
@@ -279,14 +293,20 @@ linear branch). Both call sites already hold it.
 - **Linear branch:** after `s.cursor++` and its `done` check, call
   `applyPendingReturn(s, posOfEmittedBar)` before the early return. In a linear
   chart `s.cursor === emittedPos + 1 > afterPos` on the section's last bar, so the
-  return fires; the Rule-5 `Fine` early-return path (non-linear) carries no
-  pending-return concern (a Fine ends the song) but gets the same treatment for
-  uniformity — harmless, `pendingReturn` is virtually never set under an active
-  al-Fine.
+  return fires.
 - **Main path:** call it before the final `return { transition, state: s }`
   (after Rule 6 advance). Guard `s.cursor > afterPos` distinguishes a **forward
   exit** (return now) from a **back-jump** caused by an internal repeat (let it
   loop; the register survives until the section's final forward pass).
+- **Rule-5 `Fine` early-return path (`roadmap-vm.ts:495`) is DELIBERATELY
+  EXCLUDED (Codex R2 MEDIUM).** It is *not* one of the two call sites. A notated
+  `Fine` ends the song; a live pending return must **never** resurrect it. This
+  is D7 in the small — notated navigation is authoritative and a pending insert
+  return does not override it. (The earlier "gets the same treatment for
+  uniformity" framing was wrong: applying the helper there could clear the
+  `done` the Fine just set and bounce the cursor back into the chart, violating
+  the notated al-Fine.) So `applyPendingReturn` rides exactly TWO returns — the
+  linear branch and the main path — and the docstring's "BOTH" is literal.
 - One-shot: cleared on fire.
 - The return is **automatic** — it rides the band's natural advance to the
   section boundary. No MD tap, no clock. This is why it's a `stepVM` mechanic,
