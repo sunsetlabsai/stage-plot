@@ -12,9 +12,11 @@ the MD's **local** `ChartCalibration`.
 **Companion (prerequisite):** `design-conductor-insert-return.md` reshapes the
 `jumpTo` directive that auto-fire commits — a live backward/insert cue now carries
 an optional `return` leg. **chunk 5's `arm` is where that leg is resolved and baked**
-(at arm time, against the last-emitted bar — insert-return §4.1): `arm` passes the
-full `JumpTarget` + `currentBarId` into `resolveArm`, which attaches the return via
-`resolveInsertReturn` (§3.1). `commit`/auto-fire then applies the armed directive
+(at arm time, against the last-emitted bar — insert-return §4.1): `arm` forwards a
+**stable identity** `{ barId, kind, label }` (NOT the raw target — don't-trust-the-
+object safety rule, insert-return §4.3) + `currentBarId` into `resolveArm`, which
+re-derives the fresh target and attaches the return via `resolveInsertReturn` (§3.1).
+`commit`/auto-fire then applies the armed directive
 **unchanged** (`conductor-state.ts:242`) — the firing and the `stepVM` return mechanic
 are transparent, but the **resolution is not**: it must happen at arm time, not fire
 time (else the anchor drifts). The fire-point auto-align (Idea 1a) is folded into
