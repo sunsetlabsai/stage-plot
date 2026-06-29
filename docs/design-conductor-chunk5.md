@@ -9,6 +9,12 @@ those two epic items. It does NOT touch the canonical `SongStructure` bridge (th
 is the 3b cross-chart concern, design §0 / D0); like chunk 4, everything here runs on
 the MD's **local** `ChartCalibration`.
 
+**Companion (prerequisite):** `design-conductor-insert-return.md` reshapes the
+`jumpTo` directive that auto-fire commits — a live backward/insert cue now carries
+an optional `return` leg. Auto-fire commits that directive **unchanged** (it is the
+same `commit` payload, §0.1 (b)); the return leg is a `stepVM` mechanic, transparent
+to this chunk. The fire-point auto-align (Idea 1a) is folded into **D6** below.
+
 **Predecessor:** chunk 4 shipped the single-device baton (`lib/conductor-session.ts`,
 `lib/conductor-targets.ts`, `lib/use-conductor-session.ts`, `components/ConductorCluster.tsx`).
 It left exactly one seam stubbed OFF for this chunk:
@@ -75,13 +81,18 @@ This is a strictly-safer subset of §3.5, not a weakening of it. See D1.
 go-tap at the moment of transition. The MD keeps the beat; the change rides the
 bar-advance. Opt-in (default OFF = chunk-4 behaviour). Single device.
 
-**How far ahead can the fire bar be? — see D6.** Chunk 4 arms only at the *default*
-`fireAt = next emitted bar`, so default-only auto-fire fires on the **very next advance**
-(useful for the common "jump at the next downbeat" cue, but the telegraph window is just
-one bar). The richer "arm now, fire N bars later" telegraph requires letting the MD pick
-a fire bar *ahead* of the cursor — the chunk-4-*deferred* fireAt selection. D6 decides
-whether 5a includes it. The body of this doc is written for the **D6-YES (fireAt-ahead)**
-shape and flags every spot the **D6-NO (default-only)** fallback simplifies.
+**Where does the fire bar land? — the structural-boundary model (Idea 1a, see D6).**
+The fire point **auto-aligns to a structural boundary**, never a raw bar count. The
+real gesture (Graham): an MD signals a change *at the top of the current bar* for it
+to take effect *at the top of the next bar* — "signal at top of N → fire at top of
+N+1." So the **default** fire bar is the **next bar downbeat** (`fireAt =
+nextEmittedBarId`, exactly chunk 4's arm point). The **richer** option snaps the fire
+to the **next section / marker head** instead — the natural "make the change when we
+hit the chorus" call — which can be several bars ahead. There is **no** raw "fire in N
+bars" stepper; the only choices are *structural* (next bar | next section). D6 decides
+whether 5a includes the section-snap option. The body is written for the **D6-YES
+(boundary-snap)** shape and flags every spot the **D6-NO (next-bar-only)** fallback
+simplifies.
 
 **IS NOT:** (a) an audio/BPM motion engine — `advance` stays the only `stepVM` caller,
 still MD-driven (that's 5b); (b) a *new* commit semantic — auto-fire dispatches the
@@ -105,16 +116,18 @@ Chunk 4 deliberately split the auto-fire condition across the pure lib and the h
 
 **`armedFireAtEligible` — vestigial under D6-NO, load-bearing under D6-YES:**
 
-- **D6-NO (default-only):** the hook arms only at `fireAt = nextEmittedBarId(...)`
+- **D6-NO (next-bar-only):** the hook arms only at `fireAt = nextEmittedBarId(...)`
   (`use-conductor-session.ts:132`), eligible by construction, so `armedFireAtEligible` is
   **invariantly true** — kept only to honour the frozen contract + 5b forward-compat.
-- **D6-YES (fireAt-ahead):** the MD can place `fireAt` several bars ahead; a fire bar that
-  the VM will *skip* this pass (a pass-excluded volta) is forward-unreachable, so
-  `fireAtEligible` returns false at arm time → `armedFireAtEligible` is **load-bearing**
-  (it blocks arming a dead marker). This is the case the chunk-4 contract reserved it for.
+- **D6-YES (boundary-snap):** the section-snap fire bar can be several bars ahead, and a
+  section head the VM will *skip* this pass (e.g. a pass-excluded volta on the way to it)
+  is forward-unreachable, so `fireAtEligible` returns false at arm time →
+  `armedFireAtEligible` is **load-bearing** (it blocks arming a dead marker). This is the
+  case the chunk-4 contract reserved it for.
 
-Either way the AND stays verbatim. 5a does **not** add the *behind-the-cursor* re-tap
-(firing at a bar already passed is incoherent); "ahead" is the only direction D6-YES adds.
+Either way the AND stays verbatim. 5a does **not** add a *behind-the-cursor* re-tap
+(firing at a bar already passed is incoherent); the only fire bars 5a offers are the
+**next downbeat** and the **next section head ahead** of the cursor.
 
 ---
 
@@ -198,43 +211,61 @@ advance: () => {
 The surface adds two fields: `autoFireOn: boolean` and `setAutoFire: (on: boolean) => void`.
 Under D6-NO nothing else on `ConductorSurface` changes.
 
-### 3.1 fireAt-ahead arming (D6-YES only)
+### 3.1 boundary-snap arming (D6-YES only)
 
-To place the fire bar ahead of the cursor, the hook needs to *preview* the bars the next
-N advances will emit. `nextEmittedBarId` already peeks one step; generalize it to N
-without changing its meaning:
+The fire bar is one of two **structural** boundaries ahead of the cursor:
+
+- **`next-bar`** (the default) — the next downbeat, `nextEmittedBarId(compiled, vm)`,
+  exactly chunk 4's arm point. The "signal at top of N → fire at top of N+1" gesture.
+- **`next-section`** — the next **section / marker head** ahead, which may be several
+  bars away. The VM is section-blind, so this resolver lives in `conductor-targets.ts`
+  (which already has `cal` + the section-head machinery of `armableTargets`). It walks
+  `stepVM` forward — the deterministic preview of the bars the MD's advances will emit —
+  until the emitted bar's `sectionId` differs from the section we're in now, and returns
+  that boundary bar:
 
 ```ts
-// lib/conductor-targets.ts — N-step forward peek (N=1 ≡ nextEmittedBarId)
-export function peekAheadBarId(compiled: CompiledRoadmap, vm: VMState, n: number): string | undefined {
+// lib/conductor-targets.ts — next section/marker head ahead (forward stepVM preview).
+// `currentBarId` = the last-emitted bar (session.state.current.barId); VMState itself
+// carries no `current`, so the caller passes it. undefined currentBarId ⇒ pre-roll.
+export function nextSectionBoundaryBarId(
+  compiled: CompiledRoadmap,
+  cal: ChartCalibration,
+  vm: VMState,
+  currentBarId: string | undefined,
+): string | undefined {
+  const ordered = barsInOrder(cal);
+  const secOf = new Map(ordered.map((b) => [b.id, b.sectionId]));
+  const here = currentBarId ? secOf.get(currentBarId) ?? null : null; // current section
   let cur = vm;
-  let last: string | undefined;
-  for (let i = 0; i < n; i++) {
+  for (;;) {
     const step = stepVM(compiled, cur);
-    if (!step.transition) return undefined; // walks off the song end → no such fire bar
-    last = step.transition.barId;
-    cur = step.next;                         // feed the peeked VM forward (pure, no commit)
+    if (!step.transition) return undefined;           // off the song end → no boundary ahead
+    if ((secOf.get(step.transition.barId) ?? null) !== here) return step.transition.barId;
+    cur = step.next;                                   // same section → keep walking (pure)
   }
-  return last;
 }
 ```
 
-The hook's `arm` takes an optional `fireInBars` (default 1 = chunk-4 behaviour):
+The hook's `arm` takes an optional `fireAt: 'next-bar' | 'next-section'` (default
+`'next-bar'` = chunk-4 behaviour) — a **structural** choice, never a raw count:
 
 ```ts
-arm: (t, exit, fireInBars = 1) => {
+arm: (t, exit, fireAt = 'next-bar') => {
   if (!compiled || !cal || !session) return;
-  const fireAt = peekAheadBarId(compiled, session.state.vm, fireInBars);
-  if (!fireAt) return;                                   // ahead of song end — nothing to arm against
-  const eligible = fireAtEligible(compiled, session.state.vm, fireAt);
+  const fireBar = fireAt === 'next-section'
+    ? nextSectionBoundaryBarId(compiled, cal, session.state.vm, session.state.current?.barId)
+    : nextEmittedBarId(compiled, session.state.vm);
+  if (!fireBar) return;                                  // no such boundary ahead — nothing to arm against
+  const eligible = fireAtEligible(compiled, session.state.vm, fireBar);
   setArmedFireAtEligible(eligible);                      // local state; load-bearing under D6-YES
-  const armed = resolveArm(compiled, cal, t.barId, exit, fireAt);
+  const armed = resolveArm(compiled, cal, t.barId, exit, fireBar);
   if (!armed) return;
   run({ kind: 'arm', armed });
 },
 ```
 
-`peekAheadBarId` is a deterministic forward preview of *the bars that will be emitted if
+Both resolvers are deterministic forward previews of *the bars that will be emitted if
 the MD keeps advancing*; if the MD `redirect`s in between, the marked bar may fall off the
 path → the marker lingers (D4). This is the same forward-position honesty bound
 `fireAtEligible` already documents (`conductor-targets.ts:211` — a heuristic, not a
@@ -250,9 +281,11 @@ full-traversal reachability proof). Sufficient for an advisory marker.
 - **Auto-fire toggle** (new prop `autoFire: boolean` + `onToggleAutoFire: () => void`),
   placed in the mode header beside "Local MD mode." Label: `Auto-fire ⃝ / ⏻`. Off by
   default.
-- **(D6-YES only) "fire in N bars" stepper** in the arm flow — a small `0–3` selector
-  (`onArm` gains `fireInBars`). Default 1 (next bar). When the chosen bar is ineligible
-  (`armedFireAtEligible` false), the arm button disables with "can't fire there" — the
+- **(D6-YES only) "fire at" structural choice** in the arm flow — a two-way selector
+  `Next bar / Next section` (`onArm` gains `fireAt: 'next-bar' | 'next-section'`).
+  Default `Next bar`. This is a **structural** pick, never a raw bar count. When the
+  chosen boundary is ineligible (`armedFireAtEligible` false — e.g. a section head behind
+  a pass-excluded volta), the arm button disables with "can't fire there" — the
   load-bearing arm-time guard, surfaced. Under D6-NO this control is absent; arm is
   next-bar-only.
 - **Armed-summary copy keys on the toggle + hold state:**
@@ -314,20 +347,25 @@ callbacks, no session/PDF/validity), so it remains jsdom-testable with no chart 
   `useEffect` (recommend YES).** The chunk-4 parity lesson: no frame-critical conductor
   transition behind a deferred effect; chain the pure dispatches on returned values, one
   `setSession`.
-- **D6 — does 5a include fireAt-*ahead* arming, or only the default next-bar fire?
-  (recommend YES — include it.)** This is the one real scope decision.
-  - **D6-YES (fireAt-ahead, §3.1):** the MD picks how many bars ahead to fire (0–3),
-    giving a real telegraph window and making auto-fire meaningfully different from a
-    go-tap. Cost: a `peekAheadBarId` helper (~10 lines, pure), an `arm` arg, and a stepper
-    in the cluster. Makes `armedFireAtEligible` load-bearing (its intended job).
-  - **D6-NO (default-only):** auto-fire fires on the very next advance. Smallest possible
+- **D6 — the fire point is a structural boundary (Idea 1a, Graham); does 5a include the
+  `next-section` snap, or only the `next-bar` default? (recommend YES — include it.)** The
+  fire bar is *always* a structural boundary — never a raw bar count — because the real
+  gesture is "signal at the top of this bar, change at the top of the next" (default) or
+  "make the change when we hit the chorus" (section). This is the one real scope decision.
+  - **D6-YES (boundary-snap, §3.1):** the MD picks `Next bar` (default) or `Next section`.
+    The section option gives a real telegraph window aligned to musical structure and
+    makes auto-fire meaningfully different from a go-tap. Cost: a `nextSectionBoundaryBarId`
+    resolver (~12 lines, pure, section-aware), an `arm` arg, and a two-way selector in the
+    cluster. Makes `armedFireAtEligible` load-bearing (its intended job).
+  - **D6-NO (next-bar-only):** auto-fire fires on the very next downbeat. Smallest possible
     build, but the telegraph window is one bar and `armedFireAtEligible` stays vestigial —
     auto-fire becomes "your next advance also commits the armed jump," a thin win over the
     go-tap.
-  - **Lean:** YES. Default-only undersells the feature and leaves a vestigial contract
-    field; fireAt-ahead is the version worth shipping and is modest scope. Flagging it as a
-    decision because it is the difference between a coherent feature and a marginal one —
-    your call on whether the extra surface is worth it now or deferred to a 5a-follow-on.
+  - **Lean:** YES. Next-bar-only undersells the feature and leaves a vestigial contract
+    field; the section snap is the version worth shipping, is modest scope, and matches how
+    MDs actually call a change. Flagging it as a decision because it is the difference
+    between a coherent feature and a marginal one — your call on whether the extra surface
+    is worth it now or deferred to a 5a-follow-on.
 
 5b's open items are the §8.2-1 epic OQs (§7).
 
@@ -379,10 +417,12 @@ Pure-lib (vitest node default), mirroring the chunk-4 seam tests:
   pair lands the committed jump cursor with `armed` cleared (the same end-state a go-tap
   produces) — the regression guard that auto-fire ≡ go-tap in outcome, differing only in
   trigger.
-- **`peekAheadBarId` (pure, D6-YES):** N=1 ≡ `nextEmittedBarId`; N past song end →
-  `undefined`; N across a repeat/volta matches the bars `advance` actually emits over N
-  steps (walk-equivalence). A fireAt N-ahead on a pass-excluded volta → `fireAtEligible`
-  false (the load-bearing arm-time guard).
+- **`nextSectionBoundaryBarId` (pure, D6-YES):** returns the first emitted bar whose
+  `sectionId` differs from the current section; mid-section cursor walks to the next head;
+  last section (no boundary ahead) → `undefined`; section-less / null `sectionId` chart →
+  `undefined` (no snap, falls back to next-bar at the call site); across a repeat/volta the
+  walked boundary matches the bars `advance` actually emits (walk-equivalence). A boundary
+  behind a pass-excluded volta → `fireAtEligible` false (the load-bearing arm-time guard).
 
 Hook (jsdom, `// @vitest-environment jsdom`, `afterEach(cleanup)`, renderHook + act):
 
@@ -407,15 +447,15 @@ regression guard.
 
 1. **`shouldAutoFire` body** (`lib/conductor-session.ts`) — replace the stub with §2;
    pure tests.
-2. **(D6-YES) `peekAheadBarId`** (`lib/conductor-targets.ts`) — §3.1 N-step forward peek;
-   pure tests. (Skip under D6-NO.)
+2. **(D6-YES) `nextSectionBoundaryBarId`** (`lib/conductor-targets.ts`) — §3.1 section-head
+   forward preview; pure tests. (Skip under D6-NO.)
 3. **Hook** (`lib/use-conductor-session.ts`) — `autoFireOn`/`setAutoFire` state,
    `armedFireAtEligible` capture-at-arm/clear-on-fire-or-disarm, the synchronous
-   advance→auto-commit chain (§3), and (D6-YES) `arm(fireInBars)` via `peekAheadBarId`
-   (§3.1); hook tests.
+   advance→auto-commit chain (§3), and (D6-YES) `arm(fireAt: 'next-bar' | 'next-section')`
+   via `nextSectionBoundaryBarId` (§3.1); hook tests.
 4. **Cluster** (`components/ConductorCluster.tsx`) — `autoFire` + `onToggleAutoFire` props,
-   toggle in the header, hold-aware armed-summary copy (§4), and (D6-YES) the "fire in N
-   bars" stepper; cluster tests.
+   toggle in the header, hold-aware armed-summary copy (§4), and (D6-YES) the "fire at"
+   Next bar / Next section selector; cluster tests.
 5. **Wire `page.tsx`** (manual-UAT) — thread `autoFire`/`setAutoFire` from the hook surface
    into the cluster; no other page changes (single device, no transport).
 
