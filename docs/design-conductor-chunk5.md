@@ -11,9 +11,14 @@ the MD's **local** `ChartCalibration`.
 
 **Companion (prerequisite):** `design-conductor-insert-return.md` reshapes the
 `jumpTo` directive that auto-fire commits — a live backward/insert cue now carries
-an optional `return` leg. Auto-fire commits that directive **unchanged** (it is the
-same `commit` payload, §0.1 (b)); the return leg is a `stepVM` mechanic, transparent
-to this chunk. The fire-point auto-align (Idea 1a) is folded into **D6** below.
+an optional `return` leg. **chunk 5's `arm` is where that leg is resolved and baked**
+(at arm time, against the last-emitted bar — insert-return §4.1): `arm` passes the
+full `JumpTarget` + `currentBarId` into `resolveArm`, which attaches the return via
+`resolveInsertReturn` (§3.1). `commit`/auto-fire then applies the armed directive
+**unchanged** (`conductor-state.ts:242`) — the firing and the `stepVM` return mechanic
+are transparent, but the **resolution is not**: it must happen at arm time, not fire
+time (else the anchor drifts). The fire-point auto-align (Idea 1a) is folded into
+**D6** below.
 
 **Predecessor:** chunk 4 shipped the single-device baton (`lib/conductor-session.ts`,
 `lib/conductor-targets.ts`, `lib/use-conductor-session.ts`, `components/ConductorCluster.tsx`).
@@ -279,16 +284,30 @@ The hook's `arm` takes an optional `fireAt: 'next-bar' | 'next-section'` (defaul
 **Order matters (Codex R1 HIGH-2):** resolve the boundary, resolve the arm, and only
 THEN store the local eligibility bit + dispatch — never mutate `armedFireAtEligible`
 before the arm is known to succeed (a rejected arm must not clobber the bit for the
-*previous* armed marker):
+*previous* armed marker).
+
+**Insert-and-return is resolved HERE, at arm time (insert-return §4.1, Codex R4).**
+`commit` applies `Armed.directive` **verbatim** (`conductor-state.ts:242`) — it never
+re-resolves — so the return leg must already be **baked into the armed directive**.
+`arm` therefore passes the **full `JumpTarget`** (not just `t.barId`) and the
+**last-emitted bar** (`currentBarId`) into `resolveArm`, which calls
+`resolveInsertReturn(compiled, cal, t, currentBarId)` and attaches the resolved
+`return` field to the `jumpTo` — but **only when `t` carries no explicit `exit`**
+(exit XOR return, insert-return §4.2/D10). Forward, non-section, and exit-bearing
+targets stay plain. Auto-fire then commits the directive unchanged, return leg and
+all (it's transparent to chunk 5):
 
 ```ts
 arm: (t, exit, fireAt = 'next-bar') => {
   if (!compiled || !cal || !session) return;
+  const currentBarId = session.state.current?.barId;    // anchor frozen at arm time (§4.1)
   const fireBar = fireAt === 'next-section'
-    ? nextSectionBoundaryBarId(compiled, cal, session.state.vm, session.state.current?.barId)
+    ? nextSectionBoundaryBarId(compiled, cal, session.state.vm, currentBarId)
     : nextEmittedBarId(compiled, session.state.vm);
   if (!fireBar) return;                                  // no such boundary ahead — nothing to arm against
-  const armed = resolveArm(compiled, cal, t.barId, exit, fireBar);
+  // resolveArm bakes the insert-return leg (no-exit backward section only) into
+  // Armed.directive via resolveInsertReturn — takes the full target + currentBarId.
+  const armed = resolveArm(compiled, cal, t, exit, fireBar, currentBarId);
   if (!armed) return;                                    // reject FIRST — no local-state mutation yet
   setArmedFireAtEligible(true);                          // only after the arm succeeds (see eligibility note)
   run({ kind: 'arm', armed });
@@ -498,7 +517,11 @@ regression guard.
 3. **Hook** (`lib/use-conductor-session.ts`) — `autoFireOn`/`setAutoFire` state,
    `armedFireAtEligible` capture-at-arm/clear-on-fire-or-disarm, the synchronous
    advance→auto-commit chain (§3), and (D6-YES) `arm(fireAt: 'next-bar' | 'next-section')`
-   via `nextSectionBoundaryBarId` (§3.1); hook tests.
+   via `nextSectionBoundaryBarId` (§3.1). **arm passes the full `JumpTarget` +
+   `currentBarId`** so `resolveArm` can bake the insert-return leg (§3.1; depends on the
+   insert-return build having extended `resolveArm`'s signature — that doc lands first).
+   Hook tests, **including the arm-time return-resolution case** (arm in E, advance, fire,
+   returns to F — insert-return §10).
 4. **Cluster** (`components/ConductorCluster.tsx`) — `autoFire` + `onToggleAutoFire` props,
    toggle in the header, hold-aware armed-summary copy (§4), and (D6-YES) the "fire at"
    Next bar / Next section selector; cluster tests.
