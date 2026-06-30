@@ -26,65 +26,19 @@ import type {
   Bar,
   ChartCalibration,
   RoadmapMarker,
-  SectionAnchor,
   System,
 } from './types';
-import type { BarRef, RoadmapSpec, RoadmapSection } from './roadmap-spec';
-
-// ── Layout constants (the ONE shared grid; PDF + calibration both read these) ──
-// Points (1/72"). US Letter portrait. A "system" is one chart line of up to
-// barsPerLine bars; each section starts a fresh system (matches SectionAnchor at
-// a section head). Change these and BOTH the PDF and the calibration move together.
-const PAGE_W = 612;            // 8.5"
-const PAGE_H = 792;            // 11"
-const MARGIN_X = 48;
-const MARGIN_TOP = 96;         // room for the title/key header
-const MARGIN_BOTTOM = 48;
-const SYSTEM_LABEL_H = 16;     // section label strip above the bar row of its first system
-const SYSTEM_BARS_H = 48;      // the bar row height
-const SYSTEM_GAP = 18;         // vertical gap between systems
-const DEFAULT_BARS_PER_LINE = 4;
-
-const CONTENT_W = PAGE_W - 2 * MARGIN_X;
-const SYSTEM_TOTAL_H = SYSTEM_LABEL_H + SYSTEM_BARS_H;
-
-// ── Layout result (the shared substrate both projections read) ────────────────
-// Every geometry value here is already normalized 0..1 within its page, so the
-// calibration is a near-direct copy and the PDF draw is a single denormalize.
-
-interface LaidBar {
-  id: string;
-  systemId: string;
-  page: number;          // 1-based
-  xStart: number;        // normalized
-  xEnd: number;          // normalized
-  yTop: number;          // normalized (band top — mirrors the system)
-  yBottom: number;       // normalized
-  absNumber: number;     // 1-based, reading order
-  sectionId: string;
-  sectionIndex: number;  // 0-based index into spec.sections
-  barInSection: number;  // 1-based position within the section
-  section: RoadmapSection;
-}
-
-interface LaidSystem {
-  id: string;
-  page: number;
-  yTop: number;          // normalized (top of the bar row)
-  yBottom: number;       // normalized
-  xStart: number;        // normalized
-  xEnd: number;          // normalized
-  labelYTop: number;     // normalized top of the label strip (first system of a section only)
-  label: string | null;  // section label on the section's first system; null otherwise
-  bars: LaidBar[];
-}
-
-interface RoadmapLayout {
-  pageCount: number;
-  systems: LaidSystem[];
-  sections: SectionAnchor[];
-  bars: LaidBar[];
-}
+import type { BarRef, RoadmapSpec } from './roadmap-spec';
+// The section→systems→bars geometry lives in a pure, pdf-lib-free module shared
+// with the React preview (design §4.1). This file owns ONLY the PDF projection.
+import {
+  PAGE_W,
+  PAGE_H,
+  MARGIN_X,
+  layoutRoadmap,
+  type LaidBar,
+  type RoadmapLayout,
+} from './roadmap-layout';
 
 export interface RenderResult {
   pdfBytes: Uint8Array;
@@ -113,98 +67,6 @@ function barIndex(layout: RoadmapLayout): Map<string, LaidBar> {
   const m = new Map<string, LaidBar>();
   for (const b of layout.bars) m.set(`${b.sectionIndex}:${b.barInSection}`, b);
   return m;
-}
-
-// ── Stage 1: layout (pure, deterministic, the testable backbone) ──────────────
-// Flows sections → systems (barsPerLine bars each, new system per section) →
-// bars (equal-width within a system), stacking systems down the page and spilling
-// to a new page when the next system would cross MARGIN_BOTTOM. All coords
-// normalized. Reading order = page → system (top→bottom) → bar (left→right).
-export function layoutRoadmap(spec: RoadmapSpec): RoadmapLayout {
-  const barsPerLine = spec.barsPerLine && spec.barsPerLine > 0 ? spec.barsPerLine : DEFAULT_BARS_PER_LINE;
-
-  const systems: LaidSystem[] = [];
-  const allBars: LaidBar[] = [];
-  const sections: SectionAnchor[] = [];
-
-  let page = 1;
-  let cursorY = MARGIN_TOP;                         // points from page top
-  let absNumber = 1;
-
-  spec.sections.forEach((section, sectionIndex) => {
-    const sectionAnchorId = `sec-${sectionIndex}`;
-    const lineCount = Math.ceil(section.bars / barsPerLine);
-    let barInSection = 1;
-    let sectionAnchorEmitted = false;
-
-    for (let line = 0; line < lineCount; line += 1) {
-      // Page break if this system (incl. its label strip) would overrun.
-      if (cursorY + SYSTEM_TOTAL_H > PAGE_H - MARGIN_BOTTOM) {
-        page += 1;
-        cursorY = MARGIN_TOP;
-      }
-
-      const isFirstSystemOfSection = line === 0;
-      const labelTopPt = cursorY;
-      const barsTopPt = cursorY + SYSTEM_LABEL_H;
-      const barsBottomPt = barsTopPt + SYSTEM_BARS_H;
-
-      const systemId = `sys-${sectionIndex}-${line}`;
-      const barsThisLine = Math.min(barsPerLine, section.bars - line * barsPerLine);
-      const cellW = CONTENT_W / barsThisLine;
-
-      const laidBars: LaidBar[] = [];
-      for (let b = 0; b < barsThisLine; b += 1) {
-        const xStartPt = MARGIN_X + b * cellW;
-        const xEndPt = xStartPt + cellW;
-        const bar: LaidBar = {
-          id: `bar-${sectionIndex}-${barInSection}`,
-          systemId,
-          page,
-          xStart: xStartPt / PAGE_W,
-          xEnd: xEndPt / PAGE_W,
-          yTop: barsTopPt / PAGE_H,
-          yBottom: barsBottomPt / PAGE_H,
-          absNumber,
-          sectionId: sectionAnchorId,
-          sectionIndex,
-          barInSection,
-          section,
-        };
-        laidBars.push(bar);
-        allBars.push(bar);
-        absNumber += 1;
-        barInSection += 1;
-      }
-
-      systems.push({
-        id: systemId,
-        page,
-        yTop: barsTopPt / PAGE_H,
-        yBottom: barsBottomPt / PAGE_H,
-        xStart: MARGIN_X / PAGE_W,
-        xEnd: (PAGE_W - MARGIN_X) / PAGE_W,
-        labelYTop: labelTopPt / PAGE_H,
-        label: isFirstSystemOfSection ? section.label : null,
-        bars: laidBars,
-      });
-
-      if (isFirstSystemOfSection && !sectionAnchorEmitted) {
-        sections.push({
-          id: sectionAnchorId,
-          page,
-          x: MARGIN_X / PAGE_W,
-          y: labelTopPt / PAGE_H,
-          label: section.label,
-        });
-        sectionAnchorEmitted = true;
-      }
-
-      cursorY = barsBottomPt + SYSTEM_GAP;
-    }
-  });
-
-  return { pageCount: page, systems, sections, bars: allBars };
 }
 
 // ── Stage 2: calibration projection (layout → ChartCalibration) ───────────────
@@ -361,13 +223,17 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
   // demoted, informational provenance note ("authored in X"), not the live key,
   // so a standalone/printed PDF isn't keyless without claiming a key it can't honor.
   // It drops a line when a credit is present so they never collide.
+  // Bug A fix (design §4.0): every header baseline is a clean TOP-origin offset
+  // (see headerBaselinesPt), flipped to pdf-lib's bottom origin via denormYTopPt,
+  // so the whole header band sits in the top MARGIN_TOP strip, title highest.
+  const header = headerBaselinesPt({ hasArtist: Boolean(opts.artist) });
   if (opts.songTitle) {
-    drawText(pages[0], fontBold, opts.songTitle, MARGIN_X, MARGIN_TOP - 36, 18);
+    drawText(pages[0], fontBold, opts.songTitle, MARGIN_X, header.title, 18);
   }
   if (opts.artist) {
-    drawText(pages[0], font, opts.artist, MARGIN_X, MARGIN_TOP - 52, 11);
+    drawText(pages[0], font, opts.artist, MARGIN_X, header.artist, 11);
   }
-  drawText(pages[0], font, `Nashville (authored in ${spec.renderKey})`, MARGIN_X, MARGIN_TOP - (opts.artist ? 70 : 58), 10);
+  drawText(pages[0], font, `Nashville (authored in ${spec.renderKey})`, MARGIN_X, header.key, 10);
 
   const beats = spec.timeSig.beats;
   for (const sys of layout.systems) {
@@ -632,6 +498,30 @@ function denormX(xNorm: number): number {
 // PDF y is bottom-up; our normalized y is top-down.
 function denormYTop(yNorm: number): number {
   return PAGE_H * (1 - yNorm);
+}
+// A TOP-measured offset (points from the page's top edge) → pdf-lib's bottom
+// origin. Mirrors denormYTop for raw point offsets, so the header band is
+// expressed top-down (the natural way) and lands correctly top-up (Bug A, §4.0).
+function denormYTopPt(topOffsetPt: number): number {
+  return PAGE_H - topOffsetPt;
+}
+
+// Header baselines as clean TOP-origin offsets (points from the top edge),
+// descending so title is highest, then artist, then the authored-key tag. Larger
+// offset = lower on the page. The key tag drops below the artist credit when one
+// is present (else it takes the artist slot) so they never collide. EVERY value
+// is < MARGIN_TOP, so flipped via denormYTopPt the whole band sits in the top
+// margin strip. Pure + exported so the ordering/band invariant is unit-testable
+// without rasterizing the PDF (design §8).
+export function headerBaselinesPt(opts: { hasArtist: boolean }): { title: number; artist: number; key: number } {
+  const titleOffset = 36;
+  const artistOffset = 52;
+  const keyOffset = opts.hasArtist ? 70 : artistOffset;
+  return {
+    title: denormYTopPt(titleOffset),
+    artist: denormYTopPt(artistOffset),
+    key: denormYTopPt(keyOffset),
+  };
 }
 
 function drawText(page: PDFPage, font: PDFFont, text: string, x: number, y: number, size: number): void {

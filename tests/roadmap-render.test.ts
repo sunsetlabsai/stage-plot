@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { renderRoadmap, layoutRoadmap, buildCalibration, voltaLabel } from '../lib/roadmap-render';
+import { renderRoadmap, buildCalibration, voltaLabel, headerBaselinesPt } from '../lib/roadmap-render';
+import { layoutRoadmap, pickBarsPerLine, chunkIntoLines, PAGE_W, PAGE_H, MARGIN_X, MARGIN_TOP, CONTENT_W } from '../lib/roadmap-layout';
 import { validateRoadmapSpec, type RoadmapSpec } from '../lib/roadmap-spec';
 import { isValidCalibration, canVerify, resolveRoadmap, CALIBRATION_SCHEMA_VERSION } from '../lib/chart-calibration';
 
@@ -419,5 +420,191 @@ describe('renderRoadmap — chord content & header', () => {
     const plain = await renderRoadmap(plainSeven);
     expect(Buffer.from(a.pdfBytes).equals(Buffer.from(plain.pdfBytes))).toBe(false);
     expect(a.calibration).toEqual(plain.calibration);
+  });
+});
+
+// ── Fit-to-width: constant-width bars, partial-line tracking (Bug B) ──────────
+describe('layoutRoadmap — constant bar width + partial-line system edge (Bug B)', () => {
+  // The motivating defect: a 10-bar section at 4/line wraps to 4 + 4 + 2; the
+  // trailing 2-bar line used to stretch to fill the row (cellW / barsThisLine).
+  const tenBarIntro: RoadmapSpec = {
+    version: 1,
+    timeSig: { beats: 4, unit: 4 },
+    renderKey: 'G',
+    barsPerLine: 4,
+    sections: [{ id: 'intro', label: 'Intro', bars: 10 }],
+  };
+
+  it('gives EVERY bar the same width regardless of how many sit on its line', () => {
+    const layout = layoutRoadmap(tenBarIntro);
+    const expectedNormW = CONTENT_W / 4 / PAGE_W; // constant cellW (in normalized units)
+    expect(layout.systems).toHaveLength(3); // 4 + 4 + 2
+    expect(layout.systems.map((s) => s.barsThisLine)).toEqual([4, 4, 2]);
+    for (const bar of layout.bars) {
+      expect(bar.xEnd - bar.xStart).toBeCloseTo(expectedNormW, 10);
+    }
+  });
+
+  it('left-aligns the partial line and stops its system edge at the last real bar', () => {
+    const layout = layoutRoadmap(tenBarIntro);
+    const partial = layout.systems[2]; // the 2-bar line
+    const lastBar = partial.bars[partial.bars.length - 1];
+    // The system's right edge tracks the last real bar — NOT the page content edge.
+    expect(partial.xEnd).toBeCloseTo(lastBar.xEnd, 10);
+    const cellW = CONTENT_W / 4;
+    expect(partial.xEnd).toBeCloseTo((MARGIN_X + 2 * cellW) / PAGE_W, 10); // MARGIN_X + 2 cells
+    // First partial bar still starts at the left margin (left-aligned, not centered).
+    expect(partial.bars[0].xStart).toBeCloseTo(MARGIN_X / PAGE_W, 10);
+  });
+
+  it('leaves a FULL line spanning the whole content box (behavior-preserving)', () => {
+    const layout = layoutRoadmap(tenBarIntro);
+    const full = layout.systems[0]; // a 4-bar line
+    expect(full.xEnd).toBeCloseTo((PAGE_W - MARGIN_X) / PAGE_W, 10); // = (PAGE_W - MARGIN_X)/PAGE_W
+  });
+});
+
+// ── Responsive bars/line selection + explicit override (design §4.2 / Q1) ─────
+describe('pickBarsPerLine — responsive {2,4,8} tiers', () => {
+  it('picks 2 below the phone breakpoint', () => {
+    expect(pickBarsPerLine(360)).toBe(2);
+    expect(pickBarsPerLine(479)).toBe(2);
+  });
+  it('picks 4 in the mid band', () => {
+    expect(pickBarsPerLine(480)).toBe(4);
+    expect(pickBarsPerLine(699)).toBe(4);
+  });
+  it('picks 8 at/above the wide breakpoint', () => {
+    expect(pickBarsPerLine(700)).toBe(8);
+    expect(pickBarsPerLine(1280)).toBe(8);
+  });
+});
+
+describe('layoutRoadmap — barsPerLine resolution (Q1 explicit override)', () => {
+  const spec = (barsPerLine?: number): RoadmapSpec => ({
+    version: 1,
+    timeSig: { beats: 4, unit: 4 },
+    renderKey: 'C',
+    ...(barsPerLine != null ? { barsPerLine } : {}),
+    sections: [{ id: 's', label: 'S', bars: 16 }],
+  });
+
+  it('honors spec.barsPerLine when set (no override)', () => {
+    expect(layoutRoadmap(spec(8)).systems).toHaveLength(2); // 16 / 8
+  });
+  it('defaults to 4/line when spec.barsPerLine is unset', () => {
+    expect(layoutRoadmap(spec()).systems).toHaveLength(4); // 16 / 4
+  });
+  it('uses the responsive override only when spec.barsPerLine is unset', () => {
+    // With no explicit spec value, the override (the responsive preview pick) is
+    // what applies — beating the default.
+    expect(layoutRoadmap(spec(), { barsPerLine: 2 }).systems).toHaveLength(8); // 16 / 2
+  });
+  it('makes explicit spec.barsPerLine win over the responsive override (Q1 enforced in the resolver)', () => {
+    // Q1 lives in resolveBarsPerLine, not the caller: an explicit spec value beats
+    // any override, so a reopened/AI-authored spec can never be silently re-wrapped.
+    expect(layoutRoadmap(spec(8), { barsPerLine: 2 }).systems).toHaveLength(2); // 16 / 8, override ignored
+  });
+});
+
+// ── Header band ordering (Bug A) ──────────────────────────────────────────────
+describe('headerBaselinesPt — top-margin band, descending order (Bug A)', () => {
+  const inBand = (y: number) => y >= PAGE_H - MARGIN_TOP && y <= PAGE_H;
+
+  it('places title > artist > key, all within the top margin band (with artist)', () => {
+    const h = headerBaselinesPt({ hasArtist: true });
+    expect(h.title).toBeGreaterThan(h.artist);
+    expect(h.artist).toBeGreaterThan(h.key);
+    expect(inBand(h.title)).toBe(true);
+    expect(inBand(h.artist)).toBe(true);
+    expect(inBand(h.key)).toBe(true);
+  });
+
+  it('drops the key into the artist slot when no credit is present (title still highest)', () => {
+    const h = headerBaselinesPt({ hasArtist: false });
+    expect(h.title).toBeGreaterThan(h.key);
+    expect(h.key).toBe(h.artist);
+    expect(inBand(h.title)).toBe(true);
+    expect(inBand(h.key)).toBe(true);
+  });
+});
+
+// ── chunkIntoLines: the grouping decision the preview consumes (design §4.3) ──
+describe('chunkIntoLines — same wrapping rule the PDF layout applies', () => {
+  it('splits into ceil(N/perLine) lines with a left-aligned partial last line', () => {
+    const lines = chunkIntoLines([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 4);
+    expect(lines).toEqual([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10]]); // 4 + 4 + 2
+  });
+  it('matches layoutRoadmap line count for the same bars/perLine', () => {
+    const lines = chunkIntoLines(Array.from({ length: 10 }, (_, i) => i), 4);
+    const layout = layoutRoadmap({
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'G',
+      barsPerLine: 4,
+      sections: [{ id: 'i', label: 'I', bars: 10 }],
+    });
+    expect(lines).toHaveLength(layout.systems.length);
+  });
+  it('returns no lines for an empty section', () => {
+    expect(chunkIntoLines([], 4)).toEqual([]);
+  });
+});
+
+// ── Module boundary: the shared layout must not pull pdf-lib into the client ──
+// The invariant isn't "this one file's source has no pdf-lib" — it's that nothing
+// in roadmap-layout.ts's RUNTIME import graph reaches pdf-lib (a local helper it
+// imports could pull it in). So crawl: follow runtime (non-type-only) local
+// imports transitively; `import type`/`export type` erase at compile time, so
+// they can't bundle anything and are skipped.
+describe('roadmap-layout module boundary (client-bundle safety)', () => {
+  it('pulls no pdf-lib through its runtime import graph (React preview never bundles it)', async () => {
+    const { readFileSync, existsSync } = await import('node:fs');
+    const { dirname, resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+
+    // Resolve a relative specifier to a concrete TS source file.
+    const resolveLocal = (fromFile: string, spec: string): string | null => {
+      const base = resolve(dirname(fromFile), spec);
+      for (const cand of [`${base}.ts`, `${base}.tsx`, `${base}/index.ts`, `${base}/index.tsx`]) {
+        if (existsSync(cand)) return cand;
+      }
+      return null;
+    };
+
+    const visited = new Set<string>();
+    const offenders: string[] = [];
+
+    const crawl = (file: string) => {
+      if (visited.has(file)) return;
+      visited.add(file);
+      const src = readFileSync(file, 'utf8');
+
+      // Runtime `import ...`/`export ... from` (NOT `import type`/`export type`),
+      // plus side-effect imports and CJS require. Capture the module specifier.
+      const fromRe = /^\s*(?:import|export)(?!\s+type\b)[\s\S]*?\bfrom\s*['"]([^'"]+)['"]/gm;
+      const sideEffectRe = /^\s*import\s*['"]([^'"]+)['"]/gm;
+      const requireRe = /\brequire\(\s*['"]([^'"]+)['"]\s*\)/g;
+
+      const specs = new Set<string>();
+      for (const re of [fromRe, sideEffectRe, requireRe]) {
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(src))) specs.add(m[1]);
+      }
+
+      for (const spec of specs) {
+        if (spec === 'pdf-lib' || spec.startsWith('pdf-lib/')) {
+          offenders.push(`${file} → ${spec}`);
+          continue;
+        }
+        if (spec.startsWith('.')) {
+          const local = resolveLocal(file, spec);
+          if (local) crawl(local);
+        }
+      }
+    };
+
+    crawl(fileURLToPath(new URL('../lib/roadmap-layout.ts', import.meta.url)));
+    expect(offenders).toEqual([]);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { layoutRoadmap, buildCalibration } from '../lib/roadmap-render';
+import { buildCalibration } from '../lib/roadmap-render';
+import { layoutRoadmap } from '../lib/roadmap-layout';
 import { assertSpecCalibrationParity } from '../lib/roadmap-save';
 import type { RoadmapSpec } from '../lib/roadmap-spec';
 import type { ChartCalibration } from '../lib/types';
