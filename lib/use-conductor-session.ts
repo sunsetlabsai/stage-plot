@@ -123,6 +123,30 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     if (res.outcome === 'applied') setSession(res.session);
   };
 
+  // Commit the result of an action that may have satisfied the §3.5 gate, chaining a
+  // synchronous auto-commit when it does (NEVER a deferred effect — the chunk-4
+  // page-turn-parity lesson, D5). TWO fire sites share this: an `advance` that ARRIVES
+  // at the fire bar, and a `release` redirect that CLEARS the hold while the playhead is
+  // already PARKED on the fire bar. The second is load-bearing: the reducer keeps
+  // `current` on the fire bar across a redirect (it re-emits only on the next advance),
+  // so for a fire bar inside the vamp body the hold-clear is the EXACT — and only —
+  // moment `shouldAutoFire` is true; the following advance steps off the fire bar and
+  // never returns. Both dispatch on the returned session (a value, not React state) with
+  // a SINGLE setSession, so there is no read-after-setState hazard. With auto-fire off
+  // (or the gate unmet) this is the verbatim `run` apply.
+  const applyWithAutoFire = (res: ReturnType<typeof dispatch>) => {
+    setOutcome(res.outcome);
+    if (res.outcome !== 'applied') return;
+    if (autoFireOn && armedFireAtEligible && shouldAutoFire(res.session)) {
+      const afterFire = dispatch(res.session, { kind: 'commit' }, Date.now());
+      setOutcome(afterFire.outcome); // surface the COMMIT result, not the stale prior one
+      setSession(afterFire.outcome === 'applied' ? afterFire.session : res.session);
+      setArmedFireAtEligible(false); // fired (or attempted) → drop the bit
+      return;
+    }
+    setSession(res.session);
+  };
+
   const targets = useMemo<JumpTarget[]>(
     () => (compiled && cal ? armableTargets(compiled, cal) : []),
     [compiled, cal],
@@ -156,22 +180,11 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     setAutoFire: setAutoFireOn,
     canArmNextSection,
     // §3 — auto-fire is evaluated SYNCHRONOUSLY inside the advance action (NEVER a
-    // deferred effect — the chunk-4 page-turn-parity lesson, D5). Two pure dispatches
-    // chained on their returned sessions, a SINGLE setSession. When the toggle is off
-    // this collapses to the verbatim chunk-4 advance.
+    // deferred effect — the chunk-4 page-turn-parity lesson, D5). When the toggle is off
+    // (or the gate unmet) this collapses to the verbatim chunk-4 advance.
     advance: () => {
       if (!session) return;
-      const afterAdvance = dispatch(session, { kind: 'advance' }, Date.now());
-      setOutcome(afterAdvance.outcome);
-      if (afterAdvance.outcome !== 'applied') return;
-      if (autoFireOn && armedFireAtEligible && shouldAutoFire(afterAdvance.session)) {
-        const afterFire = dispatch(afterAdvance.session, { kind: 'commit' }, Date.now());
-        setOutcome(afterFire.outcome); // surface the COMMIT result, not the stale advance one
-        setSession(afterFire.outcome === 'applied' ? afterFire.session : afterAdvance.session);
-        setArmedFireAtEligible(false); // fired (or attempted) → drop the bit
-        return;
-      }
-      setSession(afterAdvance.session);
+      applyWithAutoFire(dispatch(session, { kind: 'advance' }, Date.now()));
     },
     // arm ALWAYS routes through resolveArm (the #101 forward-carry): the component
     // never hand-builds a directive. It forwards a STABLE IDENTITY (not the raw
@@ -204,14 +217,20 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       setArmedFireAtEligible(false); // marker cancelled
       run({ kind: 'disarm' });
     },
-    // redirect must NOT clear the eligibility bit — a `release` (the §3.5 hold path)
-    // is a redirect: the gate refuses an armed marker while vm.holding != null, then
-    // release clears holding so the SAME armed marker fires on the next arrival. The
-    // bit is invariantly-true-in-5a by construction (§1/§3.1) and the real gate is
-    // shouldAutoFire (armed + arrival + no-hold), which already declines to fire when
-    // a redirect makes fireAt unreachable (it lingers as advisory, D4). Clearing here
-    // would silently disable auto-fire after release (Codex build-review HIGH).
-    redirect: (opt) => run({ kind: 'redirect', directive: opt.directive }),
+    // redirect routes through the SAME auto-fire chain as advance, and must NOT clear
+    // the eligibility bit. A `release` (the §3.5 hold path) is a redirect: the gate
+    // refuses an armed marker while vm.holding != null; release clears holding while the
+    // reducer keeps `current` parked on the fire bar, so `shouldAutoFire` becomes true on
+    // the release itself and the chain fires it THERE (the next advance would step off the
+    // fire bar — see applyWithAutoFire). For a fire bar still AHEAD (vamping an earlier
+    // section, release, advance forward into it), release leaves `current` short of the
+    // fire bar → the chain no-ops here and the marker fires on the later arriving advance.
+    // Either way the bit is preserved so a redirect can never silently disable auto-fire
+    // (Codex build-review HIGH); an unreachable fire bar still lingers as advisory (D4).
+    redirect: (opt) => {
+      if (!session) return;
+      applyWithAutoFire(dispatch(session, { kind: 'redirect', directive: opt.directive }, Date.now()));
+    },
     outcome,
   };
 }

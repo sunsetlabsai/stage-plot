@@ -242,6 +242,38 @@ describe('useConductorSession', () => {
     expect(fired).toBe(true);
   });
 
+  it('holding AT the fire bar: gate refuses on arrival, then the release ITSELF fires it (Codex repro)', async () => {
+    // The literal Codex repro: a NEXT-BAR fire whose target lands INSIDE the vamp body,
+    // so the playhead arrives ON fireAt while still holding. The §3.5 gate must refuse
+    // there (never fire mid-vamp). The reducer keeps `current` PARKED on fireAt across a
+    // redirect, so when Release clears the hold `shouldAutoFire` becomes true on the
+    // release itself — and the release must fire it THERE. (The NEXT advance would step
+    // the volta straight off fireAt and never return, so "fire on the next advance" is
+    // mechanically impossible for a next-bar fire in the vamp body — the original bug.)
+    // Default `cal`: R repeat over body b1,b2 with voltas b3/b4; arm next-bar = b2.
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.setAutoFire(true));
+    act(() => result.current.advance()); // current b1
+    expect(result.current.current?.barId).toBe('b1');
+    // arm "next bar" (default) → fireAt = b2, a bar the vamp parks on
+    act(() => result.current.arm(result.current.targets[0]));
+    expect(result.current.armed?.fireAt).toBe('b2');
+    // start the vamp, then advance ONTO b2 (= fireAt) while holding → gate refuses
+    const hold = result.current.redirects.find((o) => o.label === 'Vamp (hold)')!;
+    act(() => result.current.redirect(hold));
+    expect(result.current.state?.vm.holding).toBe('R');
+    act(() => result.current.advance()); // emit b2 = fireAt, but holding ⇒ refused
+    expect(result.current.current?.barId).toBe('b2');
+    expect(result.current.armed).not.toBeNull(); // refused mid-vamp — marker survives
+    // release the vamp while parked on the fire bar → the release fires the marker
+    const release = result.current.redirects.find((o) => o.label === 'Release vamp')!;
+    act(() => result.current.redirect(release));
+    expect(result.current.state?.vm.holding).toBeNull();
+    expect(result.current.armed).toBeNull(); // auto-fired on release (not a later advance)
+    expect(result.current.outcome).toBe('applied'); // the COMMIT result, not the redirect
+  });
+
   it('arm seam: a backward section with NO exit bakes the insert-return leg', async () => {
     const { result } = renderHook(() => useConductorSession(args({ cal: secCal })));
     await waitFor(() => expect(result.current.active).toBe(true));
