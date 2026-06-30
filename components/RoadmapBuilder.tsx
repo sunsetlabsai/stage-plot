@@ -435,6 +435,7 @@ function Review({
           timeSig={view.timeSig}
           mode={mode}
           sections={view.sections}
+          explicitBarsPerLine={view.barsPerLine}
           editing={editing}
           setEditing={setEditing}
           onCommitBar={commitBar}
@@ -726,6 +727,7 @@ function ChartSheet({
   timeSig,
   mode,
   sections,
+  explicitBarsPerLine,
   editing,
   setEditing,
   onCommitBar,
@@ -735,15 +737,22 @@ function ChartSheet({
   timeSig: { beats: number; unit: number };
   mode: 'numbers' | 'letters';
   sections: ViewSection[];
+  explicitBarsPerLine?: number;
   editing: string | null;
   setEditing: (k: string | null) => void;
   onCommitBar: (sectionId: string, barIndex: number, cells: ViewBar) => void;
 }) {
   const beats = timeSig.beats;
-  // Fit-to-width: pick a bars/line tier from the measured bar area, never letting
-  // a line overflow (design §4.3). Default 4 until the first measure lands.
+  // Fit-to-width: an explicit spec.barsPerLine wins (Q1, mirrors the PDF resolver);
+  // otherwise pick a bars/line tier from the measured bar area, never letting a
+  // line overflow (design §4.3). Default 4 until the first measure lands.
   const [barsRef, barsWidth] = useContentWidth<HTMLDivElement>();
-  const barsPerLine = barsWidth > 0 ? pickBarsPerLine(barsWidth) : 4;
+  const barsPerLine =
+    explicitBarsPerLine && explicitBarsPerLine > 0
+      ? explicitBarsPerLine
+      : barsWidth > 0
+        ? pickBarsPerLine(barsWidth)
+        : 4;
   return (
     <div className="w-full max-w-[920px] mx-auto bg-white rounded shadow-2xl p-7 text-black">
       <div className="text-center border-b border-zinc-200 pb-3 mb-3">

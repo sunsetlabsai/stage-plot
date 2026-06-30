@@ -495,10 +495,15 @@ describe('layoutRoadmap — barsPerLine resolution (Q1 explicit override)', () =
   it('defaults to 4/line when spec.barsPerLine is unset', () => {
     expect(layoutRoadmap(spec()).systems).toHaveLength(4); // 16 / 4
   });
-  it('lets an explicit override win (the preview pick), regardless of width', () => {
-    // The caller applies Q1 (spec.barsPerLine ?? responsive pick) and passes the
-    // result here; the override always takes precedence over the default.
+  it('uses the responsive override only when spec.barsPerLine is unset', () => {
+    // With no explicit spec value, the override (the responsive preview pick) is
+    // what applies — beating the default.
     expect(layoutRoadmap(spec(), { barsPerLine: 2 }).systems).toHaveLength(8); // 16 / 2
+  });
+  it('makes explicit spec.barsPerLine win over the responsive override (Q1 enforced in the resolver)', () => {
+    // Q1 lives in resolveBarsPerLine, not the caller: an explicit spec value beats
+    // any override, so a reopened/AI-authored spec can never be silently re-wrapped.
+    expect(layoutRoadmap(spec(8), { barsPerLine: 2 }).systems).toHaveLength(2); // 16 / 8, override ignored
   });
 });
 

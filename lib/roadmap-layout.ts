@@ -46,12 +46,14 @@ export function pickBarsPerLine(containerWidthPx: number): 2 | 4 | 8 {
   return 8;
 }
 
-// Resolve the effective bars/line. An explicit `spec.barsPerLine` (design §6 Q1)
-// wins; the responsive preview pick is passed as `override` ONLY when the caller
-// has already honored Q1 (i.e. spec.barsPerLine was unset). Falls back to default.
+// Resolve the effective bars/line. Q1 (design §6) is enforced HERE, not by the
+// caller: an explicit `spec.barsPerLine` always wins. `override` is purely the
+// responsive preview pick and is consulted ONLY when the spec leaves barsPerLine
+// unset. Falls back to the default when neither is a positive integer.
 function resolveBarsPerLine(spec: RoadmapSpec, override?: number): number {
-  const chosen = override ?? spec.barsPerLine;
-  return chosen && chosen > 0 ? chosen : DEFAULT_BARS_PER_LINE;
+  const explicit = spec.barsPerLine && spec.barsPerLine > 0 ? spec.barsPerLine : undefined;
+  const responsive = override && override > 0 ? override : undefined;
+  return explicit ?? responsive ?? DEFAULT_BARS_PER_LINE;
 }
 
 // The grouping decision the React preview consumes (design §4.3): split a
@@ -106,8 +108,9 @@ export interface RoadmapLayout {
 }
 
 export interface LayoutOptions {
-  // Override the effective bars/line (the responsive preview pick). When unset,
-  // spec.barsPerLine (then the default) applies — the PDF path passes nothing.
+  // The responsive preview pick. An explicit spec.barsPerLine still wins (Q1,
+  // enforced in resolveBarsPerLine); this is consulted only when the spec leaves
+  // barsPerLine unset. The PDF path passes nothing and falls through to spec/default.
   barsPerLine?: number;
 }
 
