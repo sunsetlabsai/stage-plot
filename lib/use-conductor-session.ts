@@ -9,12 +9,13 @@ import {
   type ReduceOutcome,
   type Armed,
 } from './conductor-state';
-import { initSession, dispatch, type ConductorSession } from './conductor-session';
+import { initSession, dispatch, shouldAutoFire, type ConductorSession } from './conductor-session';
 import {
   armableTargets,
   availableRedirects,
   resolveArm,
   nextEmittedBarId,
+  nextSectionBoundaryBarId,
   type JumpTarget,
   type RedirectOption,
 } from './conductor-targets';
@@ -48,8 +49,11 @@ export interface ConductorSurface {
   done: boolean; // vm.done — song end; advance/arm disabled (§3 guard)
   targets: JumpTarget[];
   redirects: RedirectOption[];
+  autoFireOn: boolean; // §3 opt-in toggle (default OFF = chunk-4 behaviour)
+  setAutoFire: (on: boolean) => void;
+  canArmNextSection: boolean; // §4 — a next-section boundary exists ahead of the cursor
   advance: () => void;
-  arm: (t: JumpTarget, exit?: ExitPolicy['kind']) => void;
+  arm: (t: JumpTarget, exit?: ExitPolicy['kind'], fireAt?: 'next-bar' | 'next-section') => void;
   commit: () => void;
   disarm: () => void;
   redirect: (opt: RedirectOption) => void;
@@ -68,6 +72,13 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
 
   const [session, setSession] = useState<ConductorSession | null>(null);
   const [outcome, setOutcome] = useState<ReduceOutcome['status'] | null>(null);
+  // §3 auto-fire is opt-in, default OFF (D3) — purely local UI state, never on the wire.
+  const [autoFireOn, setAutoFireOn] = useState(false);
+  // §1/§3.1 arm-time forward reachability of the fire bar. Invariantly true in 5a (the
+  // walk that picked the fire bar IS the proof), kept to honour the frozen contract
+  // `if (armedFireAtEligible && shouldAutoFire(...))` and stays load-bearing in 5b. Set
+  // true only AFTER an arm succeeds; cleared on commit/disarm/redirect/identity change.
+  const [armedFireAtEligible, setArmedFireAtEligible] = useState(false);
 
   // (Re)initialize the session on identity change. programHash is async, so init
   // happens in the resolve callback — naturally deferred (no sync setState-in-effect).
@@ -76,9 +87,16 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // a stale async if cal/identity changed under it.
   useEffect(() => {
     let cancelled = false;
+    // Identity changed — drop any prior arm-eligibility bit alongside the session
+    // reset. Deferred (not synchronous-in-effect) for the same lint rule the
+    // setSession resets below follow. (Harmless even if it lagged: shouldAutoFire
+    // guards on `armed`, and a fresh session is always unarmed.)
     if (!enabled || !compiled || !cal) {
       Promise.resolve().then(() => {
-        if (!cancelled) setSession(null);
+        if (!cancelled) {
+          setSession(null);
+          setArmedFireAtEligible(false);
+        }
       });
       return () => {
         cancelled = true;
@@ -89,6 +107,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     void computeProgramHash(bars, markers).then((hash) => {
       if (cancelled) return;
       setSession(initSession(sessionId, songRef, hash, compiled, Date.now()));
+      setArmedFireAtEligible(false);
     });
     return () => {
       cancelled = true;
@@ -112,6 +131,16 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     () => (compiled && session ? availableRedirects(compiled, session.state.vm) : []),
     [compiled, session],
   );
+  // §4 — is there a next-section boundary ahead? Disables the cluster's "Next section"
+  // arm option when there is none (vamping / already in the last section).
+  const canArmNextSection = useMemo<boolean>(
+    () =>
+      compiled && cal && session
+        ? nextSectionBoundaryBarId(compiled, cal, session.state.vm, session.state.current?.barId) !==
+          undefined
+        : false,
+    [compiled, cal, session],
+  );
 
   const state = session?.state ?? null;
 
@@ -123,25 +152,62 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     done: state?.vm.done ?? false,
     targets,
     redirects,
-    advance: () => run({ kind: 'advance' }),
+    autoFireOn,
+    setAutoFire: setAutoFireOn,
+    canArmNextSection,
+    // §3 — auto-fire is evaluated SYNCHRONOUSLY inside the advance action (NEVER a
+    // deferred effect — the chunk-4 page-turn-parity lesson, D5). Two pure dispatches
+    // chained on their returned sessions, a SINGLE setSession. When the toggle is off
+    // this collapses to the verbatim chunk-4 advance.
+    advance: () => {
+      if (!session) return;
+      const afterAdvance = dispatch(session, { kind: 'advance' }, Date.now());
+      setOutcome(afterAdvance.outcome);
+      if (afterAdvance.outcome !== 'applied') return;
+      if (autoFireOn && armedFireAtEligible && shouldAutoFire(afterAdvance.session)) {
+        const afterFire = dispatch(afterAdvance.session, { kind: 'commit' }, Date.now());
+        setOutcome(afterFire.outcome); // surface the COMMIT result, not the stale advance one
+        setSession(afterFire.outcome === 'applied' ? afterFire.session : afterAdvance.session);
+        setArmedFireAtEligible(false); // fired (or attempted) → drop the bit
+        return;
+      }
+      setSession(afterAdvance.session);
+    },
     // arm ALWAYS routes through resolveArm (the #101 forward-carry): the component
     // never hand-builds a directive. It forwards a STABLE IDENTITY (not the raw
     // target — don't-trust-the-object, insert-return §4.3) + the last-emitted bar
     // (currentBarId) so resolveArm can re-derive the target and bake the
-    // insert-return leg at arm time (§4.1). fireAt defaults to the real next emitted
-    // bar; an out-of-set exit, ambiguous identity, or unknown bar yields null → no-op.
-    arm: (t, exit) => {
+    // insert-return leg at arm time (§4.1). fireAt is a STRUCTURAL choice (§3.1): the
+    // real next emitted bar (default) or the next section head ahead — never a raw
+    // count. An out-of-set exit, ambiguous identity, unknown bar, or absent boundary
+    // yields null → no-op. Order matters (§3.1): resolve, reject FIRST, only THEN set
+    // the eligibility bit — a rejected arm must not clobber the prior marker's bit.
+    arm: (t, exit, fireAt = 'next-bar') => {
       if (!compiled || !cal || !session) return;
-      const fireAt = nextEmittedBarId(compiled, session.state.vm);
-      if (!fireAt) return; // song end — nothing to arm against
+      const currentBarId = session.state.current?.barId;
+      const fireBar =
+        fireAt === 'next-section'
+          ? nextSectionBoundaryBarId(compiled, cal, session.state.vm, currentBarId)
+          : nextEmittedBarId(compiled, session.state.vm);
+      if (!fireBar) return; // no such boundary ahead — nothing to arm against
       const id = { barId: t.barId, kind: t.kind, label: t.label };
-      const armed = resolveArm(compiled, cal, id, exit, fireAt, session.state.current?.barId);
-      if (!armed) return;
+      const armed = resolveArm(compiled, cal, id, exit, fireBar, currentBarId);
+      if (!armed) return; // reject FIRST — no local-state mutation yet
+      setArmedFireAtEligible(true); // only after the arm succeeds (§1/§3.1)
       run({ kind: 'arm', armed });
     },
-    commit: () => run({ kind: 'commit' }),
-    disarm: () => run({ kind: 'disarm' }),
-    redirect: (opt) => run({ kind: 'redirect', directive: opt.directive }),
+    commit: () => {
+      setArmedFireAtEligible(false);
+      run({ kind: 'commit' });
+    },
+    disarm: () => {
+      setArmedFireAtEligible(false);
+      run({ kind: 'disarm' });
+    },
+    redirect: (opt) => {
+      setArmedFireAtEligible(false);
+      run({ kind: 'redirect', directive: opt.directive });
+    },
     outcome,
   };
 }

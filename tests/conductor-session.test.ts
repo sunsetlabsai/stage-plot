@@ -141,13 +141,82 @@ describe('redirect equivalence', () => {
   });
 });
 
-// ── shouldAutoFire (chunk-4 invariant) ───────────────────────────────────────
+// ── shouldAutoFire (chunk-5 §3.5 gate) ───────────────────────────────────────
+const repeatCal = () =>
+  compileOrThrow(['b1', 'b2', 'b3', 'b4'], [
+    { id: 'R', kind: 'repeatStart', barId: 'b1', edge: 'start' },
+    { id: 'E1', kind: 'ending', repeatStartId: 'R', barIds: ['b3'], numbers: [1] },
+    { id: 'E2', kind: 'ending', repeatStartId: 'R', barIds: ['b4'], numbers: [2] },
+  ]);
+
 describe('shouldAutoFire', () => {
-  it('returns false for every session (auto-fire is OFF in chunk 4)', () => {
+  it('nothing armed → false', () => {
     let s = freshSession();
+    s = dispatch(s, { kind: 'advance' }, 1).session; // current = b1, but no armed
     expect(shouldAutoFire(s)).toBe(false);
-    s = dispatch(s, { kind: 'arm', armed: { fireAt: 'b1', directive: { kind: 'jumpTo', barId: 'b2' } } }, 1).session;
-    s = dispatch(s, { kind: 'advance' }, 2).session; // lands on b1 — still false
+  });
+
+  it('no current (fresh session) → false even when armed', () => {
+    const s = dispatch(
+      freshSession(),
+      { kind: 'arm', armed: { fireAt: 'b1', directive: { kind: 'jumpTo', barId: 'b3' } } },
+      1,
+    ).session;
+    expect(s.state.current).toBeNull();
     expect(shouldAutoFire(s)).toBe(false);
+  });
+
+  it('armed but current.barId !== fireAt (before arrival) → false', () => {
+    let s = freshSession();
+    s = dispatch(s, { kind: 'advance' }, 1).session; // current = b1
+    s = dispatch(s, { kind: 'arm', armed: { fireAt: 'b2', directive: { kind: 'jumpTo', barId: 'b4' } } }, 2).session;
+    expect(shouldAutoFire(s)).toBe(false);
+  });
+
+  it('armed, current.barId === fireAt, holding == null → true', () => {
+    let s = freshSession();
+    s = dispatch(s, { kind: 'advance' }, 1).session; // current = b1
+    s = dispatch(s, { kind: 'arm', armed: { fireAt: 'b1', directive: { kind: 'jumpTo', barId: 'b3' } } }, 2).session;
+    expect(shouldAutoFire(s)).toBe(true);
+  });
+
+  it('armed, at fireAt, but holding != null (vamping) → false (§3.5 hold guard)', () => {
+    let s = freshSession(repeatCal());
+    s = dispatch(s, { kind: 'advance' }, 1).session; // current = b1 (the repeat start)
+    s = dispatch(s, { kind: 'arm', armed: { fireAt: 'b1', directive: { kind: 'jumpTo', barId: 'b3' } } }, 2).session;
+    s = dispatch(s, { kind: 'redirect', directive: { kind: 'hold', repeatStartId: 'R' } }, 3).session;
+    expect(s.state.vm.holding).toBe('R');
+    expect(shouldAutoFire(s)).toBe(false); // refuses even at the fire bar
+    // release clears the vamp → the same armed marker now fires
+    s = dispatch(s, { kind: 'redirect', directive: { kind: 'release', repeatStartId: 'R' } }, 4).session;
+    expect(s.state.vm.holding).toBeNull();
+    expect(shouldAutoFire(s)).toBe(true);
+  });
+
+  it('fires once: after a commit clears armed, a subsequent evaluation → false', () => {
+    let s = freshSession();
+    s = dispatch(s, { kind: 'advance' }, 1).session; // current = b1
+    s = dispatch(s, { kind: 'arm', armed: { fireAt: 'b1', directive: { kind: 'jumpTo', barId: 'b3' } } }, 2).session;
+    expect(shouldAutoFire(s)).toBe(true);
+    s = dispatch(s, { kind: 'commit' }, 3).session; // clears armed
+    expect(s.state.armed).toBeNull();
+    expect(shouldAutoFire(s)).toBe(false);
+  });
+});
+
+// ── dispatch chain invariant: auto-fire ≡ go-tap in outcome ───────────────────
+describe('auto-fire ≡ go-tap (dispatch chain)', () => {
+  it('advance-onto-fireAt then commit lands the committed jump with armed cleared', () => {
+    // arm a jump that fires on arrival at b2; advance until current === fireAt, then
+    // the auto-fire path commits exactly the go-tap commit (same end-state).
+    let s = freshSession();
+    s = dispatch(s, { kind: 'arm', armed: { fireAt: 'b2', directive: { kind: 'jumpTo', barId: 'b4' } } }, 1).session;
+    s = dispatch(s, { kind: 'advance' }, 2).session; // b1
+    s = dispatch(s, { kind: 'advance' }, 3).session; // b2 === fireAt
+    expect(s.state.current?.barId).toBe('b2');
+    expect(shouldAutoFire(s)).toBe(true); // the hook would commit here
+    const afterFire = dispatch(s, { kind: 'commit' }, 4).session;
+    expect(afterFire.state.armed).toBeNull();
+    expect(afterFire.state.current?.barId).toBe('b4'); // committed jump cursor
   });
 });

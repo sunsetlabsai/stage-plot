@@ -87,15 +87,29 @@ export function dispatch(
   return { session, outcome: outcome.status };
 }
 
-// The auto-fire seam (design §4), defined + stubbed OFF. Chunk 4: always false
-// (go-tap only). The SIGNATURE + the post-advance / `current.barId === armed.fireAt`
-// / "the hook should now dispatch one commit" contract are fixed now so chunk 5
-// keeps the SAME public API. HONEST scope (design §4): chunk 5 is NOT a pure
-// body-swap — it replaces this body with the §3.5 confidence gate AND ANDs in the
-// arm-time `fireAtEligible` result, which lives as LOCAL hook state OUTSIDE this
-// predicate (the wire ConductorState stays chunk-3-frozen):
+// The auto-fire seam (design-conductor-chunk5.md §2). Chunk 5a fills the chunk-4
+// hard-OFF stub with the §3.5 gate for MANUAL advance. SAME signature (chunk-4
+// frozen). The frozen hook contract ANDs in the arm-time local bit:
 //   if (armedFireAtEligible && shouldAutoFire(session)) commit();
+//
+// Three guards, evaluated POST-advance:
+//   1. `armed` present       — auto-fire only ever fires an already-telegraphed
+//      change; it never invents one.
+//   2. `current === fireAt`   — the playhead has ARRIVED at the fire bar. In 5a the
+//      playhead moves only on the MD's manual advance, so arrival is EXACT (the §3.5
+//      position gate satisfied by construction, NOT by a confidence estimate — D1).
+//   3. `vm.holding == null`   — §3.5 verbatim "no unresolved hold/vamp": never
+//      auto-fire a structural change while the band is parked on a vamp; the MD must
+//      `release` (or go-tap) first. The one place the gate refuses even at the bar.
+//
+// Fires exactly once: `commit` clears `armed` (chunk-3 reducer), so the next
+// post-advance evaluation sees `armed == null` → false. No latch needed.
+// Clock is NOT read in 5a (D1/D2) — 5b owns the whole clock layer.
 export function shouldAutoFire(session: ConductorSession): boolean {
-  void session; // chunk 5 reads session.current/armed/clock here; chunk 4 is a hard OFF stub
-  return false; // go-tap is the floor; auto-fire is a chunk-5, clock-gated luxury
+  const s = session.state;
+  const armed = s.armed;
+  if (!armed) return false; // nothing telegraphed
+  if (!s.current || s.current.barId !== armed.fireAt) return false; // not yet at the fire bar
+  if (s.vm.holding != null) return false; // §3.5: never auto-fire through an unresolved hold/vamp
+  return true; // arrival is exact (manual advance) → fire
 }

@@ -3593,11 +3593,15 @@ function ChartNavigator({
             canAdvance={!conductor.done}
             canArm={!conductor.done}
             ignored={conductor.outcome === 'ignored'}
+            autoFire={conductor.autoFireOn}
+            holding={conductor.state?.vm.holding != null}
+            canArmNextSection={conductor.canArmNextSection}
             onAdvance={conductor.advance}
             onArm={conductor.arm}
             onCommit={conductor.commit}
             onDisarm={conductor.disarm}
             onRedirect={conductor.redirect}
+            onToggleAutoFire={() => conductor.setAutoFire(!conductor.autoFireOn)}
             onStop={() => setConducting(false)}
           />
         );

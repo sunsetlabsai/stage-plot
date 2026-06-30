@@ -26,11 +26,15 @@ export interface ConductorClusterProps {
   canAdvance: boolean; // false at song end (§3 guard)
   canArm: boolean; // false at song end (§3 guard)
   ignored: boolean; // last action was a dead tap — surface it honestly (D3)
+  autoFire: boolean; // §3 opt-in auto-fire toggle (default OFF = chunk-4 go-tap floor)
+  holding: boolean; // vm.holding != null — surfaces the §3.5 "release to fire" copy
+  canArmNextSection: boolean; // §4 — a next-section boundary exists ahead (else disable)
   onAdvance: () => void;
-  onArm: (t: JumpTarget, exit?: ExitPolicy['kind']) => void;
+  onArm: (t: JumpTarget, exit?: ExitPolicy['kind'], fireAt?: 'next-bar' | 'next-section') => void;
   onCommit: () => void;
   onDisarm: () => void;
   onRedirect: (opt: RedirectOption) => void;
+  onToggleAutoFire: () => void;
   onStop: () => void;
 }
 
@@ -43,14 +47,22 @@ export default function ConductorCluster({
   canAdvance,
   canArm,
   ignored,
+  autoFire,
+  holding,
+  canArmNextSection,
   onAdvance,
   onArm,
   onCommit,
   onDisarm,
   onRedirect,
+  onToggleAutoFire,
   onStop,
 }: ConductorClusterProps) {
   const [picking, setPicking] = useState(false);
+  // §3.1/§4 — the structural fire-at choice for the next arm. Default 'next-bar'
+  // (chunk-4 behaviour). Forced back to 'next-bar' when no section boundary is ahead.
+  const [fireAt, setFireAt] = useState<'next-bar' | 'next-section'>('next-bar');
+  const effectiveFireAt = canArmNextSection ? fireAt : 'next-bar';
 
   return (
     <div className="bg-zinc-900 border-t border-zinc-800 text-xs">
@@ -59,9 +71,21 @@ export default function ConductorCluster({
         <span className="font-bold uppercase tracking-wide text-amber-400">
           Local MD mode
         </span>
-        <button onClick={onStop} className="text-zinc-500 hover:text-white underline">
-          Exit
-        </button>
+        <div className="flex items-center gap-3">
+          {/* §4 — auto-fire opt-in toggle (default OFF = go-tap floor). */}
+          <button
+            onClick={onToggleAutoFire}
+            aria-pressed={autoFire}
+            className={`rounded px-2 py-0.5 ${
+              autoFire ? 'bg-emerald-700 text-white' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+            }`}
+          >
+            Auto-fire {autoFire ? 'on' : 'off'}
+          </button>
+          <button onClick={onStop} className="text-zinc-500 hover:text-white underline">
+            Exit
+          </button>
+        </div>
       </div>
 
       {!active ? (
@@ -98,7 +122,14 @@ export default function ConductorCluster({
                 <span className="text-zinc-400">
                   Change pending &rarr;{' '}
                   <span className="font-bold text-amber-300">{armedSummary.targetLabel}</span>
-                  <span className="text-zinc-500"> @ bar {armedSummary.fireAtLabel}</span>
+                  {/* §4 copy keys on the toggle + hold state. */}
+                  <span className="text-zinc-500">
+                    {autoFire
+                      ? holding
+                        ? ' · release to fire'
+                        : ` · fires at bar ${armedSummary.fireAtLabel}`
+                      : ` @ bar ${armedSummary.fireAtLabel} · tap Go`}
+                  </span>
                 </span>
                 <button
                   onClick={onCommit}
@@ -124,6 +155,35 @@ export default function ConductorCluster({
                     close
                   </button>
                 </div>
+                {/* §4 — structural fire-at choice (never a raw count). Next section
+                    disables when no boundary is ahead (vamping / last section). */}
+                <div className="flex items-center gap-2">
+                  <span className="text-zinc-500">Fire at:</span>
+                  <button
+                    onClick={() => setFireAt('next-bar')}
+                    aria-pressed={effectiveFireAt === 'next-bar'}
+                    className={`px-2 py-0.5 rounded ${
+                      effectiveFireAt === 'next-bar'
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+                    }`}
+                  >
+                    Next bar
+                  </button>
+                  <button
+                    onClick={() => setFireAt('next-section')}
+                    disabled={!canArmNextSection}
+                    aria-pressed={effectiveFireAt === 'next-section'}
+                    title={canArmNextSection ? undefined : 'no section ahead'}
+                    className={`px-2 py-0.5 rounded disabled:opacity-30 disabled:cursor-not-allowed ${
+                      effectiveFireAt === 'next-section'
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+                    }`}
+                  >
+                    Next section
+                  </button>
+                </div>
                 <div className="flex flex-wrap gap-1">
                   {targets.map((t) => (
                     // Composite key: armableTargets can legally emit several targets for
@@ -132,7 +192,7 @@ export default function ConductorCluster({
                     <span key={`${t.kind}:${t.barId}:${t.label}`} className="inline-flex items-center gap-1">
                       <button
                         onClick={() => {
-                          onArm(t);
+                          onArm(t, undefined, effectiveFireAt);
                           setPicking(false);
                         }}
                         className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
@@ -143,7 +203,7 @@ export default function ConductorCluster({
                         <button
                           key={ex}
                           onClick={() => {
-                            onArm(t, ex);
+                            onArm(t, ex, effectiveFireAt);
                             setPicking(false);
                           }}
                           className="px-1.5 py-1 rounded bg-zinc-800 text-amber-300 hover:bg-zinc-700"

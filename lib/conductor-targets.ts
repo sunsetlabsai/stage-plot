@@ -222,6 +222,36 @@ export function fireAtEligible(compiled: CompiledRoadmap, vm: VMState, fireAt: s
   return pos >= nextEmitPos;
 }
 
+// The (D6) "next section boundary" fire default — the bar id at which the playhead
+// FIRST crosses into a different labelled section, walking the VM FORWARD from
+// `vm` (design-conductor-chunk5.md §3.1). Used as the alternate fireAt when the MD
+// arms with "fire at: next section" instead of "next bar". A bounded stepVM walk:
+//   • bound by `compiled.cap` — the same vamp/repeat-freeze guard the batch runner
+//     uses, so a parked vamp can never spin this forever (Codex R1 HIGH-3);
+//   • a crossing counts ONLY into a NON-NULL section different from `here` (the
+//     anchor's section) — inter-section null bars are not a boundary (Codex R2);
+//   • undefined when the song ends first, or the playhead never leaves `here`
+//     (no boundary ahead) → the UI disables the "next section" choice.
+export function nextSectionBoundaryBarId(
+  compiled: CompiledRoadmap,
+  cal: ChartCalibration,
+  vm: VMState,
+  currentBarId: string | undefined,
+): string | undefined {
+  const ordered = barsInOrder(cal);
+  const secOf = new Map(ordered.map((b) => [b.id, b.sectionId]));
+  const here = currentBarId ? secOf.get(currentBarId) ?? null : null;
+  let cur = vm;
+  for (let i = 0; i < compiled.cap; i++) {
+    const step = stepVM(compiled, cur);
+    if (!step.transition) return undefined; // song end before any boundary
+    const newSec = secOf.get(step.transition.barId) ?? null;
+    if (newSec != null && newSec !== here) return step.transition.barId;
+    cur = step.state;
+  }
+  return undefined;
+}
+
 // ── Insert-and-return: resolve the return leg for a backward SECTION call ──────
 // (design-conductor-insert-return.md §2/§3). Returns the bare positions the VM
 // needs, or null when the call is forward / not a section / has no anchor / has no

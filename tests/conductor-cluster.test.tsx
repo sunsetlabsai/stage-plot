@@ -30,11 +30,15 @@ function props(over: Partial<ConductorClusterProps> = {}): ConductorClusterProps
     canAdvance: true,
     canArm: true,
     ignored: false,
+    autoFire: false,
+    holding: false,
+    canArmNextSection: false,
     onAdvance: vi.fn(),
     onArm: vi.fn(),
     onCommit: vi.fn(),
     onDisarm: vi.fn(),
     onRedirect: vi.fn(),
+    onToggleAutoFire: vi.fn(),
     onStop: vi.fn(),
     ...over,
   };
@@ -87,8 +91,8 @@ describe('ConductorCluster', () => {
     fireEvent.click(screen.getByRole('button', { name: /Arm change/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Coda' }));
     expect(onArm).toHaveBeenCalledTimes(1);
-    expect(onArm).toHaveBeenCalledWith(expect.objectContaining({ barId: 'b3' }));
-    // arm with no second arg ⇒ no exit policy was chosen
+    // chunk 5: arm now carries a structural fireAt (default 'next-bar'); no exit chosen.
+    expect(onArm).toHaveBeenCalledWith(expect.objectContaining({ barId: 'b3' }), undefined, 'next-bar');
     expect(onArm.mock.calls[0][1]).toBeUndefined();
   });
 
@@ -97,7 +101,7 @@ describe('ConductorCluster', () => {
     render(<ConductorCluster {...props({ onArm, targets: [target('b3', 'Coda', ['alCoda'])] })} />);
     fireEvent.click(screen.getByRole('button', { name: /Arm change/ }));
     fireEvent.click(screen.getByRole('button', { name: 'al Coda' }));
-    expect(onArm).toHaveBeenCalledWith(expect.objectContaining({ barId: 'b3' }), 'alCoda');
+    expect(onArm).toHaveBeenCalledWith(expect.objectContaining({ barId: 'b3' }), 'alCoda', 'next-bar');
   });
 
   it('renders the armed badge and fires onCommit / onDisarm from Go / Cancel', () => {
@@ -133,5 +137,81 @@ describe('ConductorCluster', () => {
     expect(screen.queryByText(/Not available right now/)).toBeNull();
     rerender(<ConductorCluster {...props({ ignored: true })} />);
     expect(screen.getByText(/Not available right now/)).toBeInTheDocument();
+  });
+
+  // ── chunk 5: auto-fire toggle + hold-aware copy + fire-at selector (§4) ──────
+  it('renders the auto-fire toggle reflecting state and flips onToggleAutoFire', () => {
+    const onToggleAutoFire = vi.fn();
+    const { rerender } = render(<ConductorCluster {...props({ autoFire: false, onToggleAutoFire })} />);
+    const off = screen.getByRole('button', { name: /Auto-fire off/ });
+    expect(off).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(off);
+    expect(onToggleAutoFire).toHaveBeenCalledOnce();
+    rerender(<ConductorCluster {...props({ autoFire: true, onToggleAutoFire })} />);
+    expect(screen.getByRole('button', { name: /Auto-fire on/ })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('armed-summary copy: auto-fire OFF shows "@ bar N · tap Go"', () => {
+    render(
+      <ConductorCluster
+        {...props({ autoFire: false, armedSummary: { targetLabel: 'Chorus', fireAtLabel: '24' } })}
+      />,
+    );
+    expect(screen.getByText(/@ bar 24 · tap Go/)).toBeInTheDocument();
+  });
+
+  it('armed-summary copy: auto-fire ON, not holding shows "fires at bar N"', () => {
+    render(
+      <ConductorCluster
+        {...props({
+          autoFire: true,
+          holding: false,
+          armedSummary: { targetLabel: 'Chorus', fireAtLabel: '24' },
+        })}
+      />,
+    );
+    expect(screen.getByText(/fires at bar 24/)).toBeInTheDocument();
+  });
+
+  it('armed-summary copy: auto-fire ON, holding shows "release to fire"', () => {
+    render(
+      <ConductorCluster
+        {...props({
+          autoFire: true,
+          holding: true,
+          armedSummary: { targetLabel: 'Chorus', fireAtLabel: '24' },
+        })}
+      />,
+    );
+    expect(screen.getByText(/release to fire/)).toBeInTheDocument();
+  });
+
+  it('Go and Disarm are always present regardless of the auto-fire toggle', () => {
+    render(
+      <ConductorCluster
+        {...props({ autoFire: true, armedSummary: { targetLabel: 'Chorus', fireAtLabel: '24' } })}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Go' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+  });
+
+  it('disables the "Next section" fire-at option when no boundary is ahead', () => {
+    render(<ConductorCluster {...props({ canArmNextSection: false, targets: [target('b3', 'Coda')] })} />);
+    fireEvent.click(screen.getByRole('button', { name: /Arm change/ }));
+    expect(screen.getByRole('button', { name: 'Next section' })).toBeDisabled();
+  });
+
+  it('arms with fireAt="next-section" when that boundary is chosen', () => {
+    const onArm = vi.fn();
+    render(
+      <ConductorCluster
+        {...props({ onArm, canArmNextSection: true, targets: [target('b3', 'Coda')] })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Arm change/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next section' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Coda' }));
+    expect(onArm).toHaveBeenCalledWith(expect.objectContaining({ barId: 'b3' }), undefined, 'next-section');
   });
 });

@@ -3,11 +3,12 @@ import {
   armableTargets,
   availableRedirects,
   nextEmittedBarId,
+  nextSectionBoundaryBarId,
   fireAtEligible,
   resolveArm,
   resolveInsertReturn,
 } from '../lib/conductor-targets';
-import { compileRoadmap, initVM, type CompiledRoadmap, type VMState } from '../lib/roadmap-vm';
+import { compileRoadmap, initVM, stepVM, applyOverride, type CompiledRoadmap, type VMState } from '../lib/roadmap-vm';
 import { barsInOrder } from '../lib/chart-calibration';
 import type { ChartCalibration, SectionAnchor, RoadmapMarker } from '../lib/types';
 
@@ -406,5 +407,98 @@ describe('insert-and-return', () => {
       fireAt: 'b4',
       directive: { kind: 'jumpTo', barId: 'b1' },
     });
+  });
+});
+
+// ── nextSectionBoundaryBarId (chunk-5 D6 boundary-snap, §3.1) ─────────────────
+describe('nextSectionBoundaryBarId', () => {
+  // Step the VM forward `n` emitted bars; return { vm, lastBarId } so a test can pin
+  // the cursor mid-section and pass the matching currentBarId.
+  function walk(compiled: CompiledRoadmap, n: number): { vm: VMState; lastBarId: string } {
+    let vm = initVM(compiled);
+    let lastBarId = '';
+    for (let i = 0; i < n; i++) {
+      const step = stepVM(compiled, vm);
+      if (!step.transition) break;
+      lastBarId = step.transition.barId;
+      vm = step.state;
+    }
+    return { vm, lastBarId };
+  }
+
+  // Intro b1,b2 / Verse b3,b4 / Chorus b5,b6 — linear, no markers.
+  const threeSec = makeCal(
+    [
+      { id: 'b1', sectionId: 'sI' },
+      { id: 'b2', sectionId: 'sI' },
+      { id: 'b3', sectionId: 'sV' },
+      { id: 'b4', sectionId: 'sV' },
+      { id: 'b5', sectionId: 'sC' },
+      { id: 'b6', sectionId: 'sC' },
+    ],
+    [sec('sI', 'Intro'), sec('sV', 'Verse'), sec('sC', 'Chorus')],
+  );
+
+  it('returns the next non-null, differing section head ahead of the cursor', () => {
+    const c = compileCal(threeSec);
+    const { vm, lastBarId } = walk(c, 1); // emitted b1, cursor in Intro
+    expect(lastBarId).toBe('b1');
+    expect(nextSectionBoundaryBarId(c, threeSec, vm, lastBarId)).toBe('b3'); // Verse head
+  });
+
+  it('a mid-section cursor walks to the NEXT section head (not the current one)', () => {
+    const c = compileCal(threeSec);
+    const { vm, lastBarId } = walk(c, 3); // emitted b1,b2,b3 → cursor in Verse
+    expect(lastBarId).toBe('b3');
+    expect(nextSectionBoundaryBarId(c, threeSec, vm, lastBarId)).toBe('b5'); // Chorus head
+  });
+
+  it('skips a null-sectionId gap between two labelled sections (Codex R2)', () => {
+    // Intro b1,b2 / null b3 / Verse b4 — the gap is NOT "the next section".
+    const gap = makeCal(
+      [
+        { id: 'b1', sectionId: 'sI' },
+        { id: 'b2', sectionId: 'sI' },
+        { id: 'b3', sectionId: null },
+        { id: 'b4', sectionId: 'sV' },
+      ],
+      [sec('sI', 'Intro'), sec('sV', 'Verse')],
+    );
+    const c = compileCal(gap);
+    const { vm, lastBarId } = walk(c, 1); // cursor in Intro
+    expect(nextSectionBoundaryBarId(c, gap, vm, lastBarId)).toBe('b4'); // walks past the null gap
+  });
+
+  it('returns undefined when no boundary lies ahead (in the last section)', () => {
+    const c = compileCal(threeSec);
+    const { vm, lastBarId } = walk(c, 5); // emitted through b5 → cursor in Chorus (last)
+    expect(lastBarId).toBe('b5');
+    expect(nextSectionBoundaryBarId(c, threeSec, vm, lastBarId)).toBeUndefined();
+  });
+
+  it('returns undefined for a section-less (all-null) chart — no snap target', () => {
+    const flat = makeCal([{ id: 'b1' }, { id: 'b2' }, { id: 'b3' }]);
+    const c = compileCal(flat);
+    const { vm, lastBarId } = walk(c, 1);
+    expect(nextSectionBoundaryBarId(c, flat, vm, lastBarId)).toBeUndefined();
+  });
+
+  it('a vamp (holding set) with no section change ahead → undefined within cap, not a freeze', () => {
+    // One section, a real repeat; while holding, stepVM loops forever — the cap bounds it.
+    const vamp = makeCal(
+      [
+        { id: 'b1', sectionId: 'sV' },
+        { id: 'b2', sectionId: 'sV' },
+        { id: 'b3', sectionId: 'sV' },
+        { id: 'b4', sectionId: 'sV' },
+      ],
+      [sec('sV', 'Verse')],
+      [rstart('R', 'b1'), ending('E1', 'R', ['b3'], [1]), ending('E2', 'R', ['b4'], [2])],
+    );
+    const c = compileCal(vamp);
+    const { vm, lastBarId } = walk(c, 1); // cursor in the only section
+    const held = applyOverride(c, vm, { kind: 'hold', repeatStartId: 'R' });
+    expect(held.holding).toBe('R');
+    expect(nextSectionBoundaryBarId(c, vamp, held, lastBarId)).toBeUndefined();
   });
 });
