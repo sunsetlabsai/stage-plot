@@ -1,13 +1,14 @@
 # Conductor Authority — Chunk 5b: the clock layer + OQ-1 resolution (§5.1, §8.2-1)
 
-**Status:** **v0.2 — DESIGN-ONLY, pre-Codex.** Resolves epic open item **§8.2-1**
-(`docs/design-conductor-authority.md:207` — *"Listener placement + clock latency"*),
-the single decision fence on chunk 5b. Builds on chunk 5a (gated auto-fire on arrival,
-SHIPPED to prod `de8e414`) and the epic §5.1 clock frame. **No code in this pass.** v0.2
-folds the S-current dialogue with Graham (§7): MD-mic v1 / node UAT-deferred; clock DOES
-auto-advance the playhead (motion is the feature, MD tap owns position); add `song.bpm` +
-click; tap-tempo + tuning knobs left open. On full sign-off: flip the epic §8.2-1 status
-to *resolved → this doc*, then Codex, then build.
+**Status:** **v0.3 — DESIGN-ONLY, pre-Codex; all decisions locked.** Resolves epic open
+item **§8.2-1** (`docs/design-conductor-authority.md:207` — *"Listener placement + clock
+latency"*), the single decision fence on chunk 5b. Builds on chunk 5a (gated auto-fire on
+arrival, SHIPPED to prod `de8e414`) and the epic §5.1 clock frame. **No code in this
+pass.** v0.3 closes the §7 dialogue with Graham: MD-mic v1 / node UAT-deferred; clock
+auto-advances the playhead (motion is the feature, MD align tap owns position); add
+`song.bpm` + click + **tap-tempo**; tuning knobs defer-with-default (T ≈ 2 bars, bound ≈ 8
+bars). Only node-placement specifics remain (UAT). Ready to flip the epic §8.2-1 status to
+*resolved → this doc* and hand to Codex.
 
 > **The chunk-5a / chunk-5b split (do not blur it).** 5a auto-*fires* an armed change
 > when the MD's *manual* advance lands on the fire bar — it reads **no clock** (D1).
@@ -232,17 +233,23 @@ this pass keeps that gate explicit rather than letting a half-trustworthy clock 
    drift, re-zeros at sections, forward only). My earlier "display-only / conservative"
    framing was wrong and is dropped. Only the auto-*fire* of armed structural changes is
    confidence-gated (§5), never the motion.
-3. **Static-BPM (Q3) — RESOLVED + builds work.** **Add a `bpm` field to the song (DB
+3. **Static-BPM + tap-tempo (Q3) — RESOLVED.** **Add a `bpm` field to the song (DB
    migration)** as the fallback rung; it doubles as a **click/metronome** the MD runs off
-   the stated tempo to guide the band, with the same section true-up. *Sub-question still
-   OPEN:* do we also want **tap-tempo** (MD taps beats to set/adjust the click live)? D2
-   deferred it; "guide tempo / align on the fly" may want it. (Recommend: small, add it.)
-4. **Tuning knobs (§5) — recommend DEFER-with-default.** `coasting` timeout *T* (how long to
-   glide on a lost signal before dropping a rung) and the bars-since-anchor bound (how far
-   past an MD anchor auto-fire stays trusted). In the MD-true-up-every-section model these
-   rarely bite, so ship sane defaults and tune in UAT rather than pick blind now.
+   the stated tempo to guide the band, with the same section true-up. **Tap-tempo is IN**
+   (overrides D2's deferral): the MD taps a few beats to set/adjust the click tempo live —
+   a manual feeder for the static-BPM rung and an on-the-fly tempo align.
+4. **Tuning knobs (§5) — RESOLVED: defer-with-default** (ship as named, surfaced constants,
+   tune in UAT). Both fail safe (drop to click/manual rather than be confidently wrong):
+   - **`coasting` timeout *T* ≈ 2 bars (a few seconds):** how long the clock glides at
+     last-good tempo on a lost signal before dropping a rung. Long enough to ride a
+     momentary dropout, short enough to catch a real stop within a phrase.
+   - **bars-since-anchor bound ≈ 8 bars (one phrase):** how far past an MD align tap the
+     clock will auto-*fire* a structural change before it refuses without a fresh tap.
+     (Motion is never bounded — this gates only the commit.) The MD-true-up-every-section
+     model keeps changes comfortably inside this window.
 
-**Still open:** node placement specifics (UAT), tap-tempo yes/no (3), the two knob values (4).
+**Still open:** listener-node placement specifics — a **UAT** question (does MD-mic source
+quality suffice, or is a clean-source node warranted). Everything else is locked.
 
 ---
 
@@ -250,9 +257,10 @@ this pass keeps that gate explicit rather than letting a half-trustworthy clock 
 
 Mirrors epic §9 item 5; gated commits, Codex per chunk.
 
-0. **`song.bpm` migration (§3):** add the stated-tempo field (Neon-safe: comment-free
-   bundle, no advisory locks); read door + edit in the song/chart model. Unblocks the
-   static-BPM rung + the click. Smallest first chunk; ships value (the click) before any
+0. **`song.bpm` migration + click + tap-tempo (§3):** add the stated-tempo field (Neon-safe:
+   comment-free bundle, no advisory locks); read door + edit in the song/chart model; a
+   click/metronome off the stated tempo; **tap-tempo** to set/adjust it live. Unblocks the
+   static-BPM rung. Smallest first chunk; ships standalone value (the click) before any
    audio work.
 1. **MD align/true-up tap + re-anchor (§1):** the position primitive — an MD gesture that
    seeds the start downbeat and re-zeros the clock at the current bar (forward, at section
@@ -273,7 +281,7 @@ Mirrors epic §9 item 5; gated commits, Codex per chunk.
    MD-mic); the actual beat-tracker; the logging/validation harness that promotes the
    audio rung to auto-fire-trusted. (Node placement depends on epic chunk-3 transport;
    MD-mic needs no wire.)
-- *Deferred (post-v1):* tap-tempo feeder (decision 3); listener-node placement (UAT).
+- *Deferred (post-v1):* listener-node placement (UAT-informed — §2.2).
 
 ---
 
