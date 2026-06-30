@@ -1,7 +1,13 @@
 # Conductor 5b · chunk 2 — the static-BPM motion driver (the ladder + the loop)
 
-**Status:** DESIGN — Codex R1 folded (2 HIGH + 1 MEDIUM, below). DESIGN-ONLY, no code in this
-pass. **R1 folds:** HIGH-1 — the multi-tick batching race (a render-only `liveRef` doesn't gate
+**Status:** DESIGN — Codex R1 folded (2 HIGH + 1 MEDIUM) + R2 folded (1 HIGH). DESIGN-ONLY, no
+code. **R2 fold:** the §4 `prevBpm` tempo-rebaseline detector bypassed the R1 `driverRef`
+invariant — it did a bare `setReckoning` while the authoritative driver kept the stale motion
+baseline, so the next tick would compute `owed` off the old baseline with the new bpm (re-opening
+the jump/stall bug). Fixed: the rebaseline is now itself a `driverRef` transaction (read
+`driverRef.current.reckoning` → write `driverRef` synchronously → mirror `setReckoning`), making
+the invariant uniform across **every** seam (manual / tick / reset / tempo detector). Added a
+mid-clock `song.bpm`-change fake-timer regression (§10). **R1 folds:** HIGH-1 — the multi-tick batching race (a render-only `liveRef` doesn't gate
 re-entrancy; two ticks before a commit double-bump `barsSinceAnchor`) → an authoritative
 synchronously-written `driverRef` owning `{session,reckoning,stalled}` as the loop's source of
 truth + re-entrancy gate (§3.2), with the two-due-ticks-in-one-`act` regression. HIGH-2 — the
@@ -283,18 +289,33 @@ export function rebaselineMotion(r: ClockReckoning, newBpm: number, now: number)
 }
 ```
 
-**Establishing `baselineTempoBpm` (the chunk-1 seam, §1).** A render-time prev-value detector
-(the chunk-0 `prevBpm` idiom, *not* a setState-in-effect) re-baselines whenever the prop `bpm`
-changes — **including the first transition from `null`/unset to a known bpm**, which is how
-`baselineTempoBpm` first becomes non-null:
+**Establishing `baselineTempoBpm` (the chunk-1 seam, §1) — and it MUST be a `driverRef`
+transaction** (Codex R2 HIGH). A render-time prev-value detector (the chunk-0 `prevBpm` idiom,
+*not* a setState-in-effect) re-baselines whenever the prop `bpm` changes — **including the first
+transition from `null`/unset to a known bpm**. But a rebaseline is a *reckoning mutation*, so it
+falls under the §3.2 invariant: **read from `driverRef.current.reckoning`, write `driverRef`
+synchronously, then mirror with `setReckoning`** — exactly like the manual seams and the tick. A
+bare `setReckoning((r) => rebaselineMotion(…))` would update React state while the *driver* kept
+the stale `motionBaselineAtMs`/`baselineTempoBpm`, so the next tick (which reads
+`driverRef.current.reckoning`, never React state) would compute `owed` off the old baseline with
+the *new* `cfgRef.bpm` — re-opening the jump/stall bug R1 just closed:
 
 ```ts
 const [prevBpm, setPrevBpm] = useState<number | null>(null);  // starts null so a known bpm fires once
 if (bpm !== prevBpm) {
   setPrevBpm(bpm);
-  if (bpm != null) setReckoning((r) => rebaselineMotion(r, bpm, Date.now()));
+  if (bpm != null) {
+    const next = rebaselineMotion(driverRef.current.reckoning, bpm, Date.now());
+    driverRef.current = { ...driverRef.current, reckoning: next };   // SYNC — driver is authoritative
+    setReckoning(next);                                              // render mirror
+  }
 }
 ```
+
+This is a *targeted* driver write (conditional on a real tempo change, computed from the
+authoritative reckoning), **not** the blanket `driverRef = live` overwrite §3.2 forbids — it
+cannot clobber an in-flight tick (single-threaded; the tick already wrote its advance, and the
+detector captures `barsAtMotionBaseline = barsSinceAnchor` *including* those clock bars).
 
 **Why the driver uses the *prop* `bpm` for `barMs`, not `reckoning.baselineTempoBpm`.** Because
 `motionBaselineAtMs` is reset on *every* tempo change (above) AND on every manual re-anchor
@@ -481,8 +502,9 @@ cluster + page + their tests, vitest fake timers):**
   actual re-anchor, not the action name, §6).
 - a manual `advance` mid-clock re-anchors (next tick no spurious advance).
 - a `redirect` mid-clock leaves the reckoning untouched and does not clear a stall.
-- a `song.bpm` prop change re-baselines: the next advance lands at the new `barMs`, **no jump,
-  no multi-bar catch-up, no stall**.
+- a `song.bpm` prop change **mid-clock** re-baselines *through `driverRef`* (Codex R2 HIGH): the
+  next tick does **not** advance or stall until exactly one *new-tempo* bar elapses — proving the
+  driver, not just React state, saw the rebaseline (**no jump, no multi-bar catch-up, no stall**).
 - clock ON + auto-fire ON, clock drives onto `fireAt` ⇒ marker **stays armed** (chunk-2 defer);
   a manual `commit` then fires it.
 - `clockOn=false` ⇒ loop idle, all 5a hook tests still green (parity).
@@ -509,10 +531,13 @@ ref; Codex per chunk.
   `act()` ⇒ exactly one advance, `+1` exactly (§10, 2b). (`CLOCK_TICK_MS` no longer load-bearing
   for correctness, only for resolution — §12-Q2.)
 - **(c) `barMs` from prop vs `baselineTempoBpm`.** Justified in §4: every tempo change resets
-  `motionBaselineAtMs`, so elapsed-since-baseline is always at the prop tempo. `baselineTempoBpm`
-  is bookkeeping + the change-detector record. (If Codex prefers the driver read
-  `reckoning.baselineTempoBpm` for self-containment, that's a one-line swap once §4's
-  first-known-bpm rebaseline guarantees it non-null — noted §12-Q1.)
+  `motionBaselineAtMs` *through `driverRef`* (R2 fix), so elapsed-since-baseline is always at the
+  prop tempo. `baselineTempoBpm` is bookkeeping + the change-detector record. (If Codex prefers
+  the driver read `reckoning.baselineTempoBpm` for self-containment, that's a one-line swap once
+  §4's first-known-bpm rebaseline guarantees it non-null — noted §12-Q1.) **The rebaseline is now
+  itself a `driverRef` transaction (R2 HIGH), so EVERY reckoning/session/stalled mutation seam —
+  manual run/applyWithAutoFire/align, the tick, the reset, AND the tempo detector — writes the
+  authoritative ref before mirroring to React state. That uniformity IS the invariant.**
 - **(d) Seed-gating vs an empty chart.** `current` stays null on an empty/`done` chart, so the
   loop is correctly inert (same honesty as chunk-1 align).
 - **(e) Clock on + never seeded.** Loop idle until "On the 1". No auto-start, no count-in
