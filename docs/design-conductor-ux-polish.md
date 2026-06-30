@@ -86,47 +86,81 @@ ever wanted is out of scope; today the clock has one song-level tempo, by design
 Surface a BPM control in the **in-show setlist editor** (`SetupSetlistTable` row), reusing the
 existing `TapTempo` component, wired to a song-table write:
 
-- On change → `PATCH /api/songs/update { id: songId, bpm }` (same endpoint/shape as Library) →
-  on success, update the local `SetlistSong.bpm` so Perform reads it immediately (no reload).
-- **Library-linked songs only** (`songId` present). Inline/legacy setlist songs (no `songId`)
-  have no canonical row to write — keep them BPM-less (they already fall to the `manual` rung,
-  the honest floor). Show the control disabled with a hint, or omit it, for inline songs
-  (decision Q3).
-- Because the write is global, show a quiet hint near the control — *"sets this song's tempo
-  everywhere"* — so the MD isn't surprised (decision Q2).
+- On change → **`PUT /api/songs/update { id: songId, bpm }`** (the existing endpoint + method —
+  it implements PUT only, and Library writes via `method: 'PUT'`; **not** PATCH) → on success,
+  patch the local `SetlistSong.bpm` so Perform reads it immediately (no reload).
+- **Owner-only control (Codex R1 HIGH-1).** `/api/songs/update` is owner-scoped — it verifies
+  `songs.owner_id === user.id` and returns 404 otherwise. A show **editor** can edit the in-show
+  setlist (`key`/`lead`, per-show config) but **cannot** mutate the owner's canonical song row. So
+  the BPM control is **gated on `isOwner`** — editors do not see it (no silent "control shown,
+  write 404s"). This is a deliberate asymmetry: editors keep per-show `key`/`lead`, but song-level
+  tempo stays owner-only. Letting editors mutate canonical owner-library tempo would be a separate,
+  deliberate RBAC widening (endpoint + auth change) — explicitly **out of scope** here (Q4 fence).
+- **Library-linked songs only** (`songId` present). Inline/legacy setlist songs (no `songId`) have
+  no canonical row to write — **omit the control** for them (resolved Q3). They keep falling to the
+  `manual` rung (the honest floor).
+- **Global-write hint (resolved Q2 = yes).** Because the write is global, show a quiet hint near the
+  control — *"sets this song's tempo everywhere"* — so the owner isn't surprised.
+
+### Add-time BPM threading (Codex R1 MEDIUM)
+`/api/songs` GET returns `bpm`, but `AddSongFromLibrary.handleSelect` currently **drops** it from
+the selected-song payload, and the new setlist row lands BPM-less — so adding an existing
+library song that already has a BPM shows no row tempo until reload or a manual edit. The build
+**must** thread `bpm` through: include `bpm: song.bpm` in the `onAddSong({...})` payload and carry
+it onto the new `SetlistSong` row. (Page anchors: the select handler ~`page.tsx:3862`; the add
+payload mapping; the row builder in `onAddSong`.)
 
 ### Why the setlist editor (not add-to-show, not create-chart)
 The setlist row is where per-song show metadata is already edited (`key`/`lead`), so it's the
-natural home and covers both "song already in the show" and (after add) "song just added." Add-time
-BPM entry is a nice-to-have but redundant once the row has it; create-chart is a separate flow and
-out of scope for this pass.
+natural home and covers both "song already in the show" and (after add) "song just added." With the
+add-time threading above, an added song's existing BPM shows immediately; the row control then
+covers create/override.
 
 ### Change
-- `app/[owner]/[show]/page.tsx` — `SetupSetlistTable` row: add the `TapTempo` control for rows with
-  a `songId`; an `onBpmChange(idx, songId, bpm)` handler that calls the songs-update endpoint and
-  patches local setlist state.
-- No schema change (column exists). No new endpoint (`/api/songs/update` already takes `bpm`).
+- `app/[owner]/[show]/page.tsx`:
+  - `SetupSetlistTable` row — add the `TapTempo` control **only** for rows with a `songId` **and**
+    when `isOwner`; an `onBpmChange(idx, songId, bpm)` handler that PUTs `/api/songs/update` and
+    patches local setlist state; the global-write hint adjacent.
+  - `AddSongFromLibrary.handleSelect` + `onAddSong` row builder — thread `bpm` through (MEDIUM).
+- No schema change (column exists). No new endpoint, no auth change (`PUT /api/songs/update` already
+  takes `bpm`, owner-scoped — which is exactly why the control is owner-only).
 
 ---
 
-## Open questions for Graham
+## Resolved decisions (Graham + Codex R1)
 
-- **Q1 — toggle form:** (A) `Clock: on/off` colon readout [recommended] vs (B) label + pill.
-- **Q2 — global-write hint:** show *"sets this song's tempo everywhere"* near the in-show BPM
-  control? [recommend yes — the write is genuinely global]
-- **Q3 — inline songs (no `songId`):** disabled control with a hint, or omit the control entirely?
-  [recommend omit — quieter; inline songs are the legacy minority]
-- **Q4 — scope fence:** confirm this pass is the 3 items only, and that per-show tempo *override*
-  (a setlist-level bpm distinct from the song) stays out of scope.
+- **Q1 — toggle form → (A) colon readout.** `Clock: on/off` and `Auto-fire: on/off`. Minimal diff,
+  no layout shift, reads as state not action.
+- **Q2 — global-write hint → yes.** Show *"sets this song's tempo everywhere"* near the in-show BPM
+  control (the write is genuinely global).
+- **Q3 — inline songs (no `songId`) → omit.** No control at all for legacy/inline rows; they keep
+  falling to the `manual` rung.
+- **Q4 — scope fence → confirmed.** This pass is the 3 items only; per-show tempo *override* stays
+  out of scope.
+- **Owner-only authorization (Codex R1 HIGH-1).** The BPM control is gated on `isOwner` — editors
+  don't see it. `/api/songs/update` is owner-scoped; widening it to editors is out of scope (§3, Q4).
+- **Method = PUT (Codex R1 HIGH-2).** The endpoint implements `PUT` only (Library writes via PUT);
+  the spec calls `PUT /api/songs/update`, not PATCH.
+- **Add-time bpm threading (Codex R1 MEDIUM).** `AddSongFromLibrary` must thread `bpm` through so an
+  added library song shows its tempo without reload (§3 Add-time BPM threading).
 
-## Build chunks (after approval + Codex)
+**Status:** §1 + §2 (A+B presentational) are **GO** from Codex R1. §3 (C, BPM-in-show) is GO once the
+above three Codex R1 findings are folded — which they now are.
+
+## Build chunks (after Codex R2 GO)
 1. **A+B presentational** (toggle readouts + shadow hint) — copy-only, ConductorCluster, +tests for
-   the rendered labels.
-2. **C BPM-in-show** — TapTempo in SetupSetlistTable + song-update wiring + local patch; tests for
-   the write call shape and the disabled/omitted inline case.
+   the rendered labels. (Codex R1 already GO on §1+§2.)
+2. **C BPM-in-show** —
+   - `SetupSetlistTable` row: `TapTempo` shown **only** when `isOwner && row.songId` (Codex R1 HIGH-1);
+     `onBpmChange(idx, songId, bpm)` → `PUT /api/songs/update { id: songId, bpm }` (Codex R1 HIGH-2) →
+     patch local `SetlistSong.bpm`; global-write hint adjacent (Q2).
+   - `AddSongFromLibrary.handleSelect` + `onAddSong` row builder: thread `bpm` through (Codex R1 MEDIUM).
+   - No schema change, no new endpoint, no auth change.
 
 ## Test plan
 - ConductorCluster renders `Clock: on`/`Clock: off` and `Auto-fire: on/off` per state.
-- Detection row shows the measuring-only subtext only while running.
-- SetupSetlistTable: BPM change for a `songId` row calls `/api/songs/update` with `{ id, bpm }` and
-  reflects locally; inline (no `songId`) row behaves per Q3.
+- Detection row shows the measuring-only subtext only while `micStatus === 'running'`.
+- SetupSetlistTable: for an owner + `songId` row, BPM change calls `PUT /api/songs/update` with
+  `{ id, bpm }` and patches local state; **non-owner** sees no control; **inline** (no `songId`) row
+  sees no control (Q3 omit).
+- AddSongFromLibrary: selecting a library song with a BPM carries `bpm` onto the new setlist row.
