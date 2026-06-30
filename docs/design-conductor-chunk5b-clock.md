@@ -1,13 +1,17 @@
 # Conductor Authority — Chunk 5b: the clock layer + OQ-1 resolution (§5.1, §8.2-1)
 
-**Status:** **v0.6.2 — DESIGN-ONLY, post-Codex-R5 (1 MEDIUM, 2 LOW, no HIGH blocker).**
-R5 folds: **MEDIUM** — narrowed the implicit re-anchor to true *position* gestures (align tap,
-manual `advance`, future `seek`); a path-reshaping **redirect** (`anotherRound`/`hold`/
-`release`/`resetJump`, none of which moves `current`) no longer refreshes trust / re-enables
-auto-fire (§5.1, §5.3, §5.6-i). **LOW** — retitled the retained α material as a *future
-seek-chunk note* (β is the v1 recommendation), and moved the backward-re-seat eligibility test
-out of v1 chunk 3 into the deferred `seek` chunk (β v1 tests overrun→manual instead).
-Prior status (R4): **post-buildability-check; fork reframed.**
+**Status:** **v0.6.3 — DESIGN-ONLY, post-Codex-R6 (1 HIGH, 2 LOW).**
+R6 folds: **HIGH** — the confidence gate keyed on the *action's* provenance (manual vs clock),
+but `release` is a manual redirect that merely *opens* a gate over a position the **clock** may
+have placed. The clock can drive `current` onto `fireAt` while `holding != null` (low conf, far
+past anchor); a later manual `release` would then auto-commit an **untrusted** clock arrival,
+bypassing confidence. Fix: a new `reckoning.positionTrusted` bit records the **arrival's**
+provenance (true on a manual position gesture, false on a clock-driven advance); the gate
+requires `clockConfidenceOk` iff `!positionTrusted`, so it is caller-agnostic and a release
+over a clock-placed `fireAt` is refused while the genuine 5a vamp-release still fires
+(§5.1, §5.2, §5.3). **LOW** — tightened two broad phrasings ("MD cue"/"MD nav" → "MD position
+gesture") and updated the stale "Ready for R5" header.
+Prior status (R5): narrowed re-anchor to position gestures; (R4): buildability check, fork reframed.
 Resolves epic open item **§8.2-1** (`docs/design-conductor-authority.md:207` — *"Listener
 placement + clock latency"*), the single decision fence on chunk 5b. Builds on chunk 5a (gated
 auto-fire on arrival, SHIPPED to prod `de8e414`). **No code in this pass.** v0.3 closed the §7
@@ -39,8 +43,9 @@ validate itself:
   phase but not the bound (§1, §5.1, §5.3, §4.3).
 - **HIGH (R3) — the 5b gate could break the shipped 5a manual floor.** A manual advance onto
   `fireAt` is exact and must fire even with the clock coasting/off. Fix (§5.2): pull the
-  confidence-AND **out of `shouldAutoFire` (stays frozen 5a) into the clock *driver*** — only
-  clock-driven advances consult confidence; manual taps use the verbatim 5a path.
+  confidence-AND **out of `shouldAutoFire` (stays frozen 5a) into the clock *driver***.
+  *(Refined by R6 below: the requirement keys on the ARRIVAL's provenance — `!positionTrusted`
+  — not the action's, to also cover a `release` over a clock-placed `fireAt`.)*
 - **HIGH (R3) — elapsed-bars formula off by 1000** (ms × bpm/60, not /60000). Fixed §5.3.
 - **MEDIUM (R3)** — `barsSinceAnchor`/timestamps are **MD-local**, not on the wire, updated
   atomically with the advance (§5.1 wire-vs-local split); **MEDIUM (R3)** — re-seat
@@ -56,7 +61,7 @@ validate itself:
 One product fork — *can the redline move backward on a re-anchor* — remains Graham's call
 (§5.4 / Decision 5). The honest framing after R4: **β is buildable today; α is a separate
 `seek` primitive (own chunk).** My corrected recommendation is **β for v1, α as a fast-follow
-if UAT warrants** — but the v1 build is unblocked under β either way. Ready for R5.
+if UAT warrants** — but the v1 build is unblocked under β either way. Ready for next review.
 
 > **The chunk-5a / chunk-5b split (do not blur it).** 5a auto-*fires* an armed change
 > when the MD's *manual* advance lands on the fire bar — it reads **no clock** (D1).
@@ -268,7 +273,7 @@ waiting on a tap. **Degrade precision, never honesty.**
 ### 4.3 Re-arm on recovery
 
 When telemetry returns to HIGH, the clock climbs back to the `live` **rung** at the next
-clean phase point (a section head or an MD cue), not mid-span — recovery re-acquires tempo at
+clean phase point (a section head or an MD position gesture), not mid-span — recovery re-acquires tempo at
 a downbeat rather than snapping the playhead, same discipline as initial acquisition. Note
 this is a *rung* (audio-quality) recovery and a *phase* re-acquire; it does **not** by itself
 refresh position **trust** — `barsSinceAnchor` keeps climbing until an MD gesture re-anchors
@@ -318,6 +323,8 @@ type ClockReckoning = {            // MD-LOCAL — never broadcast
   motionBaselineAtMs: number;      // MD-clock instant the CURRENT tempo baseline began (motion reckons elapsed from THIS)
   baselineTempoBpm: number;        // tempo in force at motionBaselineAtMs
   barsAtMotionBaseline: number;    // the value of barsSinceAnchor captured at motionBaselineAtMs
+  // ── arrival provenance (how `current` got where it is — R6 HIGH) ──
+  positionTrusted: boolean;        // true ⇒ current was placed by a MANUAL position gesture; false ⇒ the CLOCK drove it here
 };
 ```
 
@@ -379,22 +386,38 @@ plan):
 
 - **`shouldAutoFire(session)` stays verbatim 5a** — `armed ∧ current.barId === fireAt ∧
   holding == null`, rising-edge. It is the *exact-arrival* predicate, nothing more.
-- **The confidence gate is the *driver's* business.** Provenance is structural, not a flag in
-  the session: a **manual** advance comes from the component's `advance()` (the 5a path) and
-  auto-fires on `shouldAutoFire` **unconditionally** — the 5a floor, untouched. A
-  **clock-driven** advance comes from the motion loop (§5.3), which BEFORE chaining the commit
-  additionally requires `clockConfidenceOk(reckoning, rung)`:
+- **The confidence requirement keys on the ARRIVAL's provenance, NOT the action's (R6 HIGH).**
+  My v0.6.0–.2 framing was "manual *action* ⇒ skip confidence; clock *action* ⇒ require it."
+  That has a hole Codex R6 found: **`release` is a manual redirect but it does not *cause* the
+  arrival — it merely *opens* a gate over a position the clock may have placed.** In 5a,
+  `release` fires an armed marker when `current` is parked on `fireAt` and `holding` clears. In
+  5b the **clock** can drive `current` onto `fireAt` while `holding != null` (low confidence,
+  far past anchor); a later manual `release` would then open `shouldAutoFire` and — under the
+  old per-action flag — fire **without** a confidence check, auto-committing an *untrusted*
+  clock arrival. So the gate must ask **"how did `current` get onto `fireAt`?"** not **"what
+  action am I running now?"** That is exactly `reckoning.positionTrusted` (§5.1):
+  - **set `positionTrusted = true`** on every **manual position gesture** — `advance()` /
+    align tap / future `seek` — *as it places `current`*;
+  - **set `positionTrusted = false`** on every **clock-driven** advance (§5.3).
+- **The gate then requires confidence iff the arrival was clock-driven:** an auto-fire (from
+  `advance` arrival OR `release` opening) commits only if `positionTrusted` **OR**
+  `clockConfidenceOk(reckoning, rung)`:
   - `barsSinceAnchor ≤ bound` (§7-4), AND
   - rung confidence — `live`: `confidence ≥ HIGH`; `static-bpm`: `alignedAtMs` within the
     bound is the warrant (the click has no audio confidence); `coasting`: never auto-fires.
-- So a noisy/low-confidence clock still **moves** the redline; it just declines to auto-commit
-  a structural change — leaving the armed marker for the MD's manual tap, which fires via the
-  plain 5a path. Motion is never gated; only the *clock-initiated* auto-commit is.
+- This preserves the 5a floor (a **manual** advance onto `fireAt` sets `positionTrusted = true`
+  in the same step → fires unconditionally) AND closes the release hole (a release over a
+  **clock-placed** `fireAt` has `positionTrusted = false` → must pass `clockConfidenceOk`; a
+  release over a **manually-placed** `fireAt`, the genuine 5a vamp-release, still fires). A
+  noisy/low-confidence clock still **moves** the redline; it just declines to auto-commit,
+  leaving the marker for the MD's manual tap. Motion is never gated; only the *untrusted*
+  auto-commit is.
 
-Concretely the existing helper gains a caller-supplied flag —
-`applyWithAutoFire(before, res, { requireClockConfidence })` — manual `advance()`/`redirect()`
-pass `false` (5a verbatim); the motion loop passes `true`. `shouldAutoFire`'s signature and
-body are untouched.
+Concretely the existing helper takes the requirement **derived from state**, not a per-caller
+constant — `applyWithAutoFire(before, res, { requireClockConfidence: !reckoning.positionTrusted })`
+— so it is caller-agnostic: `advance()`, the motion loop, and `release` all pass the *same*
+expression, and the answer falls out of how `current` was placed. `shouldAutoFire`'s signature
+and body are untouched (it stays the verbatim 5a exact-arrival predicate).
 
 This is where **`armedFireAtEligible` becomes genuinely load-bearing** (epic/5a note): under
 dead-reckoning the playhead may *not* land on `fireAt` exactly, so the arm-time
@@ -414,10 +437,11 @@ instance, MD device only):
   motionBaselineAtMs) / barMs)` — reckoned from the **motion** baseline, NOT the trust anchor
   (R4 HIGH-1: the two desync on a tempo re-baseline). If `expected` exceeds the driven count
   `barsSinceAnchor` by **one**, the loop emits **exactly one** clock-driven `advance` — routed
-  through the **same rising-edge `applyWithAutoFire` chain** with `requireClockConfidence: true`
-  (§5.2) — increments `barsSinceAnchor`, and **stops for this tick**, re-reading state next tick. It NEVER loops N
-  advances in one turn: that is what could skip a fire bar, fire after passing it, or advance
-  again past a fresh commit target. The loop also halts immediately when the chain reports
+  through the **same rising-edge `applyWithAutoFire` chain** (the requirement falls out of
+  `!positionTrusted`, §5.2) — **sets `positionTrusted = false`** (the clock placed this bar),
+  increments `barsSinceAnchor`, and **stops for this tick**, re-reading state next tick. It
+  NEVER loops N advances in one turn: that is what could skip a fire bar, fire after passing
+  it, or advance again past a fresh commit target. The loop also halts immediately when the chain reports
   `commit` / `hold` / `done` / `ignored` — one transition at a time, always re-evaluated.
   `advance` stays the **only** `stepVM` caller (§1).
 - **More than one bar owed in a tick ⇒ a stall, not catch-up.** In the foreground a bar is
@@ -428,17 +452,20 @@ instance, MD device only):
   waits for the MD's next align tap; the playhead freezes where it last legitimately was
   rather than lurching ahead. (Same bound that gates auto-fire, reused.)
 - **A manual align tap cancels any pending motion and re-seeds.** The tap is a trust re-anchor:
-  it writes a new `anchor`, sets `alignedAtMs = now`, resets `barsSinceAnchor = 0`, and resets
-  the motion axis too (`motionBaselineAtMs = now`, `barsAtMotionBaseline = 0`); the next tick
-  reckons from the *new* baseline. No queued advance survives a re-anchor.
+  it writes a new `anchor`, sets `alignedAtMs = now`, resets `barsSinceAnchor = 0`, resets the
+  motion axis too (`motionBaselineAtMs = now`, `barsAtMotionBaseline = 0`), and **sets
+  `positionTrusted = true`** (a human just placed the playhead — §5.2); the next tick reckons
+  from the *new* baseline. No queued advance survives a re-anchor.
 - **A manual POSITION gesture while the clock runs is an implicit re-anchor — but a redirect
   is NOT (MINE, §5.6-i; narrowed per Codex R5 MEDIUM).** A trust re-anchor means "the MD just
   asserted *we are here now*," which is true only of gestures that **move `current`**: an
   align/true-up tap, a **manual `advance`** (the MD stepped the playhead — the loop's count
   would otherwise desync from the cursor it just moved), and the future position-writing
   `seek` (§5.4). Those re-anchor onto the resulting `current` (`barsSinceAnchor = 0`,
-  `alignedAtMs = now`, `motionBaselineAtMs = now`, `barsAtMotionBaseline = 0`). **The shipped
-  redirects do NOT** — `anotherRound` / `hold` / `release` / `resetJump` ("Re-arm jump")
+  `alignedAtMs = now`, `motionBaselineAtMs = now`, `barsAtMotionBaseline = 0`) and **set
+  `positionTrusted = true`** (§5.2 — the arrival is human-placed, so a later `release` over it
+  fires unconditionally as in 5a). **The shipped redirects do NOT** — `anotherRound` / `hold`
+  / `release` / `resetJump` ("Re-arm jump")
   reshape VM state but leave `current` unchanged (`conductor-state.ts:221`; `redirect` moves
   the next-step seed only). They are not position assertions, so they must **not** reset
   `barsSinceAnchor` or `alignedAtMs` — doing so would silently re-enable clock auto-fire off a
@@ -668,13 +695,15 @@ Mirrors epic §9 item 5; gated commits, Codex per chunk.
    that seeds the start downbeat and re-zeros the clock onto an anchor bar (writes the full
    `anchor {barId, pass}`, resets the trust axis `barsSinceAnchor = 0` / `alignedAtMs = now`
    and the motion axis `motionBaselineAtMs = now` / `barsAtMotionBaseline = 0`, §5.1).
-   **Forward-only under β (the v1 build).** A free-span align tap is a forward true-up; an MD
-   nav mid-clock is an implicit re-anchor (§5.6-i). Backward re-seat is NOT in this chunk — it
-   needs the deferred `seek` directive (§5.4 R4 HIGH-2). This is the load-bearing half of
-   "clock owns speed, MD owns place"; it stands alone atop the click even before audio.
-   **Tests:** forward true-up; free-span tap stays forward; manual nav re-anchors both axes;
-   align cancels pending motion; clock-overrun degrades to `manual` (β). *(The backward-re-seat
-   + armed-marker-recompute tests move to the future `seek` chunk, §5.4.)*
+   **Forward-only under β (the v1 build).** A free-span align tap is a forward true-up; a
+   manual **position gesture** (align tap / manual `advance`) mid-clock is an implicit
+   re-anchor, but a redirect is not (§5.6-i). Backward re-seat is NOT in this chunk — it needs
+   the deferred `seek` directive (§5.4 R4 HIGH-2). This is the load-bearing half of "clock owns
+   speed, MD owns place"; it stands alone atop the click even before audio. **Tests:** forward
+   true-up; free-span tap stays forward; manual **advance/align** re-anchors both axes AND sets
+   `positionTrusted`; **a redirect does NOT re-anchor**; align cancels pending motion;
+   clock-overrun degrades to `manual` (β). *(The backward-re-seat + armed-marker-recompute
+   tests move to the future `seek` chunk, §5.4.)*
 2. **`ConductorClock` + ladder reducer + motion shell (pure where possible, tested):** the
    §4.1 state machine as a pure function of `(telemetry, nowMs, ClockReckoning)` → the §5.1
    `ConductorClock`; receipt-based reckoning + freshness (`ageMsAtSend`, §3); `barBeats` from
@@ -693,17 +722,23 @@ Mirrors epic §9 item 5; gated commits, Codex per chunk.
    **a manual ADVANCE mid-clock re-anchors both axes** AND **a redirect
    (anotherRound/hold/release/resetJump) mid-clock does NOT touch trust** (§5.6-i, Codex R5);
    **tab-sleep / long gap → drop rung, never fast-forward missed bars**.
-3. **`clockConfidenceOk` in the driver + bounded `fireAtEligible` (tested):** `shouldAutoFire`
-   stays **verbatim 5a, frozen** (R3 HIGH-2); the confidence gate is the driver's
-   `clockConfidenceOk(reckoning, rung)` consulted only for **clock-driven** advances (§5.2);
-   `fireAtEligible` → bounded VM walk (§5.2). **Tests: a MANUAL
-   advance onto `fireAt` fires even while coasting / far-past-anchor / clock off** (the 5a
-   floor, R3 HIGH-2); clock-driven within-bound+HIGH fires; clock-driven low-conf /
-   far-past-anchor refuses but **motion continues**; static-bpm clock-fires only just after an
-   MD gesture; **β clock-overrun → drops to `manual`, and an armed marker stays pending /
-   refuses by confidence — NO backward re-seat in v1** (§5.4); 5a rising-edge parity under a
-   clock-CREATED arrival; 5a manual path unchanged when clock absent. *(The stranded-`fireAt`
-   eligibility-recompute test belongs to the deferred `seek` chunk, §5.4 — not v1.)*
+3. **`clockConfidenceOk` keyed on arrival provenance + bounded `fireAtEligible` (tested):**
+   `shouldAutoFire` stays **verbatim 5a, frozen** (R3 HIGH-2); the confidence requirement is
+   `!positionTrusted` (§5.2 / R6 HIGH) — an auto-fire (from an `advance` arrival **or** a
+   `release` opening) needs `clockConfidenceOk(reckoning, rung)` iff the arrival onto `fireAt`
+   was **clock-driven**; `fireAtEligible` → bounded VM walk (§5.2). **Tests: a MANUAL advance
+   onto `fireAt` fires even while coasting / far-past-anchor / clock off** (the 5a floor, R3
+   HIGH-2); clock-driven within-bound+HIGH fires; clock-driven low-conf / far-past-anchor
+   refuses but **motion continues**; static-bpm clock-fires only just after an MD gesture;
+   **the R6 repro — the clock drives `current` onto `fireAt` while `holding != null` with
+   `clockConfidenceOk = false`, then a manual `release` must NOT commit** (untrusted clock
+   arrival, `positionTrusted = false`); **its mirror — a MANUALLY-placed `fireAt` under hold,
+   then `release`, DOES fire** even with the clock low/off (5a vamp-release preserved,
+   `positionTrusted = true`); **β clock-overrun → drops to `manual`, armed marker stays
+   pending / refuses by confidence — NO backward re-seat in v1** (§5.4); 5a rising-edge parity
+   under a clock-CREATED arrival; 5a manual path unchanged when clock absent. *(The
+   stranded-`fireAt` eligibility-recompute test belongs to the deferred `seek` chunk, §5.4 —
+   not v1.)*
 4. **Telemetry ingest + MD re-emit + detector + validation/shadow mode (§6):** listener
    `TempoTelemetry` → MD validate → `clock` dispatch under `(epoch, seq)` (in-process for
    MD-mic). The detector ships **shadow-only** (drives nothing, logs detected-vs-actual);
