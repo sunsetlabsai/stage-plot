@@ -2,17 +2,6 @@ import { NextRequest } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { normalizeSongKey } from '@/lib/normalize';
-import { isValidBpm } from '@/lib/tempo';
-
-// Parse an incoming bpm value: absent ⇒ undefined (don't touch the column), explicit
-// null/'' ⇒ null (cleared), a valid stated tempo ⇒ the integer; anything else throws.
-function parseBpm(raw: unknown): number | null | undefined {
-  if (raw === undefined) return undefined;
-  if (raw === null || raw === '') return null;
-  const n = typeof raw === 'string' ? Number(raw) : raw;
-  if (typeof n !== 'number' || !isValidBpm(n)) throw new Error('invalid bpm');
-  return n;
-}
 
 // PUT /api/songs/update — update a song (owner-only)
 export async function PUT(request: NextRequest) {
@@ -28,13 +17,6 @@ export async function PUT(request: NextRequest) {
 
   if (!id) {
     return Response.json({ error: 'Song id is required' }, { status: 400 });
-  }
-
-  let bpm: number | null | undefined;
-  try {
-    bpm = parseBpm(body.bpm);
-  } catch {
-    return Response.json({ error: 'BPM must be a whole number between 20 and 400' }, { status: 400 });
   }
 
   const admin = getSupabaseAdmin();
@@ -56,7 +38,6 @@ export async function PUT(request: NextRequest) {
   if (lead !== undefined) updates.lead = lead;
   if (notes !== undefined) updates.notes = notes;
   if (key !== undefined) updates.key = key || null;
-  if (bpm !== undefined) updates.bpm = bpm;
 
   // If title changed, recompute song_key and cascade to chart_library
   if (typeof title === 'string' && title.trim()) {
@@ -98,7 +79,7 @@ export async function PUT(request: NextRequest) {
     .from('songs')
     .update(updates)
     .eq('id', id)
-    .select('id, song_key, title, artist, key, lead, notes, bpm, updated_at')
+    .select('id, song_key, title, artist, key, lead, notes, updated_at')
     .single();
 
   if (error) {

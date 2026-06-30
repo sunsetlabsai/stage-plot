@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation';
 import type { Chart, Song } from '@/lib/types';
 import ManageChartsModal from '@/components/ManageChartsModal';
 import RoadmapBuilder from '@/components/RoadmapBuilder';
-import TapTempo from '@/components/TapTempo';
 import { suggestDuplicateTitle, applyUploadedChart, availableRoles } from '@/lib/chart-management';
 
 export default function LibraryPage() {
@@ -17,7 +16,7 @@ export default function LibraryPage() {
   const [addingNew, setAddingNew] = useState(false);
   const [managingId, setManagingId] = useState<string | null>(null);
   const [buildingId, setBuildingId] = useState<string | null>(null);
-  const [duplicating, setDuplicating] = useState<{ title: string; artist: string; key: string; lead: string; notes: string; bpm: number | null } | null>(null);
+  const [duplicating, setDuplicating] = useState<{ title: string; artist: string; key: string; lead: string; notes: string } | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -33,11 +32,11 @@ export default function LibraryPage() {
     loadSongs();
   }, []);
 
-  async function handleCreate(title: string, key: string, lead: string, artist: string, notes: string, bpm: number | null) {
+  async function handleCreate(title: string, key: string, lead: string, artist: string, notes: string) {
     const res = await fetch('/api/songs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, key, lead, artist, notes, bpm }),
+      body: JSON.stringify({ title, key, lead, artist, notes }),
     });
 
     if (res.ok) {
@@ -51,7 +50,7 @@ export default function LibraryPage() {
     return data.error || 'Failed to create song';
   }
 
-  async function handleUpdate(id: string, updates: { title?: string; key?: string; lead?: string; artist?: string; notes?: string; bpm?: number | null }) {
+  async function handleUpdate(id: string, updates: { title?: string; key?: string; lead?: string; artist?: string; notes?: string }) {
     const res = await fetch('/api/songs/update', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -108,14 +107,13 @@ export default function LibraryPage() {
       key: song.key ?? '',
       lead: song.lead ?? '',
       notes: song.notes ?? '',
-      bpm: song.bpm ?? null,
     });
     setAddingNew(false);
     setEditingId(null);
   }
 
-  async function handleDuplicateSave(title: string, key: string, lead: string, artist: string, notes: string, bpm: number | null) {
-    const err = await handleCreate(title, key, lead, artist, notes, bpm);
+  async function handleDuplicateSave(title: string, key: string, lead: string, artist: string, notes: string) {
+    const err = await handleCreate(title, key, lead, artist, notes);
     if (!err) setDuplicating(null);
     return err;
   }
@@ -210,7 +208,7 @@ export default function LibraryPage() {
               <SongForm
                 key={song.id}
                 initial={song}
-                onSave={(title, key, lead, artist, notes, bpm) => handleUpdate(song.id, { title, key, lead, artist, notes, bpm })}
+                onSave={(title, key, lead, artist, notes) => handleUpdate(song.id, { title, key, lead, artist, notes })}
                 onCancel={() => setEditingId(null)}
               />
             ) : (
@@ -291,9 +289,6 @@ function SongRow({
             {song.key}
           </span>
         )}
-        {song.bpm != null && (
-          <span className="block text-[10px] text-zinc-500 mt-0.5">{song.bpm} bpm</span>
-        )}
       </span>
       <span className="text-sm text-zinc-400 truncate">{song.lead || '—'}</span>
       <span className="text-center">
@@ -351,8 +346,8 @@ function SongForm({
   onCancel,
   submitLabel,
 }: {
-  initial?: { title: string; artist?: string; key: string | null; lead: string; notes: string; bpm?: number | null };
-  onSave: (title: string, key: string, lead: string, artist: string, notes: string, bpm: number | null) => Promise<string | null>;
+  initial?: { title: string; artist?: string; key: string | null; lead: string; notes: string };
+  onSave: (title: string, key: string, lead: string, artist: string, notes: string) => Promise<string | null>;
   onCancel: () => void;
   submitLabel?: string;
 }) {
@@ -361,7 +356,6 @@ function SongForm({
   const [key, setKey] = useState(initial?.key ?? '');
   const [lead, setLead] = useState(initial?.lead ?? '');
   const [notes, setNotes] = useState(initial?.notes ?? '');
-  const [bpm, setBpm] = useState<number | null>(initial?.bpm ?? null);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -375,7 +369,7 @@ function SongForm({
     if (!title.trim() || saving) return;
     setSaving(true);
     setError('');
-    const err = await onSave(title.trim(), key.trim(), lead.trim(), artist.trim(), notes.trim(), bpm);
+    const err = await onSave(title.trim(), key.trim(), lead.trim(), artist.trim(), notes.trim());
     if (err) {
       setError(err);
       setSaving(false);
@@ -427,7 +421,6 @@ function SongForm({
         maxLength={500}
         className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-white outline-none focus:border-blue-500"
       />
-      <TapTempo bpm={bpm} onChange={setBpm} />
       {error && <p className="text-sm text-red-400">{error}</p>}
       <div className="flex gap-2 justify-end">
         <button
