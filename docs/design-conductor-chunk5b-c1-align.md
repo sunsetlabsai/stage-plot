@@ -1,9 +1,11 @@
 # Conductor 5b · chunk 1 — the MD align / true-up tap + re-anchor (the position primitive)
 
-**Status:** DESIGN — Codex R1 folded, awaiting R2. DESIGN-ONLY, no code in this pass. Builds
-on chunk 0 (`song.bpm` + click + tap-tempo, SHIPPED to prod `3eae7ae`) and the parent
-clock-layer design `docs/design-conductor-chunk5b-clock.md` (v0.6.6, Codex R9 GO). This doc is
-the build spec for **§8 item 1** of that parent; it does **not** reopen the parent (it is GO'd).
+**Status:** **DESIGN-DONE — Codex R2 GO** (no HIGH/MEDIUM; one LOW wording nit folded — the
+`anchor: null` gloss now reads "no human/trust anchor ever asserted", §2.1). Cleared for build
+pending Graham's GO. DESIGN-ONLY, no code in this pass. Builds on chunk 0 (`song.bpm` + click +
+tap-tempo, SHIPPED to prod `3eae7ae`) and the parent clock-layer design
+`docs/design-conductor-chunk5b-clock.md` (v0.6.6, Codex R9 GO). This doc is the build spec for
+**§8 item 1** of that parent; it does **not** reopen the parent (it is GO'd).
 
 **R1 folds:** (MEDIUM — `anchor` semantics) the machine-placement rows (`autofire`/`clock`)
 no longer overwrite `anchor`; it moves **only** on a manual re-anchor, so it unambiguously
@@ -101,8 +103,10 @@ export interface ClockReckoning {
   // future seek); a MACHINE placement (autofire / clock) NEVER writes it — `current`
   // (in ConductorState) already carries the machine-placed position, so anchor stays
   // unambiguously "last human anchor", in lockstep with alignedAtMs + barsSinceAnchor.
-  // null ⇔ "no position ever asserted" — the §5.2 unconfirmed-start state, in lockstep
-  // with alignedAtMs === null. Parent §5.1 shows the STEADY-STATE (non-null) shape; chunk 1
+  // null ⇔ "no human/trust anchor ever asserted" — the §5.2 unconfirmed-start state, in
+  // lockstep with alignedAtMs === null. (A machine placement can move `current` while anchor
+  // stays null; it is `current`, not anchor, that tracks position.) Parent §5.1 shows the
+  // STEADY-STATE (non-null) shape; chunk 1
   // adds the pre-first-anchor init form (refinement noted to Codex — §7-Q1).
   anchor: { barId: string; pass: number } | null;
   // ── trust axis (resets ONLY on a real MD position gesture) ──
