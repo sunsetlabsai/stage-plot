@@ -133,6 +133,28 @@ describe('useTempoDetector lifecycle', () => {
     expect(stop).toHaveBeenCalledTimes(1); // exactly one graph installed ⇒ released once
   });
 
+  it('releases the acquired mic when Web Audio setup fails after getUserMedia (no leak)', async () => {
+    // getUserMedia SUCCEEDS, then the AudioContext fails on resume() — the failure window
+    // between mic acquisition and ref-install where release() can't reach the locals.
+    class FailingAudioContext extends FakeAudioContext {
+      resume = vi.fn(async () => {
+        throw new Error('audio boom');
+      });
+    }
+    (window as unknown as { AudioContext: unknown }).AudioContext =
+      FailingAudioContext as unknown as typeof AudioContext;
+    const stop = vi.fn();
+    const stream = { getTracks: () => [{ stop }] } as unknown as MediaStream;
+    mockGetUserMedia(async () => stream);
+
+    const { result } = renderHook(() => useTempoDetector({ prefer: null, onTelemetry: vi.fn() }));
+    await act(async () => {
+      await result.current.enable();
+    });
+    await waitFor(() => expect(result.current.status).toBe('error'));
+    expect(stop).toHaveBeenCalledTimes(1); // acquired mic released despite the setup failure
+  });
+
   it('tears down its own graph when disable() lands mid-acquire (no leaked mic)', async () => {
     installAudioContext();
     const { resolve } = deferredGetUserMedia();

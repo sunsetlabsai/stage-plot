@@ -171,27 +171,27 @@ export function useTempoDetector(args: UseTempoDetectorArgs): TempoDetectorContr
     const myGen = genRef.current; // the supersede token captured for this acquire
     setLastError(null);
     setStatus('requesting');
+    // The acquired resources live in function-scope locals until ownership transfers to the
+    // refs (the very last step). EVERY exit that doesn't transfer — a Web-Audio setup throw, a
+    // getUserMedia rejection, or a supersede (disable/unmount mid-acquire) — leaves them here,
+    // and the single `finally` is the ONE teardown point. release() can only reach the refs, so
+    // it can't free a half-built graph; the locals are this acquire's own responsibility.
+    let stream: MediaStream | null = null;
+    let ctx: AudioContext | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         // Raw signal — the DSP wants the unprocessed mic (§2.2).
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       });
       const Ctor = window.AudioContext ?? (window as WindowWithWebkitAudio).webkitAudioContext;
       if (!Ctor) throw new Error('Web Audio unsupported');
-      const ctx = new Ctor();
+      ctx = new Ctor();
       await ctx.resume();
-      // Build into LOCALS — install into the shared refs only after the supersede check, so a
-      // disable()/unmount during the async window never leaves an untracked graph behind.
       const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = FFT_SIZE;
       source.connect(analyser); // NOT to destination — no monitoring, no feedback loop
-      if (genRef.current !== myGen) {
-        // Superseded (disable / unmount / re-enable) — tear down OUR OWN graph and bail.
-        stream.getTracks().forEach((t) => t.stop());
-        if (ctx.state !== 'closed') void ctx.close();
-        return;
-      }
+      if (genRef.current !== myGen) return; // superseded — `finally` tears the locals down
       ctxRef.current = ctx;
       streamRef.current = stream;
       sourceRef.current = source;
@@ -204,19 +204,26 @@ export function useTempoDetector(args: UseTempoDetectorArgs): TempoDetectorContr
       seqRef.current = 0;
       intervalRef.current = window.setInterval(poll, HOP_MS);
       setStatus('running');
+      // Ownership transferred to the refs — null the locals so `finally` leaves the LIVE graph
+      // alone (release()/disable() own it from here).
+      stream = null;
+      ctx = null;
     } catch (e) {
       // Only own the failure if still the current generation — a disable mid-acquire that
       // throws (e.g. an aborted getUserMedia) must not flip the now-'off' status to 'error'.
       if (genRef.current === myGen) {
-        release();
         const name = errorName(e);
         setStatus(name === 'NotAllowedError' || name === 'SecurityError' ? 'denied' : 'error');
         setLastError(errorMessage(e));
       }
     } finally {
+      // Anything still in a local (failure / supersede before transfer) is ours to release —
+      // stop the mic and close the context so a setup error never strands an open mic.
+      stream?.getTracks().forEach((t) => t.stop());
+      if (ctx && ctx.state !== 'closed') void ctx.close();
       acquiringRef.current = false;
     }
-  }, [poll, release]);
+  }, [poll]);
 
   const disable = useCallback(() => {
     genRef.current += 1; // supersede any in-flight acquire (it tears down its own graph)
