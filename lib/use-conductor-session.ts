@@ -15,6 +15,7 @@ import {
   reckonAfter,
   alignReckoning,
   computeStaticRung,
+  clockConfidenceOk,
   rebaselineMotion,
   expectedClockBars,
   type ClockReckoning,
@@ -165,6 +166,18 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   useIsomorphicLayoutEffect(() => {
     cfgRef.current = { bpm, barBeats };
   }, [bpm, barBeats]);
+  // 5b chunk 3 (§2): the auto-fire toggles the gate reads, mirrored so the FROZEN motion-tick
+  // closure (the [enabled,clockOn] interval is set up once → captures one render) sees the LIVE
+  // values when it delegates to applyWithAutoFire. Reading them from render state in that frozen
+  // closure would gate on whatever they were when the clock was toggled on (stale). The ref
+  // identity is stable, so the frozen closure dereferences a current `.current`. LAYOUT (not
+  // passive) for the cfgRef reason: a due tick must never read a stale toggle across the
+  // commit→passive gap. setArmedFireAtEligible(false) after a fire still mirrors next commit — a
+  // one-tick lag that fails SAFE (the session's armed-null is the real re-fire backstop).
+  const gateRef = useRef({ autoFireOn, armedFireAtEligible });
+  useIsomorphicLayoutEffect(() => {
+    gateRef.current = { autoFireOn, armedFireAtEligible };
+  }, [autoFireOn, armedFireAtEligible]);
 
   // The single authoritative transaction write: driverRef synchronously, THEN the React
   // mirror. Stall-clear rides the SAME reckonAfter identity result that decides re-anchor
@@ -291,46 +304,50 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // edge = !shouldAutoFire(before) && shouldAutoFire(after) is caller-agnostic — no
   // redirect-kind special-casing. Both dispatch on the returned session (a value, not React
   // state) with a SINGLE setSession, so there is no read-after-setState hazard.
-  const applyWithAutoFire = (before: ConductorSession, res: ReturnType<typeof dispatch>) => {
+  const applyWithAutoFire = (
+    before: ConductorSession,
+    res: ReturnType<typeof dispatch>,
+    opts: { provenance: 'manual' | 'clock'; rung: ClockRung },
+  ) => {
     setOutcome(res.outcome);
     if (res.outcome !== 'applied') return;
     // Invariant (P) threads a SINGLE composed reckoning so the chained auto-fire commit
     // stacks atop the primary leg, written through driverRef in one transaction (no
-    // read-after-set hazard). The auto-fire DECISION is byte-for-byte the frozen 5a rising-
-    // edge logic — chunk 2 only changes WHERE the reckoning is read/written (driverRef, the
-    // §3.2 invariant), not WHETHER it fires. The primary leg is 'manual' for BOTH callers:
-    // advance() IS a manual position gesture; redirect()'s leg never moves current (:223) so
-    // reckonAfter no-ops it ("a redirect does NOT re-anchor", for free — §2.3).
+    // read-after-set hazard). The primary leg carries the CALLER's provenance (§5.2): 'manual'
+    // for advance()/redirect()/align (advance() IS a manual position gesture; a redirect's leg
+    // never moves current (:223) so reckonAfter no-ops it — "a redirect does NOT re-anchor",
+    // §2.3), 'clock' for the motion tick. Compute it FIRST so the gate can key on the ARRIVAL.
     const now = Date.now();
+    const primaryReck = reckonAfter(
+      driverRef.current.reckoning,
+      before.state.current,
+      res.session.state.current,
+      opts.provenance,
+      now,
+    );
+    // 5b chunk 3 (§5.2): the auto-fire DECISION is the frozen 5a rising-edge predicate PLUS one
+    // confidence gate. The requirement keys on the ARRIVAL's provenance (primaryReck.positionTrusted),
+    // NOT the action — so release-over-a-clock-placed-fireAt (manual action, untrusted arrival)
+    // correctly REQUIRES confidence (closes the R6 hole), while a manual advance / 5a vamp-release
+    // over a manually-placed bar fires unconditionally. Toggles come from gateRef (the §2 frozen-
+    // tick fix), so the same chain is correct from the event handlers AND the motion interval.
+    const { autoFireOn: afOn, armedFireAtEligible: elig } = gateRef.current;
     const opened = !shouldAutoFire(before) && shouldAutoFire(res.session);
-    if (autoFireOn && armedFireAtEligible && opened) {
+    const confident = primaryReck.positionTrusted || clockConfidenceOk(primaryReck, opts.rung);
+    if (afOn && elig && opened && confident) {
       const afterFire = dispatch(res.session, { kind: 'commit' }, Date.now());
       setOutcome(afterFire.outcome); // surface the COMMIT result, not the stale prior one
       const fired = afterFire.outcome === 'applied';
-      const manual = reckonAfter(
-        driverRef.current.reckoning,
-        before.state.current,
-        res.session.state.current,
-        'manual',
-        now,
-      );
       // The chained commit is MACHINE-placed → 'autofire' stamp: flips positionTrusted=false
-      // ONLY, leaving the trust + motion axes at the manual arrival's values (no double-count).
+      // ONLY, leaving the trust + motion axes at the arrival's values (no double-count).
       const nextReck = fired
-        ? reckonAfter(manual, res.session.state.current, afterFire.session.state.current, 'autofire', now)
-        : manual;
+        ? reckonAfter(primaryReck, res.session.state.current, afterFire.session.state.current, 'autofire', now)
+        : primaryReck;
       writeDriver(fired ? afterFire.session : res.session, nextReck);
       setArmedFireAtEligible(false); // fired (or attempted) → drop the bit
       return;
     }
-    const nextReck = reckonAfter(
-      driverRef.current.reckoning,
-      before.state.current,
-      res.session.state.current,
-      'manual',
-      now,
-    );
-    writeDriver(res.session, nextReck);
+    writeDriver(res.session, primaryReck);
   };
 
   // 5b chunk 2 (§3.1): one motion tick. Reads FRESH state from driverRef/cfgRef (never a
@@ -370,15 +387,16 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       setStalled(true);
       return;
     }
-    // owed === 1: emit EXACTLY ONE clock-driven advance (the reckoning's 4th current-writer).
+    // owed === 1: emit EXACTLY ONE clock-driven advance (the reckoning's 4th current-writer), now
+    // routed through the SAME rising-edge auto-fire chain as the manual gestures (5b chunk 3, §4 —
+    // relaxes chunk 2's "clock arrivals DEFER auto-fire"). The chain stamps the primary leg 'clock'
+    // (positionTrusted=false → the §5.2 confidence requirement falls out), does setOutcome + the
+    // non-'applied' early-return, the rising-edge gate, the chained commit, and the driverRef write.
+    // rung is provably 'static-bpm' here: past b!=null / !stalled (:346) / seeded (:347) / !done
+    // (:348) / owed===1. writeDriver's stall-clear is MOOT — stalled is already false (the :346
+    // guard returns before this when stalled), so the chunk-2 "must not clear a stall" intent holds.
     const res = dispatch(s, { kind: 'advance' }, now);
-    setOutcome(res.outcome);
-    if (res.outcome !== 'applied') return; // a genuinely ignored dispatch — re-evaluate next tick
-    const nextReck = reckonAfter(r, s.state.current, res.session.state.current, 'clock', now);
-    // Write driverRef DIRECTLY (not writeDriver): a clock advance must NOT clear a stall.
-    driverRef.current = { session: res.session, reckoning: nextReck, stalled: st };
-    setSession(res.session);
-    setReckoning(nextReck);
+    applyWithAutoFire(s, res, { provenance: 'clock', rung: 'static-bpm' });
   };
 
   // The motion driver effect (§3). One interval, MD device only, set up ONCE per
@@ -443,7 +461,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       // tick off stale committed state (§3.2).
       const s = driverRef.current.session;
       if (!s) return;
-      applyWithAutoFire(s, dispatch(s, { kind: 'advance' }, Date.now()));
+      applyWithAutoFire(s, dispatch(s, { kind: 'advance' }, Date.now()), { provenance: 'manual', rung });
     },
     // arm ALWAYS routes through resolveArm (the #101 forward-carry): the component
     // never hand-builds a directive. It forwards a STABLE IDENTITY (not the raw
@@ -491,7 +509,10 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     redirect: (opt) => {
       const s = driverRef.current.session;
       if (!s) return;
-      applyWithAutoFire(s, dispatch(s, { kind: 'redirect', directive: opt.directive }, Date.now()));
+      applyWithAutoFire(s, dispatch(s, { kind: 'redirect', directive: opt.directive }, Date.now()), {
+        provenance: 'manual',
+        rung,
+      });
     },
     // §3 — the align / true-up tap. Two mechanics by state, both ending in a full manual
     // re-anchor: at the song head (current === null) it SEEDS bar 1 by dispatching the first
@@ -502,7 +523,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       const s = driverRef.current.session;
       if (!s) return;
       if (s.state.current === null) {
-        applyWithAutoFire(s, dispatch(s, { kind: 'advance' }, Date.now()));
+        applyWithAutoFire(s, dispatch(s, { kind: 'advance' }, Date.now()), { provenance: 'manual', rung });
         return;
       }
       // Mid-song true-up: re-zero ONTO current, NO dispatch. alignReckoning always returns a

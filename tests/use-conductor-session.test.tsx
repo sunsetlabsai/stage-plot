@@ -662,3 +662,102 @@ describe('useConductorSession — static-BPM motion driver (5b chunk 2)', () => 
     expect(result.current.current?.barId).toBe('b1');
   });
 });
+
+// ── 5b chunk 3: the confidence gate — clock-driven auto-fire (the trusted slice) ─
+// A clock arrival is UNTRUSTED (positionTrusted=false); it auto-commits an armed marker only
+// when clockConfidenceOk holds (trued + within the bound + static-bpm). A MANUAL arrival is
+// trusted → fires unconditionally (the 5a floor). The toggles route through gateRef so the
+// FROZEN motion-tick reads them LIVE (§2). Same fake-interval + Date.now-spy harness as chunk 2.
+
+describe('useConductorSession — the confidence gate (5b chunk 3)', () => {
+  it('a trusted clock arrival within the bound AUTO-FIRES an armed marker (auto-fire on)', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align()); // seed b1 (trusted, alignedAtMs set, barsSinceAnchor 0)
+    act(() => result.current.arm(result.current.targets[0])); // fireAt = b2 (next emitted)
+    expect(result.current.armed?.fireAt).toBe('b2');
+    act(() => result.current.setAutoFire(true));
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + bm120; // one bar elapsed → the clock drives b1 → b2 = fireAt
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.armed).toBeNull(); // confident clock arrival auto-committed
+    expect(result.current.outcome).toBe('applied');
+  });
+
+  it('§2 regression: toggling auto-fire AFTER the interval mounts is still respected (gateRef, not a stale closure)', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align());
+    act(() => result.current.arm(result.current.targets[0])); // fireAt = b2
+    act(() => result.current.setClockOn(true)); // interval mounts with auto-fire still OFF
+    act(() => result.current.setAutoFire(true)); // flipped AFTER mount — a stale closure would miss this
+    clock.t = T0 + bm120;
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.armed).toBeNull(); // the frozen tick read the LIVE toggle via gateRef
+  });
+
+  it('auto-fire OFF: a clock arrival onto the fire bar never auto-commits (5a parity)', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align());
+    act(() => result.current.arm(result.current.targets[0])); // fireAt = b2
+    act(() => result.current.setClockOn(true)); // auto-fire stays OFF
+    clock.t = T0 + bm120;
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.current?.barId).toBe('b2'); // clock advanced onto the fire bar
+    expect(result.current.armed).not.toBeNull(); // but the toggle is off ⇒ no auto-commit
+  });
+
+  it('a MANUAL arrival fires unconditionally even with the clock off (trust bypasses confidence — the 5a floor)', async () => {
+    const { result } = await activateAt();
+    act(() => result.current.advance()); // manual seed b1 (trusted)
+    act(() => result.current.arm(result.current.targets[0])); // fireAt = b2
+    act(() => result.current.setAutoFire(true)); // clock stays OFF ⇒ rung 'manual' (clockConfidenceOk=false)
+    expect(result.current.rung).toBe('manual');
+    act(() => result.current.advance()); // manual onto b2 = fireAt → positionTrusted=true → fires
+    expect(result.current.armed).toBeNull();
+    expect(result.current.outcome).toBe('applied');
+  });
+
+  it('a release over a CLOCK-placed fire bar fires WITHIN the bound (untrusted arrival, but confident — closes the R6 hole)', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align()); // b1
+    act(() => result.current.arm(result.current.targets[0])); // fireAt = b2 (a vamp body bar)
+    expect(result.current.armed?.fireAt).toBe('b2');
+    act(() => result.current.setAutoFire(true));
+    const hold = result.current.redirects.find((o) => o.label === 'Vamp (hold)')!;
+    act(() => result.current.redirect(hold)); // holding ⇒ the gate refuses mid-vamp
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + bm120;
+    act(() => vi.advanceTimersToNextTimer()); // clock drives b1 → b2 (= fireAt) while holding → refused
+    expect(result.current.current?.barId).toBe('b2');
+    expect(result.current.armed).not.toBeNull(); // mid-vamp, no fire
+    expect(result.current.reckoning.positionTrusted).toBe(false); // the CLOCK placed b2
+    const release = result.current.redirects.find((o) => o.label === 'Release vamp')!;
+    act(() => result.current.redirect(release)); // hold clears, current parked on fireAt → gate opens
+    expect(result.current.armed).toBeNull(); // clock-placed arrival, but trued + within bound ⇒ fires
+    expect(result.current.outcome).toBe('applied');
+  });
+
+  it('a release over a clock-placed fire bar PAST the bound DEFERS to the MD (long vamp); a manual commit recovers it', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align()); // b1
+    act(() => result.current.arm(result.current.targets[0])); // fireAt = b2
+    act(() => result.current.setAutoFire(true));
+    const hold = result.current.redirects.find((o) => o.label === 'Vamp (hold)')!;
+    act(() => result.current.redirect(hold));
+    act(() => result.current.setClockOn(true));
+    // Vamp 9 bars (barsSinceAnchor 1..9): each held clock advance loops the body (b2,b1,b2,…),
+    // counting +1 but never firing (holding). 9 > CLOCK_CONFIDENCE_BOUND_BARS (8), and odd ⇒ b2.
+    for (let k = 1; k <= 9; k++) {
+      clock.t = T0 + k * bm120;
+      act(() => vi.advanceTimersToNextTimer());
+    }
+    expect(result.current.reckoning.barsSinceAnchor).toBe(9);
+    expect(result.current.current?.barId).toBe('b2'); // parked on the fire bar
+    expect(result.current.armed).not.toBeNull(); // survived the vamp
+    const release = result.current.redirects.find((o) => o.label === 'Release vamp')!;
+    act(() => result.current.redirect(release)); // gate opens, but barsSinceAnchor 9 > bound
+    expect(result.current.armed).not.toBeNull(); // DEFERRED — past the trust horizon, not auto-fired
+    // no corruption: the MD's manual "Go now" still jumps to the target
+    act(() => result.current.commit());
+    expect(result.current.armed).toBeNull();
+  });
+});

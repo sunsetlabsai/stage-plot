@@ -142,6 +142,31 @@ export function computeStaticRung(args: {
   return 'static-bpm';
 }
 
+// 5b chunk 3: the confidence gate (design-conductor-chunk5b-c3-confidence.md / parent §5.2).
+// ≈ one phrase — the bound past which a dead-reckoned clock has drifted too far from the MD's
+// last truth to AUTO-COMMIT a structural change. Reused ONLY here (the chunk-2 owed≥2 stall is a
+// separate mechanism). The MD's align tap re-zeros barsSinceAnchor, refreshing the warrant.
+export const CLOCK_CONFIDENCE_BOUND_BARS = 8;
+
+// Is a CLOCK-placed (untrusted) arrival on an armed fireAt confident enough to AUTO-COMMIT? The
+// confidence gate consults this ONLY when the arrival is untrusted (positionTrusted === false,
+// §5.2) — a manual arrival fires unconditionally (the 5a floor). MOTION is never gated by this;
+// only the structural auto-commit ("degrade precision, never honesty"). Pure / timer-free.
+export function clockConfidenceOk(r: ClockReckoning, rung: ClockRung): boolean {
+  if (r.alignedAtMs === null) return false; //                never trued — no human-confirmed anchor
+  if (r.barsSinceAnchor > CLOCK_CONFIDENCE_BOUND_BARS) return false; // past the trust horizon
+  switch (rung) {
+    case 'static-bpm':
+      return true; //   the stated-BPM click IS the warrant (no audio confidence to read)
+    case 'live':
+      return false; //  needs a sustained-HIGH telemetry input — extends here in item 4
+    case 'coasting':
+      return false; //  last-known tempo: motion yes, auto-commit no
+    case 'manual':
+      return false; //  5a floor — nothing machine-placed to be confident about
+  }
+}
+
 // Re-baseline the MOTION axis only, on a tempo change (§4 / parent §5.6-ii). The closed-form
 // `floor((now − motionBaselineAtMs)/barMs)` assumes a CONSTANT tempo since the baseline, so a
 // new tempo must reset that baseline. A band speed change is NOT the MD asserting position, so

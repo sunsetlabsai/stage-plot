@@ -4,6 +4,8 @@ import {
   reckonAfter,
   alignReckoning,
   computeStaticRung,
+  clockConfidenceOk,
+  CLOCK_CONFIDENCE_BOUND_BARS,
   rebaselineMotion,
   expectedClockBars,
   type ClockReckoning,
@@ -178,6 +180,39 @@ describe('rebaselineMotion — motion axis only, trust axis untouched (§4)', ()
     const re = rebaselineMotion(r, 140, 5000);
     // immediately after the change, no time has elapsed at the new baseline:
     expect(expectedClockBars(re, 5000, barMs(140)) - re.barsSinceAnchor).toBe(0);
+  });
+});
+
+// ── Conductor 5b chunk 3: the confidence gate (pure) ─────────────────────────
+// clockConfidenceOk is consulted ONLY for an UNTRUSTED (clock-placed) arrival; a trusted
+// arrival fires unconditionally (the gate ORs positionTrusted before calling this — §5.2).
+
+describe('clockConfidenceOk — the chunk-3 confidence gate (§5.2)', () => {
+  // A trued, clock-placed reckoning at a given distance from the last human anchor.
+  const trued = (barsSinceAnchor: number): ClockReckoning => ({
+    ...reckonAfter(initReckoning(0), null, step('b1', 1), 'manual', 1000), // alignedAtMs = 1000
+    barsSinceAnchor,
+    positionTrusted: false, // the clock placed the current bar
+  });
+
+  it('refuses when never trued (alignedAtMs === null) — no human-confirmed anchor', () => {
+    const untrued: ClockReckoning = { ...initReckoning(0), barsSinceAnchor: 1 }; // alignedAtMs null
+    expect(clockConfidenceOk(untrued, 'static-bpm')).toBe(false);
+  });
+
+  it('static-bpm within the bound is confident (the click is the warrant)', () => {
+    expect(clockConfidenceOk(trued(0), 'static-bpm')).toBe(true);
+    expect(clockConfidenceOk(trued(CLOCK_CONFIDENCE_BOUND_BARS), 'static-bpm')).toBe(true); // 8 ⇒ ok
+  });
+
+  it('refuses once barsSinceAnchor exceeds the bound (drifted too far from the last truth)', () => {
+    expect(clockConfidenceOk(trued(CLOCK_CONFIDENCE_BOUND_BARS + 1), 'static-bpm')).toBe(false); // 9 ⇒ no
+  });
+
+  it('coasting / manual / live never auto-fire in this chunk (no telemetry warrant yet)', () => {
+    expect(clockConfidenceOk(trued(0), 'coasting')).toBe(false);
+    expect(clockConfidenceOk(trued(0), 'manual')).toBe(false);
+    expect(clockConfidenceOk(trued(0), 'live')).toBe(false); // HIGH-confidence input arrives in item 4
   });
 });
 
