@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import type { ExitPolicy } from '@/lib/roadmap-vm';
 import type { JumpTarget, RedirectOption } from '@/lib/conductor-targets';
+import type { ClockRung } from '@/lib/conductor-clock';
 
 // ── Conductor authority, chunk 4: the MD-only Perform control cluster ─────────
 //
@@ -27,6 +28,14 @@ export interface ConductorClusterProps {
   canArm: boolean; // false at song end (§3 guard)
   ignored: boolean; // last action was a dead tap — surface it honestly (D3)
   autoFire: boolean; // §3 opt-in auto-fire toggle (default OFF = chunk-4 go-tap floor)
+  // 5b chunk 2 — the static-BPM motion driver surface. clockOn is the per-session
+  // opt-in (default OFF = chunk-4 go-tap floor). rung is the resolved motion tier
+  // ('static-bpm' ⇒ "fixed tempo" dead-reckon; 'manual' ⇒ honest manual floor).
+  // stalled means owed ≥ 2 bars at a tick — the loop suspended to avoid a fast-forward;
+  // a manual move or "On the 1" clears it.
+  clockOn: boolean;
+  rung: ClockRung;
+  stalled: boolean;
   holding: boolean; // vm.holding != null — surfaces the §3.5 "release to fire" copy
   canArmNextSection: boolean; // §4 — a next-section boundary exists ahead (else disable)
   onAdvance: () => void;
@@ -38,6 +47,7 @@ export interface ConductorClusterProps {
   onDisarm: () => void;
   onRedirect: (opt: RedirectOption) => void;
   onToggleAutoFire: () => void;
+  onToggleClock: () => void; // 5b chunk 2 — flips clockOn (the static-BPM motion driver)
   onStop: () => void;
 }
 
@@ -51,6 +61,9 @@ export default function ConductorCluster({
   canArm,
   ignored,
   autoFire,
+  clockOn,
+  rung,
+  stalled,
   holding,
   canArmNextSection,
   onAdvance,
@@ -60,6 +73,7 @@ export default function ConductorCluster({
   onDisarm,
   onRedirect,
   onToggleAutoFire,
+  onToggleClock,
   onStop,
 }: ConductorClusterProps) {
   const [picking, setPicking] = useState(false);
@@ -76,6 +90,23 @@ export default function ConductorCluster({
           Local MD mode
         </span>
         <div className="flex items-center gap-3">
+          {/* 5b chunk 2 — static-BPM clock opt-in toggle (default OFF = go-tap floor).
+              When on, the resolved rung readout tells the MD what it is actually doing
+              ('fixed tempo' = dead-reckon, 'manual' = no usable tempo source). */}
+          <button
+            onClick={onToggleClock}
+            aria-pressed={clockOn}
+            className={`rounded px-2 py-0.5 ${
+              clockOn ? 'bg-sky-700 text-white' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+            }`}
+          >
+            Clock {clockOn ? 'on' : 'off'}
+          </button>
+          {clockOn && (
+            <span className="text-zinc-400">
+              {rung === 'static-bpm' ? 'fixed tempo' : 'manual'}
+            </span>
+          )}
           {/* §4 — auto-fire opt-in toggle (default OFF = go-tap floor). */}
           <button
             onClick={onToggleAutoFire}
@@ -254,6 +285,14 @@ export default function ConductorCluster({
                   {opt.label}
                 </button>
               ))}
+            </div>
+          )}
+
+          {/* 5b chunk 2 — the clock fell ≥2 bars behind in one tick and suspended rather
+              than fast-forward. Honest readout; a manual move or "On the 1" re-anchors. */}
+          {stalled && (
+            <div className="px-3 py-1 text-center text-sky-400">
+              Clock paused &mdash; tap &ldquo;On the 1&rdquo; to catch up
             </div>
           )}
 

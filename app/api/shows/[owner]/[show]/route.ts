@@ -22,7 +22,7 @@ async function hydrateFromEntries(
   const songIds = [...new Set(entries.map((e) => e.song_id))];
   const { data: songs } = await admin
     .from('songs')
-    .select('id, title, key, lead, notes')
+    .select('id, title, key, lead, notes, bpm')
     .in('id', songIds);
 
   const songsMap = Object.fromEntries(
@@ -40,6 +40,9 @@ async function hydrateFromEntries(
       lead: resolveOverride(row.lead_override, song?.lead, '') ?? '',
       notes: resolveOverride(row.notes_override, song?.notes, '') ?? '',
       sceneNote: row.scene_note ?? undefined,
+      // 5b chunk 2: the stated tempo for the clock's static-BPM rung. Migrated songs
+      // carry it; a legacy/inline song has none ⇒ undefined ⇒ manual rung (honest floor).
+      bpm: song?.bpm ?? null,
     };
   });
 }

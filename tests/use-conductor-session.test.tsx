@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { afterEach, describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { renderHook, act, waitFor, cleanup } from '@testing-library/react';
 import { useConductorSession } from '../lib/use-conductor-session';
+import { barMs } from '../lib/tempo';
 import type { ChartCalibration, RoadmapMarker, SectionAnchor } from '../lib/types';
 
 // ── Conductor authority, chunk 4: the React binding (jsdom) ──────────────────
@@ -13,6 +14,10 @@ import type { ChartCalibration, RoadmapMarker, SectionAnchor } from '../lib/type
 // always awaited via waitFor.
 
 afterEach(cleanup);
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 // A LOCAL ChartCalibration mirroring tests/conductor-targets.test.ts: one system,
 // bars left→right, with a REAL repeat (volta group) so availableRedirects has
@@ -440,5 +445,170 @@ describe('useConductorSession', () => {
     await waitFor(() => expect(result.current.current).toBeNull()); // fresh session
     expect(result.current.reckoning.anchor).toBeNull();
     expect(result.current.reckoning.positionTrusted).toBe(false);
+  });
+});
+
+// ── 5b chunk 2: the static-BPM motion driver (jsdom + controlled clock) ───────
+// We fake ONLY setInterval/clearInterval and drive Date.now() through a spy so each
+// tick observes an EXACT time. (Faking Date too would make sinon's catch-up replay
+// every intermediate tick at its own scheduled instant — which can never produce the
+// owed≥2 jump a real tab-sleep causes; a single controlled tick is the faithful model.)
+// `enabled` defaults to true; bpm is the static-BPM source (null ⇒ manual rung).
+
+const T0 = 1_700_000_000_000; // a fixed, large epoch so (now − baseline) is always ≥ 0
+const lin = (...ids: string[]) => makeCal(ids.map((id) => ({ id }))); // linear (no roadmap)
+const bm120 = barMs(120, 4); // 2000 ms/bar
+
+// Activate a session at a controlled clock, returning the time handle + render result.
+async function activateAt(over: Partial<Parameters<typeof useConductorSession>[0]> = {}) {
+  const clock = { t: T0 };
+  vi.spyOn(Date, 'now').mockImplementation(() => clock.t);
+  const rh = renderHook(
+    (p: Parameters<typeof useConductorSession>[0]) => useConductorSession(p),
+    { initialProps: args({ bpm: 120, ...over }) },
+  );
+  await waitFor(() => expect(rh.result.current.active).toBe(true)); // real timers — not faked yet
+  // From here on, fake ONLY the interval so we can fire single, time-exact ticks.
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  return { clock, ...rh };
+}
+
+describe('useConductorSession — static-BPM motion driver (5b chunk 2)', () => {
+  it('rung is manual until the clock is turned on; static-bpm once it is (with a stated tempo)', async () => {
+    const { result } = await activateAt();
+    expect(result.current.clockOn).toBe(false);
+    expect(result.current.rung).toBe('manual');
+    act(() => result.current.align()); // seed b1 (the clock needs a position to dead-reckon from)
+    act(() => result.current.setClockOn(true));
+    expect(result.current.rung).toBe('static-bpm');
+  });
+
+  it('no stated tempo (null bpm) keeps the rung manual even with the clock on', async () => {
+    const { result } = await activateAt({ bpm: null });
+    act(() => result.current.align());
+    act(() => result.current.setClockOn(true));
+    expect(result.current.rung).toBe('manual');
+  });
+
+  it('drives EXACTLY one advance per bar period (no fast-forward within a tick)', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align()); // current b1, baseline T0, barsSinceAnchor 0
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + bm120; // one bar has elapsed → owed 1
+    act(() => vi.advanceTimersToNextTimer()); // one tick
+    expect(result.current.current?.barId).toBe('b2');
+    expect(result.current.reckoning.barsSinceAnchor).toBe(1);
+    clock.t = T0 + 2 * bm120; // a second bar → owed 1 again
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.current?.barId).toBe('b3');
+    expect(result.current.reckoning.barsSinceAnchor).toBe(2);
+  });
+
+  it('two clock ticks at the SAME bar (no time passed between) yield only ONE advance (driverRef gate)', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align());
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + bm120; // owed 1
+    act(() => vi.advanceTimersToNextTimer()); // advances → b2, barsSinceAnchor 1
+    act(() => vi.advanceTimersToNextTimer()); // SAME clock.t — driverRef already advanced ⇒ owed 0
+    expect(result.current.current?.barId).toBe('b2'); // not b3
+    expect(result.current.reckoning.barsSinceAnchor).toBe(1);
+  });
+
+  it('owed ≥ 2 in a single tick (a tab-sleep) STALLS instead of fast-forwarding; align clears it', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align()); // current b1
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + 2 * bm120 + 50; // two bars elapsed in one tick (loop was suspended)
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.stalled).toBe(true);
+    expect(result.current.rung).toBe('manual'); // stall demotes the readout honestly
+    expect(result.current.current?.barId).toBe('b1'); // frozen — never fast-forwarded
+    // the align tap re-seeds the baseline onto current and resumes
+    act(() => result.current.align());
+    expect(result.current.stalled).toBe(false);
+    expect(result.current.current?.barId).toBe('b1');
+  });
+
+  it('a no-armed commit while stalled does NOT clear the stall (only a real move / align does)', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align());
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + 2 * bm120 + 50;
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.stalled).toBe(true);
+    act(() => result.current.commit()); // nothing armed ⇒ current does not move
+    expect(result.current.stalled).toBe(true); // still stalled
+  });
+
+  it('a manual advance mid-clock re-anchors (trusted) and is not double-counted by the clock', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align()); // b1
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + bm120;
+    act(() => vi.advanceTimersToNextTimer()); // clock → b2, untrusted
+    expect(result.current.reckoning.positionTrusted).toBe(false);
+    act(() => result.current.advance()); // MD taps ahead manually → b3, re-anchored trusted
+    expect(result.current.current?.barId).toBe('b3');
+    expect(result.current.reckoning.positionTrusted).toBe(true);
+    expect(result.current.reckoning.barsSinceAnchor).toBe(0);
+  });
+
+  it('a redirect mid-clock leaves the reckoning untouched and does not clear a running clock', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.advance()); // current b1 (need a vamp redirect available; default cal has the repeat)
+    act(() => result.current.setClockOn(true));
+    const before = result.current.reckoning;
+    const round = result.current.redirects.find((o) => o.label === 'Another round')!;
+    clock.t = T0; // no time passes
+    act(() => result.current.redirect(round));
+    expect(result.current.reckoning).toBe(before); // Invariant (P) no-op — current never moved
+  });
+
+  it('a mid-clock tempo change re-baselines the MOTION axis through driverRef — no jump, no stall', async () => {
+    const { result, clock, rerender } = await activateAt();
+    act(() => result.current.align()); // b1, baseline T0
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + bm120;
+    act(() => vi.advanceTimersToNextTimer()); // → b2, barsSinceAnchor 1
+    // MD changes the song's stated tempo to 140 mid-clock. The [bpm] effect re-baselines
+    // THROUGH driverRef (deferred a microtask), so the next tick reckons owed off the NEW
+    // baseline. Flush that microtask before advancing the clock.
+    rerender(args({ bpm: 140 }));
+    await act(async () => {});
+    const bm140 = barMs(140, 4);
+    clock.t = T0 + bm120 + bm140 + 5; // exactly one 140-bpm bar since the change
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.current?.barId).toBe('b3'); // advanced one bar — not jumped, not stalled
+    expect(result.current.stalled).toBe(false);
+  });
+
+  it('the clock idles at song end — no churn, no stall (vm.done guard)', async () => {
+    const { result, clock } = await activateAt({ cal: lin('x1', 'x2') });
+    for (let i = 0; i < 6 && !result.current.done; i++) act(() => result.current.advance());
+    expect(result.current.done).toBe(true);
+    const at = result.current.current?.barId ?? null;
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + 10 * bm120; // plenty of time — but the song is over
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.current?.barId ?? null).toBe(at); // unchanged
+    expect(result.current.stalled).toBe(false);
+  });
+
+  it('the clock is inert while unseeded (current === null): no advance, no stall', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.setClockOn(true)); // NEVER aligned — nothing to dead-reckon from
+    clock.t = T0 + 5 * bm120;
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.current).toBeNull();
+    expect(result.current.stalled).toBe(false);
+  });
+
+  it('with the clock OFF the interval never mounts — the redline does not self-advance', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align()); // b1
+    clock.t = T0 + 5 * bm120; // lots of time, but clockOn stays false
+    act(() => vi.advanceTimersByTime(5 * bm120)); // no interval scheduled ⇒ nothing fires
+    expect(result.current.current?.barId).toBe('b1');
   });
 });

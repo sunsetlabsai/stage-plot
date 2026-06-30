@@ -162,6 +162,8 @@ export interface SetlistSong {
   lead: string;           // singer name(s) — e.g. "Rachel" or "Graham + Rachel"
   notes?: string;         // e.g. "key change", "guest", "spoken word"
   sceneNote?: string;     // engineer cue — e.g. "save scene after"
+  bpm?: number | null;    // stated tempo (5b clock's static-BPM rung); from the songs table.
+                          // undefined ⇒ legacy/inline song (no migrated tempo) ⇒ manual rung.
   charts?: Chart[];       // matched charts from Google Drive
 }
 

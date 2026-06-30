@@ -31,6 +31,9 @@ function props(over: Partial<ConductorClusterProps> = {}): ConductorClusterProps
     canArm: true,
     ignored: false,
     autoFire: false,
+    clockOn: false,
+    rung: 'manual',
+    stalled: false,
     holding: false,
     canArmNextSection: false,
     onAdvance: vi.fn(),
@@ -40,6 +43,7 @@ function props(over: Partial<ConductorClusterProps> = {}): ConductorClusterProps
     onDisarm: vi.fn(),
     onRedirect: vi.fn(),
     onToggleAutoFire: vi.fn(),
+    onToggleClock: vi.fn(),
     onStop: vi.fn(),
     ...over,
   };
@@ -223,5 +227,38 @@ describe('ConductorCluster', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Next section' }));
     fireEvent.click(screen.getByRole('button', { name: 'Coda' }));
     expect(onArm).toHaveBeenCalledWith(expect.objectContaining({ barId: 'b3' }), undefined, 'next-section');
+  });
+
+  // ── 5b chunk 2: the Clock toggle + rung readout + stall notice (§7) ──────────
+  it('renders the Clock toggle reflecting state and flips onToggleClock', () => {
+    const onToggleClock = vi.fn();
+    const { rerender } = render(<ConductorCluster {...props({ clockOn: false, onToggleClock })} />);
+    const off = screen.getByRole('button', { name: /Clock off/ });
+    expect(off).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(off);
+    expect(onToggleClock).toHaveBeenCalledOnce();
+    rerender(<ConductorCluster {...props({ clockOn: true, onToggleClock })} />);
+    expect(screen.getByRole('button', { name: /Clock on/ })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('hides the rung readout while the clock is off, shows it when on', () => {
+    const { rerender } = render(<ConductorCluster {...props({ clockOn: false, rung: 'manual' })} />);
+    expect(screen.queryByText('manual')).toBeNull();
+    expect(screen.queryByText('fixed tempo')).toBeNull();
+    rerender(<ConductorCluster {...props({ clockOn: true, rung: 'static-bpm' })} />);
+    expect(screen.getByText('fixed tempo')).toBeInTheDocument();
+  });
+
+  it('reads out "manual" when the clock is on but the rung fell back', () => {
+    render(<ConductorCluster {...props({ clockOn: true, rung: 'manual' })} />);
+    expect(screen.getByText('manual')).toBeInTheDocument();
+    expect(screen.queryByText('fixed tempo')).toBeNull();
+  });
+
+  it('surfaces the stall notice only when stalled', () => {
+    const { rerender } = render(<ConductorCluster {...props({ stalled: false })} />);
+    expect(screen.queryByText(/Clock paused/)).toBeNull();
+    rerender(<ConductorCluster {...props({ stalled: true })} />);
+    expect(screen.getByText(/Clock paused/)).toBeInTheDocument();
   });
 });

@@ -2928,6 +2928,10 @@ function ChartNavigator({
     sessionId: `${chartFileId ?? 'none'}::${owner}/${slug}`,
     songRef: chartFileId ?? 'none',
     cal: barCal,
+    // 5b chunk 2 — the static-BPM motion rung's tempo source. A migrated song carries
+    // its stated tempo; a legacy/inline song has none ⇒ null ⇒ manual rung (honest floor).
+    // barBeats defaults inside the hook (4/4) until a meter source exists.
+    bpm: song.bpm ?? null,
   });
   const sessionDriving = conducting && conductor.active;
 
@@ -3594,6 +3598,9 @@ function ChartNavigator({
             canArm={!conductor.done}
             ignored={conductor.outcome === 'ignored'}
             autoFire={conductor.autoFireOn}
+            clockOn={conductor.clockOn}
+            rung={conductor.rung}
+            stalled={conductor.stalled}
             holding={conductor.state?.vm.holding != null}
             canArmNextSection={conductor.canArmNextSection}
             onAdvance={conductor.advance}
@@ -3603,6 +3610,7 @@ function ChartNavigator({
             onDisarm={conductor.disarm}
             onRedirect={conductor.redirect}
             onToggleAutoFire={() => conductor.setAutoFire(!conductor.autoFireOn)}
+            onToggleClock={() => conductor.setClockOn(!conductor.clockOn)}
             onStop={() => setConducting(false)}
           />
         );
