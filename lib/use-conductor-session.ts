@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ChartCalibration } from './types';
 import { barsInOrder, type TraversalStep } from './chart-calibration';
 import { compileRoadmap, type CompiledRoadmap, type ExitPolicy } from './roadmap-vm';
@@ -22,6 +22,13 @@ import {
   type ClockRung,
 } from './conductor-clock';
 import { barMs, DEFAULT_BAR_BEATS } from './tempo';
+import { useTempoDetector, type TempoDetectorStatus } from './use-tempo-detector';
+import {
+  initTelemetryState,
+  ingestTelemetry,
+  type ClockTelemetryState,
+  type TempoTelemetry,
+} from './tempo-telemetry';
 import {
   armableTargets,
   availableRedirects,
@@ -74,6 +81,18 @@ export interface UseConductorArgs {
   barBeats?: number;
 }
 
+// 5b chunk 4a: one row of the shadow validation log (§5) — a detected-vs-stated sample the
+// MD can eyeball over a real rehearsal before any audio is allowed to drive (4b).
+export interface ValidationLogEntry {
+  tMs: number; // MD-clock instant of the estimate
+  detectedBpm: number; // the raw emitted tempo for this estimate
+  confidence: number; // [0,1] the detector's self-report
+  statedBpm: number | null; // the song's stated tempo at the time (null ⇒ no migrated tempo)
+}
+
+// Cap the in-memory validation log so a long rehearsal can't grow it unbounded (§5).
+const VALIDATION_LOG_CAP = 600;
+
 export interface ConductorSurface {
   active: boolean;
   state: ConductorState | null;
@@ -103,6 +122,19 @@ export interface ConductorSurface {
   // wire (no dispatch / seq / broadcast).
   align: () => void;
   outcome: ReduceOutcome['status'] | null;
+  // 5b chunk 4a: the tempo detector's SHADOW channel (§5). The detector runs behind a
+  // user gesture and ingests telemetry into a synchronous ref, but DRIVES NOTHING — the
+  // motion driver + rung above are byte-unchanged in 4a. `shadow` is the latest
+  // detected-vs-stated readout; `validationLog` is the rolling comparison the MD eyeballs
+  // before opting any audio into driving (4b). Mic audio is processed in-process and never
+  // leaves the device; enabling is explicit and revocable.
+  micStatus: TempoDetectorStatus;
+  micError: string | null;
+  enableMicDetection: () => void; // MUST originate from a user gesture (iOS)
+  disableMicDetection: () => void;
+  shadow: { detectedBpm: number; confidence: number; statedBpm: number | null } | null;
+  validationLog: ValidationLogEntry[];
+  clearValidationLog: () => void;
 }
 
 export function useConductorSession(args: UseConductorArgs): ConductorSurface {
@@ -179,6 +211,69 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     gateRef.current = { autoFireOn, armedFireAtEligible };
   }, [autoFireOn, armedFireAtEligible]);
 
+  // 5b chunk 4a (§3): the SYNCHRONOUS telemetryRef — the same time-axis discipline as
+  // driverRef/cfgRef/gateRef. The detector callback writes the ingested ClockTelemetryState
+  // here SYNCHRONOUSLY; in 4b the tick + the gate read THIS ref (never passive state), which
+  // is why it is established now even though 4a drives nothing. The React-state mirrors below
+  // (shadow / validationLog) are a SEPARATE, lossy-OK display channel.
+  const telemetryRef = useRef<ClockTelemetryState>(initTelemetryState());
+  const [shadow, setShadow] = useState<{
+    detectedBpm: number;
+    confidence: number;
+    statedBpm: number | null;
+  } | null>(null);
+  const [validationLog, setValidationLog] = useState<ValidationLogEntry[]>([]);
+
+  // The detector's sink (§5): ingest into the synchronous ref FIRST (the invariant), then
+  // mirror the lossy display state. Recreated when the stated bpm changes (so the shadow
+  // readout and the log capture the CURRENT stated tempo); the detector hook re-syncs its
+  // callback ref, so the frozen poll always calls the latest.
+  const onTelemetry = useCallback(
+    (t: TempoTelemetry) => {
+      const now = Date.now();
+      telemetryRef.current = ingestTelemetry(telemetryRef.current, t, now); // synchronous (§3)
+      const st = telemetryRef.current;
+      setShadow(
+        st.lastTempoBpm === null
+          ? null
+          : { detectedBpm: st.lastTempoBpm, confidence: st.lastConfidence, statedBpm: bpm },
+      );
+      setValidationLog((log) => {
+        const next = [
+          ...log,
+          { tMs: now, detectedBpm: t.tempoBpm, confidence: t.confidence, statedBpm: bpm },
+        ];
+        return next.length > VALIDATION_LOG_CAP ? next.slice(-VALIDATION_LOG_CAP) : next;
+      });
+    },
+    [bpm],
+  );
+  const detector = useTempoDetector({ prefer: bpm, onTelemetry });
+
+  // Ride the detector's enable/disable through refs — the same frozen-closure discipline as
+  // the driver seams — so the public enableMicDetection/disableMicDetection are STABLE
+  // identities (empty deps). A no-array effect re-syncs every render, so the wrappers always
+  // call the latest detector methods without re-creating themselves.
+  const detectorEnableRef = useRef(detector.enable);
+  const detectorDisableRef = useRef(detector.disable);
+  useEffect(() => {
+    detectorEnableRef.current = detector.enable;
+    detectorDisableRef.current = detector.disable;
+  });
+
+  const enableMicDetection = useCallback(() => {
+    void detectorEnableRef.current();
+  }, []);
+  // Releasing the mic also resets the synchronous telemetry channel (a fresh incarnation on
+  // re-enable). The validation log is kept for post-run eyeballing — cleared on session
+  // identity change or explicitly.
+  const disableMicDetection = useCallback(() => {
+    detectorDisableRef.current();
+    telemetryRef.current = initTelemetryState();
+    setShadow(null);
+  }, []);
+  const clearValidationLog = useCallback(() => setValidationLog([]), []);
+
   // The single authoritative transaction write: driverRef synchronously, THEN the React
   // mirror. Stall-clear rides the SAME reckonAfter identity result that decides re-anchor
   // (§6): a NEW reckoning object (current moved / align) clears a stall; a no-move
@@ -239,6 +334,13 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
           setReckoning(fresh);
           setStalled(false);
           setClockOn(false);
+          // 5b chunk 4a: leaving MD mode releases the mic for privacy (the detector is an
+          // independent switch but must not outlive the session it shadows), then resets the
+          // shadow telemetry channel + log for the new identity.
+          detectorDisableRef.current();
+          telemetryRef.current = initTelemetryState();
+          setShadow(null);
+          setValidationLog([]);
         }
       });
       return () => {
@@ -257,6 +359,10 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       setReckoning(fresh);
       setStalled(false);
       setClockOn(false);
+      // 5b chunk 4a: reset the shadow telemetry channel + log for the new identity.
+      telemetryRef.current = initTelemetryState();
+      setShadow(null);
+      setValidationLog([]);
     });
     return () => {
       cancelled = true;
@@ -532,5 +638,13 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       writeDriver(s, nextReck);
     },
     outcome,
+    // 5b chunk 4a: the shadow detector surface (drives nothing — §5).
+    micStatus: detector.status,
+    micError: detector.lastError,
+    enableMicDetection,
+    disableMicDetection,
+    shadow,
+    validationLog,
+    clearValidationLog,
   };
 }

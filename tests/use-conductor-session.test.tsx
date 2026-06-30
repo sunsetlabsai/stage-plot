@@ -112,6 +112,21 @@ describe('useConductorSession', () => {
     expect(result.current.outcome).toBe('applied');
   });
 
+  // 5b chunk 4a: the shadow detector surface is purely additive — it exposes an OFF
+  // detector and an empty comparison by default, and does NOT touch the motion rung
+  // (4a drives nothing; the rung stays computeStaticRung: 'manual' with no bpm/clock).
+  it('exposes an inert shadow detector surface that does not affect the rung', async () => {
+    const { result } = renderHook(() => useConductorSession(args({ bpm: 120 })));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    expect(result.current.micStatus).toBe('off');
+    expect(result.current.shadow).toBeNull();
+    expect(result.current.validationLog).toEqual([]);
+    // clock off ⇒ manual; the detector being present changes nothing.
+    expect(result.current.rung).toBe('manual');
+    act(() => result.current.setClockOn(true));
+    expect(result.current.rung).toBe('static-bpm'); // unchanged by the shadow channel
+  });
+
   it('arm ALWAYS routes through resolveArm — the component never hand-builds a directive', async () => {
     const { result } = renderHook(() => useConductorSession(args()));
     await waitFor(() => expect(result.current.active).toBe(true));

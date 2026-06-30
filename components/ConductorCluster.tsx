@@ -4,6 +4,7 @@ import { useState } from 'react';
 import type { ExitPolicy } from '@/lib/roadmap-vm';
 import type { JumpTarget, RedirectOption } from '@/lib/conductor-targets';
 import type { ClockRung } from '@/lib/conductor-clock';
+import type { TempoDetectorStatus } from '@/lib/use-tempo-detector';
 
 // ── Conductor authority, chunk 4: the MD-only Perform control cluster ─────────
 //
@@ -38,6 +39,16 @@ export interface ConductorClusterProps {
   stalled: boolean;
   holding: boolean; // vm.holding != null — surfaces the §3.5 "release to fire" copy
   canArmNextSection: boolean; // §4 — a next-section boundary exists ahead (else disable)
+  // 5b chunk 4a — the tempo detector's SHADOW readout. The mic is an independent switch;
+  // when running, the detected-vs-stated comparison lets the MD judge the source quality
+  // before opting any audio into driving (4b). This row OBSERVES and drives nothing.
+  micStatus: TempoDetectorStatus;
+  shadow: { detectedBpm: number; confidence: number; statedBpm: number | null } | null;
+  validationLogCount: number;
+  onEnableMic: () => void; // originates from this click (the iOS gesture requirement)
+  onDisableMic: () => void;
+  onCopyLog: () => void;
+  onClearLog: () => void;
   onAdvance: () => void;
   // 5b chunk 1 — the align / true-up tap. Seeds bar 1 at the start, re-zeros the timing
   // baseline mid-song. No visible motion effect until the chunk-2 driver consumes it.
@@ -66,6 +77,13 @@ export default function ConductorCluster({
   stalled,
   holding,
   canArmNextSection,
+  micStatus,
+  shadow,
+  validationLogCount,
+  onEnableMic,
+  onDisableMic,
+  onCopyLog,
+  onClearLog,
   onAdvance,
   onAlign,
   onArm,
@@ -295,6 +313,54 @@ export default function ConductorCluster({
               Clock paused &mdash; tap &ldquo;On the 1&rdquo; to catch up
             </div>
           )}
+
+          {/* 5b chunk 4a — tempo detection (SHADOW: observes the source, drives nothing).
+              The mic toggle is independent of Clock/Auto-fire; when running it shows the
+              detected-vs-stated comparison so the MD can judge the source before 4b. */}
+          <div className="flex flex-wrap items-center justify-center gap-3 border-t border-zinc-800 px-3 py-1.5">
+            <span className="uppercase tracking-wide text-zinc-500">Detection</span>
+            {micStatus === 'running' ? (
+              <button
+                onClick={onDisableMic}
+                aria-pressed
+                className="rounded px-2 py-0.5 bg-purple-700 text-white"
+              >
+                Mic on
+              </button>
+            ) : (
+              <button
+                onClick={onEnableMic}
+                disabled={micStatus === 'requesting'}
+                className="rounded px-2 py-0.5 bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {micStatus === 'requesting' ? 'Starting\u2026' : 'Enable mic'}
+              </button>
+            )}
+            {micStatus === 'denied' && <span className="text-amber-500">mic blocked</span>}
+            {micStatus === 'error' && <span className="text-amber-500">mic error</span>}
+            {micStatus === 'running' &&
+              (shadow ? (
+                <span className="text-zinc-400">
+                  stated <span className="text-zinc-200">{shadow.statedBpm ?? '\u2014'}</span>
+                  {' \u00b7 '}detected{' '}
+                  <span className="font-bold text-purple-300">{Math.round(shadow.detectedBpm)}</span>
+                  <span className="text-zinc-500"> ({Math.round(shadow.confidence * 100)}%)</span>
+                  <span className="text-zinc-600"> &middot; shadow</span>
+                </span>
+              ) : (
+                <span className="text-zinc-500">listening&hellip;</span>
+              ))}
+            {validationLogCount > 0 && (
+              <span className="flex items-center gap-2">
+                <button onClick={onCopyLog} className="underline text-zinc-400 hover:text-white">
+                  Copy log ({validationLogCount})
+                </button>
+                <button onClick={onClearLog} className="underline text-zinc-500 hover:text-white">
+                  Clear
+                </button>
+              </span>
+            )}
+          </div>
 
           {ignored && (
             <div className="px-3 py-1 text-center text-amber-500">Not available right now</div>

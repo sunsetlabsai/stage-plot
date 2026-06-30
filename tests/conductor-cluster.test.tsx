@@ -36,6 +36,13 @@ function props(over: Partial<ConductorClusterProps> = {}): ConductorClusterProps
     stalled: false,
     holding: false,
     canArmNextSection: false,
+    micStatus: 'off',
+    shadow: null,
+    validationLogCount: 0,
+    onEnableMic: vi.fn(),
+    onDisableMic: vi.fn(),
+    onCopyLog: vi.fn(),
+    onClearLog: vi.fn(),
     onAdvance: vi.fn(),
     onAlign: vi.fn(),
     onArm: vi.fn(),
@@ -260,5 +267,54 @@ describe('ConductorCluster', () => {
     expect(screen.queryByText(/Clock paused/)).toBeNull();
     rerender(<ConductorCluster {...props({ stalled: true })} />);
     expect(screen.getByText(/Clock paused/)).toBeInTheDocument();
+  });
+
+  // ── 5b chunk 4a: the tempo detection SHADOW row (§5 — observes, drives nothing) ──
+  it('fires onEnableMic from the "Enable mic" gesture when off', () => {
+    const onEnableMic = vi.fn();
+    render(<ConductorCluster {...props({ micStatus: 'off', onEnableMic })} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Enable mic' }));
+    expect(onEnableMic).toHaveBeenCalledOnce();
+  });
+
+  it('shows "Mic on" + the detected-vs-stated shadow readout while running, and is labelled shadow', () => {
+    render(
+      <ConductorCluster
+        {...props({
+          micStatus: 'running',
+          shadow: { detectedBpm: 124, confidence: 0.82, statedBpm: 120 },
+        })}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Mic on' })).toBeInTheDocument();
+    expect(screen.getByText(/detected/)).toBeInTheDocument();
+    expect(screen.getByText('124')).toBeInTheDocument();
+    expect(screen.getByText('120')).toBeInTheDocument();
+    expect(screen.getByText(/82%/)).toBeInTheDocument();
+    // honest non-driving label
+    expect(screen.getByText(/shadow/)).toBeInTheDocument();
+  });
+
+  it('disables Enable mic while requesting, and surfaces denied/error honestly', () => {
+    const { rerender } = render(<ConductorCluster {...props({ micStatus: 'requesting' })} />);
+    expect(screen.getByRole('button', { name: /Starting/ })).toBeDisabled();
+    rerender(<ConductorCluster {...props({ micStatus: 'denied' })} />);
+    expect(screen.getByText('mic blocked')).toBeInTheDocument();
+    rerender(<ConductorCluster {...props({ micStatus: 'error' })} />);
+    expect(screen.getByText('mic error')).toBeInTheDocument();
+  });
+
+  it('exposes Copy/Clear log only when the log is non-empty', () => {
+    const onCopyLog = vi.fn();
+    const onClearLog = vi.fn();
+    const { rerender } = render(
+      <ConductorCluster {...props({ validationLogCount: 0, onCopyLog, onClearLog })} />,
+    );
+    expect(screen.queryByText(/Copy log/)).toBeNull();
+    rerender(<ConductorCluster {...props({ validationLogCount: 7, onCopyLog, onClearLog })} />);
+    fireEvent.click(screen.getByRole('button', { name: /Copy log \(7\)/ }));
+    expect(onCopyLog).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(onClearLog).toHaveBeenCalledOnce();
   });
 });

@@ -3603,6 +3603,15 @@ function ChartNavigator({
             stalled={conductor.stalled}
             holding={conductor.state?.vm.holding != null}
             canArmNextSection={conductor.canArmNextSection}
+            micStatus={conductor.micStatus}
+            shadow={conductor.shadow}
+            validationLogCount={conductor.validationLog.length}
+            onEnableMic={conductor.enableMicDetection}
+            onDisableMic={conductor.disableMicDetection}
+            onCopyLog={() => {
+              void navigator.clipboard?.writeText(JSON.stringify(conductor.validationLog, null, 2));
+            }}
+            onClearLog={conductor.clearValidationLog}
             onAdvance={conductor.advance}
             onAlign={conductor.align}
             onArm={conductor.arm}
