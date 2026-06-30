@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   HOP_MS,
   ANALYSIS_PERIOD_MS,
@@ -47,6 +47,8 @@ export interface TempoDetectorControl {
 
 type WindowWithWebkitAudio = Window & { webkitAudioContext?: typeof AudioContext };
 
+const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
+
 function errorName(e: unknown): string {
   return e instanceof Error ? e.name : '';
 }
@@ -58,13 +60,18 @@ export function useTempoDetector(args: UseTempoDetectorArgs): TempoDetectorContr
   const [status, setStatus] = useState<TempoDetectorStatus>('off');
   const [lastError, setLastError] = useState<string | null>(null);
 
-  // Live callback + prior (the frozen poll closure reads them through refs).
+  // Live callback + prior (the frozen poll closure reads them through refs). Mirrored in a
+  // LAYOUT effect (not passive) — the SAME macrotask-input discipline as the conductor's
+  // cfgRef/gateRef (R5/R6): the detector poll is a free-running setInterval, so a due poll
+  // landing in the commit→passive gap must not read a STALE prefer / onTelemetry. (4a only
+  // stale-folds one shadow estimate, but 4b's poll publishes the driving telemetry, so the
+  // discipline is enforced from the start.)
   const onTelemetryRef = useRef(args.onTelemetry);
   const preferRef = useRef(args.prefer);
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     onTelemetryRef.current = args.onTelemetry;
   }, [args.onTelemetry]);
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     preferRef.current = args.prefer;
   }, [args.prefer]);
 
@@ -80,6 +87,14 @@ export function useTempoDetector(args: UseTempoDetectorArgs): TempoDetectorContr
   const lastAnalysisMsRef = useRef(0);
   const epochRef = useRef(0); // bumped on each (re)start — the telemetry incarnation watermark
   const seqRef = useRef(0); // per-incarnation monotonic
+
+  // Acquire concurrency guards (the async getUserMedia window). `acquiringRef` blocks a
+  // re-entrant enable() before the FIRST acquire resolves (so two clicks can't open two
+  // streams/contexts/intervals); `genRef` is the supersede token — disable()/unmount bump it,
+  // and an in-flight acquire that finds genRef moved tears down ITS OWN just-built graph
+  // instead of installing an untracked, un-releasable one.
+  const acquiringRef = useRef(false);
+  const genRef = useRef(0);
 
   // Free everything (idempotent). Status is set by the CALLER (disable ⇒ 'off'; an
   // acquire error keeps its 'denied'/'error' status).
@@ -150,7 +165,10 @@ export function useTempoDetector(args: UseTempoDetectorArgs): TempoDetectorContr
   }, []);
 
   const enable = useCallback(async () => {
-    if (intervalRef.current !== null) return; // already running — idempotent
+    // Idempotent AND re-entrancy-safe: already running, OR an acquire is mid-flight.
+    if (intervalRef.current !== null || acquiringRef.current) return;
+    acquiringRef.current = true;
+    const myGen = genRef.current; // the supersede token captured for this acquire
     setLastError(null);
     setStatus('requesting');
     try {
@@ -158,16 +176,24 @@ export function useTempoDetector(args: UseTempoDetectorArgs): TempoDetectorContr
         // Raw signal — the DSP wants the unprocessed mic (§2.2).
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       });
-      streamRef.current = stream;
       const Ctor = window.AudioContext ?? (window as WindowWithWebkitAudio).webkitAudioContext;
       if (!Ctor) throw new Error('Web Audio unsupported');
       const ctx = new Ctor();
       await ctx.resume();
+      // Build into LOCALS — install into the shared refs only after the supersede check, so a
+      // disable()/unmount during the async window never leaves an untracked graph behind.
       const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = FFT_SIZE;
       source.connect(analyser); // NOT to destination — no monitoring, no feedback loop
+      if (genRef.current !== myGen) {
+        // Superseded (disable / unmount / re-enable) — tear down OUR OWN graph and bail.
+        stream.getTracks().forEach((t) => t.stop());
+        if (ctx.state !== 'closed') void ctx.close();
+        return;
+      }
       ctxRef.current = ctx;
+      streamRef.current = stream;
       sourceRef.current = source;
       analyserRef.current = analyser;
       freqBufRef.current = new Float32Array(analyser.frequencyBinCount);
@@ -179,21 +205,36 @@ export function useTempoDetector(args: UseTempoDetectorArgs): TempoDetectorContr
       intervalRef.current = window.setInterval(poll, HOP_MS);
       setStatus('running');
     } catch (e) {
-      release();
-      const name = errorName(e);
-      setStatus(name === 'NotAllowedError' || name === 'SecurityError' ? 'denied' : 'error');
-      setLastError(errorMessage(e));
+      // Only own the failure if still the current generation — a disable mid-acquire that
+      // throws (e.g. an aborted getUserMedia) must not flip the now-'off' status to 'error'.
+      if (genRef.current === myGen) {
+        release();
+        const name = errorName(e);
+        setStatus(name === 'NotAllowedError' || name === 'SecurityError' ? 'denied' : 'error');
+        setLastError(errorMessage(e));
+      }
+    } finally {
+      acquiringRef.current = false;
     }
   }, [poll, release]);
 
   const disable = useCallback(() => {
+    genRef.current += 1; // supersede any in-flight acquire (it tears down its own graph)
     release();
     setStatus('off');
     setLastError(null);
   }, [release]);
 
-  // Release on unmount (mic indicator off even if the MD never tapped disable).
-  useEffect(() => release, [release]);
+  // Release on unmount (mic indicator off even if the MD never tapped disable). Bump the
+  // supersede token too, so an acquire still in flight at unmount aborts instead of starting
+  // an interval on an unmounted hook.
+  useEffect(
+    () => () => {
+      genRef.current += 1;
+      release();
+    },
+    [release],
+  );
 
   return { status, lastError, enable, disable };
 }

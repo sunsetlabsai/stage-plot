@@ -93,4 +93,63 @@ describe('useTempoDetector lifecycle', () => {
     });
     await waitFor(() => expect(result.current.status).toBe('error'));
   });
+
+  // ── Codex 4a-review HIGH: the async-acquire concurrency leak ────────────────────────────
+  // A deferred getUserMedia lets us exercise the window BETWEEN enable() and the mic resolving.
+  function deferredGetUserMedia(): {
+    resolve: (s: MediaStream) => void;
+    getUserMedia: ReturnType<typeof vi.fn>;
+  } {
+    let resolve!: (s: MediaStream) => void;
+    const pending = new Promise<MediaStream>((r) => {
+      resolve = r;
+    });
+    const getUserMedia = vi.fn(() => pending);
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia } });
+    return { resolve, getUserMedia };
+  }
+  const flushMicrotasks = () => new Promise((r) => setTimeout(r, 0));
+
+  it('ignores a re-entrant enable() during the async acquire (one stream/context/interval)', async () => {
+    installAudioContext();
+    const { resolve, getUserMedia } = deferredGetUserMedia();
+    const stop = vi.fn();
+    const stream = { getTracks: () => [{ stop }] } as unknown as MediaStream;
+
+    const { result } = renderHook(() => useTempoDetector({ prefer: 120, onTelemetry: vi.fn() }));
+    await act(async () => {
+      void result.current.enable();
+      void result.current.enable(); // the second click, before the mic resolves
+    });
+    expect(getUserMedia).toHaveBeenCalledTimes(1); // second enable blocked by the acquiring guard
+
+    await act(async () => {
+      resolve(stream);
+      await flushMicrotasks();
+    });
+    expect(result.current.status).toBe('running');
+
+    act(() => result.current.disable());
+    expect(stop).toHaveBeenCalledTimes(1); // exactly one graph installed ⇒ released once
+  });
+
+  it('tears down its own graph when disable() lands mid-acquire (no leaked mic)', async () => {
+    installAudioContext();
+    const { resolve } = deferredGetUserMedia();
+    const stop = vi.fn();
+    const stream = { getTracks: () => [{ stop }] } as unknown as MediaStream;
+
+    const { result } = renderHook(() => useTempoDetector({ prefer: null, onTelemetry: vi.fn() }));
+    await act(async () => {
+      void result.current.enable();
+    });
+    act(() => result.current.disable()); // supersede the in-flight acquire before it resolves
+
+    await act(async () => {
+      resolve(stream);
+      await flushMicrotasks();
+    });
+    expect(result.current.status).toBe('off'); // never flipped to running
+    expect(stop).toHaveBeenCalledTimes(1); // the just-built stream torn down (mic released)
+  });
 });
