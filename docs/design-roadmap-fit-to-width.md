@@ -95,12 +95,12 @@ There IS a standard: **4 bars/line** (Nashville / lead-sheet; `DEFAULT_BARS_PER_
 "cram N to width" breaks phrasing.
 
 Rule: bars fill the width at **constant** `cellW`, but `barsPerLine` is chosen from
-a **musical set {4, 8}** (never arbitrary) — 4 narrow, 8 wide. Spike (§5) sets the
-breakpoint and confirms 8 is legible. If `spec.barsPerLine` is explicitly set,
-honor it and skip the responsive pick (Q1).
+a **musical set {2, 4, 8}** (never arbitrary) — 2 phone-portrait, 4 narrow, 8 wide.
+Spike (§5) sets the breakpoints and confirms legibility. If `spec.barsPerLine` is
+explicitly set, honor it and skip the responsive pick (Q1).
 
 NOTE: the PDF is a fixed 8.5×11 page (`barsPerLine` from the spec/default 4); the
-responsive {4,8} pick applies to the on-SCREEN preview (and any future
+responsive {2,4,8} pick applies to the on-SCREEN preview (and any future
 screen-target render). The PDF and the preview share the layout fn but pass their
 own `barsPerLine` — same algorithm, surface-appropriate input.
 
@@ -117,25 +117,27 @@ never trigger.**
 Click-to-edit `Measure` is unchanged. Edit key stays `${sectionId}:${barIndex}`
 (section-wide index); wrapping doesn't change indices, so `commitBar` is untouched.
 
-## 5. Spike — 4 vs 8 bars/line (folded in)
+## 5. Spike — 2 / 4 / 8 bars/line breakpoints (folded in)
 
-Set the preview width breakpoint for 4→8 and confirm 8-wide legibility. Throwaway
-scaffolding in this worktree (**not shipped**): render the 10-bar intro at widths
-{360, 768, 1024, 1280}px at 4/line and 8/line; eyeball numeral + slash legibility.
-Output: the px breakpoint(s) and confirmed set. Hypothesis: `< ~700px` → 4,
-`≥ ~700px` → 8. Add a 2/line tier only if 4 is unreadable on phone portrait (Q3).
+Set the preview width breakpoints across the {2,4,8} set and confirm legibility at
+each tier. Throwaway scaffolding in this worktree (**not shipped**): render the
+10-bar intro at widths {360, 480, 768, 1024, 1280}px at 2/line, 4/line and 8/line;
+eyeball numeral + slash legibility. Output: the px breakpoints and confirmed tiers.
+Hypothesis: `< ~480px` → 2, `< ~700px` → 4, `≥ ~700px` → 8. Q3 locked the 2/line
+phone tier in; the spike confirms its breakpoint rather than deciding whether to add it.
 
-## 6. Open questions
+## 6. Resolved decisions (Graham, locked)
 
-- **Q1** — Honor explicit `spec.barsPerLine` over the responsive preview pick? (lean: yes.)
-- **Q2** — Preview pagination: discrete pages matching the PDF now, or stack systems +
-  vertical-scroll now and add page breaks later? (lean: stack/scroll MVP.)
-- **Q3** — Phone portrait: add a 2/line tier if 4 is too wide?
-- **Q4** — Keep the `max-w-[560px]` paper sheet for authoring, or fill the screen like
-  Perform? (lean: responsive sheet up to a max.)
-- **Q5 (new)** — Old saved roadmap PDFs carry baked calibration from the OLD (stretched)
-  geometry. Re-render on next open, or leave until next manual save? (lean: leave;
-  geometry self-heals on the next render — note for backlog, not this PR.)
+- **Q1 → YES.** Honor explicit `spec.barsPerLine` when set; skip the responsive pick.
+  The responsive {4,8} (and 2 phone tier) applies only when `barsPerLine` is unset.
+- **Q2 → STACK + VERTICAL-SCROLL MVP.** Preview stacks systems and scrolls vertically;
+  discrete page breaks matching the PDF are a later enhancement, not this PR.
+- **Q3 → YES.** Add a **2/line** tier for phone portrait. Set: {2, 4, 8}; the §5 spike
+  sets the breakpoints (≈ <480px → 2, <700px → 4, ≥700px → 8; spike confirms).
+- **Q4 → RESPONSIVE SHEET UP TO A MAX.** Drop the hard `max-w-[560px]`; the authoring
+  sheet fills available width up to a sane max so it reads like Perform on wide screens.
+- **Q5 → LEAVE + BACKLOG.** Old saved PDFs keep their baked (stretched) calibration;
+  geometry self-heals on the next render/save. Backlog note, not this PR.
 
 ## 7. Non-goals / separate backlog
 
