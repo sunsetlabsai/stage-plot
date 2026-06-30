@@ -1,9 +1,16 @@
 # Conductor 5b · chunk 1 — the MD align / true-up tap + re-anchor (the position primitive)
 
-**Status:** DESIGN — pre-Codex. DESIGN-ONLY, no code in this pass. Builds on chunk 0
-(`song.bpm` + click + tap-tempo, SHIPPED to prod `3eae7ae`) and the parent clock-layer
-design `docs/design-conductor-chunk5b-clock.md` (v0.6.6, Codex R9 GO). This doc is the
-build spec for **§8 item 1** of that parent; it does **not** reopen the parent (it is GO'd).
+**Status:** DESIGN — Codex R1 folded, awaiting R2. DESIGN-ONLY, no code in this pass. Builds
+on chunk 0 (`song.bpm` + click + tap-tempo, SHIPPED to prod `3eae7ae`) and the parent
+clock-layer design `docs/design-conductor-chunk5b-clock.md` (v0.6.6, Codex R9 GO). This doc is
+the build spec for **§8 item 1** of that parent; it does **not** reopen the parent (it is GO'd).
+
+**R1 folds:** (MEDIUM — `anchor` semantics) the machine-placement rows (`autofire`/`clock`)
+no longer overwrite `anchor`; it moves **only** on a manual re-anchor, so it unambiguously
+means "last human anchor" (parent §5.1:341), `current` carries the machine-placed position,
+and "chunk 2 adds a consumer, not a reshape" holds (§2.1/§2.2/§5.5). (LOW — test gap) added a
+chained auto-fire **binding** test (advance-opened + release-opened) proving the final
+reckoning gets the autofire stamp with no double-count (§7).
 
 **One-line frame.** Chunk 1 builds the *position-authority machinery* — the MD-local
 `ClockReckoning` state and the single **Invariant (P)** chokepoint that decides, on every
@@ -89,6 +96,11 @@ to *hold* this state, so it must model "before anything was placed"):
 export type ClockProvenance = 'manual' | 'autofire' | 'clock'; // 'clock' reserved for chunk 2
 
 export interface ClockReckoning {
+  // The last TRUST (human) anchor — the step a MANUAL re-anchor last re-zeroed onto
+  // (parent §5.1:341). It moves ONLY on a manual re-anchor (advance / align / Go-now /
+  // future seek); a MACHINE placement (autofire / clock) NEVER writes it — `current`
+  // (in ConductorState) already carries the machine-placed position, so anchor stays
+  // unambiguously "last human anchor", in lockstep with alignedAtMs + barsSinceAnchor.
   // null ⇔ "no position ever asserted" — the §5.2 unconfirmed-start state, in lockstep
   // with alignedAtMs === null. Parent §5.1 shows the STEADY-STATE (non-null) shape; chunk 1
   // adds the pre-first-anchor init form (refinement noted to Codex — §7-Q1).
@@ -167,15 +179,17 @@ export function reckonAfter(
         barsAtMotionBaseline: 0,                //   TEMPO change re-baselines it — chunk 2/§5.6-ii)
         positionTrusted: true,
       };
-    case 'autofire': // chained auto-fire commit: machine-placed; counters LEFT at the
-      return {       //   arrival's values (no double-count stall, parent §5.2), motion untouched
+    case 'autofire': // chained auto-fire commit: MACHINE-placed. Flips provenance ONLY —
+      return {       //   anchor / barsSinceAnchor / alignedAtMs (the whole TRUST axis) and the
+        ...r,        //   motion axis are ALL left at the arrival's values (no double-count
+        positionTrusted: false,  //  stall, parent §5.2). anchor stays the last HUMAN anchor (§2.1).
+      };
+    case 'clock':    // reserved for chunk 2's driver — not emitted in chunk 1. Counts ONE
+      return {       //   clock-driven bar SINCE the human anchor; anchor + alignedAtMs untouched.
         ...r,
-        anchor: { barId: cur.barId, pass: cur.pass },
+        barsSinceAnchor: r.barsSinceAnchor + 1,
         positionTrusted: false,
       };
-    case 'clock':    // reserved for chunk 2's driver — not emitted in chunk 1
-      return { ...r, anchor: { barId: cur.barId, pass: cur.pass },
-        barsSinceAnchor: r.barsSinceAnchor + 1, positionTrusted: false };
   }
 }
 ```
@@ -304,12 +318,14 @@ emits nothing → `current` stays null → `reckonAfter` no-ops → align is ine
    onto `{b8,1}`. ✗-case: nothing armed → `commit()` returns `base` (`:234`), `current`
    unchanged → **no re-anchor** (R8). ✓
 5. **Release-opened auto-fire (5a path) stamps autofire.** `current={b6,3}` placed by a prior
-   *manual* advance (trusted), `holding≠null`, armed at `b6`. `redirect(release)`: leg
-   `'manual'` but `current` unchanged → reckoning untouched; gate opens → chained
-   `commit` writes `current={b7,1}` → `reckonAfter('autofire')`: anchor `{b7,1}`,
-   `positionTrusted=false`, `barsSinceAnchor` **left** at the manual arrival's value. ✓ (The
-   chunk-3 gate later reads `positionTrusted` — here the *placement* it stamps is honest; no
-   gate consumer exists in chunk 1.)
+   *manual* advance, so `anchor={b6,3}`, trusted, `barsSinceAnchor=0`; `holding≠null`, armed at
+   `b6`. `redirect(release)`: leg `'manual'` but `current` unchanged → reckoning untouched; gate
+   opens → chained `commit` writes `current={b7,1}` → `reckonAfter('autofire')`: **only**
+   `positionTrusted→false`. **`anchor` stays `{b6,3}`** (the last human anchor — NOT the
+   machine-placed `b7`), `barsSinceAnchor` stays `0`, `alignedAtMs` unchanged, motion untouched.
+   ✓ The machine-placed position lives in `current={b7,1}` (which travels in `ConductorState`);
+   `anchor` never duplicates it. The chunk-3 gate later reads `positionTrusted` — here the stamp
+   is honest; no gate consumer exists in chunk 1.
 
 ---
 
@@ -346,8 +362,11 @@ intentional, and the trace in §5.5 shows the write is right ahead of the chunk-
   (the redirect / no-armed-commit / dead-advance class).
 - `reckonAfter` distinguishes a genuine repeat re-emit (`{b,1}`→`{b,2}`) as a *move* (re-anchors)
   vs a null-transition (`{b,2}`→`{b,2}`) as a no-op.
-- `reckonAfter('autofire')` → `positionTrusted=false`, `barsSinceAnchor` **unchanged**, motion
-  untouched (no double-count — parent §5.2).
+- `reckonAfter('autofire')` → **only** `positionTrusted=false`; the whole trust axis (`anchor`,
+  `barsSinceAnchor`, `alignedAtMs`) AND the motion axis are **unchanged** (anchor stays the
+  last human anchor; no double-count — parent §5.2 / §2.1).
+- `reckonAfter('clock')` → `barsSinceAnchor+1`, `positionTrusted=false`, `anchor`/`alignedAtMs`
+  unchanged (the chunk-2 row, asserted here so chunk 2 adds a consumer, not a reshape).
 - `alignReckoning` re-zeros onto the passed step, `positionTrusted=true`, never moves `current`.
 
 **Hook-binding tests (`use-conductor-session.test.tsx`):**
@@ -357,6 +376,12 @@ intentional, and the trace in §5.5 shows the write is right ahead of the chunk-
 - a `redirect` (anotherRound/hold/release/resetJump) leaves reckoning **untouched** (anchor +
   `alignedAtMs` + `positionTrusted` preserved).
 - a no-armed `commit()` does **not** re-anchor (Invariant (P) / R8).
+- **a chained auto-fire through `applyWithAutoFire` (the riskiest wiring path):** arm at the
+  next bar with `autoFire` on, `advance()` onto `fireAt` → assert the **first** dispatch
+  (manual advance) re-anchored AND the chained `commit` then applied the **autofire** stamp
+  (`positionTrusted=false`, trust axis left at the manual arrival's `barsSinceAnchor`/`anchor`),
+  with a **single** final reckoning value (no double-count, no intermediate-state leak). Mirror
+  with a **release-opened** auto-fire (vamp hold → `redirect(release)`) for the §5.5 #5 path.
 - reckoning resets to `initReckoning` on identity change (new `sessionId`/`cal`) and on disable.
 
 **Report the test-count delta** on the build PR (per the standing rule).
