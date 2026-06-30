@@ -565,18 +565,18 @@ describe('useConductorSession — static-BPM motion driver (5b chunk 2)', () => 
     expect(result.current.reckoning).toBe(before); // Invariant (P) no-op — current never moved
   });
 
-  it('a mid-clock tempo change re-baselines the MOTION axis IN-TICK — no jump, no stall (Codex R5 HIGH 2)', async () => {
+  it('a mid-clock tempo change re-baselines the MOTION axis IN-TICK — no jump, no stall (Codex R5/R6 HIGH 2)', async () => {
     const { result, clock, rerender } = await activateAt();
     act(() => result.current.align()); // b1, baseline T0
     act(() => result.current.setClockOn(true));
     clock.t = T0 + bm120;
     act(() => vi.advanceTimersToNextTimer()); // → b2, barsSinceAnchor 1 (establishes bpm 120)
-    // MD changes the song's stated tempo to 140 mid-clock. There is NO [bpm] passive effect any
-    // more (it could lose to an already-due tick); the reconcile happens INSIDE the tick, atomically
-    // aligned with the baseline it reads. So the FIRST tick after the change re-zeros the motion axis
-    // to NOW and consumes no bar; the NEXT tick (one 140-bpm bar later) advances cleanly.
+    // MD changes the song's stated tempo to 140 mid-clock. NO manual flush: the cfgRef mirror is a
+    // LAYOUT effect (Codex R6), so the new bpm lands in the rerender's COMMIT — every subsequent tick
+    // reads 140 with no commit→passive window to lose. The reconcile then happens INSIDE the tick,
+    // atomically aligned with the baseline: the FIRST tick after the change re-zeros the motion axis
+    // to NOW (consumes no bar); the NEXT tick (one 140-bpm bar later) advances cleanly.
     rerender(args({ bpm: 140 }));
-    await act(async () => {}); // flush the cfgRef config-mirror effect so the tick reads bpm 140
     const bm140 = barMs(140, 4);
     clock.t = T0 + bm120 + 7; // a beat after the change — the reconcile tick re-zeros to here
     act(() => vi.advanceTimersToNextTimer());
@@ -588,7 +588,7 @@ describe('useConductorSession — static-BPM motion driver (5b chunk 2)', () => 
     expect(result.current.stalled).toBe(false);
   });
 
-  it('an identity change while the clock runs inerts the stale interval — no ghost advance (Codex R5 HIGH 1)', async () => {
+  it('an identity change while the clock runs inerts the stale interval — no ghost advance (Codex R5/R6 HIGH 1)', async () => {
     const { result, clock, rerender } = await activateAt({
       cal: lin('a1', 'a2', 'a3'),
       songRef: 'songA',
@@ -599,19 +599,38 @@ describe('useConductorSession — static-BPM motion driver (5b chunk 2)', () => 
     clock.t = T0 + bm120;
     act(() => vi.advanceTimersToNextTimer()); // clock → a2
     expect(result.current.current?.barId).toBe('a2');
-    // Swap to a DIFFERENT chart while clockOn is still true. programHash is async, so the new
-    // session isn't seeded yet, but the OLD interval is still keyed [enabled, clockOn] and mounted.
-    // The reset effect nulls driverRef.session SYNCHRONOUSLY, so this stale tick is inert; without
-    // it the old session would be advanced/stalled under the next chart's render.
+    // Swap to a DIFFERENT chart while clockOn is still true. The OLD interval is still keyed
+    // [enabled, clockOn] and mounted; the new session is reseeded asynchronously (programHash). A
+    // LAYOUT effect nulls driverRef.session in the rerender's COMMIT (Codex R6) — before the event
+    // loop can run a due timer — so the still-mounted interval is inert against the stale session.
+    // (RTL's act collapses the commit→passive flush, so this asserts the post-commit invariant: the
+    // session is null in the same commit, hence even a maximally-owed stale tick advances/stalls nothing.)
     rerender(args({ cal: lin('z1', 'z2', 'z3'), songRef: 'songZ', sessionId: 'songZ::o/s', bpm: 120 }));
-    clock.t = T0 + 10 * bm120; // a long owed window — a live stale tick would stall/fast-forward
+    clock.t = T0 + 10 * bm120; // a long owed window — a LIVE stale tick would stall/fast-forward songA
     act(() => vi.advanceTimersToNextTimer()); // the stale interval fires once — must do nothing
     expect(result.current.stalled).toBe(false); // no ghost stall leaked across the swap
-    // Once the new session resolves, the clock is reset OFF (per-session §12-Q4) and the cursor fresh.
-    await act(async () => {});
-    expect(result.current.active).toBe(true);
-    expect(result.current.clockOn).toBe(false);
+    // The new session settles (async programHash) with the clock reset OFF (per-session §12-Q4) and a
+    // fresh cursor. Use REAL timers + waitFor so the assertion is robust to the resolve's microtask
+    // depth (a single act-flush was order-sensitive across the full suite — the prior flake).
+    vi.useRealTimers();
+    await waitFor(() => expect(result.current.clockOn).toBe(false));
     expect(result.current.current).toBeNull();
+  });
+
+  it('toggling the clock OFF tears the interval down in-commit — no spurious post-off advance (Codex R6 class)', async () => {
+    const { result, clock } = await activateAt();
+    act(() => result.current.align()); // b1
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + bm120;
+    act(() => vi.advanceTimersToNextTimer()); // → b2
+    expect(result.current.current?.barId).toBe('b2');
+    // MD turns the clock off. The driver is a LAYOUT effect, so its cleanup clears the interval in
+    // the setClockOn(false) commit (before a due tick can run). A long owed window then fires nothing.
+    act(() => result.current.setClockOn(false));
+    clock.t = T0 + 20 * bm120;
+    act(() => vi.advanceTimersByTime(20 * bm120));
+    expect(result.current.current?.barId).toBe('b2'); // no spurious advance after clock-off
+    expect(result.current.stalled).toBe(false);
   });
 
   it('the clock idles at song end — no churn, no stall (vm.done guard)', async () => {

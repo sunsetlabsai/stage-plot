@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ChartCalibration } from './types';
 import { barsInOrder, type TraversalStep } from './chart-calibration';
 import { compileRoadmap, type CompiledRoadmap, type ExitPolicy } from './roadmap-vm';
@@ -45,6 +45,15 @@ import {
 // load-bearing for correctness — the driverRef gate closes the batching race at any tick
 // rate (§3.2) — only for resolution; tune in UAT.
 const CLOCK_TICK_MS = 80;
+
+// 5b chunk 2 (Codex R6): the free-running motion interval is a MACROTASK. Any input it consumes
+// that is synchronized through a PASSIVE useEffect has a race window — a due interval can fire in
+// the gap between React's commit and the (later, separate-macrotask) passive flush, reading the
+// STALE value. The fix for the whole class is to synchronize every such input in the COMMIT phase
+// via a LAYOUT effect (runs synchronously before control yields to the event loop, so no due timer
+// can interleave). On the server, effects never run, so useEffect is behaviorally identical and
+// avoids the useLayoutEffect SSR warning.
+const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
 export interface UseConductorArgs {
   // isOwner && the MD turned on "Local MD mode" && a performable bar-cal is loaded.
@@ -145,13 +154,15 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     reckoning: ClockReckoning;
     stalled: boolean;
   }>({ session, reckoning, stalled });
-  // A SEPARATE ref for the tick's non-transaction config (stale-by-a-tick is harmless:
-  // bpm/barBeats only feed barMs, which self-corrects; clockOn keys the driver effect, so it
-  // needn't be mirrored). Written in a post-commit effect — NOT during render (react-hooks/refs
-  // bans touching ref.current there) — and NOT the driver transaction, which is only written at
-  // mutation seams so an unrelated re-render can't clobber an in-flight advance.
+  // A SEPARATE ref for the tick's non-transaction config (bpm/barBeats feed barMs + the in-tick
+  // tempo reconcile). Mirrored in a LAYOUT effect (Codex R6 HIGH 2) — NOT a passive one: a passive
+  // mirror leaves a window where a due interval fires after the bpm-prop commit but before the
+  // passive flush, reading the OLD bpm against the OLD baseline (a stale old-tempo advance instead
+  // of a reconcile). The layout write lands in the commit, so every post-commit tick sees the
+  // current tempo. NOT written during render (react-hooks/refs bans ref.current there) and NOT the
+  // driver transaction (only written at mutation seams, so a re-render can't clobber an in-flight advance).
   const cfgRef = useRef({ bpm, barBeats });
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     cfgRef.current = { bpm, barBeats };
   }, [bpm, barBeats]);
 
@@ -176,22 +187,28 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // stall). The tick is the one place synchronized with the baseline — so it reconciles there,
   // atomically, before computing owed. See driveClockTick below.
 
+  // SYNCHRONOUSLY inert the still-mounted interval the instant identity changes (Codex R6 HIGH 1).
+  // The driver interval is keyed on [enabled, clockOn], so when sessionId / songRef / cal change
+  // while clockOn stays true, the OLD interval keeps ticking against the OLD driverRef.session until
+  // the async programHash reseeds it. The previous fix nulled the session at the TOP of the PASSIVE
+  // reset effect — but that passive body runs in a later macrotask, so a due interval could still
+  // fire in the commit→passive gap and advance/stall the previous chart. A LAYOUT effect nulls it in
+  // the commit phase (before the event loop can run a due timer), truly closing the window. Ref write
+  // only (no setState), so it's lint-clean here; the tick's `if (!s || ...) return` catches the null,
+  // the passive effect below reseeds, and a fresh session's `current === null` guard covers the interim.
+  useIsomorphicLayoutEffect(() => {
+    driverRef.current = { ...driverRef.current, session: null };
+  }, [enabled, compiled, cal, sessionId, songRef]);
+
   // (Re)initialize the session on identity change. programHash is async, so init
   // happens in the resolve callback — naturally deferred (no sync setState-in-effect).
   // The disabled/teardown branch defers its reset to a microtask for the same lint
   // rule (mirrors the cross-chart reset idiom in page.tsx). A `cancelled` guard drops
-  // a stale async if cal/identity changed under it.
+  // a stale async if cal/identity changed under it. (The driverRef.session null that
+  // inerts the live interval is done synchronously in the LAYOUT effect above — this
+  // passive effect owns only the deferred setState resets + the async reseed.)
   useEffect(() => {
     let cancelled = false;
-    // SYNCHRONOUSLY inert the still-mounted interval the instant identity changes (Codex R5
-    // HIGH 1). The driver effect is keyed only on [enabled, clockOn], so when sessionId /
-    // songRef / cal change while clockOn stays true, the OLD interval keeps ticking against
-    // the OLD driverRef.session until the async programHash resolves — long enough to advance
-    // or stall the previous chart under the next chart's render. Nulling the session here (the
-    // one mutation a render-phase-adjacent effect may do to the ref, since the tick's
-    // `if (!s || ...) return` guard catches it) closes that window; the post-resolve reseed
-    // re-populates it, and the fresh session's `current === null` guard covers the interim.
-    driverRef.current = { ...driverRef.current, session: null };
     // Identity changed — drop any prior arm-eligibility bit alongside the session
     // reset. Deferred (not synchronous-in-effect) for the same lint rule the
     // setSession resets below follow. (Harmless even if it lagged: shouldAutoFire
@@ -366,9 +383,13 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
 
   // The motion driver effect (§3). One interval, MD device only, set up ONCE per
   // [enabled, clockOn] (re-creating it per render would reset the timing baseline every
-  // tick). Torn down on disable / clock-off / unmount. driveClockTick reads only refs, so
-  // the stale closure is a non-issue and session/reckoning/bpm are intentionally NOT deps.
-  useEffect(() => {
+  // tick). driveClockTick reads only refs, so the stale closure is a non-issue and
+  // session/reckoning/bpm are intentionally NOT deps. LAYOUT, not passive (Codex R6): the
+  // CLEANUP must clear the interval in the SAME commit the MD toggles clock off / leaves MD
+  // mode — a passive teardown leaves a window where a due tick fires after the clockOff/disable
+  // commit but before the passive cleanup, advancing one spurious bar. A layout cleanup runs in
+  // the commit, before the event loop can run that due timer, so the interval stops cleanly.
+  useIsomorphicLayoutEffect(() => {
     if (!enabled || !clockOn) return;
     const id = setInterval(driveClockTick, CLOCK_TICK_MS);
     return () => clearInterval(id);
