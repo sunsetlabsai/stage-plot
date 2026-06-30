@@ -1,17 +1,17 @@
 # Conductor Authority — Chunk 5b: the clock layer + OQ-1 resolution (§5.1, §8.2-1)
 
-**Status:** **v0.6.3 — DESIGN-ONLY, post-Codex-R6 (1 HIGH, 2 LOW).**
-R6 folds: **HIGH** — the confidence gate keyed on the *action's* provenance (manual vs clock),
-but `release` is a manual redirect that merely *opens* a gate over a position the **clock** may
-have placed. The clock can drive `current` onto `fireAt` while `holding != null` (low conf, far
-past anchor); a later manual `release` would then auto-commit an **untrusted** clock arrival,
-bypassing confidence. Fix: a new `reckoning.positionTrusted` bit records the **arrival's**
-provenance (true on a manual position gesture, false on a clock-driven advance); the gate
-requires `clockConfidenceOk` iff `!positionTrusted`, so it is caller-agnostic and a release
-over a clock-placed `fireAt` is refused while the genuine 5a vamp-release still fires
-(§5.1, §5.2, §5.3). **LOW** — tightened two broad phrasings ("MD cue"/"MD nav" → "MD position
-gesture") and updated the stale "Ready for R5" header.
-Prior status (R5): narrowed re-anchor to position gestures; (R4): buildability check, fork reframed.
+**Status:** **v0.6.4 — DESIGN-ONLY, post-Codex-R7 (1 MEDIUM, 1 LOW).**
+R7 folds: **MEDIUM** — `positionTrusted` (R6) was defined for `advance` and the future `seek`
+but not for **`commit`**, the third `current`-writer (`conductor-state.ts:242`). Defined both
+triggers: a manual **"Go now"** is a human gesture → full trust re-anchor (`positionTrusted =
+true`, counters zeroed); an **auto-fire commit** is machine-placed → `positionTrusted = false`
+**with counters left at the opening arrival's values** (a self-caught subtlety: incrementing
+`barsSinceAnchor` on the chained commit would push it one ahead of the motion pacer and stall
+the next advance — the R4 double-count class). No stale-trusted state survives a structural
+jump (§5.2). **LOW** — tightened the last broad phrasing (§3 "re-anchors trust on every MD
+cue" → "MD position gesture").
+Prior status (R6): arrival-provenance confidence gate (`!positionTrusted`); (R5): narrowed
+re-anchor to position gestures; (R4): buildability check, fork reframed.
 Resolves epic open item **§8.2-1** (`docs/design-conductor-authority.md:207` — *"Listener
 placement + clock latency"*), the single decision fence on chunk 5b. Builds on chunk 5a (gated
 auto-fire on arrival, SHIPPED to prod `de8e414`). **No code in this pass.** v0.3 closed the §7
@@ -206,8 +206,9 @@ deferred node (§2.2) placement-compatible, and it ships *with* the node, not be
   cares about (we light *bars*, not sub-beats), that is well under the threshold of
   visible error.
 - The clock re-zeros *display phase* at every section head + re-anchors trust on every MD
-  cue (§1, §5.1), so transit error (a phase term) **cannot accumulate** — it is bounded to a
-  single span and the phase reset is frequent. (Phase reset is cheap and self-asserted;
+  **position gesture** (align tap / manual `advance` / Go-now / future `seek` — never a
+  redirect, §5.1/§5.2), so transit error (a phase term) **cannot accumulate** — it is bounded
+  to a single span and the phase reset is frequent. (Phase reset is cheap and self-asserted;
   *trust* is the thing that waits for the human — §5.1 R3 HIGH-1.)
 
 **The cheap safeguard — carry freshness, reckon from receipt (HIGH-1 fix).** v0.3 proposed
@@ -418,6 +419,34 @@ constant — `applyWithAutoFire(before, res, { requireClockConfidence: !reckonin
 — so it is caller-agnostic: `advance()`, the motion loop, and `release` all pass the *same*
 expression, and the answer falls out of how `current` was placed. `shouldAutoFire`'s signature
 and body are untouched (it stays the verbatim 5a exact-arrival predicate).
+
+**`commit` is the THIRD `current`-writer — its provenance must be defined too (R7 MEDIUM).**
+The shipped reducer writes `current` from exactly three payloads: `advance`, `commit`
+(`conductor-state.ts:242` — `applyOverride` jump + one `stepVM` step), and the future `seek`.
+`advance` is covered above; `commit` jumps the playhead, so leaving `positionTrusted` (and the
+counters) untouched across it would carry **stale** state across a structural discontinuity —
+exactly the bug class R6 was about. There are two commit triggers (`use-conductor-session.ts`),
+and they get **opposite** provenance because one is a human act and one is not:
+
+- **Manual "Go now"** (the hook's `commit()`, line 220 — the MD deliberately executes the armed
+  jump now) is a **human position gesture** → full **trust re-anchor** onto the post-jump
+  `current`: `positionTrusted = true`, `barsSinceAnchor = 0`, `alignedAtMs = now`,
+  `motionBaselineAtMs = now`, `barsAtMotionBaseline = 0`. Same treatment as a manual `advance` /
+  align tap — the human just placed the playhead.
+- **Auto-fire commit** (the chained `commit` inside `applyWithAutoFire`, line 149) is **machine
+  placed**, not a fresh gesture → `positionTrusted = false`, **but it does NOT advance any
+  counter**: `barsSinceAnchor`, `alignedAtMs`, and the whole motion axis are left **exactly as
+  the opening arrival set them**. The commit fires in the **same tick** as the arrival that
+  opened the gate — the arrival's `advance` (clock-driven) already counted that bar's elapsed
+  time, or the opening was a `release` that consumed none. The commit only *relocates* `current`
+  across the structural jump; it consumes no additional wall-clock, so incrementing
+  `barsSinceAnchor` here would push it one **ahead** of the motion pacer's `expected` and stall
+  the next advance by a bar — the R4 double-count class. So: provenance flips to clock-placed
+  (a *subsequent* auto-fire must re-clear `clockConfidenceOk`), `barsSinceAnchor` keeps climbing
+  toward the §7-4 bound from the arrival's value until a real MD gesture re-anchors, and no
+  stale `positionTrusted = true` survives the jump. The motion baseline is untouched because
+  tempo/time is continuous across the jump (the band plays straight through; the *score*
+  discontinuity is not a *time* discontinuity).
 
 This is where **`armedFireAtEligible` becomes genuinely load-bearing** (epic/5a note): under
 dead-reckoning the playhead may *not* land on `fireAt` exactly, so the arm-time
@@ -734,11 +763,14 @@ Mirrors epic §9 item 5; gated commits, Codex per chunk.
    `clockConfidenceOk = false`, then a manual `release` must NOT commit** (untrusted clock
    arrival, `positionTrusted = false`); **its mirror — a MANUALLY-placed `fireAt` under hold,
    then `release`, DOES fire** even with the clock low/off (5a vamp-release preserved,
-   `positionTrusted = true`); **β clock-overrun → drops to `manual`, armed marker stays
-   pending / refuses by confidence — NO backward re-seat in v1** (§5.4); 5a rising-edge parity
-   under a clock-CREATED arrival; 5a manual path unchanged when clock absent. *(The
-   stranded-`fireAt` eligibility-recompute test belongs to the deferred `seek` chunk, §5.4 —
-   not v1.)*
+   `positionTrusted = true`); **commit provenance (R7): a manual "Go now" re-anchors both axes
+   + `positionTrusted = true`, while an auto-fire commit sets `positionTrusted = false` and
+   leaves `barsSinceAnchor`/motion baseline AT THE ARRIVAL'S VALUES — the next clock advance
+   lands on time, NOT one bar late** (no double-count stall, §5.2); **β clock-overrun → drops
+   to `manual`, armed marker stays pending / refuses by confidence — NO backward re-seat in
+   v1** (§5.4); 5a rising-edge parity under a clock-CREATED arrival; 5a manual path unchanged
+   when clock absent. *(The stranded-`fireAt` eligibility-recompute test belongs to the deferred
+   `seek` chunk, §5.4 — not v1.)*
 4. **Telemetry ingest + MD re-emit + detector + validation/shadow mode (§6):** listener
    `TempoTelemetry` → MD validate → `clock` dispatch under `(epoch, seq)` (in-process for
    MD-mic). The detector ships **shadow-only** (drives nothing, logs detected-vs-actual);
