@@ -1,7 +1,9 @@
 # Conductor 5b · chunk 2 — the static-BPM motion driver (the ladder + the loop)
 
-**Status:** DESIGN — Codex R1 folded (2 HIGH + 1 MEDIUM) + R2 (1 HIGH) + R3 (1 HIGH). DESIGN-ONLY,
-no code. **R3 fold:** the loop would dispatch *no-op* advances after song end — a done-`advance`
+**Status:** DESIGN — **Codex R4 GO** (R1 2 HIGH + 1 MEDIUM, R2 1 HIGH, R3 1 HIGH, R4 1 LOW — all
+folded). DESIGN-ONLY, no code. **R4:** GO; one LOW — the §3.1 tick pseudocode used `session.vm.done`/
+`session.current`; corrected to the shipped `session.state.vm.done`/`session.state.current` so the
+build implements the real shape. **R3 fold:** the loop would dispatch *no-op* advances after song end — a done-`advance`
 is `applied` (not `ignored`: `current: r.transition ?? state.current`, `conductor-state.ts:218`),
 leaving `current`/`barsSinceAnchor` unchanged while bumping `seq`/`updatedAt`, so `owed` grows and
 the loop churns every tick until an artificial stall. Fixed: `computeStaticRung` now takes
@@ -176,8 +178,8 @@ is the correct v1 mechanism; rAF smooth-glide is post-v1 (parent §5.6-iii).
 ```
 on each tick (reads FRESH state from driverRef.current — §3.2; writes it back synchronously):
   if rung !== 'static-bpm'         → return          // clock off / no bpm / stalled / DONE / manual
-  if session.current === null      → return          // NOT YET SEEDED — wait for the MD's "On the 1"
-  if session.vm.done               → return          // belt-and-suspenders: never dispatch a no-op advance at song end
+  if session.state.current === null → return          // NOT YET SEEDED — wait for the MD's "On the 1"
+  if session.state.vm.done         → return          // belt-and-suspenders: never dispatch a no-op advance at song end
   barMs    = barMs(bpm, barBeats)                     // lib/tempo.ts (60000·barBeats/bpm)
   expected = barsAtMotionBaseline + floor((now − motionBaselineAtMs) / barMs)
   owed     = expected − barsSinceAnchor
