@@ -1,6 +1,14 @@
 # Conductor Authority — Chunk 5b: the clock layer + OQ-1 resolution (§5.1, §8.2-1)
 
-**Status:** **v0.6.5 — DESIGN-ONLY, post-Codex-R8 (1 MEDIUM, 1 LOW) + 2 of my own.**
+**Status:** **v0.6.6 — DESIGN-DONE, Codex R9 GO (no HIGH/MEDIUM). Cleared for build.**
+R9 was a clean GO — Invariant (P) closes the no-op/current-write class, the unconfirmed-start
+guard is correct, the hold/vamp pacer analysis matches the VM. Two LOW doc-consistency nits
+folded: §5.1's `ClockReckoning` intro now says fields ride **any reduce that writes a new
+`current`** (not "the advance the driver emits"), `positionTrusted`'s comment says **false ⇒
+machine-placed (clock advance OR auto-fire commit)**; §1 narrowed "`advance` is the only
+`stepVM` caller" → "**the clock** emits only `advance`" (`commit` also calls `stepVM`,
+`conductor-state.ts:242`).
+Prior status (R8 + own sweep):
 R8 folds (with a systemic reframe that closes the class, not the instance): **MEDIUM** — the
 R7 commit bookkeeping keyed off the *action* ("manual Go-now ⇒ re-anchor"), but the shipped
 reducer has **`applied` commits that do NOT move `current`** — nothing armed (`:234`), a
@@ -121,9 +129,10 @@ From epic §5.1, restated so the OQ-1 answers are forced, not invented:
   second writer** (epic finding 6). This is already locked architecture — OQ-1 only
   decides *which device* and *how it degrades*, not *who writes*.
 - **The clock can only ever make the playhead move; it can never make it jump.** A jump
-  is a structural decision (an armed change), and that stays MD-authored (5a). The clock
-  feeds `advance` and nothing else — `advance` remains the **only** `stepVM` caller
-  (chunk-5a invariant, design-conductor-chunk5.md §107).
+  is a structural decision (an armed change), and that stays MD-authored (5a). **The clock
+  emits `advance` and nothing else — never `commit`/`seek`** (`commit` also calls `stepVM`
+  in shipped code, `conductor-state.ts:242`, so `advance` is not the *only* `stepVM` caller;
+  the invariant is that the *clock's* only output is `advance`, design-conductor-chunk5.md §107).
 
 **Consequence:** a wrong clock degrades to *the MD tapping advance* (5a), which is always
 present and always correct. That is the floor every OQ-1 answer falls back to.
@@ -324,8 +333,9 @@ type ConductorClock = {            // the WIRE shape — additive, no new top-le
 
 **(b) MD-local reckoning (NOT on the wire — lives beside `armedFireAtEligible`/`autoFireOn`
 in the hook, MD device only).** The gate runs only on the MD (single writer), so the things
-the gate reads live here, updated **atomically with the advance the driver emits** — never a
-separate clock payload, so there is no cursor/counter skew (MEDIUM-1):
+the gate reads live here, updated **atomically with any reduce that writes a new `current`**
+(Invariant (P), §5.2 — `advance`, manual or auto-fire `commit`, future `seek`; never on a
+no-op or a separate clock payload, so there is no cursor/counter skew, MEDIUM-1):
 
 ```ts
 type ClockReckoning = {            // MD-LOCAL — never broadcast
@@ -338,7 +348,7 @@ type ClockReckoning = {            // MD-LOCAL — never broadcast
   baselineTempoBpm: number;        // tempo in force at motionBaselineAtMs
   barsAtMotionBaseline: number;    // the value of barsSinceAnchor captured at motionBaselineAtMs
   // ── arrival provenance (how `current` got where it is — R6 HIGH) ──
-  positionTrusted: boolean;        // true ⇒ current was placed by a MANUAL position gesture; false ⇒ the CLOCK drove it here
+  positionTrusted: boolean;        // true ⇒ current was placed by a MANUAL position gesture (advance/align/Go-now/future seek); false ⇒ MACHINE-placed (clock advance OR auto-fire commit). Set per Invariant (P), §5.2
 };
 ```
 

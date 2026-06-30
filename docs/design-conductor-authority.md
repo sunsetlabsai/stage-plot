@@ -170,6 +170,10 @@ type ConductorState = {
     passCount: Record<canonicalBarId, number>;
   };
   armed?: { fireAt: CanonicalRef; jumpTo: CanonicalRef; exit?: ExitPolicy }; // pending change marker (advisory display)
+  // pre-5b compact shape — SUPERSEDED by chunk-5b §5.1. The broadcast (wire) clock is now
+  // { rung: 'live'|'coasting'|'static-bpm'|'manual'; tempoBpm: number|null; confidence: number };
+  // the reckoning state + confidence gate (anchor, barsSinceAnchor, alignedAtMs, motion baseline,
+  // positionTrusted) are MD-LOCAL, off the wire. See docs/design-conductor-chunk5b-clock.md §5.1.
   clock: { tempoBpm: number | null; downbeatAt?: number; confidence: number };
   updatedAt: number;
 };
@@ -203,9 +207,11 @@ Closed by v2: v1's §8.1 (continuation — §3.4), §8.2 (resync pass-state — 
 - **§8.2-1 alignment ambiguity → §2.2.0.** Partial alignment with per-node `local` | `tacet` | `unmapped`; tacet is resolved (rest + re-home), unmapped is loud + self-nav; never block the whole chart; no auto-snap. Spine: degrade precision, never honesty.
 - **§8.2-2 `barOffset` span-equivalence → §2.3.1.** Honored only in a `bar-isomorphic` span (equal bar count + no intervening structural divergence); else drop to span head, label approximate.
 
+**Resolved by chunk-5b clock design (`docs/design-conductor-chunk5b-clock.md`, Codex R9 GO):**
+1. **Listener placement + clock latency (§5.1) [gated chunk 5] — RESOLVED.** (Q1) Ship MD-mic as v1, seam stays placement-agnostic, dedicated node UAT-deferred. (Q2) Relay latency is invisible at bar granularity (≤2.5%/bar at 50ms); reckon from receipt + carry freshness, never subtract a foreign monotonic clock. (Q3) Degrade ladder live→coasting→static-bpm→manual; motion on all non-manual rungs, only auto-*fire* gated; floor is 5a. Clock owns speed, MD owns place; provenance/counters ride the actual `current`-write (Invariant (P)). See chunk-5b §0–§8.
+
 **Still open (gate later chunks only — not architecture, not chunks 1–2):**
-1. **Listener placement + clock latency (§5.1) [gates chunk 5]:** dedicated node vs. MD device; phase alignment across relay latency (likely invisible at bar granularity — confirm); clock behavior when the listener drops.
-2. **Failover + session discovery on a backhaul-less relay (§4/§5) [gates chunk 3 transport]:** the `claim` protocol details (how a new MD is discovered + accepted post-MD-death), room discovery (QR to relay / mDNS / room code).
+1. **Failover + session discovery on a backhaul-less relay (§4/§5) [gates chunk 3 transport]:** the `claim` protocol details (how a new MD is discovered + accepted post-MD-death), room discovery (QR to relay / mDNS / room code).
 
 ---
 
