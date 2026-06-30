@@ -49,7 +49,8 @@ shows it mangled too). Two bugs in `lib/roadmap-render.ts`:
 "Normalize around Perform" (Graham's call) = preview and PDF run the **one shared
 `layoutSystems`** — identical wrapping/constant-width/partial-left-align RULES — each
 passing its **own** `barsPerLine` + target width. They are deliberately NOT
-pixel-for-pixel the same: the PDF is fixed 8.5×11 at 4/line; the preview is responsive
+pixel-for-pixel the same: the PDF is a fixed 8.5×11 page that defaults to 4/line
+(unless `spec.barsPerLine` is explicitly set — §6 Q1); the preview is responsive
 {2,4,8} and (MVP) stacks/scrolls instead of paginating (§6 Q2). So on phone, wide
 screens, or page boundaries the preview will differ in bars-per-line and page breaks —
 **by design**. What CANNOT drift is the layout *algorithm*: there is exactly one code
@@ -95,10 +96,20 @@ bundle/`import`-graph check, not just "it builds").
 ```
 layoutSystems(spec, { barsPerLine }) → Array<{
   sectionId, sectionLabel, page, line,
-  xStart, xEnd,                          // system extents (see below)
+  barsThisLine,                          // grouping decision (for partial-line logic)
+  xStart, xEnd,                          // system extents in PDF points (see below)
   bars: Array<{ barIndex, xStart, xEnd, chord }>
 }>
 ```
+
+**Coordinate space.** `layoutSystems` is parameterized by `barsPerLine` only and emits
+**PDF-point** geometry (`CONTENT_W`-based `xStart/xEnd`) — that is the PDF drawer's
+direct input, no extra width arg needed. The PDF passes its `barsPerLine` and draws the
+points as-is. The **preview** does NOT consume those points; it consumes the
+**grouping decisions** (`page`/`line`/`barsThisLine` per system + which `barIndex`es
+land on each line) and the constant-width/left-aligned-partial RULE, then computes its
+OWN pixel geometry from its container width (§4.3). One algorithm, two coordinate
+spaces — that is the §3 "same algorithm, surface-appropriate width" seam made concrete.
 
 Fix B inside it:
 - `cellW = CONTENT_W / barsPerLine` — **constant**, independent of `barsThisLine`.
@@ -163,7 +174,11 @@ phone tier in; the spike confirms its breakpoint rather than deciding whether to
 ## 6. Resolved decisions (Graham, locked)
 
 - **Q1 → YES.** Honor explicit `spec.barsPerLine` when set; skip the responsive pick.
-  The responsive {4,8} (and 2 phone tier) applies only when `barsPerLine` is unset.
+  The responsive {2,4,8} applies only when `barsPerLine` is unset. An explicit value
+  applies to **both** surfaces: the PDF uses it as bars/line, and the preview uses it
+  as its grid column count (still scaling those columns to fit the container width).
+  The two stay on the same algorithm with the same `barsPerLine` — only the target
+  width differs.
 - **Q2 → STACK + VERTICAL-SCROLL MVP.** Preview stacks systems and scrolls vertically;
   discrete page breaks matching the PDF are a later enhancement, not this PR.
 - **Q3 → YES.** Add a **2/line** tier for phone portrait. Set: {2, 4, 8}; the §5 spike
