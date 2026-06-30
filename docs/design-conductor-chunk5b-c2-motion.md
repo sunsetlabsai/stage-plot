@@ -1,7 +1,14 @@
 # Conductor 5b · chunk 2 — the static-BPM motion driver (the ladder + the loop)
 
-**Status:** DESIGN — Codex R1 folded (2 HIGH + 1 MEDIUM) + R2 folded (1 HIGH). DESIGN-ONLY, no
-code. **R2 fold:** the §4 `prevBpm` tempo-rebaseline detector bypassed the R1 `driverRef`
+**Status:** DESIGN — Codex R1 folded (2 HIGH + 1 MEDIUM) + R2 (1 HIGH) + R3 (1 HIGH). DESIGN-ONLY,
+no code. **R3 fold:** the loop would dispatch *no-op* advances after song end — a done-`advance`
+is `applied` (not `ignored`: `current: r.transition ?? state.current`, `conductor-state.ts:218`),
+leaving `current`/`barsSinceAnchor` unchanged while bumping `seq`/`updatedAt`, so `owed` grows and
+the loop churns every tick until an artificial stall. Fixed: `computeStaticRung` now takes
+`done` (`vm.done`) and returns `manual` at song end (honest readout, idle loop), plus a
+belt-and-suspenders `vm.done` guard in the tick before dispatch; added a song-end fake-timer
+regression (no advance, no `seq` churn, no artificial stall). Corrected the §3.1 prose that wrongly
+called a done-advance `ignored`. **R2 fold:** the §4 `prevBpm` tempo-rebaseline detector bypassed the R1 `driverRef`
 invariant — it did a bare `setReckoning` while the authoritative driver kept the stale motion
 baseline, so the next tick would compute `owed` off the old baseline with the new bpm (re-opening
 the jump/stall bug). Fixed: the rebaseline is now itself a `driverRef` transaction (read
@@ -122,16 +129,27 @@ export function computeStaticRung(args: {
   clockOn: boolean;
   bpm: number | null;
   stalled: boolean;
+  done: boolean;        // vm.done — song ended; nothing left to advance onto (Codex R3 HIGH)
 }): ClockRung {
-  if (!args.clockOn || args.bpm == null || args.stalled) return 'manual';
+  if (!args.clockOn || args.bpm == null || args.stalled || args.done) return 'manual';
   return 'static-bpm';
 }
 ```
 
-- **`manual`** (clock off, or no stated bpm, or stalled): the loop emits nothing — the floor is
-  shipped 5a, the MD's tap is the only motion. **Default.**
-- **`static-bpm`** (clock on + a stated bpm + not stalled): the loop dead-reckons forward off
-  the stated tempo. This *is* the click made visible on the redline (parent §4.1/§3).
+- **`manual`** (clock off, or no stated bpm, or stalled, **or `vm.done`**): the loop emits nothing
+  — the floor is shipped 5a, the MD's tap is the only motion. **Default.**
+- **`static-bpm`** (clock on + a stated bpm + not stalled + not done): the loop dead-reckons
+  forward off the stated tempo. This *is* the click made visible on the redline (parent §4.1/§3).
+
+**Why `done` falls to `manual` (Codex R3 HIGH).** At song end `vm.done` is true and `current`
+holds the last emitted bar. A clock-driven `advance` then is **not** `ignored` — the reducer
+returns `applied` with `current: r.transition ?? state.current` (`conductor-state.ts:218`) and
+`stepVM` yields no transition (`roadmap-vm.ts:412`), so `current` is unchanged BUT `seq`/`updatedAt`
+are bumped. Worse, `reckonAfter('clock')`'s `sameStep` guard leaves `barsSinceAnchor` frozen, so
+`owed` only *grows* with elapsed time → the loop would dispatch a no-op `advance` **every tick**
+(seq churn now; broadcast churn once item 4 lands) until `owed ≥ 2` fires an *artificial* stall.
+Gating the rung on `done` idles the loop cleanly and reads honestly ("manual" at song end, not a
+phantom stall). A belt-and-suspenders `vm.done` guard also sits in the tick before dispatch (§3.1).
 
 **Why a `clockOn` toggle, default OFF.** The feature must be opt-in so the shipped 5a manual
 floor is the default and nothing auto-moves until the MD asks. It is **orthogonal to
@@ -157,8 +175,9 @@ is the correct v1 mechanism; rAF smooth-glide is post-v1 (parent §5.6-iii).
 
 ```
 on each tick (reads FRESH state from driverRef.current — §3.2; writes it back synchronously):
-  if rung !== 'static-bpm'         → return          // clock off / no bpm / stalled / manual
+  if rung !== 'static-bpm'         → return          // clock off / no bpm / stalled / DONE / manual
   if session.current === null      → return          // NOT YET SEEDED — wait for the MD's "On the 1"
+  if session.vm.done               → return          // belt-and-suspenders: never dispatch a no-op advance at song end
   barMs    = barMs(bpm, barBeats)                     // lib/tempo.ts (60000·barBeats/bpm)
   expected = barsAtMotionBaseline + floor((now − motionBaselineAtMs) / barMs)
   owed     = expected − barsSinceAnchor
@@ -192,9 +211,12 @@ the large `owed` and stalls — no replay. (`computeStaticRung` returns `manual`
 **The clock-driven advance is the reckoning's 4th `current`-writer.** It dispatches a normal
 `{ kind: 'advance' }` (the *only* `stepVM` caller stays `advance`, parent §1), and on
 `applied` stamps `reckonAfter(…, 'clock')`: `barsSinceAnchor + 1`, `positionTrusted = false`
-(the *clock* placed this bar, not a human). The Invariant (P) `sameStep` guard already handles
-a dead advance at song end (`current` unchanged ⇒ no-op). If the dispatch is `ignored`
-(`done`, etc.) the tick halts and re-evaluates next turn.
+(the *clock* placed this bar, not a human). The Invariant (P) `sameStep` guard keeps the
+*reckoning* correct on a no-move (returns it untouched) — but a done-`advance` is still `applied`
+and **churns `seq`/`updatedAt`** (`conductor-state.ts:218`), which is why song-end is gated at the
+rung (`done ⇒ manual`, §2) *and* re-checked in the tick (above): **the loop never dispatches at
+all once `vm.done`.** A genuinely `ignored` dispatch (e.g. a poison-pill `arm`, `:227`) likewise
+just halts the tick to re-evaluate next turn — but the clock only ever dispatches `advance`.
 
 ### 3.2 The stale-closure AND the multi-tick batching race — one authoritative driver ref
 
@@ -450,6 +472,10 @@ correctly from the trued position.) **Required test:** a no-armed `commit` while
    manual commit fires it (re-anchor). ✓ (Chunk 3 will let a confident clock arrival auto-fire.)
 7. **Clock off = pure 5a.** `clockOn=false` → rung `manual` → loop idle; every advance/arm/
    commit/redirect behaves byte-for-byte as shipped. ✓
+8. **Song end (Codex R3).** Clock drives onto the last bar; the advance sets `vm.done`. Now
+   `computeStaticRung(done=true)=manual` → the next tick returns at the rung check (and the
+   `vm.done` guard backstops it): no further `advance`, no `seq`/`updatedAt` churn, rung reads
+   "manual", no artificial stall. The MD may align/advance into an encore (re-anchor re-seeds). ✓
 
 ---
 
@@ -480,7 +506,7 @@ pure math lands and is proven before the timer-driven hook edit:
 
 **2a — pure (`lib/conductor-clock.ts` + `tests/conductor-clock.test.ts`):** `ClockRung`,
 `computeStaticRung`, `rebaselineMotion`, `expectedClockBars`. Tests:
-- `computeStaticRung`: off/no-bpm/stalled → `manual`; on+bpm+!stalled → `static-bpm`.
+- `computeStaticRung`: off/no-bpm/stalled/**done** → `manual`; on+bpm+!stalled+!done → `static-bpm`.
 - `expectedClockBars`: `floor((now−baseline)/barMs)` + `barsAtMotionBaseline` offset; 0 before
   one bar elapses; exact at the boundary; honours non-4/4 `barMs`.
 - `rebaselineMotion`: sets `motionBaselineAtMs`/`baselineTempoBpm`, captures
@@ -507,6 +533,9 @@ cluster + page + their tests, vitest fake timers):**
   driver, not just React state, saw the rebaseline (**no jump, no multi-bar catch-up, no stall**).
 - clock ON + auto-fire ON, clock drives onto `fireAt` ⇒ marker **stays armed** (chunk-2 defer);
   a manual `commit` then fires it.
+- **song end (Codex R3):** clock reaches the last emitted bar; after another `barMs` elapses
+  **no advance is dispatched, no `seq`/`updatedAt` churn, and no artificial stall** (rung →
+  `manual` on `vm.done`).
 - `clockOn=false` ⇒ loop idle, all 5a hook tests still green (parity).
 - cluster: Clock toggle fires `setClockOn`; rung readout renders "fixed tempo"/"manual";
   stall notice shows when `stalled`.
@@ -538,8 +567,12 @@ ref; Codex per chunk.
   itself a `driverRef` transaction (R2 HIGH), so EVERY reckoning/session/stalled mutation seam —
   manual run/applyWithAutoFire/align, the tick, the reset, AND the tempo detector — writes the
   authoritative ref before mirroring to React state. That uniformity IS the invariant.**
-- **(d) Seed-gating vs an empty chart.** `current` stays null on an empty/`done` chart, so the
-  loop is correctly inert (same honesty as chunk-1 align).
+- **(d) Seed-gating vs an empty chart, AND song end (Codex R3 HIGH, FOLDED).** `current` stays
+  null on an empty chart ⇒ inert. A chart that *plays to the end* leaves `current` on the last bar
+  with `vm.done` true — a done-`advance` is `applied` (not `ignored`), churning `seq` while
+  `current`/`barsSinceAnchor` stay put and `owed` only grows. Closed by `done ⇒ manual` in
+  `computeStaticRung` (§2) plus a tick-level `vm.done` guard (§3.1): the loop dispatches nothing at
+  song end. Regression in §10.
 - **(e) Clock on + never seeded.** Loop idle until "On the 1". No auto-start, no count-in
   invented — matches parent §1.
 - **(f) Frozen surfaces.** `shouldAutoFire`, `applyWithAutoFire`, the reducer, and the wire are
