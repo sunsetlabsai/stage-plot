@@ -1,10 +1,13 @@
 # Conductor Authority — Chunk 5b: the clock layer + OQ-1 resolution (§5.1, §8.2-1)
 
-**Status:** **v0.1 — DESIGN-ONLY, pre-Codex.** Resolves epic open item **§8.2-1**
+**Status:** **v0.2 — DESIGN-ONLY, pre-Codex.** Resolves epic open item **§8.2-1**
 (`docs/design-conductor-authority.md:207` — *"Listener placement + clock latency"*),
 the single decision fence on chunk 5b. Builds on chunk 5a (gated auto-fire on arrival,
-SHIPPED to prod `de8e414`) and the epic §5.1 clock frame. **No code in this pass.** On
-sign-off: flip the epic §8.2-1 status to *resolved → this doc*, then Codex, then build.
+SHIPPED to prod `de8e414`) and the epic §5.1 clock frame. **No code in this pass.** v0.2
+folds the S-current dialogue with Graham (§7): MD-mic v1 / node UAT-deferred; clock DOES
+auto-advance the playhead (motion is the feature, MD tap owns position); add `song.bpm` +
+click; tap-tempo + tuning knobs left open. On full sign-off: flip the epic §8.2-1 status
+to *resolved → this doc*, then Codex, then build.
 
 > **The chunk-5a / chunk-5b split (do not blur it).** 5a auto-*fires* an armed change
 > when the MD's *manual* advance lands on the fire bar — it reads **no clock** (D1).
@@ -30,11 +33,20 @@ whole ballgame** (audio-tempo designed-in now, on only after live validation).
 
 From epic §5.1, restated so the OQ-1 answers are forced, not invented:
 
-- **Tempo ≠ position.** Beat-tracking yields *speed*, never *place*. So the clock is a
-  **motion-smoother between anchors**, not a positioner. It dead-reckons the playhead
-  forward at the detected tempo and **re-zeros at every section boundary + MD cue.** A
-  band hits boundaries constantly, so drift is bounded by design — the clock is never
-  trusted further than the next anchor.
+- **Clock owns speed; MD owns place (the spine of all four answers).** Beat-tracking
+  yields *tempo*, never *position*. So in follow mode the clock **auto-advances the
+  playhead continuously — bar to bar, at the tracked tempo** (the redline moves on its
+  own; that motion *is* the feature, not a display gloss). But the audio can only say *how
+  fast*, never *where* — so **the MD seeds and re-trues position** with an **align/true-up
+  tap** (same gesture as follow-me, confirming "we're here now," forward). The clock
+  re-zeros at every section boundary + MD cue; a band hits boundaries constantly, so
+  drift is bounded by design and the clock is never trusted past the next anchor. The two
+  named failure points — **no count-in at start** and **drift over a span** — are both
+  solved by the MD's align tap; the audio is a kick, the MD is the downbeat.
+- **Follow only exists in MD-led mode.** In self-serve mode every phone self-drives and
+  there is no master clock to follow — the listener/clock simply does not engage. The
+  clock layer is therefore inherently an MD-mode feature, which is why the MD's own device
+  is the natural listener (§2).
 - **One listener, one broadcast clock.** Detection runs on exactly **one device**; its
   output is **telemetry to the MD**, who re-emits an authoritative `clock` (tempo +
   downbeat phase + confidence) under its own `(epoch, seq)`. The listener is **never a
@@ -53,31 +65,32 @@ present and always correct. That is the floor every OQ-1 answer falls back to.
 ## 2. Q1 — Listener placement: MD-mic vs. dedicated node
 
 **This is a deployment choice, not an architecture choice** — the telemetry→MD→re-emit
-seam (§1) is identical either way. So the design question is really *"which ships as the
-default, and what is the contract between them?"*
+seam (§1) is identical either way — and it only matters in MD-led mode (§1). So the design
+question is really *"which ships as the default, and what is the contract between them?"*
 
 ### 2.1 The two placements
 
-- **(A) MD-device mic — the zero-friction default.** The MD's phone listens to the room /
-  its own monitor. Pros: no extra hardware, no extra setup, no extra relay traffic, no
-  extra failure point; validates the whole dead-reckoning pipeline end-to-end with one
-  device. Cons: the MD's phone is in a poor acoustic spot (stand, pocket), exposed to
-  crowd/room noise and monitor bleed, and the MD is already busy tapping. **Source quality
-  is marginal** — exactly the case §5.1 says to gate behind validation.
-- **(B) Dedicated listener node — the "turn it on for real" path.** A second device taped
-  near a **clean source** (DI split, a monitor send, the drummer's overhead). It sends
-  telemetry to the MD over the same own-AP relay. Pros: clean source = the whole ballgame;
-  detection quality jumps; frees the MD's device. Cons: extra device + setup, one more
-  relay participant, one more thing that can drop (→ Q3).
+- **(A) MD-device mic — the v1, and the natural one.** The MD's phone listens to the room
+  / its own monitor. In MD-led mode the MD's device is already the clock authority, so the
+  ear and the writer are the same device — zero extra hardware, setup, relay traffic, or
+  failure points; validates the whole dead-reckoning pipeline end-to-end. Cons: the MD's
+  phone may sit in a poor acoustic spot (stand, pocket), exposed to crowd noise / monitor
+  bleed — source quality is whatever the MD's position gives.
+- **(B) Dedicated listener node — a UAT-deferred upgrade.** *A node is any spare device
+  (an old phone/tablet) taped near a clean source* — a DI split, a monitor send, an
+  overhead — **not a musician's playing device and not tied to any one player.** A
+  dedicated ear in a good spot, sending telemetry to the MD over the same own-AP relay.
+  Pros: clean source = the whole ballgame; detection quality jumps; frees the MD's device.
+  Cons: extra device + setup, one more relay participant, one more thing that can drop
+  (→ Q3).
 
-### 2.2 Recommendation
+### 2.2 Recommendation (RESOLVED — Graham)
 
-**Support both behind one telemetry contract; ship (A) MD-mic as the v1 on-ramp, (B)
-listener-node as a config option once a clean source exists.** Rationale: the architecture
-makes them interchangeable, so building the telemetry seam *once* gets both. (A) lets us
-validate dead-reckoning + the degrade ladder with no hardware ask; (B) is the quality
-upgrade for venues with a clean feed. **Neither is on by default** — both sit behind the
-§6 source-quality gate; the floor is always 5a manual advance.
+**Ship (A) MD-mic as v1.** The seam is built once and is placement-agnostic, so (B) stays
+*possible* with no architecture change — but its specifics (when a clean-source node earns
+its keep over the MD's own mic) are a **UAT question, deferred**: we'll learn from real
+gigs whether MD-mic source quality is good enough or whether a node is warranted. The
+floor is always 5a manual advance; the listener/clock engages only in MD-led mode.
 
 ### 2.3 The telemetry contract (listener → MD)
 
@@ -143,13 +156,18 @@ waiting on a tap. **Degrade precision, never honesty.**
 
 ### 4.2 Drop never strands, never freezes
 
-- A dropped listener can only ever cost *auto-advance*, never togetherness: every device
-  keeps its own offline redline (epic §5 per-device floor), and the MD can always advance
-  manually (5a). The bottom rung **is** chunk-5a, which is shipped and correct.
-- **Auto-advance runs only on `live`.** `coasting`/`static-bpm` are explicitly *display
-  smoothers we don't bet a jump on*: they may animate the beat, but the §3.5 confidence
-  gate (below) means auto-*fire* of an armed change requires `live` + HIGH confidence. The
-  rungs below `live` degrade to "MD confirms the change with a tap" — i.e. 5a.
+- A dropped listener can only ever cost *audio-driven motion*, never togetherness: every
+  device keeps its own offline redline (epic §5 per-device floor), and the MD can always
+  advance manually (5a). The bottom rung **is** chunk-5a, which is shipped and correct.
+- **Motion runs on every non-manual rung; only auto-*fire* is gated.** The playhead
+  auto-advances on `live`, `coasting`, AND `static-bpm` — `static-bpm` *is* the
+  click/metronome guide (§3), driving the redline off the stated tempo even with no audio.
+  `manual` is the only rung with no clock motion. What the §3.5 gate (§5) restricts is the
+  auto-*commit of an armed structural change*: a jump auto-fires only when position is
+  trustworthy (recently re-trued by an MD align tap / within the bars-since-anchor bound,
+  and on `live` at HIGH confidence). Below that bar the change waits for the MD's tap —
+  i.e. 5a. So a noisy or BPM-only clock still *flows* the redline; it just asks the MD to
+  confirm structural changes.
 - **No jitter/lurch:** coast at last-good rather than chase a noisy estimate (§5.1).
 
 ### 4.3 Re-arm on recovery
@@ -167,11 +185,16 @@ null`**, fired on the rising edge (shipped). 5b ANDs the estimated-position cond
 top, *without changing the `shouldAutoFire(session)` signature* (the seam is already shaped
 — chunk-4 Codex R5 note):
 
-- **clock state `== live`** (rung 4.1), AND
-- **confidence ≥ HIGH**, AND
-- **bars/beats since last anchor ≤ a bound** (dead-reckoning is only trusted near an
-  anchor; far from one, fall back to manual confirm), AND
-- the 5a guards unchanged.
+- **position is trustworthy** — within the **bars-since-anchor bound** of the last MD
+  align tap / section re-zero (dead-reckoning is only trusted near an anchor; far from one,
+  the change waits for an MD tap), AND
+- **the rung's confidence is met** — on `live`, **confidence ≥ HIGH**; on `static-bpm`,
+  the MD's recent align tap *is* the position warrant (the click has no audio confidence),
+  AND
+- the 5a guards unchanged (armed ∧ `current.barId === fireAt` ∧ `holding == null`).
+
+(Note: clock *motion* is NOT gated here — that runs on any non-manual rung, §4.2. This
+gate is only the auto-*fire* of an armed structural change.)
 
 This is where **`armedFireAtEligible` becomes genuinely load-bearing** (epic/5a note):
 under dead-reckoning the playhead may *not* land on `fireAt` exactly, so the arm-time
@@ -185,30 +208,41 @@ may be upgraded to a bounded VM walk *without signature change* lands here.)
 Audio-tempo is **designed-in now, turned on only after live source-quality validation** —
 this pass keeps that gate explicit rather than letting a half-trustworthy clock ship:
 
-- A **validation mode** (not a production feature): run the detector against the real
-  source at a real gig, log detected-vs-actual tempo + confidence over a set, and only
-  promote a placement (A or B) to "auto-advance allowed" if it clears a bar (e.g.
-  sustained HIGH confidence, error < a beat fraction). Until then the clock is **display
-  only** — it can animate, but the §5 gate keeps auto-fire on the 5a manual floor.
-- This makes (A) MD-mic shippable immediately as *display* (zero risk: it never moves a
-  jump), and (B) listener-node the path that earns *auto-advance* once validated.
+- The **stated-BPM click and manual advance are always available** — they need no audio
+  and carry no detection risk, so they ship unconditionally (§3, §4).
+- The **`live` audio-track rung** is what the validation gate guards: a **validation mode**
+  (not a production feature) runs the detector against the real source at a real gig, logs
+  detected-vs-actual tempo + confidence over a set, and only promotes the audio rung to
+  "trusted for auto-fire" once it clears a bar (sustained HIGH confidence, error < a beat
+  fraction). Until then audio may still *flow* the redline (motion is cheap and re-trued by
+  the MD), but the §5 gate keeps auto-*fire* of structural changes on the MD's tap.
+- So MD-mic (A) ships immediately — click + manual now, audio motion now, audio auto-fire
+  once the MD's source proves out in the field.
 
 ---
 
-## 7. Open decisions for Graham (lock before Codex)
+## 7. Decisions (S-current dialogue with Graham)
 
-1. **Placement default (Q1):** agree **ship (A) MD-mic display-only first, (B) node behind
-   validation** — or do you want to *start* with the node (clean source) and skip the
-   marginal-mic rung entirely?
-2. **Does the clock ever auto-*advance*, or is 5b "display-smoothing only" for v1?** The
-   conservative cut: 5b ships the listener + ladder + display, but auto-advance stays
-   behind validation indefinitely (auto-*fire* still requires `live`+HIGH). The aggressive
-   cut: validated `live` may auto-advance the playhead. (Recommend conservative for v1.)
-3. **Static-BPM source:** is a stated song BPM available in the chart/show model today, or
-   does that rung need a BPM field added (and is tap-tempo wanted as a manual feeder, which
-   D2 deferred)? Determines whether the `static-bpm` rung exists at v1 or is a no-op.
-4. **`coasting` timeout *T* and the "bars-since-anchor" bound (§5):** pick now or defer to a
-   build-time tunable with a sane default (recommend defer-with-default).
+1. **Placement (Q1) — RESOLVED.** Ship **(A) MD-mic v1**; the seam stays placement-agnostic
+   so **(B) listener-node is possible with no architecture change**, but its specifics are a
+   **UAT question, deferred**. Clock engages only in MD-led mode (self-serve self-drives).
+2. **Auto-advance (Q2) — RESOLVED.** The clock **auto-advances the playhead continuously
+   (bar to bar at tracked tempo) — that motion IS the feature.** Audio = speed; the MD's
+   **align/true-up tap = position** (seeds the start when there's no count-in, corrects
+   drift, re-zeros at sections, forward only). My earlier "display-only / conservative"
+   framing was wrong and is dropped. Only the auto-*fire* of armed structural changes is
+   confidence-gated (§5), never the motion.
+3. **Static-BPM (Q3) — RESOLVED + builds work.** **Add a `bpm` field to the song (DB
+   migration)** as the fallback rung; it doubles as a **click/metronome** the MD runs off
+   the stated tempo to guide the band, with the same section true-up. *Sub-question still
+   OPEN:* do we also want **tap-tempo** (MD taps beats to set/adjust the click live)? D2
+   deferred it; "guide tempo / align on the fly" may want it. (Recommend: small, add it.)
+4. **Tuning knobs (§5) — recommend DEFER-with-default.** `coasting` timeout *T* (how long to
+   glide on a lost signal before dropping a rung) and the bars-since-anchor bound (how far
+   past an MD anchor auto-fire stays trusted). In the MD-true-up-every-section model these
+   rarely bite, so ship sane defaults and tune in UAT rather than pick blind now.
+
+**Still open:** node placement specifics (UAT), tap-tempo yes/no (3), the two knob values (4).
 
 ---
 
@@ -216,20 +250,30 @@ this pass keeps that gate explicit rather than letting a half-trustworthy clock 
 
 Mirrors epic §9 item 5; gated commits, Codex per chunk.
 
-1. **`ClockState` + ladder reducer (pure, tested):** the 4.1 state machine as a pure
-   function of `(telemetry, now, lastAnchor)` → `{rung, tempoBpm, phase}`; transit-time
-   compensation (§3); re-anchor on boundary/cue; re-acquire on recovery (4.3). **Tests:**
-   each rung transition; stale→coast; coast→static→manual; recovery-at-anchor; transit
-   compensation math.
-2. **`shouldAutoFire` confidence-AND (pure, tested):** extend the gate (§5) behind the
-   existing signature; `fireAtEligible` → bounded VM walk. **Tests:** live+HIGH+near-anchor
-   fires; low-conf / non-live / far-from-anchor refuses; 5a manual path unchanged when
-   clock absent.
-3. **Telemetry ingest + MD re-emit:** listener `TempoTelemetry` → MD validate → `clock`
-   dispatch under `(epoch, seq)`; in-process path for MD-mic placement. (Depends on the
-   epic chunk-3 transport for the node placement; MD-mic needs no wire.)
-4. **Detector + validation mode (§6):** the actual beat-tracker (placement-agnostic) and
-   the logging/validation harness that flips auto-advance on.
+0. **`song.bpm` migration (§3):** add the stated-tempo field (Neon-safe: comment-free
+   bundle, no advisory locks); read door + edit in the song/chart model. Unblocks the
+   static-BPM rung + the click. Smallest first chunk; ships value (the click) before any
+   audio work.
+1. **MD align/true-up tap + re-anchor (§1):** the position primitive — an MD gesture that
+   seeds the start downbeat and re-zeros the clock at the current bar (forward, at section
+   heads). This is the load-bearing half of "clock owns speed, MD owns place"; it stands
+   alone atop the click even before audio.
+2. **`ClockState` + ladder reducer (pure, tested):** the §4.1 state machine as a pure
+   function of `(telemetry, now, lastAnchor)` → `{rung, tempoBpm, phase}`; continuous
+   dead-reckoned advance on every non-manual rung; transit-time compensation (§3);
+   re-anchor on align tap / boundary; re-acquire on recovery (§4.3). **Tests:** each rung
+   transition; stale→coast→static→manual; motion-on-static-bpm; recovery-at-anchor;
+   transit-compensation math.
+3. **`shouldAutoFire` confidence-AND (pure, tested):** extend the gate (§5) behind the
+   existing signature; `fireAtEligible` → bounded VM walk. **Tests:** within-bound+HIGH
+   fires; low-conf / far-past-anchor refuses; static-bpm fires only just after an align
+   tap; 5a manual path unchanged when clock absent.
+4. **Telemetry ingest + MD re-emit + detector + validation mode (§6):** listener
+   `TempoTelemetry` → MD validate → `clock` dispatch under `(epoch, seq)` (in-process for
+   MD-mic); the actual beat-tracker; the logging/validation harness that promotes the
+   audio rung to auto-fire-trusted. (Node placement depends on epic chunk-3 transport;
+   MD-mic needs no wire.)
+- *Deferred (post-v1):* tap-tempo feeder (decision 3); listener-node placement (UAT).
 
 ---
 
