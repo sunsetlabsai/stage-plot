@@ -1,143 +1,162 @@
-# Design — Roadmap chart fit-to-width (builder preview)
+# Design — Roadmap chart fit-to-width + PDF render fixes
 
 Status: DRAFT (pre-Codex). Design-only. No build until approved.
 
 ## 1. Problem
 
-The Roadmap Builder's on-screen chart preview clips a section to ~8 bars and
-hides the rest behind a non-obvious **horizontal** scrollbar. Reported against a
-10-bar intro: the chart appeared to drop the trailing `G×2`.
+Two related defects in how an AI-authored roadmap chart is laid out and displayed.
+The chord DATA is correct throughout (parse/fold/spec preserve every bar); these
+are all **geometry/layout** bugs.
 
-Root cause (verified, read-only): the data is intact — the parse/fold and the
-saved spec preserve all 10 bars, and the PDF renderer lays them out correctly.
-The defect is purely in the React preview component `ChartSheet`:
+**(P1) Builder preview clips to ~8 bars behind a horizontal scrollbar.**
+`ChartSheet` renders a section's whole bar array into one non-wrapping flex row:
+- `app/mockup/roadmap-builder/page.tsx:619` — `flex … overflow-x-auto`
+- `app/mockup/roadmap-builder/page.tsx:667` — each `Measure` is `flex-1 min-w-[64px]`
+- sheet is `max-w-[560px] p-7` (`page.tsx:592`) → ~504px inner ÷ 64 ≈ 7.9 bars fit;
+  the rest overflow horizontally. The "8" is incidental, not chosen.
 
-- `app/mockup/roadmap-builder/page.tsx:619` — each section's *entire* bar array
-  renders into **one non-wrapping flex row** wrapped in `overflow-x-auto`.
-- `app/mockup/roadmap-builder/page.tsx:667` — each `Measure` is
-  `flex-1 min-w-[64px]`.
-- The sheet is `max-w-[560px]` with `p-7` (`page.tsx:592`) → ~504px inner.
-  504 ÷ 64 ≈ **7.9 bars** fit before the row exceeds the container; the rest
-  overflow horizontally as a scrollbar. The "8" is incidental, not chosen.
+**(P2) The generated PDF itself is mangled** (so Perform, which displays the PDF,
+shows it mangled too). Two bugs in `lib/roadmap-render.ts`:
+- **Bug A — header at the bottom.** `drawText` (`:637`) passes `y` straight to
+  pdf-lib's bottom-origin `page.drawText`. The body systems flip top→bottom via
+  `denormYTop = PAGE_H*(1-yNorm)` (`:633`), but the header does NOT: title
+  `y = MARGIN_TOP - 36 = 60` (`:365`), artist `MARGIN_TOP - 52` (`:368`), key
+  `MARGIN_TOP - 58/70` (`:370`) are *top-measured* point values used as
+  bottom-origin → the whole header renders ~40-60pt **from the bottom**.
+- **Bug B — partial last line stretches full width.** `:154`
+  `cellW = CONTENT_W / barsThisLine`. A 2-bar last line gets `CONTENT_W/2` per bar
+  (double width; a 1-bar line → quadruple). The code comment ("equal-width within
+  a system", `:120`) confirms it was deliberate-but-wrong. Bars should be a
+  CONSTANT `CONTENT_W / barsPerLine`, with a partial line left-aligned.
 
 ## 2. Requirement (from Graham)
 
 **Fit-to-WIDTH, not fit-to-page.**
 - A page/line must fit the screen width — **never** horizontal scroll within a page.
 - Multi-page is fine; **vertical** scroll / paging to subsequent pages is acceptable.
-- Hard constraint for **Perform** (reading on stage): no horizontal scroll, ever.
+- Bars are a **constant width**; a short last line does not stretch to fill.
+- Hard constraint for **Perform** (reading on stage).
 
-## 3. Scope — this is a ONE-surface fix
+## 3. Scope
 
 | Surface | Today | Change |
 | --- | --- | --- |
-| **Perform** (`PerformTab`, `page.tsx:815`) | Displays the chart as a rendered **file** (PDF/PNG) in a viewer that fills the container and paginates (`page.tsx:2020`, `performDisplayPage` `page.tsx:2957`), with the calibration redline overlaid. Already fit-to-width. | **None** |
-| **PDF renderer** (`lib/roadmap-render.ts:119-207`) | Flows sections → systems of `barsPerLine` across `PAGE_W` minus margins, wraps systems, paginates. Fit-to-width by construction. This is "the standard." | **None to output** (see §4.1 — extract layout for reuse) |
-| **Builder preview** (`ChartSheet`, `page.tsx:566`) | Single non-wrapping `overflow-x-auto` row per section. **Broken.** | **Fix here** |
+| **PDF renderer** (`lib/roadmap-render.ts`) | Header lands at page bottom (Bug A); partial lines stretch (Bug B). | **FIX A + B.** B lives in the shared layout (§4.1); A is PDF-draw-only (§4.0). |
+| **Perform** (`PerformTab`, `[owner]/[show]/page.tsx:815`) | Displays the rendered PDF file in a container-filling, paginated viewer (`:2020`, `:2957`) with the calibration redline. Mechanically fit-to-width; its CONTENT was mangled only because the PDF was. | **None** — fixing the PDF fixes Perform. |
+| **Builder preview** (`ChartSheet`, `roadmap-builder/page.tsx:566`) | Single non-wrapping `overflow-x` row per section (P1). | **Fix** — consume the shared layout (§4.1, §4.3). |
 
-"Normalize around Perform" (Graham's call) therefore means: make the builder
-preview lay bars out the **same way `roadmap-render` does** — so
-**preview === print === Perform** (true WYSIWYG, no drift).
+"Normalize around Perform" (Graham's call) = make the builder preview lay bars out
+the **same way the (now-fixed) PDF does**, so **preview === print === Perform**.
 
 ## 4. Design
 
-### 4.1 Shared layout (no-drift guarantee)
+### 4.0 PDF header fix (Bug A) — draw-only
 
-Extract `roadmap-render`'s section→systems flow (`roadmap-render.ts:124-207`)
-into a **pure, pdf-lib-free layout function**:
+In `drawRoadmapPdf`, flip **every** header baseline to bottom-origin so the whole
+header band sits in the top `MARGIN_TOP` strip — today title, artist, AND key all
+land at the bottom (Graham confirmed: "it's not just title but the key... and
+likely if/when i add it the BPM and the artist"). Either convert each
+(`y = PAGE_H - topOffset`) or add a `denormYTopPt(pt) = PAGE_H - pt` helper
+mirroring `denormYTop`, then route ALL header text through it so any future field
+(BPM, etc.) is correct by construction rather than per-line. Order title → artist →
+key (→ BPM), title highest. Exact offsets are a layout nicety; constraint: all
+inside the top 96pt margin, descending, non-overlapping. No layout/geometry
+change, no calibration impact.
+
+### 4.1 Shared layout + constant-width fix (Bug B) — the no-drift core
+
+Extract `roadmap-render`'s section→systems flow (`:124-205`) into a **pure,
+pdf-lib-free** layout function consumed by BOTH the PDF drawer and the React
+preview:
 
 ```
 layoutSystems(spec, { barsPerLine }) → Array<{
   sectionId, sectionLabel, page, line,
-  bars: Array<{ barIndex, chord }>      // barIndex is within the section
+  xStart, xEnd,                          // system extents (see below)
+  bars: Array<{ barIndex, xStart, xEnd, chord }>
 }>
 ```
 
-It returns *which bars sit on which line/page* — pure geometry, no drawing.
-Both consumers use it:
-- the existing PDF drawer wraps it and draws with pdf-lib (behavior-preserving);
-- the React preview maps each returned line to a bordered system row.
+Fix B inside it:
+- `cellW = CONTENT_W / barsPerLine` — **constant**, independent of `barsThisLine`.
+- A partial line's bars are left-aligned at constant width; the **system's right
+  edge / trailing barline** is the last real bar's `xEnd`
+  (`MARGIN_X + barsThisLine * cellW`), NOT `PAGE_W - MARGIN_X`. (Today `:380`
+  bottom rule and `:386` trailing barline both run to the page edge — they must
+  track the partial line.)
 
-`roadmap-render.ts` already computes systems *before* drawing
-(`lineCount = ceil(section.bars / barsPerLine)`, `barsThisLine = min(...)`), so
-the layout is largely separable already. Build step confirms the seam.
+`roadmap-render` already computes systems before drawing, so the seam is clean.
+The PDF drawer keeps its pdf-lib draw; the preview maps each line to a system row.
 
 ### 4.2 `barsPerLine` — responsive within the musical standard
 
-There **is** a standard: **4 bars/line** (Nashville / lead-sheet convention;
-`DEFAULT_BARS_PER_LINE = 4` in `roadmap-render.ts:46`). It matters because
-4-bar lines align to 4-bar phrases — players track the *form*, not just bars.
-Pure "cram N to width" breaks phrasing (a 7-bar line is hard to read on stage).
+There IS a standard: **4 bars/line** (Nashville / lead-sheet; `DEFAULT_BARS_PER_LINE
+= 4`, `:46`). 4-bar lines align to 4-bar phrases — players track the *form*. Pure
+"cram N to width" breaks phrasing.
 
-Rule: **scale bars to fill the width, but pick `barsPerLine` from a musical set,
-never an arbitrary count.**
-- Default set: **{4, 8}** — 4 on narrow, 8 on wide. (Spike §5 sets the breakpoint
-  and confirms 8 is legible.)
-- Bars **flex-fill** the line so the chosen count spans the full width — no dead
-  space, no overflow. (Replaces the `min-w-[64px]` + `overflow-x` that caused the
-  bug: drop both.)
-- **Author override:** if `spec.barsPerLine` is explicitly set, honor it (don't
-  auto-responsive). Unset → responsive {4,8}. (Q1.)
+Rule: bars fill the width at **constant** `cellW`, but `barsPerLine` is chosen from
+a **musical set {4, 8}** (never arbitrary) — 4 narrow, 8 wide. Spike (§5) sets the
+breakpoint and confirms 8 is legible. If `spec.barsPerLine` is explicitly set,
+honor it and skip the responsive pick (Q1).
 
-### 4.3 Preview layout mechanics
+NOTE: the PDF is a fixed 8.5×11 page (`barsPerLine` from the spec/default 4); the
+responsive {4,8} pick applies to the on-SCREEN preview (and any future
+screen-target render). The PDF and the preview share the layout fn but pass their
+own `barsPerLine` — same algorithm, surface-appropriate input.
 
-In `ChartSheet`:
-- Remove `overflow-x-auto` (`page.tsx:619`) and `min-w-[64px]` (`page.tsx:667`).
-- For each section, consume `layoutSystems` → render each line as its own
-  bordered system row (left/right barlines), bars `flex-fill` the row.
-- A section longer than `barsPerLine` wraps to multiple rows (vertical growth) —
-  acceptable per §2.
-- The center container (`page.tsx:343`) keeps `overflow-y` for vertical scroll;
-  **`overflow-x` must never trigger.**
+### 4.3 Preview layout mechanics (P1)
+
+In `ChartSheet`: remove `overflow-x-auto` (`:619`) and `min-w-[64px]` (`:667`);
+render each `layoutSystems` line as its own bordered system row, bars flex-fill at
+constant width. Sections > `barsPerLine` wrap to multiple rows (vertical growth,
+acceptable). The center container (`:343`) keeps `overflow-y`; **`overflow-x` must
+never trigger.**
 
 ### 4.4 Edit affordance preserved
 
-Click-to-edit `Measure` is unchanged. Bars now live in wrapped rows, but the edit
-key stays `${sectionId}:${barIndex}` where `barIndex` is the section-wide index —
-wrapping does not change indices, so `commitBar` and editing are untouched.
+Click-to-edit `Measure` is unchanged. Edit key stays `${sectionId}:${barIndex}`
+(section-wide index); wrapping doesn't change indices, so `commitBar` is untouched.
 
 ## 5. Spike — 4 vs 8 bars/line (folded in)
 
-Goal: set the width breakpoint for 4→8 and confirm 8-wide is legible across
-devices.
-
-Method (throwaway scaffolding in this worktree, **not shipped**): render the
-representative 10-bar intro at container widths {360, 768, 1024, 1280}px, at both
-4/line and 8/line; eyeball numeral + rhythm-slash legibility.
-
-Output: the px breakpoint(s) and a confirmed set. Default hypothesis: `< ~700px`
-→ 4/line, `≥ ~700px` → 8/line, set = {4, 8}. The spike confirms or adjusts;
-adds a 2/line tier only if 4 is unreadable on phone portrait (Q3).
+Set the preview width breakpoint for 4→8 and confirm 8-wide legibility. Throwaway
+scaffolding in this worktree (**not shipped**): render the 10-bar intro at widths
+{360, 768, 1024, 1280}px at 4/line and 8/line; eyeball numeral + slash legibility.
+Output: the px breakpoint(s) and confirmed set. Hypothesis: `< ~700px` → 4,
+`≥ ~700px` → 8. Add a 2/line tier only if 4 is unreadable on phone portrait (Q3).
 
 ## 6. Open questions
 
-- **Q1** — Honor explicit `spec.barsPerLine` over responsive? (lean: yes — author intent wins.)
-- **Q2** — Preview pagination: render discrete pages matching the PDF now, or stack
-  systems with vertical scroll now and add page-break visualization later? (lean:
-  stack + vertical-scroll for MVP; page breaks are a follow-on. Graham OK'd multi-page scroll.)
-- **Q3** — Phone portrait: is 4/line still too wide → add a 2/line tier?
-- **Q4** — Keep the `max-w-[560px]` paper-sheet metaphor for the authoring preview
-  (bars fill within it), or let the sheet fill the screen like Perform? (lean: keep
-  a responsive sheet up to a max; the preview is an editor, not the stage view.)
+- **Q1** — Honor explicit `spec.barsPerLine` over the responsive preview pick? (lean: yes.)
+- **Q2** — Preview pagination: discrete pages matching the PDF now, or stack systems +
+  vertical-scroll now and add page breaks later? (lean: stack/scroll MVP.)
+- **Q3** — Phone portrait: add a 2/line tier if 4 is too wide?
+- **Q4** — Keep the `max-w-[560px]` paper sheet for authoring, or fill the screen like
+  Perform? (lean: responsive sheet up to a max.)
+- **Q5 (new)** — Old saved roadmap PDFs carry baked calibration from the OLD (stretched)
+  geometry. Re-render on next open, or leave until next manual save? (lean: leave;
+  geometry self-heals on the next render — note for backlog, not this PR.)
 
 ## 7. Non-goals / separate backlog
 
-- No change to parse/fold, the spec schema, Perform, or PDF *output*.
-- **Separate issues observed during diagnosis (log as backlog, not this spec):**
-  - `A7sus2` → `Asus2`: the quality enum (`roadmap-parse.ts:58`) has `sus2` but no
-    `7sus2`, so the 7 is dropped.
-  - The intro's "3x" repeat was not captured as a repeat op, and `tallyDraft` is
-    op-blind (`roadmap-authoring.ts:340`) so the read-back can silently disagree
-    with the folded spec when an op changes the bar count — a latent fidelity hole
-    worth its own fix.
+- No change to parse/fold or the spec schema.
+- **Separate issues from diagnosis (backlog, not this spec):**
+  - `A7sus2` → `Asus2`: quality enum (`roadmap-parse.ts:58`) has `sus2`, no `7sus2`.
+  - The intro "3x" repeat wasn't captured, and `tallyDraft` is op-blind
+    (`roadmap-authoring.ts:340`) so the read-back can disagree with the folded spec —
+    a latent fidelity hole.
 
 ## 8. Test plan
 
-- **Unit** — `layoutSystems`: a section of N bars at `barsPerLine` B yields
-  `ceil(N/B)` lines, last line `N mod B || B` bars; output matches the systems
-  `roadmap-render` produces today (port/extend the existing render tests so the
-  extraction is provably behavior-preserving).
-- **Manual/visual** — builder preview at the §5 widths: no horizontal scrollbar
-  ever; all bars visible; preview matches the generated PDF.
-- **Regression** — existing `roadmap-render` tests unchanged (layout extraction
-  must not alter PDF output).
+- **Unit — `layoutSystems`:** N bars at `barsPerLine` B → `ceil(N/B)` lines; the last
+  line has `N mod B || B` bars; **every** bar across all lines has identical width
+  `CONTENT_W / B` (the Bug-B regression guard); the partial line's system `xEnd`
+  equals its last bar's `xEnd`.
+- **Unit — header (Bug A):** title/artist/key baselines resolve to the top margin
+  band (`y` in `[PAGE_H - MARGIN_TOP, PAGE_H]`), descending, non-overlapping.
+- **Behavior-preserving extraction:** for full-width sections (no partial line), the
+  extracted layout reproduces today's systems byte-for-byte; update only the tests
+  that asserted the OLD stretched partial-line geometry, and document the change.
+- **Manual/visual:** generated PDF — header at top, partial line left-aligned at
+  constant width; builder preview at §5 widths — no horizontal scrollbar, all bars
+  visible, preview matches the PDF.
