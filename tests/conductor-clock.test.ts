@@ -3,8 +3,12 @@ import {
   initReckoning,
   reckonAfter,
   alignReckoning,
+  computeStaticRung,
+  rebaselineMotion,
+  expectedClockBars,
   type ClockReckoning,
 } from '../lib/conductor-clock';
+import { barMs } from '../lib/tempo';
 import type { TraversalStep } from '../lib/roadmap-vm';
 
 // ── Conductor 5b chunk 1: the MD-LOCAL position-trust bookkeeping (pure) ──────
@@ -108,5 +112,101 @@ describe('alignReckoning — mid-song true-up', () => {
     expect(trued.motionBaselineAtMs).toBe(8000);
     expect(trued.barsAtMotionBaseline).toBe(0);
     expect(trued.positionTrusted).toBe(true);
+  });
+});
+
+// ── Conductor 5b chunk 2: the static-BPM motion rung math (pure) ─────────────
+
+describe('computeStaticRung — the chunk-2 ladder domain (§2)', () => {
+  it('static-bpm only when clock on + stated bpm + not stalled + not done', () => {
+    expect(computeStaticRung({ clockOn: true, bpm: 120, stalled: false, done: false })).toBe(
+      'static-bpm',
+    );
+  });
+
+  it('falls to manual when the clock is off', () => {
+    expect(computeStaticRung({ clockOn: false, bpm: 120, stalled: false, done: false })).toBe(
+      'manual',
+    );
+  });
+
+  it('falls to manual when no bpm is stated (legacy/inline song ⇒ null)', () => {
+    expect(computeStaticRung({ clockOn: true, bpm: null, stalled: false, done: false })).toBe(
+      'manual',
+    );
+  });
+
+  it('falls to manual while stalled (loop suspended — honest readout)', () => {
+    expect(computeStaticRung({ clockOn: true, bpm: 120, stalled: true, done: false })).toBe(
+      'manual',
+    );
+  });
+
+  it('falls to manual at song end (vm.done — Codex R3 HIGH, no phantom stall)', () => {
+    expect(computeStaticRung({ clockOn: true, bpm: 120, stalled: false, done: true })).toBe(
+      'manual',
+    );
+  });
+});
+
+describe('rebaselineMotion — motion axis only, trust axis untouched (§4)', () => {
+  it('sets motionBaselineAtMs/baselineTempoBpm and captures barsAtMotionBaseline=barsSinceAnchor', () => {
+    // Drive 3 clock bars off a 120-bpm baseline, then change tempo to 140.
+    let r = reckonAfter(initReckoning(0), null, step('b1', 1), 'manual', 1000);
+    r = reckonAfter(r, step('b1', 1), step('b2', 1), 'clock', 2000);
+    r = reckonAfter(r, step('b2', 1), step('b3', 1), 'clock', 3000);
+    r = reckonAfter(r, step('b3', 1), step('b4', 1), 'clock', 4000);
+    expect(r.barsSinceAnchor).toBe(3);
+    const re = rebaselineMotion(r, 140, 5000);
+    expect(re.motionBaselineAtMs).toBe(5000);
+    expect(re.baselineTempoBpm).toBe(140);
+    expect(re.barsAtMotionBaseline).toBe(3); // = barsSinceAnchor at the change
+  });
+
+  it('leaves the trust axis (barsSinceAnchor / alignedAtMs / anchor / positionTrusted) unchanged', () => {
+    const r = reckonAfter(initReckoning(0), null, step('b1', 1), 'manual', 1000);
+    const re = rebaselineMotion(r, 140, 5000);
+    expect(re.barsSinceAnchor).toBe(r.barsSinceAnchor);
+    expect(re.alignedAtMs).toBe(r.alignedAtMs);
+    expect(re.anchor).toEqual(r.anchor);
+    expect(re.positionTrusted).toBe(r.positionTrusted);
+  });
+
+  it('drops owed to exactly 0 right after a tempo change (no jump / no stall)', () => {
+    let r = reckonAfter(initReckoning(0), null, step('b1', 1), 'manual', 1000);
+    r = reckonAfter(r, step('b1', 1), step('b2', 1), 'clock', 1500);
+    const re = rebaselineMotion(r, 140, 5000);
+    // immediately after the change, no time has elapsed at the new baseline:
+    expect(expectedClockBars(re, 5000, barMs(140)) - re.barsSinceAnchor).toBe(0);
+  });
+});
+
+describe('expectedClockBars — the timer-free closed form (§3.1)', () => {
+  it('is 0 before one bar has elapsed since the baseline', () => {
+    const r = reckonAfter(initReckoning(0), null, step('b1', 1), 'manual', 1000); // baseline 1000
+    const bm = barMs(120); // 2000 ms/bar at 120 bpm 4/4
+    expect(expectedClockBars(r, 1000 + bm - 1, bm)).toBe(0);
+  });
+
+  it('is exact at the bar boundary', () => {
+    const r = reckonAfter(initReckoning(0), null, step('b1', 1), 'manual', 1000);
+    const bm = barMs(120);
+    expect(expectedClockBars(r, 1000 + bm, bm)).toBe(1);
+    expect(expectedClockBars(r, 1000 + 3 * bm, bm)).toBe(3);
+  });
+
+  it('adds the barsAtMotionBaseline offset (bars driven before the current baseline)', () => {
+    const r = reckonAfter(initReckoning(0), null, step('b1', 1), 'manual', 1000);
+    const re = rebaselineMotion(r, 120, 5000); // barsAtMotionBaseline = 0 here (no clock bars yet)
+    const shifted: ClockReckoning = { ...re, barsAtMotionBaseline: 4 };
+    const bm = barMs(120);
+    expect(expectedClockBars(shifted, 5000 + 2 * bm, bm)).toBe(6); // 4 + 2
+  });
+
+  it('honours a non-4/4 barMs (3/4 bar is shorter at the same bpm)', () => {
+    const r = reckonAfter(initReckoning(0), null, step('b1', 1), 'manual', 0);
+    const bm34 = barMs(120, 3); // 1500 ms/bar
+    expect(expectedClockBars(r, 1500, bm34)).toBe(1);
+    expect(expectedClockBars(r, 4500, bm34)).toBe(3);
   });
 });

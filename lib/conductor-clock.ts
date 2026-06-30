@@ -114,3 +114,54 @@ export function alignReckoning(r: ClockReckoning, current: TraversalStep, now: n
     positionTrusted: true,
   };
 }
+
+// ── Conductor 5b, chunk 2: the static-BPM motion rung (pure / MD-local) ───────
+//
+// (design-conductor-chunk5b-c2-motion.md.) Chunk 2 grows this file with the rung
+// ladder's value set and the pure math the driver loop reads. Still no wire/broadcast
+// (item 4) — these are MD-local. The full ClockRung contract is defined here (the stable
+// type item 4 extends), but with NO telemetry input chunk 2 can only PRODUCE the bottom
+// two rungs; live/coasting are added by item 4 when a tempo-telemetry input exists.
+
+export type ClockRung = 'live' | 'coasting' | 'static-bpm' | 'manual';
+
+// Chunk-2 rung resolution (§2). This is NOT a stub of a future computeRung — it is that
+// function's chunk-2 domain: the WHOLE ladder reachable without telemetry. `manual` is the
+// honest floor (loop emits nothing — the shipped 5a manual tap is the only motion) whenever
+// the clock is off, no tempo is stated, the loop stalled, OR the song ended (vm.done). At
+// song end a clock-driven advance is still `applied` (not ignored) and churns seq/updatedAt
+// while owed only grows (Codex R3 HIGH) — gating on `done` idles the loop cleanly and reads
+// honestly. `static-bpm` (on + stated bpm + not stalled + not done) dead-reckons forward.
+export function computeStaticRung(args: {
+  clockOn: boolean;
+  bpm: number | null;
+  stalled: boolean;
+  done: boolean; // vm.done — song ended; nothing left to advance onto (Codex R3 HIGH)
+}): ClockRung {
+  if (!args.clockOn || args.bpm == null || args.stalled || args.done) return 'manual';
+  return 'static-bpm';
+}
+
+// Re-baseline the MOTION axis only, on a tempo change (§4 / parent §5.6-ii). The closed-form
+// `floor((now − motionBaselineAtMs)/barMs)` assumes a CONSTANT tempo since the baseline, so a
+// new tempo must reset that baseline. A band speed change is NOT the MD asserting position, so
+// the TRUST axis (anchor / barsSinceAnchor / alignedAtMs / positionTrusted) is left untouched;
+// `barsAtMotionBaseline = barsSinceAnchor` captures the bars driven so far so past bars keep
+// their true duration and the post-rebaseline `expected − barsSinceAnchor` is exactly 0 (no
+// jump, no stall). The hook applies this THROUGH driverRef (Codex R2 HIGH) — see §4.
+export function rebaselineMotion(r: ClockReckoning, newBpm: number, now: number): ClockReckoning {
+  return {
+    ...r,
+    motionBaselineAtMs: now,
+    baselineTempoBpm: newBpm,
+    barsAtMotionBaseline: r.barsSinceAnchor,
+  };
+}
+
+// The bars the clock SHOULD have driven by `now` under a static tempo: the whole bars elapsed
+// since the motion baseline, offset by the bars already driven at that baseline (§3.1). The
+// caller supplies barMs from lib/tempo.ts (60000·barBeats/bpm) so the math is timer-free and
+// unit-testable; the driver compares this to the actual barsSinceAnchor to find owed advances.
+export function expectedClockBars(r: ClockReckoning, now: number, barMs: number): number {
+  return r.barsAtMotionBaseline + Math.floor((now - r.motionBaselineAtMs) / barMs);
+}
