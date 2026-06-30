@@ -1,6 +1,13 @@
 # Conductor Authority — Chunk 5b: the clock layer + OQ-1 resolution (§5.1, §8.2-1)
 
-**Status:** **v0.6.1 — DESIGN-ONLY, post-Codex-R4; fork reframed by a buildability check.**
+**Status:** **v0.6.2 — DESIGN-ONLY, post-Codex-R5 (1 MEDIUM, 2 LOW, no HIGH blocker).**
+R5 folds: **MEDIUM** — narrowed the implicit re-anchor to true *position* gestures (align tap,
+manual `advance`, future `seek`); a path-reshaping **redirect** (`anotherRound`/`hold`/
+`release`/`resetJump`, none of which moves `current`) no longer refreshes trust / re-enables
+auto-fire (§5.1, §5.3, §5.6-i). **LOW** — retitled the retained α material as a *future
+seek-chunk note* (β is the v1 recommendation), and moved the backward-re-seat eligibility test
+out of v1 chunk 3 into the deferred `seek` chunk (β v1 tests overrun→manual instead).
+Prior status (R4): **post-buildability-check; fork reframed.**
 Resolves epic open item **§8.2-1** (`docs/design-conductor-authority.md:207` — *"Listener
 placement + clock latency"*), the single decision fence on chunk 5b. Builds on chunk 5a (gated
 auto-fire on arrival, SHIPPED to prod `de8e414`). **No code in this pass.** v0.3 closed the §7
@@ -39,8 +46,9 @@ validate itself:
   atomically with the advance (§5.1 wire-vs-local split); **MEDIUM (R3)** — re-seat
   *recomputes* eligibility (not blind-preserve), surfaces "re-arm needed" (§5.4);
   **MEDIUM (R3)** — node telemetry needs `listenerId` + `telemetryEpoch` for restart (§2.3).
-- **MINE (Codex missed): (i)** a manual advance/redirect *while the clock runs* is an implicit
-  re-anchor — the human just asserted place (§5.6-i); **(ii)** the closed-form bar count is
+- **MINE (Codex missed): (i)** a manual *position* gesture (align tap / manual `advance`)
+  while the clock runs is an implicit re-anchor — the human asserted place; a path-reshaping
+  redirect is NOT (narrowed per R5, §5.6-i); **(ii)** the closed-form bar count is
   invalid under varying tempo — must re-baseline on every accepted tempo change (§5.6-ii);
   **(iii)** smooth motion is MD-local; followers move at **broadcast/bar granularity** — a
   stated scope boundary, not a bug (§5.6-iii).
@@ -339,8 +347,11 @@ correctness — drift could never accumulate past one section and a wrong clock 
 "trusted for auto-fire" forever. So:
 
 - **A trust re-anchor (resets `barsSinceAnchor = 0`, sets `alignedAtMs = now`) happens ONLY
-  on a real MD gesture** — an align/true-up tap, a follow-me, an MD cue. The human is the
-  only thing that can assert "we are *here* now."
+  on a real MD POSITION gesture** — one that *moves `current`*: an align/true-up tap, a manual
+  `advance`, or the future `seek` (§5.4). A path-reshaping **redirect**
+  (`anotherRound`/`hold`/`release`/`resetJump`) is **not** a position gesture and does **not**
+  re-anchor trust (Codex R5 MEDIUM, §5.6-i). The human is the only thing that can assert "we
+  are *here* now," and only by actually placing the playhead.
 - **A clock arriving at a section head re-zeros *display phase* only** (cosmetic — the redline
   sits cleanly on the downbeat). It does **not** touch `barsSinceAnchor`, `alignedAtMs`, or
   trust. So far from the last *human* anchor, the bound trips and auto-fire refuses even if
@@ -420,14 +431,21 @@ instance, MD device only):
   it writes a new `anchor`, sets `alignedAtMs = now`, resets `barsSinceAnchor = 0`, and resets
   the motion axis too (`motionBaselineAtMs = now`, `barsAtMotionBaseline = 0`); the next tick
   reckons from the *new* baseline. No queued advance survives a re-anchor.
-- **ANY MD advance/redirect while the clock runs is an implicit re-anchor (MINE, §5.6-i).**
-  If the clock is driving the playhead and the MD *also* manually advances or redirects, the
-  human has just asserted place — and the loop's `barsSinceAnchor`/`motionBaselineAtMs` would
-  otherwise desync from the cursor the MD just moved (the loop thinks fewer bars elapsed than
-  the cursor shows). So a manual nav action during clock-on is a trust re-anchor onto the
-  resulting `current` (`barsSinceAnchor = 0`, `alignedAtMs = now`, `motionBaselineAtMs = now`,
-  `barsAtMotionBaseline = 0`). The MD is always the position authority; a tap never races the
-  clock, it *becomes* the new anchor.
+- **A manual POSITION gesture while the clock runs is an implicit re-anchor — but a redirect
+  is NOT (MINE, §5.6-i; narrowed per Codex R5 MEDIUM).** A trust re-anchor means "the MD just
+  asserted *we are here now*," which is true only of gestures that **move `current`**: an
+  align/true-up tap, a **manual `advance`** (the MD stepped the playhead — the loop's count
+  would otherwise desync from the cursor it just moved), and the future position-writing
+  `seek` (§5.4). Those re-anchor onto the resulting `current` (`barsSinceAnchor = 0`,
+  `alignedAtMs = now`, `motionBaselineAtMs = now`, `barsAtMotionBaseline = 0`). **The shipped
+  redirects do NOT** — `anotherRound` / `hold` / `release` / `resetJump` ("Re-arm jump")
+  reshape VM state but leave `current` unchanged (`conductor-state.ts:221`; `redirect` moves
+  the next-step seed only). They are not position assertions, so they must **not** reset
+  `barsSinceAnchor` or `alignedAtMs` — doing so would silently re-enable clock auto-fire off a
+  non-position control. A redirect needs no clock bookkeeping at all: `current` didn't move and
+  no advance was driven, so the motion timing is unchanged; the next advance simply reckons
+  through the redirected VM. The MD is always the position authority, but only via a gesture
+  that actually places the playhead.
 - **Manual rung = loop idle.** On `manual` the loop emits nothing; the floor is 5a, the
   MD's tap is the only motion.
 
@@ -490,9 +508,11 @@ re-derived:
     **"re-arm needed"** so the MD re-arms or disarms. No stale-open gate, no silent strand —
     and now the latch state and the gate agree.
 
-**I recommend (α) with this rule** — it keeps the redline honest with the cheapest gesture,
-bounds the one backward move to a structural anchor, and reuses the shipped 5a edge gate
-verbatim. **Graham's call** before chunk 1 builds.
+*(Future-`seek`-chunk note, NOT the v1 recommendation.)* If α is later built, this rule keeps
+the redline honest with the cheapest gesture, bounds the one backward move to a structural
+anchor, and reuses the shipped 5a edge gate verbatim. **The v1 recommendation is β** (see the
+reframe above and Decision 5); α does **not** block the v1 build and is a separate `seek`
+chunk if UAT warrants it.
 
 ### 5.5 Bar duration — where `barBeats` comes from (Codex R2 MEDIUM)
 
@@ -514,14 +534,18 @@ calibration charts carry **no meter at all**. So the honest v1 policy:
 
 ### 5.6 Three things my own sweep caught that the Codex rounds did not
 
-**(i) A manual nav action during clock-on is an implicit re-anchor.** Covered as a §5.3
-bullet; restated here as a first-class rule because it is the seam between the two authorities.
-The clock and the MD can both move the playhead; if they move it independently the loop's
-reckoning desyncs from the cursor. Resolution: the MD always wins and *becomes* the anchor —
-any manual `advance`/`redirect` while the clock runs is a trust re-anchor (`barsSinceAnchor =
-0`, `alignedAtMs = now`) that also re-zeroes the motion axis (`motionBaselineAtMs = now`,
-`barsAtMotionBaseline = 0`). There is no race because there is no contest: a human gesture is
-definitionally the new truth ("MD owns place").
+**(i) A manual POSITION gesture during clock-on is an implicit re-anchor — a redirect is not.**
+Covered as a §5.3 bullet; restated here as a first-class rule because it is the seam between
+the two authorities. The clock and the MD can both move the playhead; if a *human position
+gesture* moves it independently the loop's reckoning desyncs from the cursor. Resolution: a
+gesture that **moves `current`** (align/true-up tap, manual `advance`, future `seek`) wins and
+*becomes* the anchor — trust re-anchor (`barsSinceAnchor = 0`, `alignedAtMs = now`) plus motion
+re-zero (`motionBaselineAtMs = now`, `barsAtMotionBaseline = 0`). **A redirect is excluded**
+(Codex R5 MEDIUM): `anotherRound`/`hold`/`release`/`resetJump` reshape VM state but leave
+`current` put (`conductor-state.ts:221`), so they are not "we are here now" and must not refresh
+trust or re-enable auto-fire. There is no race because there is no contest: a human *position*
+gesture is definitionally the new truth ("MD owns place"); a path-reshaping redirect simply
+isn't one.
 
 **(ii) The closed-form bar count is invalid under varying tempo — re-baseline the MOTION axis
 on tempo change.** `floor((now − baseline) / barMs)` with a single `barMs` assumes the tempo
@@ -666,18 +690,20 @@ Mirrors epic §9 item 5; gated commits, Codex per chunk.
    middle fires exactly once, never skipped/over-run**; **non-4/4 + missing-meter `barBeats`
    fallback**; **tempo change mid-span re-baselines without a playhead jump AND without a stall** — the next
    advance still lands on time, NOT ~N bars late (the R4 HIGH-1 trust/motion-axis split, §5.1);
-   **a manual nav action mid-clock re-seats the anchor** (§5.6-i); **tab-sleep / long gap →
-   drop rung, never fast-forward missed bars**.
+   **a manual ADVANCE mid-clock re-anchors both axes** AND **a redirect
+   (anotherRound/hold/release/resetJump) mid-clock does NOT touch trust** (§5.6-i, Codex R5);
+   **tab-sleep / long gap → drop rung, never fast-forward missed bars**.
 3. **`clockConfidenceOk` in the driver + bounded `fireAtEligible` (tested):** `shouldAutoFire`
    stays **verbatim 5a, frozen** (R3 HIGH-2); the confidence gate is the driver's
    `clockConfidenceOk(reckoning, rung)` consulted only for **clock-driven** advances (§5.2);
-   `fireAtEligible` → bounded VM walk, recomputed after a re-seat (§5.4). **Tests: a MANUAL
+   `fireAtEligible` → bounded VM walk (§5.2). **Tests: a MANUAL
    advance onto `fireAt` fires even while coasting / far-past-anchor / clock off** (the 5a
    floor, R3 HIGH-2); clock-driven within-bound+HIGH fires; clock-driven low-conf /
    far-past-anchor refuses but **motion continues**; static-bpm clock-fires only just after an
-   MD gesture; **a `fireAt` stranded behind the cursor (post backward re-seat) → eligibility
-   recomputed false, refused, "re-arm needed"** (§5.4); 5a rising-edge parity under a
-   clock-CREATED arrival; 5a manual path unchanged when clock absent.
+   MD gesture; **β clock-overrun → drops to `manual`, and an armed marker stays pending /
+   refuses by confidence — NO backward re-seat in v1** (§5.4); 5a rising-edge parity under a
+   clock-CREATED arrival; 5a manual path unchanged when clock absent. *(The stranded-`fireAt`
+   eligibility-recompute test belongs to the deferred `seek` chunk, §5.4 — not v1.)*
 4. **Telemetry ingest + MD re-emit + detector + validation/shadow mode (§6):** listener
    `TempoTelemetry` → MD validate → `clock` dispatch under `(epoch, seq)` (in-process for
    MD-mic). The detector ships **shadow-only** (drives nothing, logs detected-vs-actual);
