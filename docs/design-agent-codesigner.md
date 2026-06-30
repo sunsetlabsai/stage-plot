@@ -306,12 +306,13 @@ You understand:
   role: "Sax, Tpt, Tbn"). Individual detail (per-player mics,
   channels, stands) belongs in the Input List, not the stage plot.
 
-  Each position must have exactly one occupant — the stage plot
-  renderer uses position as a unique key, so duplicates silently
-  overwrite. With 9 zones, most bands fit comfortably. For very
-  large ensembles (big bands, orchestras), use zones for sections
-  (e.g., "Brass" at MSR, "Strings" at MSL, "Woodwinds" at USR)
-  and detail individuals in the Input List.
+  Multiple occupants may share a position — the renderer stacks
+  every slot at a given pos into that zone's cell, so co-occupants
+  render as separate chips rather than overwriting each other. With
+  9 zones plus stacking, any ensemble fits. For very large ensembles
+  (big bands, orchestras), prefer section zones (e.g., "Brass" at MSR,
+  "Strings" at MSL, "Woodwinds" at USR) and detail individuals in the
+  Input List.
 
   The mid-stage row renders conditionally — it only appears when at
   least one MS position is occupied. For small bands (6 or fewer),
