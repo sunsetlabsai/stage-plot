@@ -54,6 +54,18 @@ function resolveBarsPerLine(spec: RoadmapSpec, override?: number): number {
   return chosen && chosen > 0 ? chosen : DEFAULT_BARS_PER_LINE;
 }
 
+// The grouping decision the React preview consumes (design §4.3): split a
+// section's bars into lines of `perLine`. Same ceil(N/perLine) / last-line-size
+// rule layoutRoadmap applies, so preview wrapping can't drift from the PDF's.
+// (The preview then renders each line as a constant-width grid; it does NOT reuse
+// the PDF's absolute point coordinates.)
+export function chunkIntoLines<T>(items: T[], perLine: number): T[][] {
+  const n = perLine >= 1 ? Math.floor(perLine) : 1;
+  const lines: T[][] = [];
+  for (let i = 0; i < items.length; i += n) lines.push(items.slice(i, i + n));
+  return lines;
+}
+
 // ── Layout result (the shared substrate both projections read) ────────────────
 // Every geometry value here is already normalized 0..1 within its page, so the
 // calibration is a near-direct copy and the PDF draw is a single denormalize.

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderRoadmap, buildCalibration, voltaLabel, headerBaselinesPt } from '../lib/roadmap-render';
-import { layoutRoadmap, pickBarsPerLine, PAGE_W, PAGE_H, MARGIN_X, MARGIN_TOP, CONTENT_W } from '../lib/roadmap-layout';
+import { layoutRoadmap, pickBarsPerLine, chunkIntoLines, PAGE_W, PAGE_H, MARGIN_X, MARGIN_TOP, CONTENT_W } from '../lib/roadmap-layout';
 import { validateRoadmapSpec, type RoadmapSpec } from '../lib/roadmap-spec';
 import { isValidCalibration, canVerify, resolveRoadmap, CALIBRATION_SCHEMA_VERSION } from '../lib/chart-calibration';
 
@@ -521,6 +521,28 @@ describe('headerBaselinesPt — top-margin band, descending order (Bug A)', () =
     expect(h.key).toBe(h.artist);
     expect(inBand(h.title)).toBe(true);
     expect(inBand(h.key)).toBe(true);
+  });
+});
+
+// ── chunkIntoLines: the grouping decision the preview consumes (design §4.3) ──
+describe('chunkIntoLines — same wrapping rule the PDF layout applies', () => {
+  it('splits into ceil(N/perLine) lines with a left-aligned partial last line', () => {
+    const lines = chunkIntoLines([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 4);
+    expect(lines).toEqual([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10]]); // 4 + 4 + 2
+  });
+  it('matches layoutRoadmap line count for the same bars/perLine', () => {
+    const lines = chunkIntoLines(Array.from({ length: 10 }, (_, i) => i), 4);
+    const layout = layoutRoadmap({
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'G',
+      barsPerLine: 4,
+      sections: [{ id: 'i', label: 'I', bars: 10 }],
+    });
+    expect(lines).toHaveLength(layout.systems.length);
+  });
+  it('returns no lines for an empty section', () => {
+    expect(chunkIntoLines([], 4)).toEqual([]);
   });
 });
 

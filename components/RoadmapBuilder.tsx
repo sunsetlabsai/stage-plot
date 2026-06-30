@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -32,6 +32,7 @@ import {
   type ViewNavigation,
 } from '@/lib/roadmap-view';
 import type { RoadmapSpec, SectionRepeat } from '@/lib/roadmap-spec';
+import { pickBarsPerLine, chunkIntoLines } from '@/lib/roadmap-layout';
 
 // ── Roadmap Builder — describe a song's structure, render an exact chart ─────
 // Full-screen overlay launched from ManageChartsModal. Compose (big prompt) →
@@ -419,8 +420,9 @@ function Review({
         </p>
       </aside>
 
-      {/* Center — chart system hero */}
-      <main className="min-h-[420px] p-6 bg-zinc-900/40 flex flex-col items-center gap-3 overflow-auto">
+      {/* Center — chart system hero. overflow-Y only: the chart is fit-to-width,
+          so a horizontal scrollbar must NEVER appear (design §4.3). */}
+      <main className="min-h-[420px] p-6 bg-zinc-900/40 flex flex-col items-center gap-3 overflow-y-auto overflow-x-hidden">
         <PreviewToolbar
           mode={mode}
           setMode={setMode}
@@ -699,6 +701,24 @@ function PreviewToolbar({
   );
 }
 
+// Track an element's content-box width so the preview can pick a fit-to-width
+// bars/line tier responsively (design §4.2/§4.3). Content-box width excludes
+// padding, so it's the true bar-rendering width.
+function useContentWidth<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) setWidth(entry.contentRect.width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, width] as const;
+}
+
 // ── The chart: a real Nashville system ───────────────────────────────────────
 function ChartSheet({
   title,
@@ -720,8 +740,12 @@ function ChartSheet({
   onCommitBar: (sectionId: string, barIndex: number, cells: ViewBar) => void;
 }) {
   const beats = timeSig.beats;
+  // Fit-to-width: pick a bars/line tier from the measured bar area, never letting
+  // a line overflow (design §4.3). Default 4 until the first measure lands.
+  const [barsRef, barsWidth] = useContentWidth<HTMLDivElement>();
+  const barsPerLine = barsWidth > 0 ? pickBarsPerLine(barsWidth) : 4;
   return (
-    <div className="w-full max-w-[560px] bg-white rounded shadow-2xl p-7 text-black">
+    <div className="w-full max-w-[920px] mx-auto bg-white rounded shadow-2xl p-7 text-black">
       <div className="text-center border-b border-zinc-200 pb-3 mb-3">
         <div className="text-xl font-bold text-black">{title}</div>
       </div>
@@ -731,26 +755,38 @@ function ChartSheet({
           {beats}/{timeSig.unit} · Nashville Number System
         </div>
       </div>
-      <div className="mt-5 space-y-5">
+      <div ref={barsRef} className="mt-5 space-y-5">
         {sections.map((s) => (
           <div key={s.id}>
             <div className="text-[11px] font-bold text-zinc-700 flex items-center gap-2 mb-1">
               {s.label}
               {repeatLabel(s.repeat) && <span className="text-[9px] text-blue-600">{repeatLabel(s.repeat)}</span>}
             </div>
-            <div className="flex border-l-2 border-r-2 border-black overflow-x-auto">
-              {s.chords.map((bar, bi) => (
-                <Measure
-                  key={bi}
-                  bar={bar}
-                  beats={beats}
-                  mode={mode}
-                  renderKey={renderKey}
-                  isEditing={editing === `${s.id}:${bi}`}
-                  onEdit={() => setEditing(`${s.id}:${bi}`)}
-                  onCommit={(cells) => onCommitBar(s.id, bi, cells)}
-                  onCancel={() => setEditing(null)}
-                />
+            {/* One system row per line of `barsPerLine` bars. Constant-width grid
+                columns (NOT flex-fill): a partial last line keeps bar width and
+                left-aligns; the trailing barline tracks the last real bar. */}
+            <div className="space-y-1">
+              {chunkIntoLines(s.chords.map((bar, bi) => ({ bar, bi })), barsPerLine).map((line, li) => (
+                <div
+                  key={li}
+                  className="grid border-l-2 border-black"
+                  style={{ gridTemplateColumns: `repeat(${barsPerLine}, minmax(0, 1fr))` }}
+                >
+                  {line.map(({ bar, bi }, idx) => (
+                    <Measure
+                      key={bi}
+                      bar={bar}
+                      beats={beats}
+                      mode={mode}
+                      renderKey={renderKey}
+                      trailing={idx === line.length - 1}
+                      isEditing={editing === `${s.id}:${bi}`}
+                      onEdit={() => setEditing(`${s.id}:${bi}`)}
+                      onCommit={(cells) => onCommitBar(s.id, bi, cells)}
+                      onCancel={() => setEditing(null)}
+                    />
+                  ))}
+                </div>
               ))}
             </div>
           </div>
@@ -767,6 +803,7 @@ function Measure({
   beats,
   mode,
   renderKey,
+  trailing,
   isEditing,
   onEdit,
   onCommit,
@@ -776,16 +813,22 @@ function Measure({
   beats: number;
   mode: 'numbers' | 'letters';
   renderKey: string;
+  trailing: boolean; // last real bar on its line → draw the heavy system barline
   isEditing: boolean;
   onEdit: () => void;
   onCommit: (cells: ViewBar) => void;
   onCancel: () => void;
 }) {
   const cells = bar ?? [];
+  // Width comes from the parent grid column (constant), not flex-grow. A light
+  // zinc divider separates interior bars; the line's last real bar carries the
+  // heavy black system barline so a partial line's edge tracks it.
   return (
     <div
       onClick={isEditing ? undefined : onEdit}
-      className="group relative flex-1 min-w-[64px] border-r border-zinc-300 last:border-r-0 cursor-pointer hover:bg-blue-50"
+      className={`group relative border-r cursor-pointer hover:bg-blue-50 ${
+        trailing ? 'border-r-2 border-black' : 'border-zinc-300'
+      }`}
     >
       <div className="h-5 flex items-stretch">
         {isEditing ? null : cells.length === 0 ? (
