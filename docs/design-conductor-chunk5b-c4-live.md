@@ -68,6 +68,7 @@ All constants (`HOP_MS`, `ENVELOPE_SEC`, `BPM_MIN`, `BPM_MAX`, `HIGH_CONFIDENCE`
 A small hook owning the audio graph lifecycle. **Never holds clock state** — it only produces telemetry via a callback.
 
 - **`enable()` (MUST be called from a user gesture — the chunk-0 iOS lesson):** `getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false } })` (raw signal — DSP wants the unprocessed mic), create/`resume()` an `AudioContext`, wire `MediaStreamSource → AnalyserNode` (`fftSize` ≈ 2048). Start a `setInterval(HOP_MS)` poll: each tick `getFloatFrequencyData` → `spectralFlux` → push to the `OnsetEnvelope`; every `ANALYSIS_PERIOD_MS` (≈ 500 ms) run `autocorrelateTempo` → emit `TempoTelemetry` (§3) through the callback.
+- **⚑ Hop-grid quantization is the IO shell's job (Codex R1 MEDIUM-2 — resolves the jitter/fixed-hop tension).** `autocorrelateTempo` is a *fixed-hop* estimator (constant `HOP_MS` between envelope samples) — that is what makes its lag→BPM math valid and unit-testable. A `setInterval` poll does **not** land on an even grid (timer jitter, main-thread contention), so the shell must **quantize each frame onto the `HOP_MS` grid using the audio clock**: stamp every poll with `AudioContext.currentTime`, compute the target grid slot, write the frame's flux there; a skipped slot is zero-filled (or linearly interpolated), a doubled slot is averaged. The pure core then sees a true constant-hop envelope regardless of wall-clock jitter. (Timestamping *alone* — without re-gridding — would NOT make a fixed-hop autocorrelation valid; the re-grid is the actual fix. AudioWorklet, if later adopted, gives an even hop natively and removes this shell step.)
 - **`disable()` / unmount:** clear the interval, `disconnect()` the nodes, **`stream.getTracks().forEach(t => t.stop())`** (release the mic — the OS indicator goes off), `audioContext.close()`. Idempotent.
 - **State surfaced:** `{ status: 'off' | 'requesting' | 'running' | 'denied' | 'error', lastError? }` for the UI.
 - **Privacy (stated explicitly):** audio is processed **in-process and never leaves the device**; the stream is held only while detection is on and torn down on disable/unmount; enabling is an explicit, revocable MD action with a visible mic-active indicator.
@@ -93,7 +94,28 @@ export type TempoTelemetry = {
 
 **MD-mic specialisation (parent §3 "MD-mic is in-process — one clock"):** the producer and consumer share the JS event loop, so `ageMsAtSend ≈ 0` and ordering is trivially monotonic. The full node-shaped fields are kept anyway so the deferred listener-node (B) is a no-contract-change add — `listenerId`/`telemetryEpoch`/`seq` cost nothing in-process and the **MD ingest stays latest-wins per `(listenerId, telemetryEpoch)`** exactly as specced (a detector restart bumps `telemetryEpoch` → resets the accepted-seq watermark, so a restarted stream isn't dropped forever).
 
-**Ingest (pure, testable):** `ingestTelemetry(state, t, nowMs) → ClockTelemetryState` — keeps `lastAcceptedSeq` keyed by incarnation, the **last accepted** telemetry, and the **last-good tempo** (the most recent HIGH-confidence `tempoBpm`, frozen for coasting). Receipt is **now** (the MD's own clock); detection age = `ageMsAtSend + measuredTransit` (≈ `ageMsAtSend` in-process), never a foreign-clock subtraction (parent §3 HIGH-1).
+**Ingest (pure, testable):** `ingestTelemetry(state, t, nowMs) → ClockTelemetryState` — keeps `lastAcceptedSeq` keyed by incarnation, plus the state below. Receipt is **now** (the MD's own clock); detection age = `ageMsAtSend + measuredTransit` (≈ `ageMsAtSend` in-process), never a foreign-clock subtraction (parent §3 HIGH-1).
+
+**⚑ Age is computed at READ time, not stored at ingest (Codex R1 MEDIUM-1).** If the ingested state stored a fixed `ageMs`, it would never grow and `live` would never expire — the stale-drop ladder would be dead. So the state stores **receive instants**, and the freshness terms are computed in the tick/render from `nowMs`:
+
+```ts
+type ClockTelemetryState = {
+  lastAcceptedSeqByIncarnation: Map<string, number>;  // (listenerId|telemetryEpoch) → seq watermark
+  // the last ACCEPTED estimate (any confidence) — proves the detector is still alive:
+  lastTempoBpm: number | null;        // smoothed (§3 deadband)
+  lastConfidence: number;             // [0,1]
+  lastReceivedAtMs: number | null;    // MD-clock receipt of the last accepted estimate
+  lastAgeMsAtReceipt: number;         // ageMsAtSend(+transit) captured AT that receipt
+  // the last HIGH-confidence estimate — the ONLY thing coasting may ride (Codex R1 HIGH-1):
+  lastGoodTempoBpm: number | null;    // most recent tempo with confidence ≥ HIGH (frozen for coast)
+  lastGoodAtMs: number | null;        // MD-clock receipt of that HIGH estimate
+};
+// read-time freshness (in tick AND render, off telemetryRef):
+//   telemetryAgeMs = last==null ? null : lastAgeMsAtReceipt + (nowMs − lastReceivedAtMs)
+//   lastGoodAgeMs  = lastGoodAtMs==null ? null : nowMs − lastGoodAtMs
+```
+
+`lastGoodTempoBpm`/`lastGoodAtMs` update **only** on a HIGH-confidence accepted estimate; a stream of low-confidence estimates refreshes `lastReceived*` (detector alive) but **not** `lastGood*` — which is exactly what makes coasting expire (next).
 
 **Tempo smoothing + deadband (MINE — a raw per-estimate tempo would wobble the redline).** The autocorrelation tempo jitters frame-to-frame (124, 125, 123…). If every estimate were treated as a tempo *change*, it would churn `rebaselineMotion` ~twice a second and the dead-reckoned playhead would micro-wobble. So `ingestTelemetry` **smooths** the accepted tempo (median or EMA over the last few estimates — the chunk-0 `tapTempoToBpm` already uses median for robustness) and applies a **deadband**: the smoothed tempo is only treated as a *new* `baselineTempoBpm` when it moves more than `TEMPO_DEADBAND_BPM` (≈ 2). Below that the existing baseline holds. This makes the 4b driver's `rebaselineMotion` fire on *real* tempo moves, not detector noise.
 
@@ -107,24 +129,30 @@ export type TempoTelemetry = {
 
 ```ts
 // 4b, in lib/conductor-clock.ts — pure. Reaches 'live'/'coasting' ONLY when audioDriveEnabled.
+// BOTH ages are READ-TIME (computed off telemetryRef + nowMs by the caller, §3), never ingest-stored.
 export function computeRung(args: {
   clockOn: boolean; bpm: number | null; stalled: boolean; done: boolean;
   audioDriveEnabled: boolean;        // the §6 validated opt-in (default false)
-  telemetryAgeMs: number | null;     // null ⇒ no telemetry ever
-  confidence: number;                // last accepted; 0 when none
-  hasLastGoodTempo: boolean;
+  telemetryAgeMs: number | null;     // read-time age of the LAST ACCEPTED estimate; null ⇒ none ever
+  confidence: number;                // the last accepted estimate's confidence; 0 when none
+  lastGoodAgeMs: number | null;      // read-time age of the last HIGH-confidence estimate; null ⇒ none ever
 }): ClockRung {
   if (!args.clockOn || args.stalled || args.done) return 'manual';
-  if (args.audioDriveEnabled && args.telemetryAgeMs !== null) {
-    if (args.telemetryAgeMs <= LIVE_FRESH_MS && args.confidence >= HIGH_CONFIDENCE) return 'live';
-    if (args.telemetryAgeMs <= COAST_TIMEOUT_MS && args.hasLastGoodTempo) return 'coasting';
+  if (args.audioDriveEnabled) {
+    // live = the CURRENT estimate is fresh AND high-confidence.
+    if (args.telemetryAgeMs !== null && args.telemetryAgeMs <= LIVE_FRESH_MS
+        && args.confidence >= HIGH_CONFIDENCE) return 'live';
+    // coasting = NOT live, but a HIGH estimate landed within the coast window. Keyed on
+    // lastGoodAgeMs (NOT last-accepted age) so a stream of LOW-confidence telemetry can't
+    // hold coasting open forever on a stale good tempo (Codex R1 HIGH-1).
+    if (args.lastGoodAgeMs !== null && args.lastGoodAgeMs <= COAST_TIMEOUT_MS) return 'coasting';
   }
   if (args.bpm != null) return 'static-bpm';
   return 'manual';
 }
 ```
 
-The ladder falls straight out: fresh+HIGH ⇒ `live`; stale-but-within-coast with a last-good tempo ⇒ `coasting`; otherwise the existing `static-bpm`/`manual` floor (parent §4.1). **In 4a, `audioDriveEnabled` is hard-false** ⇒ `computeRung ≡ computeStaticRung`, so the driver is untouched by construction.
+The ladder falls straight out: current estimate fresh+HIGH ⇒ `live`; else a HIGH estimate within `COAST_TIMEOUT_MS` ⇒ `coasting` (rides `lastGoodTempoBpm`); otherwise the existing `static-bpm`/`manual` floor (parent §4.1). **Coasting expires on the age of the last *good* tempo, not the last *accepted* packet** — so low-confidence chatter cannot masquerade as a live source (the R1 HIGH-1 fix). **In 4a, `audioDriveEnabled` is hard-false** ⇒ `computeRung ≡ computeStaticRung`, so the driver is untouched by construction.
 
 ---
 
@@ -143,9 +171,9 @@ Purely additive + observational. **No change to the driver, the reducer, `applyW
 
 Flips the audio rungs on behind the **`audioDriveEnabled`** opt-in (default off, per-session like `clockOn`; the MD turns it on once 4a's shadow comparison has earned their trust — parent §6's "promotes once it clears the bar for that MD's source," human-judged in v1).
 
-- **Rung — computed in TWO places, from the SAME synchronous refs.** The render-level `rung` (display) swaps `computeStaticRung` → `computeRung` (§4). But the **driver must compute its own effective rung *inside the tick*** from `telemetryRef.current` + `cfgRef`/`driverRef` — it currently hardcodes `rung: 'static-bpm'` at the auto-fire call (`use-conductor-session.ts:399`, with a comment asserting "rung is provably 'static-bpm' here"). In 4b that comment no longer holds: the tick resolves the effective rung (`computeRung` off the refs) and passes **that** to `applyWithAutoFire` (not a literal). Reading the rung off render-state inside the macrotask tick would be the stale-input race again — it must come from the refs.
-- **Driver tempo source (`driveClockTick`):** the local `b` (today `cfgRef.current.bpm`, `:362`) becomes the **effective tempo**: `live ⇒ telemetryRef smoothed tempo`, `coasting ⇒ last-good tempo`, else `cfgRef.bpm`. The existing in-tick reconcile at `:373–381` is **reused verbatim** — a change of effective tempo vs `r.baselineTempoBpm` already routes through `rebaselineMotion` (§5.6-ii), so past bars keep their duration and `expected − barsSinceAnchor = 0` (no jump, no stall). The owed math, ≤1-advance/tick, ≥2-owed stall, and the rising-edge chain are **all unchanged** — only the `b` source and the passed rung move. (The deadband §3 keeps this reconcile from firing on detector noise.)
-- **`clockConfidenceOk` live flip:** the gate's signature is `(r: ClockReckoning, rung: ClockRung)` — **`r` carries no confidence** (confidence lives in telemetry, not the reckoning), so encoding freshness+HIGH in the *rung* is **required, not merely chosen**: the rung is `live` only when the tick saw `confidence ≥ HIGH` + fresh, so `case 'live': return true` is sound *because the driver computed that rung at the same synchronous instant*. `coasting` stays `false` (motion yes, auto-commit no — parent §4.1). The `alignedAtMs != null` never-trued guard and the `barsSinceAnchor ≤ bound` guard stay exactly as shipped (both still gate `live`).
+- **⚑ ONE effective-rung source feeds the gate — for EVERY caller, never render state (Codex R1 HIGH-2, the systemic close).** `clockConfidenceOk('live') → true` is only sound if the `'live'` label was computed from *fresh* telemetry at the same synchronous instant the gate runs. Today the manual callers pass a render-level `rung` into `applyWithAutoFire` (`:464`/`:526`, the chunk-3 pattern) and the tick hardcodes `'static-bpm'` (`:399`). **Both are wrong in 4b:** telemetry arrives *outside* render, so the detector callback can drop `telemetryRef` from HIGH→LOW while the render mirror still says `'live'` — and a manual `release()` over a clock-placed `fireAt` in that gap would pass the stale `'live'` and auto-fire after confidence actually dropped. **Fix = remove `rung` from the caller surface entirely.** `applyWithAutoFire` computes the effective rung *itself* at call time via one shared `effectiveRung()` helper that reads **only the synchronous refs** (`telemetryRef`/`cfgRef`/`driverRef`) + `nowMs` (the §3 read-time ages). The tick, every manual gesture, and the `release` path then all gate on the *same* freshly-derived rung by construction — no caller can inject a stale label. The render-level `rung` becomes **display-only** (never feeds the gate). This closes the class the way Invariant (P) closed R6–R8: one chokepoint, not N call-site stamps.
+- **Driver tempo source (`driveClockTick`):** the local `b` (today `cfgRef.current.bpm`, `:362`) becomes the **effective tempo** derived from the same refs: `live ⇒ telemetryRef smoothed `lastTempoBpm``, `coasting ⇒ `lastGoodTempoBpm``, else `cfgRef.bpm`. The existing in-tick reconcile at `:373–381` is **reused verbatim** — a change of effective tempo vs `r.baselineTempoBpm` routes through `rebaselineMotion` (§5.6-ii), so past bars keep their duration and `expected − barsSinceAnchor = 0` (no jump, no stall). The owed math, ≤1-advance/tick, ≥2-owed stall, and the rising-edge chain are **all unchanged** — only the `b` source moves. (The deadband §3 keeps this reconcile from firing on detector noise.)
+- **`clockConfidenceOk` live flip:** the gate's signature is `(r: ClockReckoning, rung: ClockRung)` — **`r` carries no confidence** (it lives in telemetry, not the reckoning), so encoding freshness+HIGH in the *rung* is **required, not merely chosen**, AND that rung MUST come from `effectiveRung()` off the refs (the bullet above), not render state. Given that, `case 'live': return true` is sound. `coasting` stays `false` (motion yes, auto-commit no — parent §4.1). The `alignedAtMs != null` never-trued guard and the `barsSinceAnchor ≤ bound` guard stay exactly as shipped (both still gate `live`).
 - **Drop ladder (parent §5.3):** telemetry going stale moves the rung `live → coasting → static-bpm/manual` via `computeRung`; the driver re-baselines onto the new tempo source at each step. The existing ≥2-owed stall (tab sleep) is orthogonal and still fires. A dropped detector can only ever cost *audio-driven motion*, never the floor: `static-bpm`/manual is always under it.
 
 ---
@@ -165,7 +193,7 @@ Flips the audio rungs on behind the **`audioDriveEnabled`** opt-in (default off,
 3. **Octave-fold prior — RECOMMEND: fold toward `song.bpm` when present, else a default-band centre.** The stated tempo is a free, strong half/double-time disambiguator.
 4. **`downbeatPhase` — RECOMMEND deferred** (tempo+confidence only; MD align owns phase). Telemetry field reserved.
 5. **Validation promotion — RECOMMEND manual MD opt-in** (`audioDriveEnabled`, earned by eyeballing the 4a shadow log), not an automated stats gate (premature; defer).
-6. **`live` gate form — RECOMMEND** encoding freshness+HIGH in the *rung* so `clockConfidenceOk('live')` is a plain `true` (this is **forced** by the frozen `(r, rung)` signature — `r` has no confidence; §6).
+6. **`live` gate form — RECOMMEND** encoding freshness+HIGH in the *rung*, with the rung derived by a single `effectiveRung()` off the synchronous refs for **every** caller (no render-state rung reaches the gate), so `clockConfidenceOk('live')` is a sound plain `true` (this is **forced** by the frozen `(r, rung)` signature — `r` has no confidence; §6 / R1 HIGH-2).
 7. **Tempo smoothing — RECOMMEND median/EMA + `TEMPO_DEADBAND_BPM` ≈ 2** (§3) so detector jitter doesn't churn `rebaselineMotion`. Defer-with-default constant.
 
 **Open for Graham:** any of the above defaults; whether 4a's validation log needs export/persistence or in-memory-eyeball suffices; whether `audioDriveEnabled` persists per-session (like `clockOn`) or per-MD-per-source.
@@ -175,16 +203,16 @@ Flips the audio rungs on behind the **`audioDriveEnabled`** opt-in (default off,
 ## 9. Build outline (gated chunks, Codex per chunk — NOT building)
 
 **4a (shadow):**
-- `lib/tempo-detect.ts` (pure: `spectralFlux`, `OnsetEnvelope`, `autocorrelateTempo`, `octaveFold`, constants) **+ tests** (synthetic click trains at known BPM → recovered within tolerance; octave-fold toward prior; flux half-wave rectification; confidence rises with a clean periodic signal, ~0 on noise).
-- `TempoTelemetry` + `ingestTelemetry` (pure) **+ tests** (latest-wins per incarnation; restart bumps epoch → not dropped; last-good tempo tracks last HIGH; receipt-based age; **smoothing + `TEMPO_DEADBAND_BPM`: a sub-deadband jitter does NOT change the accepted baseline tempo**).
+- `lib/tempo-detect.ts` (pure: `spectralFlux`, `OnsetEnvelope`, `autocorrelateTempo`, `octaveFold`, constants) **+ tests** (synthetic click trains at known BPM → recovered within tolerance; octave-fold toward prior; flux half-wave rectification; confidence rises with a clean periodic signal, ~0 on noise; **jittered frame stamps re-gridded onto the hop grid still recover the BPM — skip zero-filled, double averaged** — the R1 MEDIUM-2 build rule).
+- `TempoTelemetry` + `ingestTelemetry` (pure) **+ tests** (latest-wins per incarnation; restart bumps epoch → not dropped; **`lastGood*` updates ONLY on a HIGH estimate — a low-confidence stream refreshes `lastReceived*` but NOT `lastGood*`** (R1 HIGH-1); **read-time age grows with `nowMs`: a fixed stored age would never expire** (R1 MEDIUM-1); smoothing + `TEMPO_DEADBAND_BPM`: a sub-deadband jitter does NOT change the accepted baseline tempo).
 - `lib/use-tempo-detector.ts` (IO shell; gesture-gated enable, teardown releases mic). Thin; covered at the boundary + a denied/error-status test.
 - `use-conductor-session.ts` shadow channel (the synchronous `telemetryRef` from §3, written by the detector callback) + surfaced shadow readouts; **assert the driver/rung are byte-unchanged** (rung still `computeStaticRung`; no playhead motion from telemetry even with a fresh HIGH stream).
 - `ConductorCluster.tsx` enable affordance + shadow readout + validation log. Cluster test: shadow shows, drives nothing, denied state honest.
 
 **4b (driving):**
-- `computeRung` (§4) **+ tests** (each ladder transition; `audioDriveEnabled=false` ⇒ `computeRung ≡ computeStaticRung`; live needs fresh+HIGH; coasting needs last-good within timeout; drop to static/manual).
-- `clockConfidenceOk` live flip **+ tests** (live arrival within bound + trued auto-fires; coasting never; `alignedAtMs===null` still refuses; past-bound still refuses).
-- Driver tempo-source swap (effective `b` from `telemetryRef`) + **effective rung passed to `applyWithAutoFire`** (not hardcoded `'static-bpm'`) + `rebaselineMotion` on every accepted tempo/source change **+ fake-timer tests** (live tempo change re-baselines: next advance on time, no jump/no stall — the R4 class, reused; live→coasting freezes at last-good; coasting→static drops to stated; sub-deadband jitter does NOT re-baseline; a live arrival on `fireAt` auto-fires while a coasting one does NOT; ≥2-owed stall still independent; signal-loss → manual, no fast-forward; **telemetry read via ref, not stale render-state — a due tick after a telemetry update sees the new tempo**).
+- `computeRung` (§4) **+ tests** (each ladder transition; `audioDriveEnabled=false` ⇒ `computeRung ≡ computeStaticRung`; live needs fresh+HIGH; coasting needs last-good within timeout; **a steady stream of LOW-confidence telemetry expires coasting via `lastGoodAgeMs` and drops to static/manual — it does NOT hold coasting open** (R1 HIGH-1); drop to static/manual).
+- `effectiveRung()` + `clockConfidenceOk` live flip **+ tests** (live arrival within bound + trued auto-fires; coasting never; `alignedAtMs===null` still refuses; past-bound still refuses; **THE R1 HIGH-2 REPRO: clock drives `current` onto `fireAt` while `telemetryRef` is fresh-HIGH; then telemetry drops to LOW *without a re-render*; a manual `release()` must consult `effectiveRung()` (now NOT live) and REFUSE — it must NOT read a stale render-level `'live'`**).
+- Driver tempo-source swap (effective `b` from `telemetryRef`) + **`applyWithAutoFire` derives the gate rung from `effectiveRung()` off the refs — no caller passes a rung** (the `:399` `'static-bpm'` literal and the `:464`/`:526` render-rung args are removed) + `rebaselineMotion` on every accepted tempo/source change **+ fake-timer tests** (live tempo change re-baselines: next advance on time, no jump/no stall — the R4 class, reused; live→coasting freezes at last-good; coasting→static drops to stated; sub-deadband jitter does NOT re-baseline; a live arrival on `fireAt` auto-fires while a coasting one does NOT; ≥2-owed stall still independent; signal-loss → manual, no fast-forward; **telemetry read via ref, not stale render-state — a due tick after a telemetry update sees the new tempo**).
 - `audioDriveEnabled` opt-in wiring (default off) + cluster control.
 
 Report the test-count DELTA on each chunk PR (per the standing rule).
@@ -203,5 +231,5 @@ Report the test-count DELTA on each chunk PR (per the standing rule).
 ## 11. Risks / honest unknowns
 
 - **Detection quality is the real risk** — autocorrelation on a noisy stage mic (crowd, monitors, bleed) may be jittery or octave-confused. This is *exactly* why 4a ships shadow-first: we learn the real-source quality before any audio drives the playhead, and the floor never depends on it.
-- **AnalyserNode poll jitter** under main-thread contention could smear the envelope hop. Mitigation: timestamp each frame by `AudioContext.currentTime` (not wall clock) for the envelope spacing; AudioWorklet is the upgrade path behind the same boundary.
+- **AnalyserNode poll jitter** under main-thread contention could smear the envelope hop. Mitigation = the §2.2 **hop-grid re-quantization**: stamp each frame by `AudioContext.currentTime` and write it to its grid slot (zero-fill skips / average doubles) so the pure fixed-hop estimator stays valid. AudioWorklet is the upgrade path behind the same boundary (even hop natively).
 - **Browser mic permission UX** varies (iOS Safari gesture + HTTPS; permission persistence). The IO shell surfaces `requesting/denied/error` honestly; the floor is unaffected when denied.
