@@ -222,11 +222,20 @@ but the honest report costs nothing.
   this collapses to the verbatim chunk-4 `advance`.
 - **`armedFireAtEligible`** — local hook state set `true` when an `arm` succeeds (the
   fire bar is walk-proven reachable in 5a, §1/§3.1), cleared on
-  `commit`/`disarm`/`redirect`/identity change. Invariantly true in 5a; the genuinely
-  load-bearing check in 5b (§1, §7).
-- **`shouldAutoFire(afterAdvance.session)`** — evaluated on the **post-advance** session,
-  so `current` is the bar we just landed on. Exactly the contract's "post-advance,
-  `current.barId === armed.fireAt`."
+  `commit`/`disarm`/identity change. **NOT cleared on `redirect`** (build-review R1): a
+  `release` is a redirect, and clearing the latch on it would silently disable the
+  hold→release→fire path; a non-firing redirect must leave the latch intact for the next
+  genuine arrival. Invariantly true in 5a; the genuinely load-bearing check in 5b (§1, §7).
+- **`shouldAutoFire`, fired on the RISING EDGE** — `advance` and `release` share one helper
+  (`applyWithAutoFire`) that auto-commits iff **this action OPENED the gate**:
+  `!shouldAutoFire(before) && shouldAutoFire(after)`. Two openers only: an `advance` that
+  ARRIVES (`current` transitions onto `fireAt`), and a `release` that CLEARS the hold while
+  parked on `fireAt` (the reducer keeps `current` on the fire bar across a redirect, so the
+  hold-clear is the exact moment the gate opens — the **release itself** fires it, not a
+  later advance, which for a vamp-body fire bar would step off and never return). A redirect
+  that finds the gate ALREADY open (a stale marker parked on `fireAt` with auto-fire toggled
+  on after arrival) is not an edge → no fire (build-review R3). Edge-gating is caller-
+  agnostic — no redirect-kind special-casing.
 
 The surface adds two fields: `autoFireOn: boolean` and `setAutoFire: (on: boolean) => void`.
 Under D6-NO nothing else on `ConductorSurface` changes.
@@ -502,8 +511,15 @@ Hook (jsdom, `// @vitest-environment jsdom`, `afterEach(cleanup)`, renderHook + 
   parity.
 - auto-fire ON: advance onto the fire bar auto-commits in the **same** act (single
   `setSession`); `armed` cleared, cursor jumped.
-- auto-fire ON but `holding`: advance onto the fire bar does **not** fire (gate refuses);
-  dispatch the Release vamp redirect (which clears `holding`), then the next advance fires.
+- auto-fire ON but `holding`: advance onto the fire bar does **not** fire (gate refuses).
+  For a fire bar **inside the vamp body**, dispatching Release vamp (which clears `holding`
+  while `current` is parked on the fire bar) fires on the **release itself** — the rising
+  edge — since the next advance would step off the fire bar and never return. For a fire bar
+  **ahead** of the vamp, release does not open the gate (no edge) and the marker fires on the
+  later arriving advance.
+- **no spurious fire (R3):** with the gate already OPEN (advance onto the fire bar with
+  auto-fire OFF, then toggle ON), an unrelated applied redirect ("Another round") must **not**
+  auto-commit — only a rising edge fires; the latch is preserved.
 - toggle OFF mid-arm → reverts to go-tap.
 - **arm seam — exit XOR return at the seam (insert-return §4.3/D10, Codex R5):** arm a
   **backward section** target **with** an explicit `exit` (al Coda/al Fine); assert the

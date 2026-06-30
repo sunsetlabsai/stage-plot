@@ -274,6 +274,29 @@ describe('useConductorSession', () => {
     expect(result.current.outcome).toBe('applied'); // the COMMIT result, not the redirect
   });
 
+  it('no spurious fire: a non-opening redirect on an ALREADY-open gate preserves the marker (Codex R3 repro)', async () => {
+    // Auto-fire fires on the RISING EDGE of the §3.5 gate, never merely because the gate
+    // is open. Repro: arm while parked one bar short, advance ONTO fireAt with auto-fire
+    // OFF (so it does not fire), THEN toggle auto-fire ON — the gate is now open but no
+    // arrival/release happened. A subsequent unrelated redirect ("Another round", which
+    // does not move `current` off fireAt) must NOT auto-commit the stale armed marker.
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.advance()); // current b1
+    act(() => result.current.arm(result.current.targets[0])); // fireAt = b2
+    expect(result.current.armed?.fireAt).toBe('b2');
+    act(() => result.current.advance()); // arrive b2 = fireAt, auto-fire OFF ⇒ no fire
+    expect(result.current.current?.barId).toBe('b2');
+    expect(result.current.armed).not.toBeNull();
+    act(() => result.current.setAutoFire(true)); // gate now OPEN, but no edge event
+    const round = result.current.redirects.find((o) => o.label === 'Another round')!;
+    expect(round).toBeDefined();
+    act(() => result.current.redirect(round)); // applied, but current stays on fireAt
+    expect(result.current.outcome).toBe('applied'); // the redirect REALLY applied (non-vacuous)
+    expect(result.current.armed).not.toBeNull(); // NOT fired — no rising edge
+    expect(result.current.armed?.fireAt).toBe('b2');
+  });
+
   it('arm seam: a backward section with NO exit bakes the insert-return leg', async () => {
     const { result } = renderHook(() => useConductorSession(args({ cal: secCal })));
     await waitFor(() => expect(result.current.active).toBe(true));
