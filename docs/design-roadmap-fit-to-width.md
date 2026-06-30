@@ -45,29 +45,52 @@ shows it mangled too). Two bugs in `lib/roadmap-render.ts`:
 | **Perform** (`PerformTab`, `[owner]/[show]/page.tsx:815`) | Displays the rendered PDF file in a container-filling, paginated viewer (`:2020`, `:2957`) with the calibration redline. Mechanically fit-to-width; its CONTENT was mangled only because the PDF was. | **None** — fixing the PDF fixes Perform. |
 | **Builder preview** (`ChartSheet`, `roadmap-builder/page.tsx:566`) | Single non-wrapping `overflow-x` row per section (P1). | **Fix** — consume the shared layout (§4.1, §4.3). |
 
-"Normalize around Perform" (Graham's call) = make the builder preview lay bars out
-the **same way the (now-fixed) PDF does**, so **preview === print === Perform**.
+**Invariant — same algorithm, surface-appropriate width (NOT pixel-identical).**
+"Normalize around Perform" (Graham's call) = preview and PDF run the **one shared
+`layoutSystems`** — identical wrapping/constant-width/partial-left-align RULES — each
+passing its **own** `barsPerLine` + target width. They are deliberately NOT
+pixel-for-pixel the same: the PDF is fixed 8.5×11 at 4/line; the preview is responsive
+{2,4,8} and (MVP) stacks/scrolls instead of paginating (§6 Q2). So on phone, wide
+screens, or page boundaries the preview will differ in bars-per-line and page breaks —
+**by design**. What CANNOT drift is the layout *algorithm*: there is exactly one code
+path, so a given (barsPerLine, width) always produces the same geometry on any surface.
+That is the no-drift guarantee, and it is what protects Perform's PDF/calibration.
 
 ## 4. Design
 
 ### 4.0 PDF header fix (Bug A) — draw-only
 
-In `drawRoadmapPdf`, flip **every** header baseline to bottom-origin so the whole
-header band sits in the top `MARGIN_TOP` strip — today title, artist, AND key all
-land at the bottom (Graham confirmed: "it's not just title but the key... and
-likely if/when i add it the BPM and the artist"). Either convert each
-(`y = PAGE_H - topOffset`) or add a `denormYTopPt(pt) = PAGE_H - pt` helper
-mirroring `denormYTop`, then route ALL header text through it so any future field
-(BPM, etc.) is correct by construction rather than per-line. Order title → artist →
-key (→ BPM), title highest. Exact offsets are a layout nicety; constraint: all
-inside the top 96pt margin, descending, non-overlapping. No layout/geometry
-change, no calibration impact.
+In `drawRoadmapPdf`, the whole header band (title, artist, key, future BPM) renders
+at the page *bottom* — today title, artist, AND key all land there (Graham confirmed:
+"it's not just title but the key... and likely if/when i add it the BPM and the
+artist"). Root cause: `drawText` passes `y` straight to bottom-origin
+`page.drawText`, but the header uses top-measured expressions (`MARGIN_TOP - 36` etc.)
+with no flip.
+
+**Do NOT mechanically wrap the existing `MARGIN_TOP - 36 / - 52 / - 70` expressions
+in `PAGE_H - (…)`** — that inverts the ordering (it would put title lowest). Instead:
+1. Add a `denormYTopPt(topOffset) = PAGE_H - topOffset` helper (mirrors `denormYTop`).
+2. Define the header as clean **top-origin baseline offsets**, descending from the top
+   edge: `title = 36`, `artist = 52`, `key = 70` (`BPM` slots in when added). Larger
+   offset = lower on the page; title smallest = highest. All within the top 96pt margin.
+3. Route every header `drawText` `y` through `denormYTopPt(offset)` so title=PAGE_H-36
+   (highest), artist=PAGE_H-52, key=PAGE_H-70, and any future field is correct by
+   construction.
+
+Draw-only. No layout/geometry change, no calibration impact.
 
 ### 4.1 Shared layout + constant-width fix (Bug B) — the no-drift core
 
 Extract `roadmap-render`'s section→systems flow (`:124-205`) into a **pure,
 pdf-lib-free** layout function consumed by BOTH the PDF drawer and the React
-preview:
+preview.
+
+**Module boundary (hard constraint).** `lib/roadmap-render.ts` imports `pdf-lib` at
+top level; `ChartSheet` is a **client** component. The pure layout MUST live in a NEW
+module (e.g. `lib/roadmap-layout.ts`) that imports NO pdf-lib — `roadmap-render.ts`
+imports it, and so does the client preview, but the client never transitively pulls
+pdf-lib into its bundle. Verify no pdf-lib import path reaches the client (e.g. a
+bundle/`import`-graph check, not just "it builds").
 
 ```
 layoutSystems(spec, { barsPerLine }) → Array<{
@@ -106,11 +129,22 @@ own `barsPerLine` — same algorithm, surface-appropriate input.
 
 ### 4.3 Preview layout mechanics (P1)
 
+**What the preview consumes.** The preview does NOT reuse the PDF's absolute
+`xStart/xEnd` points (those are 8.5×11-page coordinates that don't transfer to a
+responsive container). It consumes `layoutSystems`' **decisions**: the per-line bar
+groupings (which bars on which line, given the chosen `barsPerLine`) and the
+constant-width + left-aligned-partial RULE. It computes its own pixel widths from its
+own container width. Same algorithm (§3 invariant), different target width.
+
 In `ChartSheet`: remove `overflow-x-auto` (`:619`) and `min-w-[64px]` (`:667`);
-render each `layoutSystems` line as its own bordered system row, bars flex-fill at
-constant width. Sections > `barsPerLine` wrap to multiple rows (vertical growth,
-acceptable). The center container (`:343`) keeps `overflow-y`; **`overflow-x` must
-never trigger.**
+render each `layoutSystems` line as its own bordered system row. Each row is a fixed
+**`barsPerLine`-column grid** (`grid-template-columns: repeat(barsPerLine, 1fr)`), NOT
+`flex-fill` — flex-fill would stretch a 2-bar partial line across the row, re-creating
+Bug B on screen. A partial line fills its first N cells at the constant column width
+and leaves the trailing cells **empty** (left-aligned), and the row's trailing border
+tracks the last real bar — mirroring the PDF's partial-line system edge (§4.1).
+Sections > `barsPerLine` wrap to multiple rows (vertical growth, acceptable). The
+center container (`:343`) keeps `overflow-y`; **`overflow-x` must never trigger.**
 
 ### 4.4 Edit affordance preserved
 
@@ -155,10 +189,23 @@ phone tier in; the spike confirms its breakpoint rather than deciding whether to
   `CONTENT_W / B` (the Bug-B regression guard); the partial line's system `xEnd`
   equals its last bar's `xEnd`.
 - **Unit — header (Bug A):** title/artist/key baselines resolve to the top margin
-  band (`y` in `[PAGE_H - MARGIN_TOP, PAGE_H]`), descending, non-overlapping.
+  band (`y` in `[PAGE_H - MARGIN_TOP, PAGE_H]`), and ordering is correct — title
+  highest, then artist, then key (`y_title > y_artist > y_key`), non-overlapping.
+  Guards against the mechanical-flip ordering inversion.
+- **Unit — responsive `barsPerLine` selection:** the width→{2,4,8} picker returns 2
+  below the phone breakpoint, 4 in the mid band, 8 at/above the wide breakpoint
+  (boundary cases at each breakpoint).
+- **Unit — explicit override (Q1):** when `spec.barsPerLine` is set, the responsive
+  picker is bypassed and that value is used regardless of width.
+- **Unit — module boundary:** an import-graph/bundle assertion that the client preview
+  path does NOT transitively import `pdf-lib`.
 - **Behavior-preserving extraction:** for full-width sections (no partial line), the
   extracted layout reproduces today's systems byte-for-byte; update only the tests
   that asserted the OLD stretched partial-line geometry, and document the change.
-- **Manual/visual:** generated PDF — header at top, partial line left-aligned at
-  constant width; builder preview at §5 widths — no horizontal scrollbar, all bars
-  visible, preview matches the PDF.
+- **Manual/visual:** generated PDF — header at top (ordered, in margin band), partial
+  line left-aligned at constant width, trailing border tracking the last real bar.
+  Builder preview at §5 widths — no horizontal scrollbar, all bars visible, partial
+  line left-aligned (NOT stretched). Note: preview is **not** pixel-identical to the
+  PDF (responsive {2,4,8} vs fixed 4, stack-scroll vs paginate, §3 invariant); verify
+  the shared *algorithm* (constant width, left-aligned partial, correct wrapping for
+  the chosen `barsPerLine`), not pixel parity.
