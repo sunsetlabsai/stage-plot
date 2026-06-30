@@ -552,12 +552,59 @@ describe('chunkIntoLines — same wrapping rule the PDF layout applies', () => {
 });
 
 // ── Module boundary: the shared layout must not pull pdf-lib into the client ──
+// The invariant isn't "this one file's source has no pdf-lib" — it's that nothing
+// in roadmap-layout.ts's RUNTIME import graph reaches pdf-lib (a local helper it
+// imports could pull it in). So crawl: follow runtime (non-type-only) local
+// imports transitively; `import type`/`export type` erase at compile time, so
+// they can't bundle anything and are skipped.
 describe('roadmap-layout module boundary (client-bundle safety)', () => {
-  it('imports no pdf-lib (so the React preview never bundles it)', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync(new URL('../lib/roadmap-layout.ts', import.meta.url), 'utf8');
-    // Match an actual import/require of pdf-lib, not the word in a comment.
-    expect(src).not.toMatch(/from\s+['"]pdf-lib['"]/);
-    expect(src).not.toMatch(/require\(\s*['"]pdf-lib['"]\s*\)/);
+  it('pulls no pdf-lib through its runtime import graph (React preview never bundles it)', async () => {
+    const { readFileSync, existsSync } = await import('node:fs');
+    const { dirname, resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+
+    // Resolve a relative specifier to a concrete TS source file.
+    const resolveLocal = (fromFile: string, spec: string): string | null => {
+      const base = resolve(dirname(fromFile), spec);
+      for (const cand of [`${base}.ts`, `${base}.tsx`, `${base}/index.ts`, `${base}/index.tsx`]) {
+        if (existsSync(cand)) return cand;
+      }
+      return null;
+    };
+
+    const visited = new Set<string>();
+    const offenders: string[] = [];
+
+    const crawl = (file: string) => {
+      if (visited.has(file)) return;
+      visited.add(file);
+      const src = readFileSync(file, 'utf8');
+
+      // Runtime `import ...`/`export ... from` (NOT `import type`/`export type`),
+      // plus side-effect imports and CJS require. Capture the module specifier.
+      const fromRe = /^\s*(?:import|export)(?!\s+type\b)[\s\S]*?\bfrom\s*['"]([^'"]+)['"]/gm;
+      const sideEffectRe = /^\s*import\s*['"]([^'"]+)['"]/gm;
+      const requireRe = /\brequire\(\s*['"]([^'"]+)['"]\s*\)/g;
+
+      const specs = new Set<string>();
+      for (const re of [fromRe, sideEffectRe, requireRe]) {
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(src))) specs.add(m[1]);
+      }
+
+      for (const spec of specs) {
+        if (spec === 'pdf-lib' || spec.startsWith('pdf-lib/')) {
+          offenders.push(`${file} → ${spec}`);
+          continue;
+        }
+        if (spec.startsWith('.')) {
+          const local = resolveLocal(file, spec);
+          if (local) crawl(local);
+        }
+      }
+    };
+
+    crawl(fileURLToPath(new URL('../lib/roadmap-layout.ts', import.meta.url)));
+    expect(offenders).toEqual([]);
   });
 });
