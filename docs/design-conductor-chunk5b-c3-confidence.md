@@ -331,8 +331,8 @@ provenance/counters ride the actual `current`-write, never the action or the `ap
      (the R6 hole, both directions);
    - **manual advance onto `fireAt` fires unconditionally** with the clock coasting/off (5a floor);
    - **long-vamp defer**: vamp past the bound, then release ⇒ refused.
-4. Gate: `npm test` + `turbo lint` + `pnpm type-check` (report the test-count DELTA). No new UI
-   surface (the strand hint, if chosen, is its own item).
+4. Gate: `npm test` + `npm run lint` + `npx tsc --noEmit` + `npm run build` (report the test-count
+   DELTA). No new UI surface (the strand hint, if chosen, is its own item).
 
 **Scope check.** No reducer change, no wire/broadcast, no follower change, no `shouldAutoFire`
 change, no stall-logic change. One pure helper + one gate + one ref + one routing swap.
