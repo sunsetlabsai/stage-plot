@@ -77,7 +77,9 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // §1/§3.1 arm-time forward reachability of the fire bar. Invariantly true in 5a (the
   // walk that picked the fire bar IS the proof), kept to honour the frozen contract
   // `if (armedFireAtEligible && shouldAutoFire(...))` and stays load-bearing in 5b. Set
-  // true only AFTER an arm succeeds; cleared on commit/disarm/redirect/identity change.
+  // true only AFTER an arm succeeds; cleared on commit/disarm/identity change — NOT on
+  // redirect (R1/R3: a release is a redirect, so clearing it there would disable the
+  // hold→release→fire path; a non-firing redirect must preserve the latch).
   const [armedFireAtEligible, setArmedFireAtEligible] = useState(false);
 
   // (Re)initialize the session on identity change. programHash is async, so init
