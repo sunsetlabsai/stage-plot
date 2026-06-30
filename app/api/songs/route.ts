@@ -2,6 +2,18 @@ import { NextRequest } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { normalizeSongKey } from '@/lib/normalize';
+import { isValidBpm } from '@/lib/tempo';
+
+// Parse an incoming bpm value: absent ⇒ undefined (leave column as-is / default null),
+// explicit null/'' ⇒ null (cleared), a valid stated tempo ⇒ the integer. Anything else
+// (out of range / non-integer) ⇒ Error, surfaced as a 400 by the caller.
+function parseBpm(raw: unknown): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null || raw === '') return null;
+  const n = typeof raw === 'string' ? Number(raw) : raw;
+  if (typeof n !== 'number' || !isValidBpm(n)) throw new Error('invalid bpm');
+  return n;
+}
 
 // GET /api/songs — list owner's song library
 // Uses admin client (setlist_entries has no client RLS policies, so show_count needs service_role)
@@ -125,6 +137,13 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Title is required' }, { status: 400 });
   }
 
+  let bpm: number | null | undefined;
+  try {
+    bpm = parseBpm(body.bpm);
+  } catch {
+    return Response.json({ error: `BPM must be a whole number between 20 and 400` }, { status: 400 });
+  }
+
   const trimmedTitle = title.trim().slice(0, 200);
   let songKey: string;
   try {
@@ -144,8 +163,9 @@ export async function POST(request: NextRequest) {
       key: key || null,
       lead: lead || '',
       notes: notes || '',
+      bpm: bpm ?? null,
     })
-    .select('id, song_key, title, artist, key, lead, notes, created_at, updated_at')
+    .select('id, song_key, title, artist, key, lead, notes, bpm, created_at, updated_at')
     .single();
 
   if (error) {

@@ -174,6 +174,7 @@ export interface Song {
   key: string | null;
   lead: string;
   notes: string;
+  bpm: number | null;   // stated tempo (chunk-5b clock's static-BPM rung); null ⇒ no stated tempo
   created_at: string;
   updated_at: string;
   chart_count?: number;
