@@ -195,6 +195,53 @@ describe('useConductorSession', () => {
     expect(result.current.canArmNextSection).toBe(false); // no section ahead
   });
 
+  it('release preserves the auto-fire latch: a held marker still fires on arrival post-release', async () => {
+    // §8 hold path. Verse b1..b4 is a repeat body+volta (sV); Chorus b5,b6 (sC) follow.
+    // Arm "fire at next section" (= b5, the Chorus head, reached only AFTER the vamp).
+    // While holding, the playhead loops the verse and never reaches b5 → no fire. On
+    // Release the vamp exits forward; the marker must STILL auto-fire when it lands on
+    // b5 — i.e. the Release redirect must NOT clear the eligibility latch (Codex HIGH).
+    const vampCal = makeCal(
+      [
+        { id: 'b1', sectionId: 'sV' },
+        { id: 'b2', sectionId: 'sV' },
+        { id: 'b3', sectionId: 'sV' },
+        { id: 'b4', sectionId: 'sV' },
+        { id: 'b5', sectionId: 'sC' },
+        { id: 'b6', sectionId: 'sC' },
+      ],
+      [rstart('R', 'b1'), ending('E1', 'R', ['b3'], [1]), ending('E2', 'R', ['b4'], [2])],
+      [sec('sV', 'Verse'), sec('sC', 'Chorus')],
+    );
+    const { result } = renderHook(() => useConductorSession(args({ cal: vampCal })));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.setAutoFire(true));
+    act(() => result.current.advance()); // current b1
+    expect(result.current.canArmNextSection).toBe(true);
+    act(() => result.current.arm(result.current.targets[0], undefined, 'next-section'));
+    expect(result.current.armed?.fireAt).toBe('b5'); // Chorus head, post-vamp
+    // vamp the verse — loops, never reaches b5 → no auto-fire, marker stays armed
+    const hold = result.current.redirects.find((o) => o.label === 'Vamp (hold)')!;
+    act(() => result.current.redirect(hold));
+    expect(result.current.state?.vm.holding).toBe('R');
+    act(() => result.current.advance());
+    act(() => result.current.advance());
+    expect(result.current.armed).not.toBeNull(); // still pending mid-vamp
+    expect(result.current.current?.barId).not.toBe('b5');
+    // release the vamp — must preserve the armed marker AND the auto-fire latch
+    const release = result.current.redirects.find((o) => o.label === 'Release vamp')!;
+    act(() => result.current.redirect(release));
+    expect(result.current.state?.vm.holding).toBeNull();
+    expect(result.current.armed).not.toBeNull(); // release does not disarm
+    // advance to the Chorus head — the marker must auto-fire on arrival
+    let fired = false;
+    for (let i = 0; i < 10 && !fired; i++) {
+      act(() => result.current.advance());
+      if (result.current.armed === null) fired = true; // auto-fire cleared the marker
+    }
+    expect(fired).toBe(true);
+  });
+
   it('arm seam: a backward section with NO exit bakes the insert-return leg', async () => {
     const { result } = renderHook(() => useConductorSession(args({ cal: secCal })));
     await waitFor(() => expect(result.current.active).toBe(true));

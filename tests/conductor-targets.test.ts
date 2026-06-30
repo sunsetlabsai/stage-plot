@@ -483,6 +483,30 @@ describe('nextSectionBoundaryBarId', () => {
     expect(nextSectionBoundaryBarId(c, flat, vm, lastBarId)).toBeUndefined();
   });
 
+  it('snaps to the section HEAD only — skips a non-head bar of a section entered via a volta', () => {
+    // Verse b1,b2 (repeat body) / Chorus b3,b4 (ending1=b3, ending2=b4) / Bridge b5,b6.
+    // Chorus head (first in barsInOrder) is b3. On PASS 2 the VM emits b4 — a Chorus bar
+    // that is NOT the head — before reaching the Bridge. The boundary must skip b4 (a
+    // mid-section entry) and return b5 (the Bridge head), never the non-head b4.
+    const volta = makeCal(
+      [
+        { id: 'b1', sectionId: 'sV' },
+        { id: 'b2', sectionId: 'sV' },
+        { id: 'b3', sectionId: 'sC' },
+        { id: 'b4', sectionId: 'sC' },
+        { id: 'b5', sectionId: 'sB' },
+        { id: 'b6', sectionId: 'sB' },
+      ],
+      [sec('sV', 'Verse'), sec('sC', 'Chorus'), sec('sB', 'Bridge')],
+      [rstart('R', 'b1'), ending('E1', 'R', ['b3'], [1]), ending('E2', 'R', ['b4'], [2])],
+    );
+    const c = compileCal(volta);
+    const { vm, lastBarId } = walk(c, 5); // emits b1,b2,b3 (pass1) then b1,b2 (pass2)
+    expect(lastBarId).toBe('b2'); // cursor in Verse on pass 2
+    // forward emits b4 (Chorus, NON-head) then b5 (Bridge head) → must return b5, not b4
+    expect(nextSectionBoundaryBarId(c, volta, vm, lastBarId)).toBe('b5');
+  });
+
   it('a vamp (holding set) with no section change ahead → undefined within cap, not a freeze', () => {
     // One section, a real repeat; while holding, stepVM loops forever — the cap bounds it.
     const vamp = makeCal(

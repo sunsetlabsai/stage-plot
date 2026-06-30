@@ -197,17 +197,21 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       run({ kind: 'arm', armed });
     },
     commit: () => {
-      setArmedFireAtEligible(false);
+      setArmedFireAtEligible(false); // marker fired/consumed
       run({ kind: 'commit' });
     },
     disarm: () => {
-      setArmedFireAtEligible(false);
+      setArmedFireAtEligible(false); // marker cancelled
       run({ kind: 'disarm' });
     },
-    redirect: (opt) => {
-      setArmedFireAtEligible(false);
-      run({ kind: 'redirect', directive: opt.directive });
-    },
+    // redirect must NOT clear the eligibility bit — a `release` (the §3.5 hold path)
+    // is a redirect: the gate refuses an armed marker while vm.holding != null, then
+    // release clears holding so the SAME armed marker fires on the next arrival. The
+    // bit is invariantly-true-in-5a by construction (§1/§3.1) and the real gate is
+    // shouldAutoFire (armed + arrival + no-hold), which already declines to fire when
+    // a redirect makes fireAt unreachable (it lingers as advisory, D4). Clearing here
+    // would silently disable auto-fire after release (Codex build-review HIGH).
+    redirect: (opt) => run({ kind: 'redirect', directive: opt.directive }),
     outcome,
   };
 }

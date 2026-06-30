@@ -240,13 +240,25 @@ export function nextSectionBoundaryBarId(
 ): string | undefined {
   const ordered = barsInOrder(cal);
   const secOf = new Map(ordered.map((b) => [b.id, b.sectionId]));
+  // Section HEAD = the FIRST bar (in traversal order) owning a section — the SAME
+  // definition armableTargets uses (ordered.find(sectionId === sec.id)). The walk
+  // must snap to a head, not merely to "a bar whose sectionId differs": a jump/volta
+  // can emit a section's LATER bar before/without its head, and snapping there would
+  // arm a mid-section fire (Codex build-review MEDIUM). So we accept the boundary
+  // only when the emitted bar IS its section's head; a mid-section entry is walked
+  // past to the next real head (or undefined).
+  const headOf = new Map<string, string>();
+  for (const b of ordered) {
+    if (b.sectionId != null && !headOf.has(b.sectionId)) headOf.set(b.sectionId, b.id);
+  }
   const here = currentBarId ? secOf.get(currentBarId) ?? null : null;
   let cur = vm;
   for (let i = 0; i < compiled.cap; i++) {
     const step = stepVM(compiled, cur);
     if (!step.transition) return undefined; // song end before any boundary
-    const newSec = secOf.get(step.transition.barId) ?? null;
-    if (newSec != null && newSec !== here) return step.transition.barId;
+    const barId = step.transition.barId;
+    const newSec = secOf.get(barId) ?? null;
+    if (newSec != null && newSec !== here && headOf.get(newSec) === barId) return barId;
     cur = step.state;
   }
   return undefined;
