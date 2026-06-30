@@ -30,6 +30,9 @@ export interface ConductorClusterProps {
   holding: boolean; // vm.holding != null — surfaces the §3.5 "release to fire" copy
   canArmNextSection: boolean; // §4 — a next-section boundary exists ahead (else disable)
   onAdvance: () => void;
+  // 5b chunk 1 — the align / true-up tap. Seeds bar 1 at the start, re-zeros the timing
+  // baseline mid-song. No visible motion effect until the chunk-2 driver consumes it.
+  onAlign: () => void;
   onArm: (t: JumpTarget, exit?: ExitPolicy['kind'], fireAt?: 'next-bar' | 'next-section') => void;
   onCommit: () => void;
   onDisarm: () => void;
@@ -51,6 +54,7 @@ export default function ConductorCluster({
   holding,
   canArmNextSection,
   onAdvance,
+  onAlign,
   onArm,
   onCommit,
   onDisarm,
@@ -112,6 +116,16 @@ export default function ConductorCluster({
               className="px-3 py-1 rounded bg-red-600 text-white font-bold hover:bg-red-500 disabled:opacity-30 disabled:cursor-not-allowed"
             >
               Advance &rarr;
+            </button>
+            {/* 5b chunk 1 — align / true-up: "we are on the 1, now." Disabled at song end
+                (mirrors Advance, since seed-align IS the first advance). */}
+            <button
+              onClick={onAlign}
+              disabled={!canAdvance}
+              title="Tap on the downbeat to true up the clock"
+              className="px-3 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              On the 1
             </button>
           </div>
 

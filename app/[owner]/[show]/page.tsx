@@ -3597,6 +3597,7 @@ function ChartNavigator({
             holding={conductor.state?.vm.holding != null}
             canArmNextSection={conductor.canArmNextSection}
             onAdvance={conductor.advance}
+            onAlign={conductor.align}
             onArm={conductor.arm}
             onCommit={conductor.commit}
             onDisarm={conductor.disarm}

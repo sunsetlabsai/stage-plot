@@ -318,4 +318,127 @@ describe('useConductorSession', () => {
     expect(result.current.armed?.directive.exit).toEqual({ kind: 'alFine' });
     expect(result.current.armed?.directive.return).toBeUndefined();
   });
+
+  // ── 5b chunk 1: align / true-up + Invariant (P) bookkeeping (the binding) ─────
+  it('reckoning starts at the unconfirmed-start (anchor null, untrusted)', async () => {
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    expect(result.current.reckoning.anchor).toBeNull();
+    expect(result.current.reckoning.positionTrusted).toBe(false);
+  });
+
+  it('align at the start (current=null) seeds bar 1 and re-anchors trusted onto {b1,1}', async () => {
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    expect(result.current.current).toBeNull();
+    act(() => result.current.align()); // seed = the first manual advance
+    expect(result.current.current?.barId).toBe('b1');
+    expect(result.current.reckoning.anchor).toEqual({ barId: 'b1', pass: 1 });
+    expect(result.current.reckoning.positionTrusted).toBe(true);
+    expect(result.current.reckoning.barsSinceAnchor).toBe(0);
+  });
+
+  it('align mid-song re-zeros onto current with NO dispatch (session unchanged)', async () => {
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.advance()); // current b1, trusted
+    const stateBefore = result.current.state; // same ref iff no dispatch happens
+    act(() => result.current.align()); // mid-song true-up — MD-local only
+    expect(result.current.state).toBe(stateBefore); // no session replacement = no dispatch
+    expect(result.current.current?.barId).toBe('b1'); // never moves current
+    expect(result.current.reckoning.anchor).toEqual({ barId: 'b1', pass: 1 });
+    expect(result.current.reckoning.positionTrusted).toBe(true);
+  });
+
+  it('a manual advance re-anchors (positionTrusted, barsSinceAnchor=0)', async () => {
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.advance());
+    expect(result.current.reckoning.positionTrusted).toBe(true);
+    expect(result.current.reckoning.barsSinceAnchor).toBe(0);
+    expect(result.current.reckoning.anchor).toEqual({ barId: 'b1', pass: 1 });
+  });
+
+  it('a redirect does NOT re-anchor — reckoning preserved (Invariant (P) no-op)', async () => {
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.advance()); // current b1, trusted, anchor {b1,1}
+    const before = result.current.reckoning;
+    const opt = result.current.redirects.find((o) => o.label === 'Another round')!;
+    act(() => result.current.redirect(opt)); // moves vm seed only — current unchanged
+    expect(result.current.reckoning).toBe(before); // untouched (anchor/aligned/trust all kept)
+  });
+
+  it('a no-armed commit does NOT re-anchor (R8 guarantee)', async () => {
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.advance()); // current b1, trusted
+    const before = result.current.reckoning;
+    act(() => result.current.commit()); // nothing armed → current unchanged
+    expect(result.current.reckoning.anchor).toEqual(before.anchor);
+    expect(result.current.reckoning.positionTrusted).toBe(true);
+    expect(result.current.reckoning.alignedAtMs).toBe(before.alignedAtMs);
+  });
+
+  it('chained auto-fire (advance-opened): manual leg re-anchors, autofire leg stamps untrusted — single coherent reckoning, no double-count', async () => {
+    const { result } = renderHook(() => useConductorSession(args({ cal: secCal })));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.advance()); // current b1 (Intro), trusted
+    act(() => result.current.setAutoFire(true));
+    const chorus = result.current.targets.find((t) => t.kind === 'section' && t.barId === 'b5')!;
+    act(() => result.current.arm(chorus)); // fireAt next-bar = b2
+    expect(result.current.armed?.fireAt).toBe('b2');
+    act(() => result.current.advance()); // emit b2 = fireAt → chained commit jumps to b5
+    expect(result.current.armed).toBeNull(); // auto-fired
+    expect(result.current.current?.barId).toBe('b5'); // MACHINE-placed by the autofire commit
+    // The manual leg re-anchored onto b2; the autofire leg flipped ONLY positionTrusted.
+    expect(result.current.reckoning.positionTrusted).toBe(false);
+    expect(result.current.reckoning.anchor).toEqual({ barId: 'b2', pass: 1 }); // NOT b5
+    expect(result.current.reckoning.barsSinceAnchor).toBe(0); // no double-count
+  });
+
+  it('release-opened auto-fire stamps untrusted (the §5.5 #5 path)', async () => {
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.setAutoFire(true));
+    act(() => result.current.advance()); // current b1
+    act(() => result.current.arm(result.current.targets[0])); // fireAt = b2 (inside vamp body)
+    expect(result.current.armed?.fireAt).toBe('b2');
+    const hold = result.current.redirects.find((o) => o.label === 'Vamp (hold)')!;
+    act(() => result.current.redirect(hold));
+    act(() => result.current.advance()); // emit b2 = fireAt, but holding ⇒ gate refused
+    expect(result.current.armed).not.toBeNull();
+    const release = result.current.redirects.find((o) => o.label === 'Release vamp')!;
+    act(() => result.current.redirect(release)); // release OPENS the gate → fires THERE
+    expect(result.current.armed).toBeNull(); // auto-fired on the release
+    expect(result.current.reckoning.positionTrusted).toBe(false); // machine-placed
+  });
+
+  it('reckoning resets to the unconfirmed-start on disable', async () => {
+    const { result, rerender } = renderHook(
+      (p: Parameters<typeof useConductorSession>[0]) => useConductorSession(p),
+      { initialProps: args() },
+    );
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.advance()); // trusted, anchor {b1,1}
+    expect(result.current.reckoning.positionTrusted).toBe(true);
+    rerender(args({ enabled: false }));
+    await act(async () => {}); // disabled branch defers its reset to a microtask
+    expect(result.current.reckoning.anchor).toBeNull();
+    expect(result.current.reckoning.positionTrusted).toBe(false);
+  });
+
+  it('reckoning resets to the unconfirmed-start on identity change (new sessionId)', async () => {
+    const { result, rerender } = renderHook(
+      (p: Parameters<typeof useConductorSession>[0]) => useConductorSession(p),
+      { initialProps: args() },
+    );
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => result.current.advance());
+    expect(result.current.reckoning.positionTrusted).toBe(true);
+    rerender(args({ sessionId: 'chart2::owner/show', songRef: 'chart2' }));
+    await waitFor(() => expect(result.current.current).toBeNull()); // fresh session
+    expect(result.current.reckoning.anchor).toBeNull();
+    expect(result.current.reckoning.positionTrusted).toBe(false);
+  });
 });

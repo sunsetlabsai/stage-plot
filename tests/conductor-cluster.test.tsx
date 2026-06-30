@@ -34,6 +34,7 @@ function props(over: Partial<ConductorClusterProps> = {}): ConductorClusterProps
     holding: false,
     canArmNextSection: false,
     onAdvance: vi.fn(),
+    onAlign: vi.fn(),
     onArm: vi.fn(),
     onCommit: vi.fn(),
     onDisarm: vi.fn(),
@@ -78,6 +79,15 @@ describe('ConductorCluster', () => {
     expect(onAdvance).toHaveBeenCalledOnce();
     rerender(<ConductorCluster {...props({ onAdvance, canAdvance: false })} />);
     expect(screen.getByRole('button', { name: /Advance/ })).toBeDisabled();
+  });
+
+  it('fires onAlign for "On the 1", and disables it at song end (canAdvance=false)', () => {
+    const onAlign = vi.fn();
+    const { rerender } = render(<ConductorCluster {...props({ onAlign })} />);
+    fireEvent.click(screen.getByRole('button', { name: /On the 1/ }));
+    expect(onAlign).toHaveBeenCalledOnce();
+    rerender(<ConductorCluster {...props({ onAlign, canAdvance: false })} />);
+    expect(screen.getByRole('button', { name: /On the 1/ })).toBeDisabled();
   });
 
   it('disables "Arm change…" at song end (canArm=false)', () => {

@@ -11,6 +11,12 @@ import {
 } from './conductor-state';
 import { initSession, dispatch, shouldAutoFire, type ConductorSession } from './conductor-session';
 import {
+  initReckoning,
+  reckonAfter,
+  alignReckoning,
+  type ClockReckoning,
+} from './conductor-clock';
+import {
   armableTargets,
   availableRedirects,
   resolveArm,
@@ -52,11 +58,18 @@ export interface ConductorSurface {
   autoFireOn: boolean; // §3 opt-in toggle (default OFF = chunk-4 behaviour)
   setAutoFire: (on: boolean) => void;
   canArmNextSection: boolean; // §4 — a next-section boundary exists ahead of the cursor
+  // 5b chunk 1: the MD-LOCAL position-trust bookkeeping (parent §5.1b). Read-only here;
+  // chunk 3 (the confidence gate) is its first consumer. Never on the wire.
+  reckoning: ClockReckoning;
   advance: () => void;
   arm: (t: JumpTarget, exit?: ExitPolicy['kind'], fireAt?: 'next-bar' | 'next-section') => void;
   commit: () => void;
   disarm: () => void;
   redirect: (opt: RedirectOption) => void;
+  // 5b chunk 1: the align / true-up tap — "we are on this bar's downbeat, now." Seeds bar 1
+  // at the start (= first manual advance) or re-zeros the timing baseline mid-song off the
+  // wire (no dispatch / seq / broadcast).
+  align: () => void;
   outcome: ReduceOutcome['status'] | null;
 }
 
@@ -82,6 +95,12 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // hold→release→fire path; a non-firing redirect must preserve the latch).
   const [armedFireAtEligible, setArmedFireAtEligible] = useState(false);
 
+  // 5b chunk 1: the MD-LOCAL ClockReckoning (parent §5.1b). Re-initialized on identity
+  // change / disable in the SAME two places as armedFireAtEligible (same deferred discipline
+  // for the react-hooks/set-state-in-effect rule). reckonAfter (Invariant (P)) threads it
+  // through every dispatch seam; the align action re-zeros it. Never broadcast (§9).
+  const [reckoning, setReckoning] = useState<ClockReckoning>(() => initReckoning(Date.now()));
+
   // (Re)initialize the session on identity change. programHash is async, so init
   // happens in the resolve callback — naturally deferred (no sync setState-in-effect).
   // The disabled/teardown branch defers its reset to a microtask for the same lint
@@ -98,6 +117,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
         if (!cancelled) {
           setSession(null);
           setArmedFireAtEligible(false);
+          setReckoning(initReckoning(Date.now()));
         }
       });
       return () => {
@@ -110,6 +130,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       if (cancelled) return;
       setSession(initSession(sessionId, songRef, hash, compiled, Date.now()));
       setArmedFireAtEligible(false);
+      setReckoning(initReckoning(Date.now()));
     });
     return () => {
       cancelled = true;
@@ -120,9 +141,17 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // (`ignored`) surfaces honestly, and replace the session only when state advanced.
   const run = (payload: ConductorPayload) => {
     if (!session) return;
-    const res = dispatch(session, payload, Date.now());
+    const before = session;
+    const now = Date.now();
+    const res = dispatch(session, payload, now);
     setOutcome(res.outcome);
-    if (res.outcome === 'applied') setSession(res.session);
+    if (res.outcome === 'applied') {
+      setSession(res.session);
+      // Invariant (P): re-anchor IFF current moved. arm/disarm never move current → no-op;
+      // a Go-now commit that jumps re-anchors ('manual'); a no-armed/stale commit leaves
+      // current put → no re-anchor (the R8 guarantee, for free — §2.3).
+      setReckoning((r) => reckonAfter(r, before.state.current, res.session.state.current, 'manual', now));
+    }
   };
 
   // Commit the result of an action that may have satisfied the §3.5 gate, chaining a
@@ -144,15 +173,31 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   const applyWithAutoFire = (before: ConductorSession, res: ReturnType<typeof dispatch>) => {
     setOutcome(res.outcome);
     if (res.outcome !== 'applied') return;
+    // Invariant (P) threads a SINGLE composed reckoning so the chained auto-fire commit
+    // stacks atop the primary leg (one setReckoning, no read-after-set hazard — the same
+    // discipline the single setSession uses). The primary leg is 'manual' for BOTH callers:
+    // advance() IS a manual position gesture; redirect()'s leg never moves current (:223) so
+    // reckonAfter no-ops it ("a redirect does NOT re-anchor", for free — §2.3).
+    const now = Date.now();
     const opened = !shouldAutoFire(before) && shouldAutoFire(res.session);
     if (autoFireOn && armedFireAtEligible && opened) {
       const afterFire = dispatch(res.session, { kind: 'commit' }, Date.now());
       setOutcome(afterFire.outcome); // surface the COMMIT result, not the stale prior one
-      setSession(afterFire.outcome === 'applied' ? afterFire.session : res.session);
+      const fired = afterFire.outcome === 'applied';
+      setSession(fired ? afterFire.session : res.session);
+      setReckoning((r) => {
+        const manual = reckonAfter(r, before.state.current, res.session.state.current, 'manual', now);
+        // The chained commit is MACHINE-placed → 'autofire' stamp: flips positionTrusted=false
+        // ONLY, leaving the trust + motion axes at the manual arrival's values (no double-count).
+        return fired
+          ? reckonAfter(manual, res.session.state.current, afterFire.session.state.current, 'autofire', now)
+          : manual;
+      });
       setArmedFireAtEligible(false); // fired (or attempted) → drop the bit
       return;
     }
     setSession(res.session);
+    setReckoning((r) => reckonAfter(r, before.state.current, res.session.state.current, 'manual', now));
   };
 
   const targets = useMemo<JumpTarget[]>(
@@ -187,6 +232,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     autoFireOn,
     setAutoFire: setAutoFireOn,
     canArmNextSection,
+    reckoning,
     // §3 — auto-fire is evaluated SYNCHRONOUSLY inside the advance action (NEVER a
     // deferred effect — the chunk-4 page-turn-parity lesson, D5). When the toggle is off
     // (or the gate unmet) this collapses to the verbatim chunk-4 advance.
@@ -239,6 +285,19 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     redirect: (opt) => {
       if (!session) return;
       applyWithAutoFire(session, dispatch(session, { kind: 'redirect', directive: opt.directive }, Date.now()));
+    },
+    // §3 — the align / true-up tap. Two mechanics by state, both ending in a full manual
+    // re-anchor: at the song head (current === null) it SEEDS bar 1 by dispatching the first
+    // manual advance (the only way to place current on the shipped wire — reckonAfter('manual')
+    // re-anchors onto bar 1); mid-song (current !== null) it re-zeros the timing baseline ONTO
+    // the existing current with NO dispatch / seq / broadcast — purely MD-local (parent §5.1b/§9).
+    align: () => {
+      if (!session) return;
+      if (session.state.current === null) {
+        applyWithAutoFire(session, dispatch(session, { kind: 'advance' }, Date.now()));
+        return;
+      }
+      setReckoning((r) => alignReckoning(r, session.state.current!, Date.now()));
     },
     outcome,
   };
