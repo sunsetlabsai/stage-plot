@@ -170,27 +170,11 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     if (nextStalled !== prev.stalled) setStalled(nextStalled);
   };
 
-  // §4 — a stated-tempo change (and the first null→known transition) re-baselines the MOTION
-  // axis THROUGH driverRef (Codex R2 HIGH): a bare setReckoning would leave the authoritative
-  // driver on the stale baseline, so the next tick (reads driverRef, never React state) would
-  // reckon owed off the OLD baseline with the new bpm — the jump/stall bug. The write is
-  // deferred to a microtask, NOT done during render (react-hooks/refs + impure-Date.now are
-  // banned there) and NOT a synchronous set-state-in-effect (also banned) — the SAME discipline
-  // the reset effect below uses. The microtask lands before the next setInterval macrotask, so
-  // no tick observes the stale baseline. A `cancelled` guard drops a superseded change.
-  useEffect(() => {
-    if (bpm == null) return;
-    let cancelled = false;
-    void Promise.resolve().then(() => {
-      if (cancelled) return;
-      const next = rebaselineMotion(driverRef.current.reckoning, bpm, Date.now());
-      driverRef.current = { ...driverRef.current, reckoning: next };
-      setReckoning(next);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [bpm]);
+  // §4 tempo establish/reconcile lives INSIDE driveClockTick (Codex R5 HIGH 2), NOT a passive
+  // [bpm] effect: a microtask scheduled from a passive effect can lose to an ALREADY-DUE timer,
+  // so the tick would read the new cfgRef bpm against the OLD motion baseline (a false jump /
+  // stall). The tick is the one place synchronized with the baseline — so it reconciles there,
+  // atomically, before computing owed. See driveClockTick below.
 
   // (Re)initialize the session on identity change. programHash is async, so init
   // happens in the resolve callback — naturally deferred (no sync setState-in-effect).
@@ -199,6 +183,15 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // a stale async if cal/identity changed under it.
   useEffect(() => {
     let cancelled = false;
+    // SYNCHRONOUSLY inert the still-mounted interval the instant identity changes (Codex R5
+    // HIGH 1). The driver effect is keyed only on [enabled, clockOn], so when sessionId /
+    // songRef / cal change while clockOn stays true, the OLD interval keeps ticking against
+    // the OLD driverRef.session until the async programHash resolves — long enough to advance
+    // or stall the previous chart under the next chart's render. Nulling the session here (the
+    // one mutation a render-phase-adjacent effect may do to the ref, since the tick's
+    // `if (!s || ...) return` guard catches it) closes that window; the post-resolve reseed
+    // re-populates it, and the fresh session's `current === null` guard covers the interim.
+    driverRef.current = { ...driverRef.current, session: null };
     // Identity changed — drop any prior arm-eligibility bit alongside the session
     // reset. Deferred (not synchronous-in-effect) for the same lint rule the
     // setSession resets below follow. (Harmless even if it lagged: shouldAutoFire
@@ -330,12 +323,28 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // never fast-forward off a possibly-stale tempo. Song end / not-seeded / no-bpm / stalled
   // all idle the loop. NO auto-fire chain (clock arrivals defer in chunk 2, §5).
   const driveClockTick = () => {
-    const { session: s, reckoning: r, stalled: st } = driverRef.current;
+    let { reckoning: r } = driverRef.current;
+    const { session: s, stalled: st } = driverRef.current;
     const { bpm: b, barBeats: bb } = cfgRef.current;
     if (b == null || st) return; // manual rung (clockOn already gates the effect)
     if (!s || s.state.current === null) return; // not seeded — wait for the MD's "On the 1"
     if (s.state.vm.done) return; // belt-and-suspenders: never dispatch a no-op advance at song end
     const now = Date.now();
+    // §4 tempo reconcile, IN-TICK (Codex R5 HIGH 2): atomically aligned with the motion baseline
+    // the very same line reads. The motion baseline (motionBaselineAtMs / barsAtMotionBaseline) is
+    // already correctly set by the seed via align / advance — only baselineTempoBpm is null at
+    // first. So FIRST establishment merely RECORDS the tempo (does NOT re-zero, does NOT consume a
+    // tick) and falls through to owed off the SAME r; a real CHANGE re-zeros the motion axis to now
+    // (owed becomes 0) and returns, so the new period starts clean with no stale-baseline jump.
+    if (r.baselineTempoBpm === null) {
+      r = { ...r, baselineTempoBpm: b };
+      driverRef.current = { session: s, reckoning: r, stalled: st };
+    } else if (b !== r.baselineTempoBpm) {
+      const based = rebaselineMotion(r, b, now);
+      driverRef.current = { session: s, reckoning: based, stalled: st };
+      setReckoning(based);
+      return;
+    }
     const owed = expectedClockBars(r, now, barMs(b, bb)) - r.barsSinceAnchor;
     if (owed <= 0) return; // not time for the next bar yet
     if (owed >= 2) {

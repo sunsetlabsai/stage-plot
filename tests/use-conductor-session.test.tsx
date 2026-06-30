@@ -565,22 +565,53 @@ describe('useConductorSession — static-BPM motion driver (5b chunk 2)', () => 
     expect(result.current.reckoning).toBe(before); // Invariant (P) no-op — current never moved
   });
 
-  it('a mid-clock tempo change re-baselines the MOTION axis through driverRef — no jump, no stall', async () => {
+  it('a mid-clock tempo change re-baselines the MOTION axis IN-TICK — no jump, no stall (Codex R5 HIGH 2)', async () => {
     const { result, clock, rerender } = await activateAt();
     act(() => result.current.align()); // b1, baseline T0
     act(() => result.current.setClockOn(true));
     clock.t = T0 + bm120;
-    act(() => vi.advanceTimersToNextTimer()); // → b2, barsSinceAnchor 1
-    // MD changes the song's stated tempo to 140 mid-clock. The [bpm] effect re-baselines
-    // THROUGH driverRef (deferred a microtask), so the next tick reckons owed off the NEW
-    // baseline. Flush that microtask before advancing the clock.
+    act(() => vi.advanceTimersToNextTimer()); // → b2, barsSinceAnchor 1 (establishes bpm 120)
+    // MD changes the song's stated tempo to 140 mid-clock. There is NO [bpm] passive effect any
+    // more (it could lose to an already-due tick); the reconcile happens INSIDE the tick, atomically
+    // aligned with the baseline it reads. So the FIRST tick after the change re-zeros the motion axis
+    // to NOW and consumes no bar; the NEXT tick (one 140-bpm bar later) advances cleanly.
     rerender(args({ bpm: 140 }));
-    await act(async () => {});
+    await act(async () => {}); // flush the cfgRef config-mirror effect so the tick reads bpm 140
     const bm140 = barMs(140, 4);
-    clock.t = T0 + bm120 + bm140 + 5; // exactly one 140-bpm bar since the change
+    clock.t = T0 + bm120 + 7; // a beat after the change — the reconcile tick re-zeros to here
     act(() => vi.advanceTimersToNextTimer());
-    expect(result.current.current?.barId).toBe('b3'); // advanced one bar — not jumped, not stalled
+    expect(result.current.current?.barId).toBe('b2'); // reconcile only — did NOT jump a bar
     expect(result.current.stalled).toBe(false);
+    clock.t = T0 + bm120 + 7 + bm140 + 5; // just past one 140-bpm bar (epsilon clears float floor)
+    act(() => vi.advanceTimersToNextTimer());
+    expect(result.current.current?.barId).toBe('b3'); // advanced one bar off the NEW tempo
+    expect(result.current.stalled).toBe(false);
+  });
+
+  it('an identity change while the clock runs inerts the stale interval — no ghost advance (Codex R5 HIGH 1)', async () => {
+    const { result, clock, rerender } = await activateAt({
+      cal: lin('a1', 'a2', 'a3'),
+      songRef: 'songA',
+      sessionId: 'songA::o/s',
+    });
+    act(() => result.current.align()); // a1
+    act(() => result.current.setClockOn(true));
+    clock.t = T0 + bm120;
+    act(() => vi.advanceTimersToNextTimer()); // clock → a2
+    expect(result.current.current?.barId).toBe('a2');
+    // Swap to a DIFFERENT chart while clockOn is still true. programHash is async, so the new
+    // session isn't seeded yet, but the OLD interval is still keyed [enabled, clockOn] and mounted.
+    // The reset effect nulls driverRef.session SYNCHRONOUSLY, so this stale tick is inert; without
+    // it the old session would be advanced/stalled under the next chart's render.
+    rerender(args({ cal: lin('z1', 'z2', 'z3'), songRef: 'songZ', sessionId: 'songZ::o/s', bpm: 120 }));
+    clock.t = T0 + 10 * bm120; // a long owed window — a live stale tick would stall/fast-forward
+    act(() => vi.advanceTimersToNextTimer()); // the stale interval fires once — must do nothing
+    expect(result.current.stalled).toBe(false); // no ghost stall leaked across the swap
+    // Once the new session resolves, the clock is reset OFF (per-session §12-Q4) and the cursor fresh.
+    await act(async () => {});
+    expect(result.current.active).toBe(true);
+    expect(result.current.clockOn).toBe(false);
+    expect(result.current.current).toBeNull();
   });
 
   it('the clock idles at song end — no churn, no stall (vm.done guard)', async () => {
