@@ -225,7 +225,7 @@ Gated commits, Codex per chunk. Sequenced so each layer is demonstrable.
 4. **Change-marker UI + gated commit (§3.5):** place/arm/telegraph on all charts; go-tap default, gated auto-fire.
 5. **Clock layer + audio-tempo listener (§5.1):** ladder + telemetry→MD→broadcast; confidence gating. Audio-tempo designed-in, on-after-validation.
 
-**Chunks 1–2 are now unblocked** (provenance §2.2.1, alignment §2.2.0, `barOffset` §2.3.1 all closed; Codex R3 = GO). Remaining open items gate later chunks only: §8.2-1 (listener/clock) before chunk 5; §8.2-2 (failover/discovery) before chunk 3's transport.
+**Chunks 1–2 are now unblocked** (provenance §2.2.1, alignment §2.2.0, `barOffset` §2.3.1 all closed; Codex R3 = GO). Listener/clock (§5.1) is **resolved** by the chunk-5b clock design (see §8.2 Status). The one remaining open item gates chunk 3's transport only: failover + session discovery — designed in `docs/design-conductor-3b-discovery-failover.md`.
 
 ---
 
