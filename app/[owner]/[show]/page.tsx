@@ -52,6 +52,7 @@ import {
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
 import ManageChartsModal from '@/components/ManageChartsModal';
+import TapTempo from '@/components/TapTempo';
 import { updateSetlistCharts } from '@/lib/chart-management';
 import {
   emptyCalibration,
@@ -3801,20 +3802,20 @@ function ShowSortableRow({
 // ADD SONG FROM LIBRARY (autocomplete + Create & Add)
 // ════════════════════════════════════════════════════════════════════════════
 
-function AddSongFromLibrary({
+export function AddSongFromLibrary({
   onAddSong,
   isOwner,
   ownerId,
   isEditor,
 }: {
-  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; charts?: Chart[] }) => void;
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; bpm?: number | null; charts?: Chart[] }) => void;
   isOwner: boolean;
   ownerId: string | null;
   isEditor?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [songs, setSongs] = useState<Array<{ id: string; title: string; key: string | null; lead: string; notes: string; charts?: Chart[] }>>([]);
+  const [songs, setSongs] = useState<Array<{ id: string; title: string; key: string | null; lead: string; notes: string; bpm: number | null; charts?: Chart[] }>>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
@@ -3859,13 +3860,16 @@ function AddSongFromLibrary({
     : songs;
   const exactMatch = songs.find((s) => s.title.toLowerCase() === trimmed.toLowerCase());
 
-  function handleSelect(song: { id: string; title: string; key: string | null; lead: string; notes: string; charts?: Chart[] }) {
+  function handleSelect(song: { id: string; title: string; key: string | null; lead: string; notes: string; bpm: number | null; charts?: Chart[] }) {
     onAddSong({
       songId: song.id,
       title: song.title,
       key: song.key ?? undefined,
       lead: song.lead,
       notes: song.notes,
+      // Thread the library song's stated tempo so the new row shows it without a
+      // reload (Codex R1 MEDIUM) — without this the row lands BPM-less on `manual`.
+      bpm: song.bpm,
       charts: song.charts,
     });
     setQuery('');
@@ -3890,6 +3894,7 @@ function AddSongFromLibrary({
           key: newSong.key ?? undefined,
           lead: newSong.lead || '',
           notes: newSong.notes || '',
+          bpm: newSong.bpm ?? null,
         });
         setQuery('');
         setOpen(false);
@@ -3974,15 +3979,17 @@ function AddSongFromLibrary({
 // SORTABLE SETLIST TABLE (shared DnD logic for Config tab)
 // ════════════════════════════════════════════════════════════════════════════
 
-function SetupSetlistTable({
-  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, ownerId, isEditor, onManageCharts,
+export function SetupSetlistTable({
+  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, onBpmChange, isOwner, ownerId, isEditor, onManageCharts,
 }: {
   setlist: SetlistSong[];
   canResolveCharts: boolean;
   onReorder: (from: number, to: number) => void;
   onUpdate: (idx: number, field: string, value: string) => void;
   onDelete: (idx: number) => void;
-  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; charts?: Chart[] }) => void;
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; bpm?: number | null; charts?: Chart[] }) => void;
+  // BPM writes the CANONICAL song row (owner-only), not the per-show blob — see §3.
+  onBpmChange: (songId: string, bpm: number | null) => void;
   isOwner: boolean;
   ownerId: string | null;
   isEditor?: boolean;
@@ -4035,6 +4042,7 @@ function SetupSetlistTable({
                     onMoveUp={() => onReorder(idx, idx - 1)}
                     onMoveDown={() => onReorder(idx, idx + 1)}
                     isOwner={isOwner}
+                    onBpmChange={onBpmChange}
                     onManageCharts={onManageCharts}
                   />
                 ))}
@@ -4052,7 +4060,7 @@ const inputCls = 'w-full px-2 py-2.5 sm:py-1.5 text-sm border border-gray-300 ro
 const arrowBtn = 'px-1 py-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-20 disabled:cursor-not-allowed';
 
 function SetupSortableRow({
-  song, idx, total, canResolveCharts, onUpdate, onDelete, onMoveUp, onMoveDown, isOwner, onManageCharts,
+  song, idx, total, canResolveCharts, onUpdate, onDelete, onMoveUp, onMoveDown, isOwner, onBpmChange, onManageCharts,
 }: {
   song: SetlistSong;
   idx: number;
@@ -4063,6 +4071,7 @@ function SetupSortableRow({
   onMoveUp: () => void;
   onMoveDown: () => void;
   isOwner: boolean;
+  onBpmChange: (songId: string, bpm: number | null) => void;
   onManageCharts?: (songTitle: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: song.id! });
@@ -4070,8 +4079,13 @@ function SetupSortableRow({
 
   const hasSongCharts = (song.charts?.length ?? 0) > 0;
   const hasSongDupes = song.charts?.some((c) => (c.dupeCount ?? 0) > 1) ?? false;
+  // BPM is a song-level (canonical) write — owner-only, and only for library-linked
+  // rows (a songId is the write target). Inline/legacy rows have no canonical row,
+  // so they get no control and stay on the `manual` rung (§3, resolved Q3).
+  const showBpm = isOwner && !!song.songId;
 
   return (
+    <>
     <tr ref={setNodeRef} style={style} className="border-b border-gray-100">
       <td className="px-1 py-1 cursor-grab" {...attributes} {...listeners}>
         <span className="text-gray-300 text-sm select-none">&#x2630;</span>
@@ -4122,6 +4136,19 @@ function SetupSortableRow({
         <button className="px-2 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors" onClick={() => onDelete(idx)}>X</button>
       </td>
     </tr>
+    {showBpm && (
+      <tr style={style} className="border-b border-gray-100">
+        <td></td>
+        <td colSpan={8} className="px-2 pb-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <TapTempo bpm={song.bpm ?? null} onChange={(bpm) => onBpmChange(song.songId!, bpm)} />
+            {/* The write is genuinely global (canonical song row) — say so (Q2). */}
+            <span className="text-xs text-gray-400">sets this song&rsquo;s tempo everywhere</span>
+          </div>
+        </td>
+      </tr>
+    )}
+    </>
   );
 }
 
@@ -5704,6 +5731,7 @@ function ConfigTab({
                   key: song.key,
                   lead: song.lead || '',
                   notes: song.notes,
+                  bpm: song.bpm ?? null,
                   charts: song.charts,
                 }],
               }));
@@ -5714,6 +5742,22 @@ function ConfigTab({
               if (newCharts.length > 0) {
                 downloadAllCharts(newCharts, null, () => {}).catch(() => {});
               }
+            }}
+            onBpmChange={async (songId, bpm) => {
+              // BPM is song-level: write the CANONICAL song row (owner-scoped PUT),
+              // then patch local state so Perform reads the new tempo without a reload.
+              const res = await fetch('/api/songs/update', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: songId, bpm }),
+              });
+              if (!res.ok) return; // keep the prior tempo on failure — no silent divergence
+              // Patch by songId, NOT a row index (Codex R2) — a concurrent reorder/delete
+              // during the async PUT must not patch the wrong visible row.
+              updateConfig((p) => ({
+                ...p,
+                setlist: p.setlist.map((s) => (s.songId === songId ? { ...s, bpm } : s)),
+              }));
             }}
             isEditor={isEditor}
             onManageCharts={(songTitle) => setManageChartsSong(songTitle)}
