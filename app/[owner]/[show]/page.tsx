@@ -563,6 +563,38 @@ export default function Page() {
     setConfig((prev) => ensureStageSlotIds(fn(prev)).config);
   }, []);
 
+  // Canonical-BPM writer (lib/bpm-writer): optimistic patch, per-song serialized
+  // PUTs (server receives writes in order), revert-to-confirmed on failure. Lives
+  // HERE — not in ConfigTab, which remounts on every tab switch (Codex R2 HIGH-2) —
+  // so ONE writer's in-flight chain + confirmed map span the whole show session.
+  // Built lazily inside the handler (react-hooks/refs: no ref access in render);
+  // reads the live setlist via bpmConfigRef so the confirmed seed is never stale.
+  const bpmConfigRef = useRef(config);
+  useEffect(() => { bpmConfigRef.current = config; }, [config]);
+  const bpmWriterRef = useRef<BpmWriter | null>(null);
+  const handleBpmChange = useCallback((songId: string, bpm: number | null) => {
+    if (bpmWriterRef.current == null) {
+      bpmWriterRef.current = createBpmWriter({
+        put: async (id, value) => {
+          const res = await fetch('/api/songs/update', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, bpm: value }),
+          });
+          return res.ok;
+        },
+        getCurrent: (id) =>
+          bpmConfigRef.current.setlist.find((s) => s.songId === id)?.bpm ?? null,
+        patch: (id, value) =>
+          updateConfig((p) => ({
+            ...p,
+            setlist: p.setlist.map((s) => (s.songId === id ? { ...s, bpm: value } : s)),
+          })),
+      });
+    }
+    void bpmWriterRef.current(songId, bpm);
+  }, [updateConfig]);
+
   const [publishSlug] = useState(slug);
   const [publishing] = useState(false);
   const [publishError] = useState('');
@@ -737,7 +769,7 @@ export default function Page() {
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
       {tab === 'config' && (
-        <ConfigTab config={config} updateConfig={updateConfig} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
+        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
       )}
       {tab === 'ai' && (
         <div className="p-4 md:p-8">
@@ -5101,6 +5133,7 @@ const btnRemove = 'px-2 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-re
 function ConfigTab({
   config,
   updateConfig,
+  onBpmChange,
   googleToken,
   googleError,
   onDisconnectGoogle,
@@ -5111,6 +5144,8 @@ function ConfigTab({
 }: {
   config: AppConfig;
   updateConfig: (fn: (prev: AppConfig) => AppConfig) => void;
+  // Session-lifetime canonical-BPM writer, owned by Page (survives tab remounts).
+  onBpmChange: (songId: string, bpm: number | null) => void;
   googleToken: GoogleToken | null;
   googleError?: string;
   onDisconnectGoogle: () => void;
@@ -5136,37 +5171,6 @@ function ConfigTab({
 
   // Version guard: prevents out-of-order batch responses from overwriting newer data
   const resolveVersionRef = useRef(0);
-
-  // Canonical-BPM writer (lib/bpm-writer): optimistic patch, latest-request-wins
-  // per song, revert-to-confirmed on failure. Reads live setlist via configRef so
-  // the confirmed seed never comes from a stale render closure. Built lazily inside
-  // the event handler (react-hooks/refs: no ref access during render).
-  const configRef = useRef(config);
-  useEffect(() => { configRef.current = config; }, [config]);
-  const bpmWriterRef = useRef<BpmWriter | null>(null);
-  const handleBpmChange = useCallback((songId: string, bpm: number | null) => {
-    if (bpmWriterRef.current == null) {
-      bpmWriterRef.current = createBpmWriter({
-        put: async (id, value, signal) => {
-          const res = await fetch('/api/songs/update', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, bpm: value }),
-            signal,
-          });
-          return res.ok;
-        },
-        getCurrent: (id) =>
-          configRef.current.setlist.find((s) => s.songId === id)?.bpm ?? null,
-        patch: (id, value) =>
-          updateConfig((p) => ({
-            ...p,
-            setlist: p.setlist.map((s) => (s.songId === id ? { ...s, bpm: value } : s)),
-          })),
-      });
-    }
-    void bpmWriterRef.current(songId, bpm);
-  }, [updateConfig]);
 
   const resolveCharts = useCallback(async () => {
     if (!googleToken || !config.chartsRootFolderId || config.setlist.length === 0) return;
@@ -5775,7 +5779,7 @@ function ConfigTab({
                 downloadAllCharts(newCharts, null, () => {}).catch(() => {});
               }
             }}
-            onBpmChange={handleBpmChange}
+            onBpmChange={onBpmChange}
             isEditor={isEditor}
             onManageCharts={(songTitle) => setManageChartsSong(songTitle)}
           />
