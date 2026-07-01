@@ -6,7 +6,9 @@ blob). Codex R2 folded (1 HIGH + 2 MED): session identity is now the FULL reduce
 triple `SessionKey = {sessionId, songRef, programHash}` end to end — the R1 fold had
 quietly re-weakened it to `sessionId` alone on the snapshot path; also `activeSession` is
 explicitly nullable, and song-change epoch semantics pinned (baton epoch inherited,
-per-session seq restarts at 0). Awaiting Codex R3. Resolves the epic's last open item
+per-session seq restarts at 0). **Codex R3 = GO** (one non-blocking note folded: live-writer
+snapshot requests off the active key get `snapshot-none` immediately, never forwarded —
+§5, tested in chunks 1/3). Resolves the epic's last open item
 (`docs/design-conductor-authority.md:214` — §8.2-2 *"Failover + session discovery on a
 backhaul-less relay: the `claim` protocol details (how a new MD is discovered + accepted
 post-MD-death), room discovery (QR to relay / mDNS / room code)"*). On GO this flips
@@ -228,7 +230,10 @@ banner (chart sync is at-home provisioning, §1); never a blank or wrong chart.
 
 - **D6. Forward-to-MD, with the claim-time snapshot as a stale-marked cache (CHOSEN).**
   A follower whose reducer returns `needsSnapshot` sends `snapshot-request {session:
-  SessionKey}`. The relay forwards it to the writer; the MD's client replies
+  SessionKey}`. **The relay forwards it to the writer ONLY if the request's key fully
+  equals `activeSession`** — otherwise it answers `snapshot-none` immediately, without
+  bothering the writer (Codex R3 note: the requester is on a dead session; the `session`
+  frame, not a snapshot, is what moves it). On a match, the MD's client replies
   `snapshot {state}` (its authoritative `ConductorState` — already fully serializable,
   fixed ground); the relay routes it back. The relay also keeps the **last uploaded
   snapshot, tagged with its full `SessionKey`** (claim-time upload; dropped on `session`
@@ -354,8 +359,9 @@ Gated commits, Codex per chunk; each demonstrable.
    writer enforcement, lease, `{room, roomCode, epoch}` journal, nullable active-session
    blob, **full-`SessionKey`-tagged** snapshot cache, forward paths. Tests: integration over
    real sockets (loopback), the §7 matrix again end-to-end — including reboot-readmit (same
-   code, epoch monotonic, activeSession null) and stale-cache mismatch on each key field
-   individually → `snapshot-none`.
+   code, epoch monotonic, activeSession null), stale-cache mismatch on each key field
+   individually → `snapshot-none`, and **live-writer request off the active key →
+   `snapshot-none` immediately, writer never receives `snapshot-needed`** (Codex R3 note).
 4. **Client binding**: `use-conductor-session` grows the fan-out seam (dispatch → also emit
    `msg` + announce `session` on start/switch — including on recompile/recalibration, since
    a new `programHash` IS a switch, §4.4), the mirror path (incoming `msg` → reduce →
