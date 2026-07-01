@@ -145,7 +145,11 @@ covers create/override.
   added library song shows its tempo without reload (§3 Add-time BPM threading).
 
 **Status:** §1 + §2 (A+B presentational) are **GO** from Codex R1. §3 (C, BPM-in-show) is GO once the
-above three Codex R1 findings are folded — which they now are.
+above three Codex R1 findings are folded — which they now are. **Codex R2 = GO, no blocking findings.**
+
+- **Codex R2 note (non-blocking, chunk 2):** when patching local `SetlistSong.bpm` after the PUT
+  resolves, guard the patch by **`songId`, not a naked row index** — a row reorder/delete during the
+  async request must not patch the wrong visible row. Update by matching `row.songId === songId`.
 
 ## Build chunks (after Codex R2 GO)
 1. **A+B presentational** (toggle readouts + shadow hint) — copy-only, ConductorCluster, +tests for
@@ -153,7 +157,8 @@ above three Codex R1 findings are folded — which they now are.
 2. **C BPM-in-show** —
    - `SetupSetlistTable` row: `TapTempo` shown **only** when `isOwner && row.songId` (Codex R1 HIGH-1);
      `onBpmChange(idx, songId, bpm)` → `PUT /api/songs/update { id: songId, bpm }` (Codex R1 HIGH-2) →
-     patch local `SetlistSong.bpm`; global-write hint adjacent (Q2).
+     patch local `SetlistSong.bpm` **guarded by `songId`, not index** (Codex R2) — global-write hint
+     adjacent (Q2).
    - `AddSongFromLibrary.handleSelect` + `onAddSong` row builder: thread `bpm` through (Codex R1 MEDIUM).
    - No schema change, no new endpoint, no auth change.
 
