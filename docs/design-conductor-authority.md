@@ -210,8 +210,10 @@ Closed by v2: v1's §8.1 (continuation — §3.4), §8.2 (resync pass-state — 
 **Resolved by chunk-5b clock design (`docs/design-conductor-chunk5b-clock.md`, Codex R9 GO):**
 1. **Listener placement + clock latency (§5.1) [gated chunk 5] — RESOLVED.** (Q1) Ship MD-mic as v1, seam stays placement-agnostic, dedicated node UAT-deferred. (Q2) Relay latency is invisible at bar granularity (≤2.5%/bar at 50ms); reckon from receipt + carry freshness, never subtract a foreign monotonic clock. (Q3) Degrade ladder live→coasting→static-bpm→manual; motion on all non-manual rungs, only auto-*fire* gated; floor is 5a. Clock owns speed, MD owns place; provenance/counters ride the actual `current`-write (Invariant (P)). See chunk-5b §0–§8.
 
-**Still open (gate later chunks only — not architecture, not chunks 1–2):**
-1. **Failover + session discovery on a backhaul-less relay (§4/§5) [gates chunk 3 transport]:** the `claim` protocol details (how a new MD is discovered + accepted post-MD-death), room discovery (QR to relay / mDNS / room code).
+**Resolved by 3b transport design (`docs/design-conductor-3b-discovery-failover.md`, Codex R3 GO):**
+2. **Failover + session discovery on a backhaul-less relay (§4/§5) [gated chunk 3 transport] — RESOLVED.** Secure context on a dead network = pre-provisioned valid cert + band-AP local DNS (`wss://relay.showrunr.ai`); discovery = QR + rotating room code; dumb relay = star + baton arbiter (journaled `{room, roomCode, epoch}`, lease-based orphan detection, zombie demote via `not-writer`, any-device claim behind confirm); session identity = the full reducer-scope `SessionKey {sessionId, songRef, programHash}` across discovery + snapshot recovery (forward-to-MD, stale-marked claim-time cache). Every failure row degrades to self-drive. See 3b doc §1–§7.
+
+**§8.2 has no open items.** Chunk 3b transport is design-unblocked (build gated on explicit GO).
 
 ---
 
@@ -225,7 +227,7 @@ Gated commits, Codex per chunk. Sequenced so each layer is demonstrable.
 4. **Change-marker UI + gated commit (§3.5):** place/arm/telegraph on all charts; go-tap default, gated auto-fire.
 5. **Clock layer + audio-tempo listener (§5.1):** ladder + telemetry→MD→broadcast; confidence gating. Audio-tempo designed-in, on-after-validation.
 
-**Chunks 1–2 are now unblocked** (provenance §2.2.1, alignment §2.2.0, `barOffset` §2.3.1 all closed; Codex R3 = GO). Remaining open items gate later chunks only: §8.2-1 (listener/clock) before chunk 5; §8.2-2 (failover/discovery) before chunk 3's transport.
+**Chunks 1–2 are now unblocked** (provenance §2.2.1, alignment §2.2.0, `barOffset` §2.3.1 all closed; Codex R3 = GO). Listener/clock (§5.1) is **resolved** by the chunk-5b clock design (see §8.2 Status). The one remaining open item gates chunk 3's transport only: failover + session discovery — designed in `docs/design-conductor-3b-discovery-failover.md`.
 
 ---
 
