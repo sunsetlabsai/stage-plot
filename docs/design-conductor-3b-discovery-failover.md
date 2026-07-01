@@ -1,6 +1,8 @@
 # Conductor Authority — 3b transport: discovery + claim/failover (§8.2-2 resolution)
 
-**Status:** v1 — DESIGN-ONLY, pre-Codex. Resolves the epic's last open item
+**Status:** v2 — DESIGN-ONLY. Codex R1 folded (3 HIGH + 2 MED — all facets of ONE systemic
+gap: session identity was missing from the control plane; fixed with the writer-announced
+`session` blob, §2/§4.4/§6). Awaiting Codex R2. Resolves the epic's last open item
 (`docs/design-conductor-authority.md:214` — §8.2-2 *"Failover + session discovery on a
 backhaul-less relay: the `claim` protocol details (how a new MD is discovered + accepted
 post-MD-death), room discovery (QR to relay / mDNS / room code)"*). On GO this flips
@@ -67,10 +69,13 @@ mDNS resolution is unreliable anyway — rejected, see D2). The workable answers
   with the relay's LAN IP. At the venue: the PWA (already installed + SW-cached from its real
   origin) opens `wss://relay.showrunr.ai:8787` — valid cert, secure context, no warnings, no
   backhaul needed. This is the established local-HTTPS pattern (Plex et al.).
-- **(b) Plain-http relay-served page (DEGRADE, kept).** The relay also serves a minimal
-  join page over `http://<LAN-IP>` for a device that never pre-installed the PWA. No SW, no
-  offline — but a guest sub can still follow along. Explicitly a degrade, never the design
-  center.
+- **(b) Plain-http relay-served STATUS page (DEGRADE, honestly rescoped — Codex R1 MED-2).**
+  The relay can serve a tiny self-contained page over `http://<LAN-IP>` for a device that
+  never pre-installed the PWA. On a backhaul-less network that device has NO app shell and
+  NO chart assets, so "follow along" on the chart would be a lie — the degrade is a
+  **text-only position view** (song / section / bar / conductor banner) bundled INTO the
+  relay binary, fed by the same frames. Optional, last build chunk, cut-eligible. The
+  design center remains: members install + sync at home.
 - **(c) Self-signed cert — REJECTED** (per-device trust warnings, iOS actively hostile).
 - **(d) WebRTC data channels — REJECTED for v1** (signaling needs a working channel first —
   chicken-and-egg on a dead network; and it buys nothing over a working `wss://` star).
@@ -101,8 +106,14 @@ provides — and on a few things the band prepares.
   to app releases.
 - **Room = one show** (grain: `show-slug`). One relay, one room live at a time in practice,
   but rooms are cheap and keyed — two bands sharing a rehearsal space don't collide. Within
-  a room, per-song sessions are already self-scoped by the envelope (`sessionId`/`songRef`,
-  fixed ground) — the relay does not track songs.
+  a room, per-song sessions are self-scoped by the envelope (`sessionId`/`songRef`, fixed
+  ground). The relay never *interprets* songs — but it holds ONE opaque **active-session
+  blob** per room (`{sessionId, songRef, programHash}`, announced by the writer via the
+  `session` frame, §4.4/§6, stored + rebroadcast verbatim). Discovery and snapshot recovery
+  are *session*-scoped, so the room-grained control plane must be able to say **which**
+  session is live (Codex R1 HIGH-1) — without it a late joiner cannot know what
+  `sessionId` to request, which chart to open, or whether a cached snapshot is even for
+  the current song.
 - **Writer = a connection, not a credential.** The relay records which *connection* holds
   the baton (epoch N). Only that connection's `msg` frames fan out; anyone else's are
   rejected with `not-writer`. This is the "forgery rejected by the relay" line the reducer
@@ -117,7 +128,10 @@ provides — and on a few things the band prepares.
   plus the 4-char code in large type. Scanning opens the (cached) PWA straight into the join
   flow; a member who can't scan types the code into the app's Join screen (the app tries the
   well-known relay name). The relay admits a `hello` only with the current room code —
-  that's the bouncer, not cryptography.
+  that's the bouncer, not cryptography. **`joined` returns the room's `activeSession`**
+  (§6), so a late joiner's app can open the right chart and request the right snapshot
+  without hunting — the join token itself stays session-free (sessions churn per song;
+  the QR must not).
 - **D2. mDNS — REJECTED.** Unreliable in iOS browsers, adds zero over a pinned DNS name on
   our own AP (§1a already gives us a stable name), and can't carry the room code.
 - **D3. Room codes rotate per show** (generated at room-create, shown beside the QR). Stale
@@ -126,7 +140,8 @@ provides — and on a few things the band prepares.
 ## 4. The claim protocol (baton lifecycle)
 
 The relay is the single arbiter (epic §5: "first claim at epoch N+1 wins"). The state it
-keeps per room is tiny: `{ epoch, writerConn | null, roomCode, snapshotCache }`.
+keeps per room is tiny: `{ epoch, writerConn | null, roomCode, activeSession,
+snapshotCache: { sessionId, state } | null }`.
 
 ### 4.1 Normal claim (session start, or deliberate handoff)
 1. Device sends `claim-request`.
@@ -136,12 +151,19 @@ keeps per room is tiny: `{ epoch, writerConn | null, roomCode, snapshotCache }`.
    process; requests serialize — no tie to break).
 3. **The new MD mints the new generation out of band** (fixed ground): a new pure helper
    `acceptBaton(session, grantedEpoch, now)` in `conductor-session.ts` — epoch := granted,
-   seq := 0, its OWN authoritative vm/current/clock, armed := null. It uploads this state
-   as `snapshot {state}` to the relay (cache, §D6) and broadcasts a `claim` message.
+   seq := 0, its OWN authoritative vm/current/clock, armed := null. It (re-)announces
+   `session {sessionId, songRef, programHash}` (idempotent mid-song — same sessionId),
+   uploads this state as `snapshot {state}` to the relay (cache, §D6), and broadcasts a
+   `claim` message.
 4. Followers reduce the `claim`: higher epoch → `needsSnapshot` (shipped path,
    `conductor-state.ts:189-191`) → they pull → they mirror the new generation. A follower
    that missed the claim entirely hits the future-epoch door on the next delta
-   (`:197-199`) — same recovery, by construction.
+   (`:197-199`) — same recovery, by construction. **Scope caveat (Codex R1 MED-1):** the
+   reducer's scope gate runs BEFORE claim handling (`conductor-state.ts:176-184`) — a
+   `claim` from a *different* session is IGNORED, not rebased. So claims converge only
+   *within* a session; a follower on the wrong/old session gets moved by the `session`
+   frame (§4.4), never by a claim. The client binding (build chunk 4) gates the claim UI
+   and snapshot adoption on matching `activeSession` metadata.
 5. A **deliberate handoff** ("you conduct the next set") is the same flow with the old MD
    releasing first (`release-baton`), so the grant needs no orphan wait.
 
@@ -169,16 +191,35 @@ keeps per room is tiny: `{ epoch, writerConn | null, roomCode, snapshotCache }`.
   You'll conduct everyone's charts") prevents pocket-claims; the claim is also loudly
   attributed in every follower's banner ("Rachel is conducting").
 
+### 4.4 Song change (session switch — the flow v1 forgot to write down)
+
+Advancing to the next song mints a new per-song session (chunk 4's sessionId grain).
+The MD announces `session {sessionId, songRef, programHash}`; the relay **replaces** the
+room's active-session blob, **drops the previous session's snapshot cache**, and broadcasts
+the frame. Followers switch charts locally, then pull the new session's snapshot. Ordering
+is safe by construction: the writer sends `session` before any `msg` for it on ONE ordered
+socket, and the relay fans out per-connection FIFO — and even a follower that reduces a
+new-session `msg` before switching just *ignores* it at the scope gate (fixed ground),
+then recovers via the post-switch snapshot pull. **Chart-not-synced honesty (own-sweep
+finding):** if `activeSession.songRef` isn't in the joiner's local chart store, perfect
+session metadata still can't render a chart — show an honest "chart not on this device"
+banner (chart sync is at-home provisioning, §1); never a blank or wrong chart.
+
 ## 5. Snapshot service (the one recovery door, served)
 
 - **D6. Forward-to-MD, with the claim-time snapshot as a stale-marked cache (CHOSEN).**
   A follower whose reducer returns `needsSnapshot` sends `snapshot-request {sessionId}`.
   The relay forwards it to the writer; the MD's client replies `snapshot {state}` (its
   authoritative `ConductorState` — already fully serializable, fixed ground); the relay
-  routes it back. The relay also keeps the **last uploaded claim-time snapshot** and serves
-  it flagged `stale: true` **only** when there is no live writer (join-during-orphan:
-  better an honest stale mirror + self-drive than nothing). A `snapshot-request` pending
-  when the writer orphans is answered the same way (stale cache) — a request never hangs.
+  routes it back. The relay also keeps the **last uploaded snapshot, tagged with its
+  `sessionId`** (claim-time upload; dropped on `session` change, §4.4) and serves it flagged
+  `stale: true` **only** when there is no live writer AND the request's `sessionId` matches
+  the tag (Codex R1 HIGH-2 — an untagged room-wide cache could hand a joiner the *previous
+  song's* state; "opaque payload" never meant "unidentified payload"). No match →
+  `snapshot-none`; the requester self-drives. A `snapshot-request` pending when the writer
+  orphans is answered the same way — matching stale cache or `snapshot-none`; a request
+  never hangs. Belt and suspenders: the client ALSO verifies `state.sessionId` against its
+  request before adopting any snapshot, so a buggy relay can't cross-feed sessions.
   - Why not relay-side reduction to keep a live snapshot? The relay would need the compiled
     program (`programHash` coupling) and every reducer version — the dumb-relay property
     (§2) is worth more than saving the MD ~N replies. Band-sized N (≤ ~10) makes the
@@ -193,29 +234,40 @@ Client↔relay frames (JSON over one `wss://` socket). The `msg` frame body is t
 
 ```
 → hello            { room, code, deviceLabel }            // join; bounced on bad code
-← joined           { epoch, writer: boolean, hasWriter }  // you're in; current authority facts
+← joined           { epoch, writer: boolean, hasWriter,   // you're in; authority facts +
+                     activeSession }                      //  which session is live (HIGH-1)
+→ session          { sessionId, songRef, programHash }    // writer only; relay stores+broadcasts
+← session          { sessionId, songRef, programHash }    // song change: switch chart, pull snapshot
 → claim-request    {}
 ← claim-grant      { epoch }                              // you are the writer; mint via acceptBaton
 ← claim-denied     { epoch }                              // someone else holds/won it
 → release-baton    {}                                     // deliberate handoff
 → msg              { msg: ConductorMessage }              // writer only; fans out to the room
 ← msg              { msg: ConductorMessage }              // fan-out delivery
-← not-writer       { epoch }                              // your msg bounced; demote + snapshot
+← not-writer       { epoch, activeSession }               // your msg bounced; demote + resync
 → snapshot-request { sessionId }
 ← snapshot-needed  { sessionId, requestId }               // relay→writer: someone needs state
 → snapshot         { requestId?, state }                  // writer→relay (reply or claim-time upload)
-← snapshot         { state, stale: boolean }              // relay→requester
+← snapshot         { state, stale: boolean }              // relay→requester (session-checked, §5)
+← snapshot-none    { sessionId }                          // nothing valid for that session; self-drive
 → hb               {}                                     // writer lease heartbeat
 ← conductor-lost   {}                                     // baton orphaned; honesty UI
 ← claim            —                                      // (not a control frame: the claim
                                                           //  ConductorMessage rides `msg` as normal)
 ```
 
-Relay-enforced rules, complete: (1) `hello` requires the room code; (2) `msg` and
-`snapshot` accepted only from `writerConn`; (3) `claim-request` granted only on free/orphaned
-baton; (4) epoch is assigned by the relay, monotonic per room, **persisted across relay
-restarts** (a relay reboot must not reissue epoch N — journal `{room, epoch}` to disk).
-Only `msg` fans out; every other frame is point-to-point routing per the table above.
+The relay treats `activeSession` / the `session` frame body as an opaque blob it stores,
+compares by `sessionId` string equality, and rebroadcasts verbatim — dumbness preserved.
+
+Relay-enforced rules, complete: (1) `hello` requires the room code; (2) `msg`, `session`,
+and `snapshot` accepted only from `writerConn`; (3) `claim-request` granted only on
+free/orphaned baton; (4) the **room registry is journaled to disk as
+`{room, roomCode, epoch}`** — epoch is relay-assigned and monotonic per room (a reboot must
+not reissue epoch N), and the roomCode must survive the same reboot or the failure matrix's
+"same QR readmits" promise is false (Codex R1 HIGH-3: journaling epoch alone would bounce
+every rejoining `hello` at the code check). The snapshot cache is deliberately NOT
+journaled — ephemeral, honest-stale at best. Only `msg` and `session` fan out; every other
+frame is point-to-point routing per the table above.
 
 ## 7. Failure matrix (every row degrades to self-drive, never to wrong)
 
@@ -225,9 +277,11 @@ Only `msg` fans out; every other frame is point-to-point routing per the table a
 | Follower misses deltas (radio blip, no disconnect) | reducer seq-gap → `needsSnapshot` | snapshot pull; at most one wrong-position *display* interval bounded by pull RTT |
 | MD drops WS / device dies | relay lease (§4.2) | `conductor-lost` → all self-drive → manual re-claim, epoch+1 |
 | Zombie MD returns | relay `writerConn` check | `not-writer` → self-demote → follower |
-| Relay box dies | all sockets drop | whole room self-drives (Concept A floor); relay reboot restores room, epoch journal prevents reuse; everyone rejoins via the same QR |
+| Relay box dies | all sockets drop | whole room self-drives (Concept A floor); reboot restores the room registry from the `{room, roomCode, epoch}` journal → **same QR readmits**, epoch never reused; snapshot cache is lost (ephemeral) → rejoiners self-drive until the writer reconnects and re-announces |
 | Two simultaneous claims | relay serializes | one grant, one denial — no tie exists |
-| Join during orphan | `joined { hasWriter: false }` | stale-marked snapshot (D6) + self-drive + claim affordance |
+| Join during orphan | `joined { hasWriter: false }` | stale-marked snapshot iff its session tag matches the request (§5), else `snapshot-none` → self-drive + claim affordance |
+| MD advances songs; follower still on old chart | `session` broadcast (§4.4) | switch chart → pull new session's snapshot; pre-switch new-session deltas ignored at the scope gate, recovered by the pull |
+| Joiner lacks the active chart file | local chart-store check vs `activeSession.songRef` | honest "chart not on this device" banner — never a blank or wrong chart; sync is at-home provisioning (§1) |
 | Wrong-room / stale-code QR | code check at `hello` | bounced at the door; reducer scoping is the second wall |
 
 ## 8. Scope fence
@@ -260,28 +314,41 @@ Only `msg` fans out; every other frame is point-to-point routing per the table a
 
 Gated commits, Codex per chunk; each demonstrable.
 
-1. **Pure protocol lib** (`lib/relay-protocol.ts`): control-frame types + the client-side
-   connection state machine (joining → follower → writer → demoted; snapshot-pull loop as a
-   pure reducer over frames). Tests: every §7 row as a frame-sequence case; zombie-demote;
-   claim/deny; contiguity resume after pull.
+1. **Pure protocol lib** (`lib/relay-protocol.ts`): control-frame types (incl. `session` /
+   `activeSession` / `snapshot-none`) + the client-side connection state machine (joining →
+   follower → writer → demoted; session-switch + snapshot-pull loop as a pure reducer over
+   frames). Tests: every §7 row as a frame-sequence case; zombie-demote; claim/deny;
+   contiguity resume after pull; session-switch mid-mirror; snapshot with wrong
+   `state.sessionId` rejected client-side.
 2. **`acceptBaton`** (pure, `conductor-session.ts`): mint the new generation (epoch :=
    granted, seq 0, own vm/current/clock, armed null). Tests: follower on old epoch converges
-   via claim→needsSnapshot→snapshot; equal/lower claim ignored.
+   via claim→needsSnapshot→snapshot; equal/lower claim ignored; cross-session claim ignored
+   at the scope gate (converges via `session` frame instead — MED-1).
 3. **The relay service** (`relay/` — Node + `ws`, no app imports): room registry, code check,
-   writer enforcement, lease, epoch journal, forward paths. Tests: integration over real
-   sockets (loopback), the §7 matrix again end-to-end.
+   writer enforcement, lease, `{room, roomCode, epoch}` journal, active-session blob,
+   session-keyed snapshot cache, forward paths. Tests: integration over real sockets
+   (loopback), the §7 matrix again end-to-end — including reboot-readmit (same code, epoch
+   monotonic) and stale-cache session-tag mismatch → `snapshot-none`.
 4. **Client binding**: `use-conductor-session` grows the fan-out seam (dispatch → also emit
-   `msg`), the mirror path (incoming `msg` → reduce → needsSnapshot → pull), and the
-   claim/demote UX state. The 5b clock stays MD-local (its wire `clock` re-emit already
-   exists as a payload).
-5. **Join/QR + failover UI**: join screen, QR render, conductor-lost banner, "Take the
-   baton" confirm, "X is conducting" attribution.
+   `msg` + announce `session` on start/switch), the mirror path (incoming `msg` → reduce →
+   needsSnapshot → pull), the session-switch path (§4.4: `session` frame → chart switch →
+   pull), and the claim/demote UX state — claim UI + snapshot adoption gated on matching
+   `activeSession`. The 5b clock stays MD-local (its wire `clock` re-emit already exists
+   as a payload).
+5. **Join/QR + failover UI**: join screen (auto-open `activeSession`'s chart; "chart not on
+   this device" honesty), QR render, conductor-lost banner, "Take the baton" confirm,
+   "X is conducting" attribution.
 6. **Provisioning docs/tooling**: cert issue/renew script + the at-home checklist.
+7. *(Optional, cut-eligible)* **Relay-served text-only guest status page** (§1b as
+   rescoped) — song/section/bar + conductor banner, no chart render.
 
 ## 11. Test plan spine
 
 Pure-first (chunks 1–2 carry the bulk): frame-sequence tables driving the client state
-machine + reducer together — join/late-join, gap→pull→resume, claim happy-path, orphan
-re-claim, zombie demote, join-during-orphan stale snapshot, cross-room bounce. Relay
-integration (chunk 3) re-runs the same tables over real sockets. UI chunks assert the
-banner/affordance renders per connection state (jsdom, existing harness patterns).
+machine + reducer together — join/late-join (activeSession-directed), gap→pull→resume,
+claim happy-path, orphan re-claim, zombie demote, join-during-orphan stale snapshot
+(matching tag) vs `snapshot-none` (mismatched tag), song-change switch (§4.4, incl.
+pre-switch delta ignored → recovered by pull), cross-session claim ignored, cross-room
+bounce. Relay integration (chunk 3) re-runs the same tables over real sockets, plus
+reboot-readmit from the journal. UI chunks assert the banner/affordance renders per
+connection state (jsdom, existing harness patterns), incl. chart-not-on-device honesty.
