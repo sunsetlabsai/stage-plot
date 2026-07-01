@@ -164,12 +164,12 @@ describe('ConductorCluster', () => {
   it('renders the auto-fire toggle reflecting state and flips onToggleAutoFire', () => {
     const onToggleAutoFire = vi.fn();
     const { rerender } = render(<ConductorCluster {...props({ autoFire: false, onToggleAutoFire })} />);
-    const off = screen.getByRole('button', { name: /Auto-fire off/ });
+    const off = screen.getByRole('button', { name: /Auto-fire: off/ });
     expect(off).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(off);
     expect(onToggleAutoFire).toHaveBeenCalledOnce();
     rerender(<ConductorCluster {...props({ autoFire: true, onToggleAutoFire })} />);
-    expect(screen.getByRole('button', { name: /Auto-fire on/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /Auto-fire: on/ })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('armed-summary copy: auto-fire OFF shows "@ bar N · tap Go"', () => {
@@ -240,12 +240,12 @@ describe('ConductorCluster', () => {
   it('renders the Clock toggle reflecting state and flips onToggleClock', () => {
     const onToggleClock = vi.fn();
     const { rerender } = render(<ConductorCluster {...props({ clockOn: false, onToggleClock })} />);
-    const off = screen.getByRole('button', { name: /Clock off/ });
+    const off = screen.getByRole('button', { name: /Clock: off/ });
     expect(off).toHaveAttribute('aria-pressed', 'false');
     fireEvent.click(off);
     expect(onToggleClock).toHaveBeenCalledOnce();
     rerender(<ConductorCluster {...props({ clockOn: true, onToggleClock })} />);
-    expect(screen.getByRole('button', { name: /Clock on/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /Clock: on/ })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('hides the rung readout while the clock is off, shows it when on', () => {
@@ -260,6 +260,16 @@ describe('ConductorCluster', () => {
     render(<ConductorCluster {...props({ clockOn: true, rung: 'manual' })} />);
     expect(screen.getByText('manual')).toBeInTheDocument();
     expect(screen.queryByText('fixed tempo')).toBeNull();
+  });
+
+  // ── UX polish §1: toggle labels read as STATE (colon readout), not action ────
+  it('reads the Clock/Auto-fire labels as state per the colon readout', () => {
+    const { rerender } = render(<ConductorCluster {...props({ clockOn: false, autoFire: false })} />);
+    expect(screen.getByRole('button', { name: 'Clock: off' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Auto-fire: off' })).toBeInTheDocument();
+    rerender(<ConductorCluster {...props({ clockOn: true, autoFire: true })} />);
+    expect(screen.getByRole('button', { name: 'Clock: on' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Auto-fire: on' })).toBeInTheDocument();
   });
 
   it('surfaces the stall notice only when stalled', () => {
@@ -293,6 +303,18 @@ describe('ConductorCluster', () => {
     expect(screen.getByText(/82%/)).toBeInTheDocument();
     // honest non-driving label
     expect(screen.getByText(/shadow/)).toBeInTheDocument();
+  });
+
+  // ── UX polish §2: honest "measuring only" hint while the mic is running ──────
+  it('shows the measuring-only shadow hint only while the mic is running', () => {
+    const { rerender } = render(<ConductorCluster {...props({ micStatus: 'off' })} />);
+    expect(screen.queryByText(/measuring only/)).toBeNull();
+    rerender(
+      <ConductorCluster
+        {...props({ micStatus: 'running', shadow: { detectedBpm: 124, confidence: 0.82, statedBpm: 120 } })}
+      />,
+    );
+    expect(screen.getByText(/measuring only/)).toBeInTheDocument();
   });
 
   it('disables Enable mic while requesting, and surfaces denied/error honestly', () => {

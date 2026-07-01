@@ -118,7 +118,7 @@ export default function ConductorCluster({
               clockOn ? 'bg-sky-700 text-white' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
             }`}
           >
-            Clock {clockOn ? 'on' : 'off'}
+            Clock: {clockOn ? 'on' : 'off'}
           </button>
           {clockOn && (
             <span className="text-zinc-400">
@@ -133,7 +133,7 @@ export default function ConductorCluster({
               autoFire ? 'bg-emerald-700 text-white' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
             }`}
           >
-            Auto-fire {autoFire ? 'on' : 'off'}
+            Auto-fire: {autoFire ? 'on' : 'off'}
           </button>
           <button onClick={onStop} className="text-zinc-500 hover:text-white underline">
             Exit
@@ -350,6 +350,11 @@ export default function ConductorCluster({
               ) : (
                 <span className="text-zinc-500">listening&hellip;</span>
               ))}
+            {micStatus === 'running' && (
+              <span className="basis-full text-center text-xs text-zinc-600">
+                measuring only &mdash; doesn&rsquo;t drive the chart yet
+              </span>
+            )}
             {validationLogCount > 0 && (
               <span className="flex items-center gap-2">
                 <button onClick={onCopyLog} className="underline text-zinc-400 hover:text-white">

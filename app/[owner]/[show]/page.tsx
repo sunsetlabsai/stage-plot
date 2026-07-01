@@ -52,6 +52,8 @@ import {
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
 import ManageChartsModal from '@/components/ManageChartsModal';
+import TapTempo from '@/components/TapTempo';
+import { createBpmWriter, type BpmWriter } from '@/lib/bpm-writer';
 import { updateSetlistCharts } from '@/lib/chart-management';
 import {
   emptyCalibration,
@@ -561,6 +563,38 @@ export default function Page() {
     setConfig((prev) => ensureStageSlotIds(fn(prev)).config);
   }, []);
 
+  // Canonical-BPM writer (lib/bpm-writer): optimistic patch, per-song serialized
+  // PUTs (server receives writes in order), revert-to-confirmed on failure. Lives
+  // HERE — not in ConfigTab, which remounts on every tab switch (Codex R2 HIGH-2) —
+  // so ONE writer's in-flight chain + confirmed map span the whole show session.
+  // Built lazily inside the handler (react-hooks/refs: no ref access in render);
+  // reads the live setlist via bpmConfigRef so the confirmed seed is never stale.
+  const bpmConfigRef = useRef(config);
+  useEffect(() => { bpmConfigRef.current = config; }, [config]);
+  const bpmWriterRef = useRef<BpmWriter | null>(null);
+  const handleBpmChange = useCallback((songId: string, bpm: number | null) => {
+    if (bpmWriterRef.current == null) {
+      bpmWriterRef.current = createBpmWriter({
+        put: async (id, value) => {
+          const res = await fetch('/api/songs/update', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, bpm: value }),
+          });
+          return res.ok;
+        },
+        getCurrent: (id) =>
+          bpmConfigRef.current.setlist.find((s) => s.songId === id)?.bpm ?? null,
+        patch: (id, value) =>
+          updateConfig((p) => ({
+            ...p,
+            setlist: p.setlist.map((s) => (s.songId === id ? { ...s, bpm: value } : s)),
+          })),
+      });
+    }
+    void bpmWriterRef.current(songId, bpm);
+  }, [updateConfig]);
+
   const [publishSlug] = useState(slug);
   const [publishing] = useState(false);
   const [publishError] = useState('');
@@ -735,7 +769,7 @@ export default function Page() {
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
       {tab === 'config' && (
-        <ConfigTab config={config} updateConfig={updateConfig} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
+        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
       )}
       {tab === 'ai' && (
         <div className="p-4 md:p-8">
@@ -3801,20 +3835,20 @@ function ShowSortableRow({
 // ADD SONG FROM LIBRARY (autocomplete + Create & Add)
 // ════════════════════════════════════════════════════════════════════════════
 
-function AddSongFromLibrary({
+export function AddSongFromLibrary({
   onAddSong,
   isOwner,
   ownerId,
   isEditor,
 }: {
-  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; charts?: Chart[] }) => void;
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; bpm?: number | null; charts?: Chart[] }) => void;
   isOwner: boolean;
   ownerId: string | null;
   isEditor?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [songs, setSongs] = useState<Array<{ id: string; title: string; key: string | null; lead: string; notes: string; charts?: Chart[] }>>([]);
+  const [songs, setSongs] = useState<Array<{ id: string; title: string; key: string | null; lead: string; notes: string; bpm: number | null; charts?: Chart[] }>>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState('');
@@ -3859,13 +3893,16 @@ function AddSongFromLibrary({
     : songs;
   const exactMatch = songs.find((s) => s.title.toLowerCase() === trimmed.toLowerCase());
 
-  function handleSelect(song: { id: string; title: string; key: string | null; lead: string; notes: string; charts?: Chart[] }) {
+  function handleSelect(song: { id: string; title: string; key: string | null; lead: string; notes: string; bpm: number | null; charts?: Chart[] }) {
     onAddSong({
       songId: song.id,
       title: song.title,
       key: song.key ?? undefined,
       lead: song.lead,
       notes: song.notes,
+      // Thread the library song's stated tempo so the new row shows it without a
+      // reload (Codex R1 MEDIUM) — without this the row lands BPM-less on `manual`.
+      bpm: song.bpm,
       charts: song.charts,
     });
     setQuery('');
@@ -3890,6 +3927,7 @@ function AddSongFromLibrary({
           key: newSong.key ?? undefined,
           lead: newSong.lead || '',
           notes: newSong.notes || '',
+          bpm: newSong.bpm ?? null,
         });
         setQuery('');
         setOpen(false);
@@ -3974,15 +4012,17 @@ function AddSongFromLibrary({
 // SORTABLE SETLIST TABLE (shared DnD logic for Config tab)
 // ════════════════════════════════════════════════════════════════════════════
 
-function SetupSetlistTable({
-  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, isOwner, ownerId, isEditor, onManageCharts,
+export function SetupSetlistTable({
+  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, onBpmChange, isOwner, ownerId, isEditor, onManageCharts,
 }: {
   setlist: SetlistSong[];
   canResolveCharts: boolean;
   onReorder: (from: number, to: number) => void;
   onUpdate: (idx: number, field: string, value: string) => void;
   onDelete: (idx: number) => void;
-  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; charts?: Chart[] }) => void;
+  onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; bpm?: number | null; charts?: Chart[] }) => void;
+  // BPM writes the CANONICAL song row (owner-only), not the per-show blob — see §3.
+  onBpmChange: (songId: string, bpm: number | null) => void;
   isOwner: boolean;
   ownerId: string | null;
   isEditor?: boolean;
@@ -4035,6 +4075,7 @@ function SetupSetlistTable({
                     onMoveUp={() => onReorder(idx, idx - 1)}
                     onMoveDown={() => onReorder(idx, idx + 1)}
                     isOwner={isOwner}
+                    onBpmChange={onBpmChange}
                     onManageCharts={onManageCharts}
                   />
                 ))}
@@ -4052,7 +4093,7 @@ const inputCls = 'w-full px-2 py-2.5 sm:py-1.5 text-sm border border-gray-300 ro
 const arrowBtn = 'px-1 py-0.5 text-gray-400 hover:text-gray-700 disabled:opacity-20 disabled:cursor-not-allowed';
 
 function SetupSortableRow({
-  song, idx, total, canResolveCharts, onUpdate, onDelete, onMoveUp, onMoveDown, isOwner, onManageCharts,
+  song, idx, total, canResolveCharts, onUpdate, onDelete, onMoveUp, onMoveDown, isOwner, onBpmChange, onManageCharts,
 }: {
   song: SetlistSong;
   idx: number;
@@ -4063,6 +4104,7 @@ function SetupSortableRow({
   onMoveUp: () => void;
   onMoveDown: () => void;
   isOwner: boolean;
+  onBpmChange: (songId: string, bpm: number | null) => void;
   onManageCharts?: (songTitle: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: song.id! });
@@ -4070,8 +4112,13 @@ function SetupSortableRow({
 
   const hasSongCharts = (song.charts?.length ?? 0) > 0;
   const hasSongDupes = song.charts?.some((c) => (c.dupeCount ?? 0) > 1) ?? false;
+  // BPM is a song-level (canonical) write — owner-only, and only for library-linked
+  // rows (a songId is the write target). Inline/legacy rows have no canonical row,
+  // so they get no control and stay on the `manual` rung (§3, resolved Q3).
+  const showBpm = isOwner && !!song.songId;
 
   return (
+    <>
     <tr ref={setNodeRef} style={style} className="border-b border-gray-100">
       <td className="px-1 py-1 cursor-grab" {...attributes} {...listeners}>
         <span className="text-gray-300 text-sm select-none">&#x2630;</span>
@@ -4122,6 +4169,19 @@ function SetupSortableRow({
         <button className="px-2 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors" onClick={() => onDelete(idx)}>X</button>
       </td>
     </tr>
+    {showBpm && (
+      <tr style={style} className="border-b border-gray-100">
+        <td></td>
+        <td colSpan={8} className="px-2 pb-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <TapTempo bpm={song.bpm ?? null} onChange={(bpm) => onBpmChange(song.songId!, bpm)} />
+            {/* The write is genuinely global (canonical song row) — say so (Q2). */}
+            <span className="text-xs text-gray-400">sets this song&rsquo;s tempo everywhere</span>
+          </div>
+        </td>
+      </tr>
+    )}
+    </>
   );
 }
 
@@ -5073,6 +5133,7 @@ const btnRemove = 'px-2 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-re
 function ConfigTab({
   config,
   updateConfig,
+  onBpmChange,
   googleToken,
   googleError,
   onDisconnectGoogle,
@@ -5083,6 +5144,8 @@ function ConfigTab({
 }: {
   config: AppConfig;
   updateConfig: (fn: (prev: AppConfig) => AppConfig) => void;
+  // Session-lifetime canonical-BPM writer, owned by Page (survives tab remounts).
+  onBpmChange: (songId: string, bpm: number | null) => void;
   googleToken: GoogleToken | null;
   googleError?: string;
   onDisconnectGoogle: () => void;
@@ -5704,6 +5767,7 @@ function ConfigTab({
                   key: song.key,
                   lead: song.lead || '',
                   notes: song.notes,
+                  bpm: song.bpm ?? null,
                   charts: song.charts,
                 }],
               }));
@@ -5715,6 +5779,7 @@ function ConfigTab({
                 downloadAllCharts(newCharts, null, () => {}).catch(() => {});
               }
             }}
+            onBpmChange={onBpmChange}
             isEditor={isEditor}
             onManageCharts={(songTitle) => setManageChartsSong(songTitle)}
           />
