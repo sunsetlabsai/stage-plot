@@ -7,12 +7,12 @@ import type { SetlistSong } from '../lib/types';
 // ── UX polish §3: in-show BPM authoring gate (jsdom) ─────────────────────────
 // The BPM control writes the CANONICAL song row, so it is owner-only AND only for
 // library-linked rows (a songId is the write target). These assert the render gate
-// and the onBpmChange contract; the page-level PUT wiring is thin and not unit-tested.
+// and the onBpmChange contract; the guarded PUT path is covered in bpm-writer.test.ts.
 
 afterEach(cleanup);
 
 function song(over: Partial<SetlistSong> = {}): SetlistSong {
-  return { id: 'row1', position: 1, title: 'Song', key: null, lead: '', bpm: null, ...over };
+  return { id: 'row1', position: 1, title: 'Song', lead: '', bpm: null, ...over };
 }
 
 function tableProps(over: Record<string, unknown> = {}) {

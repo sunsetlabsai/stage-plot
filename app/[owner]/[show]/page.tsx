@@ -53,6 +53,7 @@ import {
 import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
 import ManageChartsModal from '@/components/ManageChartsModal';
 import TapTempo from '@/components/TapTempo';
+import { createBpmWriter, type BpmWriter } from '@/lib/bpm-writer';
 import { updateSetlistCharts } from '@/lib/chart-management';
 import {
   emptyCalibration,
@@ -5136,6 +5137,37 @@ function ConfigTab({
   // Version guard: prevents out-of-order batch responses from overwriting newer data
   const resolveVersionRef = useRef(0);
 
+  // Canonical-BPM writer (lib/bpm-writer): optimistic patch, latest-request-wins
+  // per song, revert-to-confirmed on failure. Reads live setlist via configRef so
+  // the confirmed seed never comes from a stale render closure. Built lazily inside
+  // the event handler (react-hooks/refs: no ref access during render).
+  const configRef = useRef(config);
+  useEffect(() => { configRef.current = config; }, [config]);
+  const bpmWriterRef = useRef<BpmWriter | null>(null);
+  const handleBpmChange = useCallback((songId: string, bpm: number | null) => {
+    if (bpmWriterRef.current == null) {
+      bpmWriterRef.current = createBpmWriter({
+        put: async (id, value, signal) => {
+          const res = await fetch('/api/songs/update', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, bpm: value }),
+            signal,
+          });
+          return res.ok;
+        },
+        getCurrent: (id) =>
+          configRef.current.setlist.find((s) => s.songId === id)?.bpm ?? null,
+        patch: (id, value) =>
+          updateConfig((p) => ({
+            ...p,
+            setlist: p.setlist.map((s) => (s.songId === id ? { ...s, bpm: value } : s)),
+          })),
+      });
+    }
+    void bpmWriterRef.current(songId, bpm);
+  }, [updateConfig]);
+
   const resolveCharts = useCallback(async () => {
     if (!googleToken || !config.chartsRootFolderId || config.setlist.length === 0) return;
     const version = ++resolveVersionRef.current;
@@ -5743,22 +5775,7 @@ function ConfigTab({
                 downloadAllCharts(newCharts, null, () => {}).catch(() => {});
               }
             }}
-            onBpmChange={async (songId, bpm) => {
-              // BPM is song-level: write the CANONICAL song row (owner-scoped PUT),
-              // then patch local state so Perform reads the new tempo without a reload.
-              const res = await fetch('/api/songs/update', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: songId, bpm }),
-              });
-              if (!res.ok) return; // keep the prior tempo on failure — no silent divergence
-              // Patch by songId, NOT a row index (Codex R2) — a concurrent reorder/delete
-              // during the async PUT must not patch the wrong visible row.
-              updateConfig((p) => ({
-                ...p,
-                setlist: p.setlist.map((s) => (s.songId === songId ? { ...s, bpm } : s)),
-              }));
-            }}
+            onBpmChange={handleBpmChange}
             isEditor={isEditor}
             onManageCharts={(songTitle) => setManageChartsSong(songTitle)}
           />
