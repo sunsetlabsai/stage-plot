@@ -7,6 +7,7 @@ import {
   canOfferClaim,
   helloFrame,
   parseClientFrame,
+  parseRelayFrame,
   initClientConn,
   reduceClientConn,
   sessionKeyEquals,
@@ -478,5 +479,63 @@ describe('parseClientFrame', () => {
       type: 'msg',
       msg: { anything: true },
     });
+  });
+});
+
+// ── parseRelayFrame: the client's side of the boundary (chunk 4, §6 rule 5) ───
+// "Validate exactly what YOU read": frame fields + the ConductorMessage/State
+// ENVELOPE the reducer's admission path reads (identity triple, epoch/seq/sentAt
+// numbers, payload.kind). Payload bodies / snapshot vm stay band-plane-trusted
+// (doc §8/D5) — deep shape is NOT checked here by design.
+describe('parseRelayFrame', () => {
+  it.each([
+    ['joined (live session)', { type: 'joined', epoch: 2, hasWriter: true, activeSession: KEY_A }],
+    ['joined (empty room)', { type: 'joined', epoch: 0, hasWriter: false, activeSession: null }],
+    ['session', { type: 'session', session: KEY_A }],
+    ['claim-grant', { type: 'claim-grant', epoch: 3 }],
+    ['claim-denied', { type: 'claim-denied', epoch: 3 }],
+    ['msg', { type: 'msg', msg: fakeMsg(KEY_A) }],
+    ['not-writer (live session)', { type: 'not-writer', epoch: 4, activeSession: KEY_B }],
+    ['not-writer (no session)', { type: 'not-writer', epoch: 4, activeSession: null }],
+    ['snapshot-needed', { type: 'snapshot-needed', session: KEY_A, requestId: 'r1' }],
+    ['snapshot', { type: 'snapshot', state: fakeState(KEY_A), stale: false }],
+    ['snapshot (stale)', { type: 'snapshot', state: fakeState(KEY_A), stale: true }],
+    ['snapshot-none', { type: 'snapshot-none', session: KEY_A }],
+    ['conductor-lost', { type: 'conductor-lost' }],
+  ])('accepts a well-formed %s frame (JSON round-trip)', (_name, frame) => {
+    expect(parseRelayFrame(JSON.parse(JSON.stringify(frame)))).toEqual(frame);
+  });
+
+  it.each([
+    ['not an object', 'joined'],
+    ['null', null],
+    ['no type', { epoch: 1 }],
+    ['unknown type', { type: 'bogus' }],
+    ['joined missing epoch', { type: 'joined', hasWriter: true, activeSession: null }],
+    ['joined missing hasWriter', { type: 'joined', epoch: 1, activeSession: null }],
+    ['joined activeSession undefined (must be null or a key)', { type: 'joined', epoch: 1, hasWriter: false }],
+    ['joined partial activeSession', { type: 'joined', epoch: 1, hasWriter: true, activeSession: { sessionId: 's' } }],
+    ['session without key', { type: 'session' }],
+    ['claim-grant non-numeric epoch', { type: 'claim-grant', epoch: '3' }],
+    ['claim-denied missing epoch', { type: 'claim-denied' }],
+    ['msg without body', { type: 'msg' }],
+    ['msg missing identity triple', { type: 'msg', msg: { epoch: 1, seq: 1, sentAt: 0, payload: { kind: 'advance' } } }],
+    ['msg missing seq', { type: 'msg', msg: { ...KEY_A, epoch: 1, sentAt: 0, payload: { kind: 'advance' } } }],
+    ['msg missing sentAt', { type: 'msg', msg: { ...KEY_A, epoch: 1, seq: 1, payload: { kind: 'advance' } } }],
+    ['msg payload not an object', { type: 'msg', msg: { ...KEY_A, epoch: 1, seq: 1, sentAt: 0, payload: 'advance' } }],
+    ['msg payload without kind', { type: 'msg', msg: { ...KEY_A, epoch: 1, seq: 1, sentAt: 0, payload: {} } }],
+    ['not-writer activeSession undefined', { type: 'not-writer', epoch: 4 }],
+    ['snapshot-needed missing requestId', { type: 'snapshot-needed', session: KEY_A }],
+    ['snapshot missing stale', { type: 'snapshot', state: fakeState(KEY_A) }],
+    ['snapshot state missing identity triple', { type: 'snapshot', state: { epoch: 1, seq: 0 }, stale: false }],
+    ['snapshot state missing coordinates', { type: 'snapshot', state: { ...KEY_A }, stale: false }],
+    ['snapshot-none without key', { type: 'snapshot-none' }],
+  ])('rejects %s → null (dropped by the client binding, never a machine crash)', (_name, rawFrame) => {
+    expect(parseRelayFrame(rawFrame)).toBeNull();
+  });
+
+  it('trusts the band plane past the envelope: payload bodies are NOT deep-validated (doc §8/D5)', () => {
+    const msg = { ...KEY_A, epoch: 1, seq: 1, sentAt: 0, payload: { kind: 'arm', nonsense: true } };
+    expect(parseRelayFrame({ type: 'msg', msg })).toEqual({ type: 'msg', msg });
   });
 });

@@ -65,11 +65,18 @@ export function initSession(
 // Single-device never produces `needsSnapshot` (the MD applies its own contiguous
 // deltas), but the generic outcome is surfaced so the UI can disable an `ignored`
 // control. `now` injected per call.
+//
+// 3b chunk 4 — THE FAN-OUT SEAM: the minted ConductorMessage is returned iff it
+// APPLIED, so the transport binding can broadcast exactly what the local mirror
+// admitted (mint+loopback becomes mint+loopback+fan-out). A rejected mint is
+// never returned — fanning out a message the writer's own reducer refused would
+// hand followers a delta their mirrors also refuse (a wasted seq at best,
+// divergence-by-bug at worst).
 export function dispatch(
   session: ConductorSession,
   payload: ConductorPayload,
   now: number,
-): { session: ConductorSession; outcome: ReduceOutcome['status'] } {
+): { session: ConductorSession; outcome: ReduceOutcome['status']; msg?: ConductorMessage } {
   const { state, compiled, programHash } = session;
   const msg: ConductorMessage = {
     sessionId: state.sessionId,
@@ -82,7 +89,7 @@ export function dispatch(
   };
   const outcome = reduceConductor(compiled, programHash, state, msg);
   if (outcome.status === 'applied') {
-    return { session: { ...session, state: outcome.state }, outcome: 'applied' };
+    return { session: { ...session, state: outcome.state }, outcome: 'applied', msg };
   }
   return { session, outcome: outcome.status };
 }

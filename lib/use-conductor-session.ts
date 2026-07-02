@@ -4,12 +4,29 @@ import { barsInOrder, type TraversalStep } from './chart-calibration';
 import { compileRoadmap, type CompiledRoadmap, type ExitPolicy } from './roadmap-vm';
 import {
   programHash as computeProgramHash,
+  reduceConductor,
   type ConductorState,
   type ConductorPayload,
   type ReduceOutcome,
   type Armed,
 } from './conductor-state';
-import { initSession, dispatch, shouldAutoFire, type ConductorSession } from './conductor-session';
+import {
+  initSession,
+  dispatch,
+  shouldAutoFire,
+  acceptBaton,
+  type ConductorSession,
+} from './conductor-session';
+import { helloFrame, initClientConn, sessionKeyOf, type SessionKey } from './relay-protocol';
+import {
+  initRelayBinding,
+  reduceBinding,
+  relayFacts,
+  stateSupersedes,
+  type RelayBinding,
+  type BindingInput,
+  type RelayFacts,
+} from './relay-binding';
 import {
   initReckoning,
   reckonAfter,
@@ -63,6 +80,24 @@ const CLOCK_TICK_MS = 80;
 // avoids the useLayoutEffect SSR warning.
 const useIsomorphicLayoutEffect = typeof window !== 'undefined' ? useLayoutEffect : useEffect;
 
+// 3b chunk 4: the socket seam. Structurally satisfied by the browser WebSocket;
+// tests inject a factory (a fake, or the `ws` client against a loopback relay).
+export interface RelaySocket {
+  send(data: string): void;
+  close(): void;
+  onopen: (() => void) | null;
+  onmessage: ((ev: { data: unknown }) => void) | null;
+  onclose: (() => void) | null;
+}
+
+export interface RelayConfig {
+  url: string; // wss://relay.showrunr.ai:8787 (doc §1a)
+  room: string; // show slug (doc §3)
+  code: string; // the rotating room code (D3)
+  deviceLabel: string; // claim attribution ("Rachel is conducting")
+  socketFactory?: (url: string) => RelaySocket; // test seam; default = browser WebSocket
+}
+
 export interface UseConductorArgs {
   // isOwner && the MD turned on "Local MD mode" && a performable bar-cal is loaded.
   enabled: boolean;
@@ -79,6 +114,9 @@ export interface UseConductorArgs {
   // 5b chunk 2: bar length in beats. timeSig is NOT exposed to Perform yet (route strips
   // source_spec), so callers default to 4/4 (DEFAULT_BAR_BEATS); honoring non-4/4 is a follow-on.
   barBeats?: number;
+  // 3b chunk 4: bind this session to a room relay. Absent/null = the shipped
+  // single-device behaviour, byte-for-byte (role 'local').
+  relay?: RelayConfig | null;
 }
 
 // 5b chunk 4a: one row of the shadow validation log (§5) — a detected-vs-stated sample the
@@ -92,6 +130,26 @@ export interface ValidationLogEntry {
 
 // Cap the in-memory validation log so a long rehearsal can't grow it unbounded (§5).
 const VALIDATION_LOG_CAP = 600;
+
+// 3b chunk 4: the writer's app-level heartbeat period. Half the relay's lease
+// HB_MS (2000, doc §4.2) so a single delayed tick never costs a lease miss.
+const RELAY_HB_MS = 1000;
+// Reconnect backoff after a socket drop (failure matrix row 1: reconnect →
+// hello → pull). Flat, not exponential — the relay is the band's own box on the
+// band's own AP; the only recovery is it coming back.
+const RELAY_RECONNECT_MS = 1500;
+
+// 3b chunk 4: the relay-facing slice of the surface (doc §4.3/§7 honesty).
+export interface RelaySurface {
+  status: 'off' | 'connecting' | 'joined';
+  role: 'local' | 'writer' | 'follower'; // follower = the wire owns this session's motion
+  canClaim: boolean; // "Take the baton" affordance (follower && !hasWriter && chart ready)
+  conductorLost: boolean; // orphan banner
+  activeSession: SessionKey | null; // what the room is running (page switches charts on it)
+  chartMismatch: boolean; // room session ≠ this device's chart — honesty banner, no mirror
+  requestClaim: () => void;
+  releaseBaton: () => void;
+}
 
 export interface ConductorSurface {
   active: boolean;
@@ -135,6 +193,9 @@ export interface ConductorSurface {
   shadow: { detectedBpm: number; confidence: number; statedBpm: number | null } | null;
   validationLog: ValidationLogEntry[];
   clearValidationLog: () => void;
+  // 3b chunk 4: the relay slice — status 'off' with role 'local' when no relay
+  // is configured (the shipped single-device behaviour).
+  relay: RelaySurface;
 }
 
 export function useConductorSession(args: UseConductorArgs): ConductorSurface {
@@ -143,6 +204,15 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // bar length (timeSig not exposed to Perform yet ⇒ 4/4 default).
   const bpm = args.bpm ?? null;
   const barBeats = args.barBeats ?? DEFAULT_BAR_BEATS;
+  // 3b chunk 4: destructure the relay config to FIELDS so the socket effect keys
+  // on values, not the (possibly per-render) config object identity.
+  const relayCfg = args.relay ?? null;
+  const relayOn = relayCfg !== null;
+  const relayUrl = relayCfg?.url ?? null;
+  const relayRoom = relayCfg?.room ?? null;
+  const relayCode = relayCfg?.code ?? null;
+  const relayLabel = relayCfg?.deviceLabel ?? null;
+  const relaySocketFactory = relayCfg?.socketFactory ?? null;
 
   // compiled is sync + pure over the local chart; null when the roadmap can't compile.
   const compiled = useMemo<CompiledRoadmap | null>(() => {
@@ -289,6 +359,215 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     if (nextStalled !== prev.stalled) setStalled(nextStalled);
   };
 
+  // ── 3b chunk 4: the relay binding (design-conductor-3b §10-4) ───────────────
+  //
+  // The pure orchestrator (lib/relay-binding.ts) owns ALL routing + gating; this
+  // hook only executes its effects against the ONE ConductorSession (driverRef)
+  // and the socket. Same synchronous-ref discipline as driverRef: bindingRef is
+  // the authority (socket callbacks are macrotasks — committed React state is
+  // always potentially stale to them); relayFactsState is the lossy display
+  // mirror.
+  const bindingRef = useRef<RelayBinding>(initRelayBinding());
+  const sockRef = useRef<RelaySocket | null>(null);
+  // Seeded from a FRESH binding, not bindingRef (react-hooks/refs: no ref reads
+  // in render) — identical by construction, since bindingRef is seeded the same.
+  const [relayFactsState, setRelayFactsState] = useState<RelayFacts>(() =>
+    relayFacts(initRelayBinding()),
+  );
+  // Live relay-on flag for the FROZEN closures (driveClockTick's interval) — the
+  // same layout-mirror discipline as cfgRef/gateRef: a due tick must never read
+  // a stale "relay off" across the commit→passive gap and self-drive a follower.
+  const relayOnRef = useRef(relayOn);
+  useIsomorphicLayoutEffect(() => {
+    relayOnRef.current = relayOn;
+  }, [relayOn]);
+
+  // May a LOCAL gesture (or the local clock) dispatch into this session? With a
+  // relay bound and this device a FOLLOWER, the wire is the session's ONE writer
+  // — a local dispatch would burn seq numbers the mirror never saw, and every
+  // subsequent wire delta would land `ignored` (seq ≤ local): a silently frozen
+  // mirror. 'joining' (relay unreachable / not yet admitted) deliberately does
+  // NOT block: the epic's floor is that every failure degrades to SELF-drive —
+  // an MD whose relay box died keeps conducting locally; nothing mirrors into a
+  // joining session (the binding's activeSession is null there), so no fork.
+  const localDispatchBlocked = () =>
+    relayOnRef.current && bindingRef.current.conn.phase === 'follower';
+
+  const factsEqual = (a: RelayFacts, b: RelayFacts) =>
+    a.phase === b.phase &&
+    a.canClaim === b.canClaim &&
+    a.conductorLost === b.conductorLost &&
+    a.chartMismatch === b.chartMismatch &&
+    a.activeSession === b.activeSession; // conn holds the same reference between moves
+
+  // Drive the pure binding: reduce, execute effects (some loop back as inputs —
+  // a QUEUE, not recursion, so ordering stays first-in-first-out), then mirror
+  // the honest facts once. Reads ONLY refs + stable setters, so the stale-closure
+  // hazard of the passive feedRef sync below is a non-issue.
+  const feed = (first: BindingInput) => {
+    const queue: BindingInput[] = [first];
+    while (queue.length > 0) {
+      const input = queue.shift()!;
+      const r = reduceBinding(bindingRef.current, input);
+      bindingRef.current = r.binding;
+      for (const eff of r.effects) {
+        switch (eff.kind) {
+          case 'send':
+            sockRef.current?.send(JSON.stringify(eff.frame));
+            break;
+          // The mirror path: the wire's msg through the chunk-3a reducer, its
+          // verdict looped back (needsSnapshot is how the pull opens). The
+          // binding's localKey gate guarantees programHash agreement, so the
+          // reducer's fail-closed throw is unreachable here by construction.
+          case 'apply-mirror': {
+            const d = driverRef.current;
+            const s = d.session;
+            if (!s) break; // identity re-initializing — the pull loop heals
+            const res = reduceConductor(s.compiled, s.programHash, s.state, eff.msg);
+            if (res.status === 'applied') {
+              const nextReck = reckonAfter(
+                d.reckoning,
+                s.state.current,
+                res.state.current,
+                'manual',
+                Date.now(),
+              );
+              writeDriver({ ...s, state: res.state }, nextReck);
+            }
+            queue.push({ kind: 'mirror-outcome', outcome: res.status });
+            break;
+          }
+          // The rebase door. stateSupersedes keeps it forward-only: an
+          // ex-writer's reconnect pull must not rewind the freshest state in
+          // the room with the relay's older stale cache (doc §4.2).
+          case 'adopt-snapshot': {
+            const d = driverRef.current;
+            const s = d.session;
+            if (!s) break;
+            if (!stateSupersedes(eff.state, s.state)) break;
+            const nextReck = reckonAfter(
+              d.reckoning,
+              s.state.current,
+              eff.state.current,
+              'manual',
+              Date.now(),
+            );
+            writeDriver({ ...s, state: eff.state }, nextReck);
+            break;
+          }
+          // The §4.1-3 grant: mint the new generation from OUR freshest state
+          // (mirror or self-drive survivor), then feed back so the binding
+          // emits announce → snapshot upload → claim in pinned order.
+          case 'accept-baton': {
+            const d = driverRef.current;
+            const s = d.session;
+            if (!s) break; // claim was gated on localKey; unreachable in practice
+            const { session: reborn, claim } = acceptBaton(s, eff.epoch, Date.now());
+            writeDriver(reborn, d.reckoning); // no position move — same reckoning
+            queue.push({
+              kind: 'baton-accepted',
+              key: sessionKeyOf(reborn.state),
+              state: reborn.state,
+              claim,
+            });
+            break;
+          }
+          case 'serve-snapshot': {
+            const s = driverRef.current.session;
+            if (!s) break;
+            queue.push({ kind: 'serve-state', requestId: eff.requestId, state: s.state });
+            break;
+          }
+          // Facts carry activeSession/chartMismatch; the page reacts to them
+          // (chart navigation is the chunk-5 join/failover UI).
+          case 'switch-session':
+          case 'demoted':
+          case 'bad-frame':
+            break;
+        }
+      }
+    }
+    const f = relayFacts(bindingRef.current);
+    setRelayFactsState((prev) => (factsEqual(prev, f) ? prev : f));
+  };
+  // Socket callbacks + intervals are macrotasks; they reach feed through this
+  // ref. A stale closure is safe (feed reads only refs/stable setters), so the
+  // passive re-sync suffices — no layout timing to defend here.
+  const feedRef = useRef<(input: BindingInput) => void>(feed);
+  useEffect(() => {
+    feedRef.current = feed;
+  });
+
+  // The socket lifecycle: connect → hello; drop → fresh conn machine + retry
+  // (failure matrix row 1 — the localKey SURVIVES a reconnect; the room's conn
+  // state does not). Keyed on config FIELDS, so a per-render config object
+  // doesn't churn connections.
+  useEffect(() => {
+    if (relayUrl === null || relayRoom === null || relayCode === null || relayLabel === null) {
+      return;
+    }
+    let alive = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let sock: RelaySocket | null = null;
+    const factory =
+      relaySocketFactory ?? ((u: string) => new WebSocket(u) as unknown as RelaySocket);
+    const connect = () => {
+      bindingRef.current = { conn: initClientConn(), localKey: bindingRef.current.localKey };
+      const s = factory(relayUrl);
+      sock = s;
+      sockRef.current = s;
+      s.onopen = () => {
+        s.send(JSON.stringify(helloFrame(relayRoom, relayCode, relayLabel)));
+      };
+      s.onmessage = (ev) => {
+        let raw: unknown;
+        try {
+          raw = JSON.parse(String(ev.data));
+        } catch {
+          raw = undefined; // parseRelayFrame(undefined) → bad-frame, dropped
+        }
+        feedRef.current({ kind: 'raw-frame', raw });
+      };
+      s.onclose = () => {
+        if (!alive) return;
+        sockRef.current = null;
+        bindingRef.current = { conn: initClientConn(), localKey: bindingRef.current.localKey };
+        const f = relayFacts(bindingRef.current);
+        setRelayFactsState((prev) => (factsEqual(prev, f) ? prev : f));
+        retry = setTimeout(connect, RELAY_RECONNECT_MS);
+      };
+    };
+    connect();
+    return () => {
+      alive = false;
+      if (retry !== undefined) clearTimeout(retry);
+      sockRef.current = null;
+      if (sock) {
+        sock.onclose = null; // teardown is not a drop — no retry, no facts churn
+        sock.close();
+      }
+      // The conn dies with the socket; the localKey does NOT — it tracks the
+      // SESSION lifecycle (local-ready / local-gone from the identity effect),
+      // which this effect does not own. Wiping it here would strand a config
+      // change / relay off→on toggle (identity unchanged ⇒ local-ready never
+      // re-fires) with no key to mirror or claim on.
+      bindingRef.current = { conn: initClientConn(), localKey: bindingRef.current.localKey };
+      // Facts intentionally not reset here (setState-in-cleanup): with the relay
+      // off the surface hard-codes the 'off' block below, so stale facts are
+      // unobservable; a config change re-runs connect(), which re-mirrors.
+    };
+  }, [relayUrl, relayRoom, relayCode, relayLabel, relaySocketFactory]);
+
+  // The writer's lease heartbeat (§4.2). The pure binding gates the send on
+  // phase — this interval just ticks. Keyed on the mirrored phase so followers
+  // and local-mode devices run no timer at all.
+  const relayIsWriter = relayFactsState.phase === 'writer';
+  useEffect(() => {
+    if (!relayIsWriter) return;
+    const id = setInterval(() => feedRef.current({ kind: 'hb-tick' }), RELAY_HB_MS);
+    return () => clearInterval(id);
+  }, [relayIsWriter]);
+
   // §4 tempo establish/reconcile lives INSIDE driveClockTick (Codex R5 HIGH 2), NOT a passive
   // [bpm] effect: a microtask scheduled from a passive effect can lose to an ALREADY-DUE timer,
   // so the tick would read the new cfgRef bpm against the OLD motion baseline (a false jump /
@@ -341,6 +620,8 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
           telemetryRef.current = initTelemetryState();
           setShadow(null);
           setValidationLog([]);
+          // 3b: no session ⇒ nothing to mirror or announce (clears canClaim).
+          feedRef.current({ kind: 'local-gone' });
         }
       });
       return () => {
@@ -352,7 +633,17 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     void computeProgramHash(bars, markers).then((hash) => {
       if (cancelled) return;
       const fresh = initReckoning(Date.now());
-      const next = initSession(sessionId, songRef, hash, compiled, Date.now());
+      const minted = initSession(sessionId, songRef, hash, compiled, Date.now());
+      // 3b §4.4 epoch semantics: the baton epoch is relay-owned and ORTHOGONAL
+      // to sessions — a same-baton session switch (next song, recompile)
+      // INHERITS the granted epoch; only a claim bumps it. initSession mints
+      // epoch 0 (single-device), so a WRITER's fresh session is rebased onto
+      // the relay's grant (conn.epoch) here, before it is announced. seq stays
+      // 0 — per-session restart is the pinned rule.
+      const next =
+        bindingRef.current.conn.phase === 'writer'
+          ? { ...minted, state: { ...minted.state, epoch: bindingRef.current.conn.epoch } }
+          : minted;
       driverRef.current = { session: next, reckoning: fresh, stalled: false };
       setSession(next);
       setArmedFireAtEligible(false);
@@ -363,6 +654,10 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       telemetryRef.current = initTelemetryState();
       setShadow(null);
       setValidationLog([]);
+      // 3b: the session's key is ready — the binding announces (writer, §4.4:
+      // a recompile/recalibration lands here with a NEW hash = a session
+      // switch) or force-re-pulls (follower whose chart arrived late).
+      feedRef.current({ kind: 'local-ready', key: { sessionId, songRef, programHash: hash } });
     });
     return () => {
       cancelled = true;
@@ -374,6 +669,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   const run = (payload: ConductorPayload) => {
     const before = driverRef.current.session;
     if (!before) return;
+    if (localDispatchBlocked()) return; // 3b: a follower's session has ONE writer — the wire
     const now = Date.now();
     const res = dispatch(before, payload, now);
     setOutcome(res.outcome);
@@ -391,6 +687,9 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
         now,
       );
       writeDriver(res.session, nextReck);
+      // 3b fan-out seam: broadcast exactly what the local mirror admitted. The
+      // binding drops this unless we hold the baton (writer-gated purely).
+      if (res.msg) feedRef.current({ kind: 'applied-msg', msg: res.msg });
     }
   };
 
@@ -415,6 +714,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     res: ReturnType<typeof dispatch>,
     opts: { provenance: 'manual' | 'clock'; rung: ClockRung },
   ) => {
+    if (localDispatchBlocked()) return; // 3b: drop the caller's mint — the wire owns motion
     setOutcome(res.outcome);
     if (res.outcome !== 'applied') return;
     // Invariant (P) threads a SINGLE composed reckoning so the chained auto-fire commit
@@ -451,9 +751,14 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
         : primaryReck;
       writeDriver(fired ? afterFire.session : res.session, nextReck);
       setArmedFireAtEligible(false); // fired (or attempted) → drop the bit
+      // 3b fan-out, in mint order on the one socket: the primary leg, then the
+      // chained auto-fire commit (both writer-gated purely in the binding).
+      if (res.msg) feedRef.current({ kind: 'applied-msg', msg: res.msg });
+      if (fired && afterFire.msg) feedRef.current({ kind: 'applied-msg', msg: afterFire.msg });
       return;
     }
     writeDriver(res.session, primaryReck);
+    if (res.msg) feedRef.current({ kind: 'applied-msg', msg: res.msg });
   };
 
   // 5b chunk 2 (§3.1): one motion tick. Reads FRESH state from driverRef/cfgRef (never a
@@ -646,5 +951,29 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     shadow,
     validationLog,
     clearValidationLog,
+    // 3b chunk 4: the relay slice. Hard-coded OFF block when unconfigured, so a
+    // stale facts mirror from a torn-down socket is unobservable (see the socket
+    // effect's cleanup note).
+    relay: relayOn
+      ? {
+          status: relayFactsState.phase === 'joining' ? 'connecting' : 'joined',
+          role: relayFactsState.phase === 'writer' ? 'writer' : 'follower',
+          canClaim: relayFactsState.canClaim,
+          conductorLost: relayFactsState.conductorLost,
+          activeSession: relayFactsState.activeSession,
+          chartMismatch: relayFactsState.chartMismatch,
+          requestClaim: () => feedRef.current({ kind: 'request-claim' }),
+          releaseBaton: () => feedRef.current({ kind: 'release-baton' }),
+        }
+      : {
+          status: 'off',
+          role: 'local',
+          canClaim: false,
+          conductorLost: false,
+          activeSession: null,
+          chartMismatch: false,
+          requestClaim: () => {},
+          releaseBaton: () => {},
+        },
   };
 }
