@@ -24,6 +24,11 @@
 .DS_Store
 *.pem
 
+# relay runtime state (certbot state incl. private keys, baton journal)
+/relay/certs/
+relay-journal.json
+relay-journal.json.tmp
+
 # debug
 npm-debug.log*
 yarn-debug.log*
