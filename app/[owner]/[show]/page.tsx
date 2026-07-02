@@ -105,9 +105,7 @@ import {
   findChartForSongRef,
   isRoomCodeShaped,
   loadDeviceLabel,
-  mintRoomCode,
   normalizeRoomCode,
-  roomNameFor,
   saveDeviceLabel,
 } from '@/lib/relay-join';
 import { useShow } from '@/lib/use-show';
@@ -2668,24 +2666,21 @@ function ChartNavigator({
   // (code and/or name) — label must be settled BEFORE connecting, because the
   // socket is keyed on it (a label change mid-baton would drop the writer).
   const relayUrl = process.env.NEXT_PUBLIC_RELAY_URL ?? null;
+  // Cloud-relay D4: 'live' carries NO code — the RELAY mints the room code and
+  // the hook surfaces it (conductor.relay.room) once `joined` lands; the QR and
+  // room chip render from that. 'joined' still carries the code the member
+  // typed/scanned (it IS the room name on the shared relay).
   const [relayIntent, setRelayIntent] = useState<
     | { mode: 'off' }
     | { mode: 'prompt-join'; code: string }
     | { mode: 'prompt-live' }
     | { mode: 'joined'; code: string; label: string }
-    | { mode: 'live'; code: string; label: string }
+    | { mode: 'live'; label: string }
   >({ mode: 'off' });
   const [showQr, setShowQr] = useState(false);
   // Rising-edge latch: go-live claims the baton ONCE per live intent; a later
   // orphan re-claim is the user's deliberate strip tap, never automatic.
   const goLiveClaimedRef = useRef(false);
-  // The room code is minted once per navigator lifetime (D3: rotates per show,
-  // not per go-live toggle) so a stray Exit/re-live doesn't strand scanned QRs.
-  const mintedCodeRef = useRef<string | null>(null);
-  const mintedCode = () => {
-    if (mintedCodeRef.current === null) mintedCodeRef.current = mintRoomCode();
-    return mintedCodeRef.current;
-  };
 
   // A QR deep link auto-joins: stored label goes straight in; no label yet →
   // the footer asks for the name first (code already known).
@@ -3123,16 +3118,25 @@ function ChartNavigator({
     // its stated tempo; a legacy/inline song has none ⇒ null ⇒ manual rung (honest floor).
     // barBeats defaults inside the hook (4/4) until a meter source exists.
     bpm: song.bpm ?? null,
-    // 3b chunk 5: bind the room when the intent is settled. The config's FIELDS
-    // key the socket, so label/code changes only at intent transitions.
+    // 3b chunk 5 → cloud-relay chunk 2: bind the room when the intent is
+    // settled. The config's FIELDS key the socket, so label/code changes only
+    // at intent transitions. 'live' = CREATE (the relay mints the code; showRef
+    // is the opaque owner/slug blob it echoes); 'joined' = JOIN by code.
     relay:
       relayUrl !== null && relayOn
-        ? {
-            url: relayUrl,
-            room: roomNameFor(owner, slug),
-            code: relayIntent.code,
-            deviceLabel: relayIntent.label,
-          }
+        ? relayIntent.mode === 'live'
+          ? {
+              url: relayUrl,
+              deviceLabel: relayIntent.label,
+              mode: 'create' as const,
+              showRef: `${owner}/${slug}`,
+            }
+          : {
+              url: relayUrl,
+              deviceLabel: relayIntent.label,
+              mode: 'join' as const,
+              room: relayIntent.code,
+            }
         : null,
   });
   // A follower's redline is wire-driven even though `conducting` is false here.
@@ -3196,7 +3200,8 @@ function ChartNavigator({
       setRelayIntent({ mode: 'prompt-live' });
       return;
     }
-    setRelayIntent({ mode: 'live', code: mintedCode(), label });
+    // D4: no code minted here — the hook CREATES and the relay returns the code.
+    setRelayIntent({ mode: 'live', label });
     setShowQr(true);
   };
   // Leaving is total: release the baton if we hold it, then drop the intent
@@ -3868,7 +3873,7 @@ function ChartNavigator({
             if (relayIntent.mode === 'prompt-join') {
               setRelayIntent({ mode: 'joined', code, label });
             } else {
-              setRelayIntent({ mode: 'live', code: mintedCode(), label });
+              setRelayIntent({ mode: 'live', label }); // D4: the relay mints the code
               setShowQr(true);
             }
           }}
@@ -3881,13 +3886,16 @@ function ChartNavigator({
         // Header relay state (mockup P1/P5): live once the intent is settled —
         // 'joined' counts too, because a follower who took the baton conducts
         // under the code they joined with. null relayUrl hides the affordance.
+        // D4: the code is the RELAY's (conductor.relay.room) — until it lands
+        // (create in flight / reconnecting) the honest state is 'connecting'.
+        const relayRoomCode = conductor.relay.room;
         const clusterRelay: ClusterRelayState | null =
           relayUrl === null
             ? null
             : relayIntent.mode === 'live' || relayIntent.mode === 'joined'
-              ? conductor.relay.status === 'connecting'
+              ? conductor.relay.status === 'connecting' || relayRoomCode === null
                 ? { kind: 'connecting' }
-                : { kind: 'live', code: relayIntent.code, onShowQr: () => setShowQr(true) }
+                : { kind: 'live', code: relayRoomCode, onShowQr: () => setShowQr(true) }
               : { kind: 'available', onGoLive: goLive };
         return (
           <ConductorCluster
@@ -3943,6 +3951,18 @@ function ChartNavigator({
         // Leave rather than leaving a silently-connected device (Codex finding).
         const rs = conductor.relay.activeSession;
         const roomHit = rs ? findChartForSongRef(setlist, rs.songRef) : null;
+        if (conductor.relay.roomGone) {
+          // D4 close-code honesty: the relay said 4004 — the room no longer
+          // exists (expired/typo'd). Retrying can never help; say so + Leave.
+          return (
+            <div className="flex items-center justify-center gap-3 py-1.5 text-xs bg-zinc-900 border-t border-red-900/60">
+              <span className="text-red-400">Room not found — it may have ended.</span>
+              <button onClick={leaveRoom} className="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700">
+                Leave
+              </button>
+            </div>
+          );
+        }
         return (
           <RelayStrip
             status={conductor.relay.status === 'connecting' ? 'connecting' : 'joined'}
@@ -4027,14 +4047,34 @@ function ChartNavigator({
       ) : null}
 
       {/* 3b chunk 5: the join QR (mockup P2) — shown on go-live and from the
-          cluster's room chip. Dismissable anywhere; never blocks conducting. */}
-      {showQr && (relayIntent.mode === 'live' || relayIntent.mode === 'joined') && (
-        <RelayQrOverlay
-          joinUrl={buildJoinUrl(window.location.origin, owner, slug, relayIntent.code)}
-          code={relayIntent.code}
-          onClose={() => setShowQr(false)}
-        />
-      )}
+          cluster's room chip. Dismissable anywhere; never blocks conducting.
+          D4: the code is the relay-minted room (facts.room) — renders once the
+          create's `joined` lands (goLive opens this overlay optimistically;
+          the connecting pulse below is the honest interim). */}
+      {showQr &&
+        (relayIntent.mode === 'live' || relayIntent.mode === 'joined') &&
+        (conductor.relay.room !== null ? (
+          <RelayQrOverlay
+            joinUrl={buildJoinUrl(window.location.origin, owner, slug, conductor.relay.room)}
+            code={conductor.relay.room}
+            onClose={() => setShowQr(false)}
+          />
+        ) : (
+          <div
+            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center"
+            onClick={() => setShowQr(false)}
+            role="dialog"
+            aria-label="Follow this performance"
+          >
+            <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-80 text-center space-y-3">
+              <div className="text-sm font-bold text-white">Follow this performance</div>
+              <div className="inline-flex items-center gap-2 text-xs text-amber-500">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                getting a room code&hellip;
+              </div>
+            </div>
+          </div>
+        ))}
 
       {/* Perform seek status (a section is parked under the redline) */}
       {calMode === 'perform' && !barMode && seekId && overlayCalibration && (() => {

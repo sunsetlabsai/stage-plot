@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { renderHook, act, waitFor, cleanup } from '@testing-library/react';
-import { useConductorSession, type RelaySocket } from '../lib/use-conductor-session';
+import { useConductorSession, reconnectDelayMs, type RelaySocket } from '../lib/use-conductor-session';
 import { barMs } from '../lib/tempo';
 import { programHash as computeProgramHash } from '../lib/conductor-state';
 import { initSession, dispatch, type ConductorSession } from '../lib/conductor-session';
@@ -792,7 +792,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     sent: string[] = [];
     onopen: (() => void) | null = null;
     onmessage: ((ev: { data: unknown }) => void) | null = null;
-    onclose: (() => void) | null = null;
+    onclose: ((ev?: { code?: number }) => void) | null = null;
     closedByClient = false;
     constructor(public url: string) {}
     send(data: string) {
@@ -809,8 +809,8 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     push(frame: unknown) {
       this.onmessage?.({ data: JSON.stringify(frame) });
     }
-    drop() {
-      this.onclose?.();
+    drop(code?: number) {
+      this.onclose?.(code === undefined ? undefined : { code });
     }
     frames(): Array<Record<string, unknown>> {
       return this.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
@@ -824,10 +824,11 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
       sockets.push(s);
       return s;
     };
+    // Cloud-relay chunk 2: join-mode config (room == relay-minted code, D4).
     const relay = {
       url: 'wss://relay.test:8787',
-      room: 'band-show',
-      code: 'XYZW',
+      mode: 'join' as const,
+      room: 'XYZW23',
       deviceLabel: 'Rachel',
       socketFactory,
     };
@@ -859,11 +860,10 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     expect(h.sockets).toHaveLength(1);
     const sock = h.sock();
 
-    // Socket opens → hello with room/code/label (join intent — D4; the
-    // create-mode config split is chunk 2).
+    // Socket opens → hello with room == code (join intent, D4).
     act(() => sock.open());
     expect(sock.frames()).toEqual([
-      { type: 'hello', intent: 'join', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel' },
+      { type: 'hello', intent: 'join', room: 'XYZW23', code: 'XYZW23', deviceLabel: 'Rachel' },
     ]);
 
     // Admitted to an empty room: joined + claimable (the chart is loaded).
@@ -954,13 +954,13 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     act(() => first.drop());
     expect(result.current.relay.status).toBe('connecting');
     act(() => {
-      vi.advanceTimersByTime(2000); // > RELAY_RECONNECT_MS
+      vi.advanceTimersByTime(2000); // > reconnectDelayMs(0) max (1500)
     });
     expect(h.sockets).toHaveLength(2);
     const second = h.sock();
     act(() => second.open());
     expect(second.frames()).toEqual([
-      { type: 'hello', intent: 'join', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel' },
+      { type: 'hello', intent: 'join', room: 'XYZW23', code: 'XYZW23', deviceLabel: 'Rachel' },
     ]);
     // The localKey survived the reconnect: joining a room running OUR chart is
     // claimable/mirrorable immediately (no re-hash needed).
@@ -1000,7 +1000,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     // snapshot at LOWER coordinates — it must force-adopt (fork ≠ freshness);
     // forward-only here would freeze the mirror forever.
     act(() => {
-      vi.advanceTimersByTime(2000); // > RELAY_RECONNECT_MS
+      vi.advanceTimersByTime(2000); // > reconnectDelayMs(0) max (1500)
     });
     const second = h.sock();
     act(() => second.open());
@@ -1045,5 +1045,142 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     unmount();
     expect(h.sock().closedByClient).toBe(true);
     expect(h.sockets).toHaveLength(1); // no retry socket
+  });
+
+  // ── Cloud-relay chunk 2: create/join mode split (design-relay-cloud §4/§5) ──
+
+  it('backoff is jittered-exponential, capped, and deterministic under injected random', () => {
+    // attempt 0: base 1500 → [750, 1500]
+    expect(reconnectDelayMs(0, () => 0)).toBe(750);
+    expect(reconnectDelayMs(0, () => 1)).toBe(1500);
+    // attempt 2: base 6000 → [3000, 6000]
+    expect(reconnectDelayMs(2, () => 0)).toBe(3000);
+    expect(reconnectDelayMs(2, () => 1)).toBe(6000);
+    // deep attempts cap at 10s (a venue-wide outage must not grow unbounded)
+    expect(reconnectDelayMs(10, () => 0)).toBe(5000);
+    expect(reconnectDelayMs(10, () => 1)).toBe(10_000);
+    // default RNG stays inside the band
+    for (let a = 0; a < 6; a++) {
+      const d = reconnectDelayMs(a);
+      const base = Math.min(10_000, 1500 * 2 ** a);
+      expect(d).toBeGreaterThanOrEqual(base / 2);
+      expect(d).toBeLessThanOrEqual(base);
+    }
+  });
+
+  it('create-mode: creates, adopts the relay-minted room, and rejoins it across a plain drop (D4)', async () => {
+    vi.useFakeTimers();
+    const h = relayHarness();
+    const relay = {
+      url: h.relay.url,
+      mode: 'create' as const,
+      showRef: 'owner/show',
+      deviceLabel: 'Rachel',
+      socketFactory: h.relay.socketFactory,
+    };
+    const { result } = renderHook(() => useConductorSession(args({ relay })));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync(); // flush the async programHash resolve
+    });
+    expect(result.current.active).toBe(true);
+    const first = h.sock();
+
+    // First hello CREATES: no room/code — the relay mints, showRef rides along.
+    act(() => first.open());
+    expect(first.frames()).toEqual([
+      { type: 'hello', intent: 'create', room: '', code: '', deviceLabel: 'Rachel', showRef: 'owner/show' },
+    ]);
+    expect(result.current.relay.room).toBeNull(); // pre-admission: QR waits
+
+    // Admission reports the minted code → the surface exposes it (QR renders).
+    act(() =>
+      first.push({
+        type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null,
+        room: 'AB7XQ2', created: true, showRef: 'owner/show',
+      }),
+    );
+    expect(result.current.relay.status).toBe('joined');
+    expect(result.current.relay.room).toBe('AB7XQ2');
+
+    // A plain drop must NOT re-create (a new code would strand every scanned
+    // QR): the reconnect JOINS the adopted room, room == code.
+    act(() => first.drop());
+    act(() => {
+      vi.advanceTimersByTime(2000); // > reconnectDelayMs(0) max (1500)
+    });
+    expect(h.sockets).toHaveLength(2);
+    const second = h.sock();
+    act(() => second.open());
+    expect(second.frames()).toEqual([
+      { type: 'hello', intent: 'join', room: 'AB7XQ2', code: 'AB7XQ2', deviceLabel: 'Rachel' },
+    ]);
+  });
+
+  it('create-mode: a 4004 close clears the adopted room and the next connect re-creates (fresh code)', async () => {
+    vi.useFakeTimers();
+    const h = relayHarness();
+    const relay = {
+      url: h.relay.url,
+      mode: 'create' as const,
+      showRef: 'owner/show',
+      deviceLabel: 'Rachel',
+      socketFactory: h.relay.socketFactory,
+    };
+    const { result } = renderHook(() => useConductorSession(args({ relay })));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    expect(result.current.active).toBe(true);
+    const first = h.sock();
+    act(() => first.open());
+    act(() =>
+      first.push({
+        type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null,
+        room: 'AB7XQ2', created: true,
+      }),
+    );
+    expect(result.current.relay.room).toBe('AB7XQ2');
+
+    // The relay lost the room (GC / restart): rejoining AB7XQ2 bounced 4004.
+    // The creator's only heal is minting fresh — the next hello CREATES again.
+    act(() => first.drop(4004));
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    const second = h.sock();
+    act(() => second.open());
+    expect(second.frames()).toEqual([
+      { type: 'hello', intent: 'create', room: '', code: '', deviceLabel: 'Rachel', showRef: 'owner/show' },
+    ]);
+    // ...and the fresh minted code replaces the dead one on the surface.
+    act(() =>
+      second.push({
+        type: 'joined', epoch: 1, hasWriter: false, activeSession: null, writerLabel: null,
+        room: 'W9QZ23', created: true,
+      }),
+    );
+    expect(result.current.relay.room).toBe('W9QZ23');
+    expect(result.current.relay.roomGone).toBe(false); // create-mode heals; only join-mode is terminal
+  });
+
+  it('join-mode: a 4004 close is terminal — roomGone flips and NO retry dials (the code never comes back)', async () => {
+    vi.useFakeTimers();
+    const h = relayHarness();
+    const { result } = renderHook(() => useConductorSession(args({ relay: h.relay })));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    expect(result.current.active).toBe(true);
+    expect(result.current.relay.roomGone).toBe(false);
+    const first = h.sock();
+    act(() => first.open());
+
+    // The relay bounces the typo'd/expired code.
+    act(() => first.drop(4004));
+    expect(result.current.relay.roomGone).toBe(true);
+    act(() => {
+      vi.advanceTimersByTime(60_000); // far beyond any backoff
+    });
+    expect(h.sockets).toHaveLength(1); // no reconnect loop against a dead code
   });
 });

@@ -326,7 +326,15 @@ describe('relayFacts', () => {
       conductorLabel: null,
       activeSession: null,
       chartMismatch: false,
+      room: null,
     });
+  });
+
+  it('surfaces the relay-reported room off joined (D4: create-mode QR renders from this)', () => {
+    const { binding } = run([
+      raw({ type: 'joined', epoch: 1, hasWriter: false, activeSession: null, writerLabel: null, room: 'AB7XQ2', created: true }),
+    ]);
+    expect(relayFacts(binding).room).toBe('AB7XQ2');
   });
 
   it('chartMismatch is false when the local key matches the active session', () => {

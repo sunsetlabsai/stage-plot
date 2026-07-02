@@ -322,6 +322,10 @@ export interface ClientConn {
                                       // never authority; null = unknown/none/it's us
   activeSession: SessionKey | null;   // the room's live session; null = waiting
   awaitingSnapshot: SessionKey | null; // the ONE outstanding pull (doc §5)
+  // Cloud-relay D4 (design-relay-cloud.md §4): the room code as the RELAY
+  // reports it on `joined` — the creator adopts it (it minted the code), and
+  // the QR/room chip renders from it. null until admitted.
+  room: string | null;
 }
 
 export function initClientConn(): ClientConn {
@@ -333,6 +337,7 @@ export function initClientConn(): ClientConn {
     writerLabel: null,
     activeSession: null,
     awaitingSnapshot: null,
+    room: null,
   };
 }
 
@@ -424,6 +429,7 @@ function reduceFrame(conn: ClientConn, frame: RelayFrame): ClientReduction {
         writerLabel: frame.writerLabel,
         activeSession: frame.activeSession,
         awaitingSnapshot: null,
+        room: frame.room ?? null, // D4: the relay-reported code (null off a legacy relay)
       };
       if (frame.activeSession === null) return noop(base);
       const p = pull(base, frame.activeSession);

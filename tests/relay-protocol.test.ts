@@ -104,6 +104,16 @@ describe('join (§3 D1 / §7)', () => {
       type: 'hello', intent: 'create', room: '', code: '', deviceLabel: 'Rachel', showRef: 'graham/gig',
     });
   });
+
+  it('joined records the relay-reported room (D4: room == minted code; null when absent)', () => {
+    expect(initClientConn().room).toBeNull();
+    const withRoom = run([
+      { kind: 'frame', frame: { type: 'joined', epoch: 1, hasWriter: false, activeSession: null, writerLabel: null, room: 'AB7XQ2', created: true } },
+    ]).conn;
+    expect(withRoom.room).toBe('AB7XQ2');
+    // Join-mode relays may omit the echo — the conn stays honest (null).
+    expect(run([joined(null, false)]).conn.room).toBeNull();
+  });
 });
 
 describe('snapshot adoption (§5 — full-key verified, Codex R2 HIGH)', () => {
