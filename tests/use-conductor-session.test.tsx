@@ -859,10 +859,11 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     expect(h.sockets).toHaveLength(1);
     const sock = h.sock();
 
-    // Socket opens → hello with room/code/label.
+    // Socket opens → hello with room/code/label (join intent — D4; the
+    // create-mode config split is chunk 2).
     act(() => sock.open());
     expect(sock.frames()).toEqual([
-      { type: 'hello', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel' },
+      { type: 'hello', intent: 'join', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel' },
     ]);
 
     // Admitted to an empty room: joined + claimable (the chart is loaded).
@@ -959,7 +960,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     const second = h.sock();
     act(() => second.open());
     expect(second.frames()).toEqual([
-      { type: 'hello', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel' },
+      { type: 'hello', intent: 'join', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel' },
     ]);
     // The localKey survived the reconnect: joining a room running OUR chart is
     // claimable/mirrorable immediately (no re-hash needed).

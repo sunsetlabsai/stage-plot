@@ -3,25 +3,33 @@ import { WebSocket } from 'ws';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
-import { startRelay, type RelayHandle } from '../relay/server';
+import { startRelay, type RelayHandle, type RelayOptions } from '../relay/server';
 import {
   type ClientFrame,
   type RelayFrame,
   type SessionKey,
+  createHelloFrame,
   initClientConn,
   reduceClientConn,
   canOfferClaim,
 } from '../lib/relay-protocol';
 import type { ConductorState } from '../lib/conductor-state';
 
-// ── Chunk 3b-3: relay service integration (doc §10-3) ────────────────────────
+// ── Relay service integration (discovery doc §10-3, amended by
+// design-relay-cloud.md §4 D4) ────────────────────────────────────────────────
 // Real sockets over loopback — the §7 failure matrix end-to-end. The relay
 // never interprets ConductorState/Message, so identity-only stand-ins suffice
 // (same trick as relay-protocol.test.ts): the relay's ONLY operations are
 // field-wise SessionKey equality and verbatim rebroadcast.
+//
+// D4 grain: rooms are CREATED by an explicit create-hello (the relay mints the
+// code; room == code) and joined by presenting that code. Epochs come off the
+// ONE global grant counter (S5), so absolute values here count every create
+// seed + grant since relay boot, across all rooms.
 
 const KEY_A: SessionKey = { sessionId: 'show/chart-1', songRef: 'song-1', programHash: 'hash-1' };
 const KEY_B: SessionKey = { sessionId: 'show/chart-2', songRef: 'song-2', programHash: 'hash-2' };
+const SHOW_REF = 'graham/gig';
 
 function fakeState(key: SessionKey): ConductorState {
   return { ...key, epoch: 1, seq: 0 } as unknown as ConductorState;
@@ -93,56 +101,96 @@ afterEach(async () => {
   relays = [];
 });
 
-async function relay(opts: Partial<Parameters<typeof startRelay>[0]> = {}): Promise<RelayHandle> {
-  const h = await startRelay({ port: 0, ...opts });
+// Deterministic mint per relay instance: ROOM01, ROOM02, ... (the reducer
+// re-rolls collisions, so a strictly-increasing mint is collision-free).
+function seqMint(): () => string {
+  let n = 0;
+  return () => `ROOM${String(++n).padStart(2, '0')}`;
+}
+
+async function relay(opts: Partial<RelayOptions> = {}): Promise<RelayHandle> {
+  const { core, ...rest } = opts;
+  const h = await startRelay({ port: 0, core: { mintCode: seqMint(), ...core }, ...rest });
   relays.push(h);
   return h;
 }
 
-const HELLO = (room = 'gig', code = 'XYZW', label = 'dev'): ClientFrame => ({
-  type: 'hello', room, code, deviceLabel: label,
+const HELLO = (room: string, code = room, label = 'dev'): ClientFrame => ({
+  type: 'hello', intent: 'join', room, code, deviceLabel: label,
 });
 
-async function join(port: number, room = 'gig', code = 'XYZW'): Promise<Client> {
+// D4 create: the relay mints the code; the QR renders from the response.
+async function create(port: number, label = 'dev', showRef = SHOW_REF): Promise<{ c: Client; room: string }> {
   const c = await Client.connect(port);
-  c.send(HELLO(room, code));
+  c.send(createHelloFrame(label, showRef));
+  const f = await c.next();
+  expect(f.type).toBe('joined');
+  return { c, room: (f as { room: string }).room };
+}
+
+async function join(port: number, room: string, code = room, label = 'dev'): Promise<Client> {
+  const c = await Client.connect(port);
+  c.send(HELLO(room, code, label));
   const f = await c.next();
   expect(f.type).toBe('joined');
   return c;
 }
 
-// A joined writer: claim granted, session announced, snapshot uploaded (§4.1).
-async function writerFor(port: number, key = KEY_A): Promise<{ md: Client; epoch: number }> {
-  const md = await join(port);
+// A creator-writer: room minted, claim granted, session announced, snapshot
+// uploaded (§4.1). Counter: create = 1, grant = 2 (on a fresh relay).
+async function writerFor(port: number, key = KEY_A): Promise<{ md: Client; room: string; epoch: number }> {
+  const { c: md, room } = await create(port);
   md.send({ type: 'claim-request' });
   const grant = await md.next();
   expect(grant.type).toBe('claim-grant');
   md.send({ type: 'session', session: key });
   md.send({ type: 'snapshot', state: fakeState(key) });
-  return { md, epoch: (grant as { epoch: number }).epoch };
+  return { md, room, epoch: (grant as { epoch: number }).epoch };
 }
 
-// ── Join / the door ───────────────────────────────────────────────────────────
-describe('join (doc §3)', () => {
-  it('first hello CREATES the room: joined { epoch 0, hasWriter false, activeSession null }', async () => {
+// ── The door: create / join (cloud doc §4 D4) ─────────────────────────────────
+describe('create/join (D4)', () => {
+  it('create mints the room: joined { created, room, showRef } with the counter-seeded epoch', async () => {
     const h = await relay();
     const c = await Client.connect(h.port);
-    c.send(HELLO());
-    expect(await c.next()).toEqual({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null });
+    c.send(createHelloFrame('dev', SHOW_REF));
+    expect(await c.next()).toEqual({
+      type: 'joined',
+      epoch: 1, // ++grantCounter seeds the room (S5)
+      hasWriter: false,
+      activeSession: null,
+      writerLabel: null,
+      created: true,
+      room: 'ROOM01',
+      showRef: SHOW_REF,
+    });
   });
 
-  it('right code admits a second device; WRONG code is bounced at the door (close 4001)', async () => {
+  it('the minted code admits a joiner; an unknown room bounces no-room (4004) — a typo can never create a phantom room', async () => {
     const h = await relay();
-    await join(h.port);
+    const { room } = await create(h.port);
     const ok = await Client.connect(h.port);
-    ok.send(HELLO('gig', 'XYZW'));
-    expect((await ok.next()).type).toBe('joined');
+    ok.send(HELLO(room));
+    const joined = await ok.next();
+    expect(joined).toMatchObject({ type: 'joined', created: false, room, showRef: SHOW_REF });
+    // the typo'd code: bounced honestly, and no room was minted for it
+    const typo = await Client.connect(h.port);
+    typo.send(HELLO('ZZZZZZ'));
+    expect(await typo.closed).toBe(4004);
+    const probe = await Client.connect(h.port);
+    probe.send(HELLO('ZZZZZZ'));
+    expect(await probe.closed).toBe(4004); // still no phantom room
+  });
+
+  it('a room/code mismatch on an EXISTING room is bounced 4001 (room == code)', async () => {
+    const h = await relay();
+    const { room } = await create(h.port);
     const bad = await Client.connect(h.port);
-    bad.send(HELLO('gig', 'STALE')); // last week's QR screenshot (D3)
+    bad.send(HELLO(room, 'STALE1')); // last week's QR screenshot
     expect(await bad.closed).toBe(4001);
   });
 
-  it('any frame before admission is bounced (the code check is the one door)', async () => {
+  it('any frame before admission is bounced (the hello is the one door)', async () => {
     const h = await relay();
     const c = await Client.connect(h.port);
     c.send({ type: 'claim-request' });
@@ -151,20 +199,22 @@ describe('join (doc §3)', () => {
 
   it('a second hello on an admitted connection is bounced (own-sweep: no cross-room double-enrollment)', async () => {
     const h = await relay();
-    const c = await join(h.port);
-    c.send(HELLO('other-room', 'ABCD'));
+    const { c } = await create(h.port);
+    c.send(HELLO('ROOM01'));
     expect(await c.closed).toBe(4001);
   });
 
-  it('a malformed hello (empty room / missing fields) mints no room — closed 4002 at the parse boundary', async () => {
+  it('malformed hellos close 4002 at the parse boundary: empty join room, intent-less legacy shape, create without showRef', async () => {
     const h = await relay();
+    const a = await Client.connect(h.port);
+    a.send({ type: 'hello', intent: 'join', room: '', code: 'XYZW', deviceLabel: 'dev' } as ClientFrame);
+    expect(await a.closed).toBe(4002);
+    const b = await Client.connect(h.port);
+    b.send({ type: 'hello', room: 'gig', code: 'XYZW', deviceLabel: 'dev' } as unknown as ClientFrame);
+    expect(await b.closed).toBe(4002); // pre-D4 client (version skew) — shipped rule 5
     const c = await Client.connect(h.port);
-    c.send({ type: 'hello', room: '', code: 'XYZW', deviceLabel: 'dev' });
-    expect(await c.closed).toBe(4002);
-    // the empty name did not become a joinable room
-    const probe = await Client.connect(h.port);
-    probe.send({ type: 'hello', room: '', code: 'anything', deviceLabel: 'dev' } as ClientFrame);
-    expect(await probe.closed).toBe(4002);
+    c.send({ type: 'hello', intent: 'create', room: '', code: '', deviceLabel: 'dev' } as ClientFrame);
+    expect(await c.closed).toBe(4002); // create requires the opaque showRef
   });
 
   it('non-JSON and shapeless payloads close 4002 (not our client)', async () => {
@@ -179,9 +229,9 @@ describe('join (doc §3)', () => {
 
   it('an ADMITTED client sending an unknown type or a fieldless known type closes 4002 and cannot crash the relay (Codex R1 HIGH)', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port);
+    const { md, room } = await writerFor(h.port);
     // unknown type
-    const a = await join(h.port);
+    const a = await join(h.port, room);
     a.send({ type: 'bogus' } as unknown as ClientFrame);
     expect(await a.closed).toBe(4002);
     // known types missing their required fields — each previously a crash path
@@ -198,56 +248,65 @@ describe('join (doc §3)', () => {
       expect(await c.closed).toBe(4002);
     }
     // the relay survived it all: the room still works end to end
-    const f = await join(h.port);
+    const f = await join(h.port, room);
     md.send({ type: 'msg', msg: fakeMsg(KEY_A) as never });
     expect(await f.next()).toEqual({ type: 'msg', msg: fakeMsg(KEY_A) });
   });
 
-  it('late joiner gets the live activeSession + hasWriter in joined (HIGH-1)', async () => {
+  it('late joiner gets the live activeSession + hasWriter + showRef in joined (HIGH-1)', async () => {
     const h = await relay();
-    await writerFor(h.port);
+    const { room } = await writerFor(h.port);
     const late = await Client.connect(h.port);
-    late.send(HELLO());
+    late.send(HELLO(room));
     // §4.3: the late joiner learns WHO is conducting from the relay's own
     // member registry — 'dev' is the writer's hello deviceLabel.
-    expect(await late.next()).toEqual({ type: 'joined', epoch: 1, hasWriter: true, activeSession: KEY_A, writerLabel: 'dev' });
+    expect(await late.next()).toEqual({
+      type: 'joined',
+      epoch: 2, // create = 1, grant = 2
+      hasWriter: true,
+      activeSession: KEY_A,
+      writerLabel: 'dev',
+      created: false,
+      room,
+      showRef: SHOW_REF,
+    });
   });
 });
 
 // ── Claim arbitration ─────────────────────────────────────────────────────────
 describe('claim (doc §4.1)', () => {
-  it('grants epoch+1 on a free baton; a second claim is denied at that epoch (no tie exists)', async () => {
+  it('grants the next global-counter value on a free baton; a second claim is denied at that epoch (no tie exists)', async () => {
     const h = await relay();
-    const a = await join(h.port);
-    const b = await join(h.port);
+    const { c: a, room } = await create(h.port); // counter → 1
+    const b = await join(h.port, room);
     a.send({ type: 'claim-request' });
-    expect(await a.next()).toEqual({ type: 'claim-grant', epoch: 1 });
+    expect(await a.next()).toEqual({ type: 'claim-grant', epoch: 2 });
     // §4.3: the grant is announced to everyone EXCEPT the grantee.
     expect(await b.next()).toEqual({ type: 'writer', label: 'dev' });
     b.send({ type: 'claim-request' });
-    expect(await b.next()).toEqual({ type: 'claim-denied', epoch: 1 });
+    expect(await b.next()).toEqual({ type: 'claim-denied', epoch: 2 });
   });
 
-  it('release-baton = INSTANT orphan (§4.1-5): conductor-lost to all (incl. the releaser); next claim = epoch+1, no wait', async () => {
+  it('release-baton = INSTANT orphan (§4.1-5): conductor-lost to all (incl. the releaser); next claim = a strictly higher epoch, no wait', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port);
-    const b = await join(h.port); // joins after the announce — activeSession came in `joined`
+    const { md, room } = await writerFor(h.port); // counter → 2
+    const b = await join(h.port, room); // joins after the announce — activeSession came in `joined`
     md.send({ type: 'release-baton' });
     expect(await b.next()).toEqual({ type: 'conductor-lost' }); // followers' hasWriter clears → claim affordance opens
     expect(await md.next()).toEqual({ type: 'conductor-lost' }); // ex-writer's machine fails safe (already demoted locally)
     b.send({ type: 'claim-request' });
-    expect(await b.next()).toEqual({ type: 'claim-grant', epoch: 2 });
+    expect(await b.next()).toEqual({ type: 'claim-grant', epoch: 3 });
   });
 
   it('deliberate handoff is reachable THROUGH the client machine (Codex R1 HIGH-2): release → conductor-lost → canOfferClaim → grant', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port);
-    const f = await join(h.port);
+    const { md, room } = await writerFor(h.port);
+    const f = await join(h.port, room);
     // Drive the REAL chunk-1 machine with the wire frames this follower saw.
     let conn = initClientConn();
     conn = reduceClientConn(conn, {
       kind: 'frame',
-      frame: { type: 'joined', epoch: 1, hasWriter: true, activeSession: KEY_A, writerLabel: 'md' },
+      frame: { type: 'joined', epoch: 2, hasWriter: true, activeSession: KEY_A, writerLabel: 'md' },
     }).conn;
     expect(canOfferClaim(conn)).toBe(false); // a writer exists — affordance closed
     md.send({ type: 'release-baton' });
@@ -260,7 +319,7 @@ describe('claim (doc §4.1)', () => {
     expect(send).toBeDefined();
     f.send((send as { frame: ClientFrame }).frame);
     const grant = await f.next();
-    expect(grant).toEqual({ type: 'claim-grant', epoch: 2 });
+    expect(grant).toEqual({ type: 'claim-grant', epoch: 3 });
     conn = reduceClientConn(claim.conn, { kind: 'frame', frame: grant }).conn;
     expect(conn.phase).toBe('writer'); // handoff complete, end to end
   });
@@ -270,9 +329,9 @@ describe('claim (doc §4.1)', () => {
 describe('writer enforcement (doc §2/§4.2)', () => {
   it('writer msg fans out to every OTHER member (no echo to the sender)', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port);
-    const f1 = await join(h.port);
-    const f2 = await join(h.port);
+    const { md, room } = await writerFor(h.port);
+    const f1 = await join(h.port, room);
+    const f2 = await join(h.port, room);
     md.send({ type: 'msg', msg: fakeMsg(KEY_A) as never });
     expect(await f1.next()).toEqual({ type: 'msg', msg: fakeMsg(KEY_A) });
     expect(await f2.next()).toEqual({ type: 'msg', msg: fakeMsg(KEY_A) });
@@ -283,8 +342,8 @@ describe('writer enforcement (doc §2/§4.2)', () => {
     'a non-writer %s bounces with not-writer { epoch, activeSession } and reaches no follower',
     async (type) => {
       const h = await relay();
-      const { md } = await writerFor(h.port);
-      const zombie = await join(h.port);
+      const { md, room } = await writerFor(h.port);
+      const zombie = await join(h.port, room);
       const frame: ClientFrame =
         type === 'msg'
           ? { type, msg: fakeMsg(KEY_A) as never }
@@ -292,7 +351,7 @@ describe('writer enforcement (doc §2/§4.2)', () => {
             ? { type, session: KEY_B }
             : { type, state: fakeState(KEY_B) };
       zombie.send(frame);
-      expect(await zombie.next()).toEqual({ type: 'not-writer', epoch: 1, activeSession: KEY_A });
+      expect(await zombie.next()).toEqual({ type: 'not-writer', epoch: 2, activeSession: KEY_A });
       await md.quiet();
     },
   );
@@ -302,16 +361,16 @@ describe('writer enforcement (doc §2/§4.2)', () => {
 describe('session switch (doc §4.4)', () => {
   it('the announce broadcasts verbatim to followers', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port); // announced KEY_A pre-join
-    const f = await join(h.port);
+    const { md, room } = await writerFor(h.port); // announced KEY_A pre-join
+    const f = await join(h.port, room);
     md.send({ type: 'session', session: KEY_B });
     expect(await f.next()).toEqual({ type: 'session', session: KEY_B });
   });
 
   it('a switch DROPS the previous key\'s snapshot cache (orphan request for the old key → snapshot-none)', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port, KEY_A); // uploads KEY_A snapshot
-    const f = await join(h.port);
+    const { md, room } = await writerFor(h.port, KEY_A); // uploads KEY_A snapshot
+    const f = await join(h.port, room);
     md.send({ type: 'session', session: KEY_B });
     await f.next(); // session broadcast
     md.kill(); // orphan — no writer, so requests hit the cache path
@@ -322,8 +381,8 @@ describe('session switch (doc §4.4)', () => {
 
   it('a pending forwarded request is answered snapshot-none at the switch (a request never hangs)', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port, KEY_A);
-    const f = await join(h.port);
+    const { md, room } = await writerFor(h.port, KEY_A);
+    const f = await join(h.port, room);
     f.send({ type: 'snapshot-request', session: KEY_A }); // forwarded to md
     expect((await md.next()).type).toBe('snapshot-needed');
     md.send({ type: 'session', session: KEY_B }); // switch before answering
@@ -336,9 +395,9 @@ describe('session switch (doc §4.4)', () => {
 describe('snapshot service (doc §5 D6)', () => {
   it('live writer + matching key: forward → writer serves → requester gets { stale: false }', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port);
-    const f = await join(h.port);
-    const bystander = await join(h.port);
+    const { md, room } = await writerFor(h.port);
+    const f = await join(h.port, room);
+    const bystander = await join(h.port, room);
     f.send({ type: 'snapshot-request', session: KEY_A });
     const needed = await md.next();
     expect(needed).toMatchObject({ type: 'snapshot-needed', session: KEY_A });
@@ -350,8 +409,8 @@ describe('snapshot service (doc §5 D6)', () => {
 
   it('live writer + key OFF the active session: snapshot-none IMMEDIATELY, writer never bothered (Codex R3)', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port, KEY_A);
-    const f = await join(h.port);
+    const { md, room } = await writerFor(h.port, KEY_A);
+    const f = await join(h.port, room);
     f.send({ type: 'snapshot-request', session: KEY_B });
     expect(await f.next()).toEqual({ type: 'snapshot-none', session: KEY_B });
     await md.quiet();
@@ -359,9 +418,9 @@ describe('snapshot service (doc §5 D6)', () => {
 
   it('no writer + FULL-key cache match: served { stale: true } (join during orphan, §7)', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port, KEY_A); // claim-time upload cached
+    const { md, room } = await writerFor(h.port, KEY_A); // claim-time upload cached
     md.kill();
-    const late = await join(h.port);
+    const late = await join(h.port, room);
     late.send({ type: 'snapshot-request', session: KEY_A });
     expect(await late.next()).toEqual({ type: 'snapshot', state: fakeState(KEY_A), stale: true });
   });
@@ -372,17 +431,17 @@ describe('snapshot service (doc §5 D6)', () => {
     ['programHash', { ...KEY_A, programHash: 'other' }],
   ])('stale cache mismatching on %s ALONE → snapshot-none (Codex R2 HIGH: full-triple identity)', async (_field, key) => {
     const h = await relay();
-    const { md } = await writerFor(h.port, KEY_A);
+    const { md, room } = await writerFor(h.port, KEY_A);
     md.kill();
-    const late = await join(h.port);
+    const late = await join(h.port, room);
     late.send({ type: 'snapshot-request', session: key });
     expect(await late.next()).toEqual({ type: 'snapshot-none', session: key });
   });
 
   it('a request pending when the writer dies is answered from the stale cache — never hangs (§5)', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port, KEY_A);
-    const f = await join(h.port);
+    const { md, room } = await writerFor(h.port, KEY_A);
+    const f = await join(h.port, room);
     f.send({ type: 'snapshot-request', session: KEY_A });
     expect((await md.next()).type).toBe('snapshot-needed');
     md.kill(); // dies holding the forward
@@ -395,21 +454,30 @@ describe('snapshot service (doc §5 D6)', () => {
 describe('failover (doc §4.2)', () => {
   it('writer socket death = INSTANT orphan: conductor-lost to all; join-during-orphan sees hasWriter FALSE, session identity kept', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port);
-    const f = await join(h.port);
+    const { md, room } = await writerFor(h.port);
+    const f = await join(h.port, room);
     md.kill();
     expect(await f.next()).toEqual({ type: 'conductor-lost' });
     const late = await Client.connect(h.port);
-    late.send(HELLO());
+    late.send(HELLO(room));
     // §7 "Join during orphan": no writer, but the session identity survives the
     // orphan (only a reboot resets it) — the joiner can still pull the stale cache.
-    expect(await late.next()).toEqual({ type: 'joined', epoch: 1, hasWriter: false, activeSession: KEY_A, writerLabel: null });
+    expect(await late.next()).toEqual({
+      type: 'joined',
+      epoch: 2,
+      hasWriter: false,
+      activeSession: KEY_A,
+      writerLabel: null,
+      created: false,
+      room,
+      showRef: SHOW_REF,
+    });
   });
 
   it('lease lapse (no hb) orphans the baton; hb traffic keeps it alive', async () => {
     const h = await relay({ hbMs: 40, hbMiss: 2 }); // lease 80ms, sweep ~50ms
-    const { md } = await writerFor(h.port);
-    const f = await join(h.port);
+    const { md, room } = await writerFor(h.port);
+    const f = await join(h.port, room);
     // keep-alive: heartbeat for ~300ms — no orphan
     for (let i = 0; i < 6; i++) {
       md.send({ type: 'hb' });
@@ -420,50 +488,61 @@ describe('failover (doc §4.2)', () => {
     // lapsed writer's OWN connection (§4.2 — the client machine fails safe)
     expect(await f.next(2000)).toEqual({ type: 'conductor-lost' });
     expect(await md.next(2000)).toEqual({ type: 'conductor-lost' });
-    // the room recovers: follower re-claims at epoch+1
+    // the room recovers: follower re-claims at a strictly higher epoch
     f.send({ type: 'claim-request' });
-    expect(await f.next()).toEqual({ type: 'claim-grant', epoch: 2 });
+    expect(await f.next()).toEqual({ type: 'claim-grant', epoch: 3 });
   });
 });
 
-// ── Reboot / journal (rule 4, doc §7 "Relay box dies") ───────────────────────
+// ── Reboot / journal (rule 4 + S5, doc §7 "Relay dies") ───────────────────────
 describe('reboot-readmit (journal)', () => {
-  it('same QR readmits after a reboot; epoch is never reused; activeSession restarts null; cache is lost', async () => {
+  it('same code readmits after a clean reboot; the counter is never reused; activeSession restarts null; cache is lost', async () => {
     const dir = mkdtempSync(pathJoin(tmpdir(), 'relay-'));
     const journalPath = pathJoin(dir, 'journal.json');
     const h1 = await relay({ journalPath });
-    await writerFor(h1.port, KEY_A); // room created, epoch 1, session + cache live
-    await h1.close();
+    const { room } = await writerFor(h1.port, KEY_A); // create=1, grant=2, session + cache live
+    await h1.close(); // graceful = clean journal (no counter slack on reboot)
     relays = [];
 
     const h2 = await relay({ journalPath });
     // identity persists: same room + same code admit; liveness doesn't:
     // epoch preserved, hasWriter false, activeSession null (Codex R2 MED-1)
     const c = await Client.connect(h2.port);
-    c.send(HELLO('gig', 'XYZW'));
-    expect(await c.next()).toEqual({ type: 'joined', epoch: 1, hasWriter: false, activeSession: null, writerLabel: null });
+    c.send(HELLO(room));
+    expect(await c.next()).toEqual({
+      type: 'joined',
+      epoch: 2,
+      hasWriter: false,
+      activeSession: null,
+      writerLabel: null,
+      created: false,
+      room,
+      showRef: SHOW_REF,
+    });
     // the cache did not survive (deliberately not journaled)
     c.send({ type: 'snapshot-request', session: KEY_A });
     expect(await c.next()).toEqual({ type: 'snapshot-none', session: KEY_A });
-    // epoch monotonic across the reboot: next claim = 2, not a reissued 1
+    // counter monotonic across the clean reboot: next grant = 3, not a reissued 1
     c.send({ type: 'claim-request' });
-    expect(await c.next()).toEqual({ type: 'claim-grant', epoch: 2 });
+    expect(await c.next()).toEqual({ type: 'claim-grant', epoch: 3 });
     // and a stale code still bounces post-reboot
     const bad = await Client.connect(h2.port);
-    bad.send(HELLO('gig', 'WRONG'));
+    bad.send(HELLO(room, 'WRONG1'));
     expect(await bad.closed).toBe(4001);
   });
 });
 
 // ── Room isolation ────────────────────────────────────────────────────────────
 describe('room isolation (doc §2)', () => {
-  it('two rooms on one relay do not collide: fan-out, claims, and codes are per-room', async () => {
+  it('two rooms on one relay do not collide: fan-out and claims are per-room (epochs interleave off the ONE counter — S5)', async () => {
     const h = await relay();
-    const { md } = await writerFor(h.port); // room "gig"
-    const other = await join(h.port, 'rehearsal', 'ABCD'); // different room, own code
+    const { md } = await writerFor(h.port); // room 1: create=1, grant=2
+    const { c: other } = await create(h.port); // room 2: create=3
     md.send({ type: 'msg', msg: fakeMsg(KEY_A) as never });
     await other.quiet(); // no cross-room delivery
     other.send({ type: 'claim-request' });
-    expect(await other.next()).toEqual({ type: 'claim-grant', epoch: 1 }); // own epoch line
+    // The grant comes off the GLOBAL counter (4 follows room 1's 2 and room
+    // 2's create seed 3): ordering within a room is all the reducer needs.
+    expect(await other.next()).toEqual({ type: 'claim-grant', epoch: 4 });
   });
 });

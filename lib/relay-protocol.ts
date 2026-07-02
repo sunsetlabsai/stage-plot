@@ -70,8 +70,19 @@ export function sessionKeyOf(scoped: {
 // ConductorMessage — untouched, opaque to the relay. The relay's ONLY operation
 // on a SessionKey is field-wise string equality.
 
+// Wire string caps (design-relay-cloud.md §3 S3): enforced at the parse door so
+// an unadmitted stranger can't stuff arbitrary bytes into relay memory/journal.
+export const MAX_ROOM_LEN = 32;
+export const MAX_LABEL_LEN = 64;
+export const MAX_SHOWREF_LEN = 256;
+
 export type ClientFrame =
-  | { type: 'hello'; room: string; code: string; deviceLabel: string }
+  // D4 (design-relay-cloud.md §4): the FIRST frame on any connection, with an
+  // EXPLICIT intent. 'create' asks the relay to mint a room code (room/code
+  // ignored, showRef required — an opaque owner/slug blob the relay stores and
+  // echoes, never reads). 'join' names an existing room (room==code, minted by
+  // the relay) — a typo'd join gets a `no-room` bounce, never a phantom room.
+  | { type: 'hello'; intent: 'create' | 'join'; room: string; code: string; deviceLabel: string; showRef?: string }
   | { type: 'session'; session: SessionKey }            // writer only; relay stores+broadcasts
   | { type: 'claim-request' }
   | { type: 'release-baton' }                           // deliberate handoff
@@ -93,6 +104,12 @@ export type RelayFrame =
       // which by definition is not writerConn. A device that was the writer
       // re-earns the baton by claim. The label is honesty UI, not authority.
       writerLabel: string | null;
+      // Cloud-relay additions (design-relay-cloud.md §4): `joined` is EXTENDED,
+      // never reshaped — new fields are optional-in-type so shipped clients
+      // that don't read them keep parsing; the relay always sends them.
+      created?: boolean;                                // true = this hello minted the room
+      room?: string;                                    // the (relay-minted) room code
+      showRef?: string | null;                          // creator's opaque blob, echoed
     }
   | { type: 'session'; session: SessionKey }            // switch: change chart, pull snapshot
   | { type: 'claim-grant'; epoch: number }              // you are the writer; mint via acceptBaton
@@ -106,7 +123,13 @@ export type RelayFrame =
   | { type: 'conductor-lost' };                         // baton orphaned; honesty UI
 
 export function helloFrame(room: string, code: string, deviceLabel: string): ClientFrame {
-  return { type: 'hello', room, code, deviceLabel };
+  return { type: 'hello', intent: 'join', room, code, deviceLabel };
+}
+
+// Create-mode hello (D4): no room/code — the relay mints the code and returns it
+// on `joined`. showRef is the creator's opaque show blob, stored + echoed only.
+export function createHelloFrame(deviceLabel: string, showRef: string): ClientFrame {
+  return { type: 'hello', intent: 'create', room: '', code: '', deviceLabel, showRef };
 }
 
 // ── Wire boundary validation ──────────────────────────────────────────────────
@@ -134,12 +157,21 @@ export function parseClientFrame(raw: unknown): ClientFrame | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const f = raw as Record<string, unknown>;
   switch (f.type) {
-    case 'hello':
-      return typeof f.room === 'string' && f.room !== '' &&
-        typeof f.code === 'string' && f.code !== '' &&
-        typeof f.deviceLabel === 'string'
-        ? { type: 'hello', room: f.room, code: f.code, deviceLabel: f.deviceLabel }
-        : null;
+    case 'hello': {
+      // D4 + S3 caps: intent explicit; join needs a nonempty room/code pair
+      // (room==code on the shared relay); create needs a showRef. String caps
+      // bound what an unadmitted stranger can push into memory/journal.
+      if (f.intent !== 'create' && f.intent !== 'join') return null;
+      if (typeof f.room !== 'string' || typeof f.code !== 'string') return null;
+      if (typeof f.deviceLabel !== 'string' || f.deviceLabel.length > MAX_LABEL_LEN) return null;
+      if (f.room.length > MAX_ROOM_LEN || f.code.length > MAX_ROOM_LEN) return null;
+      if (f.intent === 'join') {
+        if (f.room === '' || f.code === '') return null;
+        return { type: 'hello', intent: 'join', room: f.room, code: f.code, deviceLabel: f.deviceLabel };
+      }
+      if (typeof f.showRef !== 'string' || f.showRef === '' || f.showRef.length > MAX_SHOWREF_LEN) return null;
+      return { type: 'hello', intent: 'create', room: f.room, code: f.code, deviceLabel: f.deviceLabel, showRef: f.showRef };
+    }
     case 'session':
       return isSessionKeyShape(f.session) ? { type: 'session', session: f.session } : null;
     case 'claim-request':
@@ -216,19 +248,32 @@ export function parseRelayFrame(raw: unknown): RelayFrame | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const f = raw as Record<string, unknown>;
   switch (f.type) {
-    case 'joined':
-      return typeof f.epoch === 'number' &&
-        typeof f.hasWriter === 'boolean' &&
-        (f.activeSession === null || isSessionKeyShape(f.activeSession)) &&
-        (f.writerLabel === null || typeof f.writerLabel === 'string')
-        ? {
-            type: 'joined',
-            epoch: f.epoch,
-            hasWriter: f.hasWriter,
-            activeSession: f.activeSession as SessionKey | null,
-            writerLabel: f.writerLabel as string | null,
-          }
-        : null;
+    case 'joined': {
+      if (
+        typeof f.epoch !== 'number' ||
+        typeof f.hasWriter !== 'boolean' ||
+        !(f.activeSession === null || isSessionKeyShape(f.activeSession)) ||
+        !(f.writerLabel === null || typeof f.writerLabel === 'string')
+      ) {
+        return null;
+      }
+      // Cloud-relay extension fields: optional (extended-never-reshaped), but
+      // when present they must be well-typed.
+      if (f.created !== undefined && typeof f.created !== 'boolean') return null;
+      if (f.room !== undefined && typeof f.room !== 'string') return null;
+      if (f.showRef !== undefined && f.showRef !== null && typeof f.showRef !== 'string') return null;
+      const out: Extract<RelayFrame, { type: 'joined' }> = {
+        type: 'joined',
+        epoch: f.epoch,
+        hasWriter: f.hasWriter,
+        activeSession: f.activeSession as SessionKey | null,
+        writerLabel: f.writerLabel as string | null,
+      };
+      if (f.created !== undefined) out.created = f.created as boolean;
+      if (f.room !== undefined) out.room = f.room as string;
+      if (f.showRef !== undefined) out.showRef = f.showRef as string | null;
+      return out;
+    }
     case 'session':
       return isSessionKeyShape(f.session) ? { type: 'session', session: f.session } : null;
     case 'claim-grant':

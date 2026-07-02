@@ -1,7 +1,13 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { WebSocket } from 'ws';
 import { startRelay, type RelayHandle } from '../relay/server';
-import { helloFrame, initClientConn, sessionKeyOf, type SessionKey } from '../lib/relay-protocol';
+import {
+  createHelloFrame,
+  helloFrame,
+  initClientConn,
+  sessionKeyOf,
+  type SessionKey,
+} from '../lib/relay-protocol';
 import {
   type BindingInput,
   type RelayBinding,
@@ -61,8 +67,9 @@ class Device {
     this.feed({ kind: 'local-ready', key: sessionKeyOf(this.session.state) });
   }
 
-  connect(port: number, label: string, room = 'gig', code = 'XYZW'): Promise<void> {
+  connect(port: number, label: string, room: string): Promise<void> {
     // The hook's (re)connect path: fresh conn machine, the localKey SURVIVES.
+    // D4: room == code — the relay minted it at create time (see createRoom).
     this.binding = { conn: initClientConn(), localKey: this.binding.localKey };
     const ws = new WebSocket(`ws://127.0.0.1:${port}`);
     this.ws = ws;
@@ -74,7 +81,7 @@ class Device {
     });
     return new Promise((res, rej) => {
       ws.on('open', () => {
-        ws.send(JSON.stringify(helloFrame(room, code, label)));
+        ws.send(JSON.stringify(helloFrame(room, room, label)));
         res();
       });
       ws.on('error', rej);
@@ -194,18 +201,36 @@ async function until(what: string, pred: () => boolean, ms = 3000): Promise<void
   }
 }
 
+/** D4 create: mint the room out-of-band (a raw setup socket, closed after) and
+ *  return the relay-minted code the Devices join. The create-mode client
+ *  binding is chunk 2 — this harness stays on the shipped join path. */
+function createRoom(port: number): Promise<string> {
+  return new Promise((res, rej) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws.on('error', rej);
+    ws.on('open', () => ws.send(JSON.stringify(createHelloFrame('setup', 'graham/gig'))));
+    ws.on('message', (data) => {
+      const f = JSON.parse(String(data)) as { type: string; room?: string };
+      if (f.type === 'joined' && typeof f.room === 'string') {
+        ws.close();
+        res(f.room);
+      } else rej(new Error(`unexpected setup frame: ${f.type}`));
+    });
+  });
+}
+
 /** Connect a device with song A loaded; wait until admitted. */
-async function joinWithA(port: number, label: string): Promise<Device> {
+async function joinWithA(port: number, label: string, room: string): Promise<Device> {
   const d = device();
   d.loadChart(songA());
-  await d.connect(port, label);
+  await d.connect(port, label, room);
   await until(`${label} admitted`, () => d.facts.phase !== 'joining');
   return d;
 }
 
 /** joinWithA + claim the baton; wait until writer. */
-async function mdWithA(port: number): Promise<Device> {
-  const md = await joinWithA(port, 'MD');
+async function mdWithA(port: number, room: string): Promise<Device> {
+  const md = await joinWithA(port, 'MD', room);
   md.requestClaim();
   await until('MD granted', () => md.facts.phase === 'writer');
   return md;
@@ -214,7 +239,8 @@ async function mdWithA(port: number): Promise<Device> {
 describe('scenario 1: MD drives, a late follower converges (§4.1/§5)', () => {
   it('claim → announce/upload → advance; late join pulls, adopts, then mirrors live', async () => {
     const h = await relay();
-    const md = await mdWithA(h.port);
+    const room = await createRoom(h.port);
+    const md = await mdWithA(h.port, room);
 
     // The grant sequence completed: the MD's session was reborn at the granted
     // epoch (relay-assigned) with seq 0, and it self-drives immediately.
@@ -226,7 +252,7 @@ describe('scenario 1: MD drives, a late follower converges (§4.1/§5)', () => {
     expect(md.state.current).toEqual({ barId: 'a2', pass: 1 });
 
     // Late follower: join → switch-session + pull → relay-served snapshot adopts.
-    const f = await joinWithA(h.port, 'guitar');
+    const f = await joinWithA(h.port, 'guitar', room);
     await until('follower adopts', () => f.state.seq === md.state.seq);
     expect(f.facts.phase).toBe('follower');
     expect(f.facts.chartMismatch).toBe(false);
@@ -244,13 +270,14 @@ describe('scenario 1: MD drives, a late follower converges (§4.1/§5)', () => {
 describe('scenario 2: MD death → failover to a new generation (§4.2)', () => {
   it('orphan → follower claims → epoch+1 rebirth; the OTHER follower re-bases via the claim broadcast', async () => {
     const h = await relay();
-    const md = await mdWithA(h.port);
+    const room = await createRoom(h.port);
+    const md = await mdWithA(h.port, room);
     const epoch1 = md.binding.conn.epoch;
     md.advance(1000);
     md.advance(1001); // both followers will converge on a2 first
 
-    const f1 = await joinWithA(h.port, 'keys');
-    const f2 = await joinWithA(h.port, 'bass');
+    const f1 = await joinWithA(h.port, 'keys', room);
+    const f2 = await joinWithA(h.port, 'bass', room);
     await until('both converged', () => f1.state.seq === 2 && f2.state.seq === 2);
 
     // The MD dies mid-song. Relay orphans the baton; honesty + claim affordance.
@@ -282,10 +309,11 @@ describe('scenario 2: MD death → failover to a new generation (§4.2)', () => 
 describe('scenario 3: session switch (§4.4)', () => {
   it('writer re-keys to song B (epoch inherited); the follower switches, loads, force re-pulls, converges', async () => {
     const h = await relay();
-    const md = await mdWithA(h.port);
+    const room = await createRoom(h.port);
+    const md = await mdWithA(h.port, room);
     md.advance(1000);
 
-    const f = await joinWithA(h.port, 'drums');
+    const f = await joinWithA(h.port, 'drums', room);
     await until('follower on song A', () => f.state.seq === md.state.seq);
 
     // Next song: the MD loads chart B. loadChart mirrors the hook's §4.4
@@ -320,10 +348,11 @@ describe('scenario 3: session switch (§4.4)', () => {
 describe('scenario 4: a forked follower reconnects (Codex chunk-4 R1 HIGH)', () => {
   it('offline self-drive past the writer → rejoin pull → FRESH snapshot force-adopts → mirrors live', async () => {
     const h = await relay();
-    const md = await mdWithA(h.port);
+    const room = await createRoom(h.port);
+    const md = await mdWithA(h.port, room);
     md.advance(1000); // → a1 (seq 1)
 
-    const f = await joinWithA(h.port, 'cello');
+    const f = await joinWithA(h.port, 'cello', room);
     await until('follower converged', () => f.state.seq === 1);
 
     // Wi-Fi dies for the follower. The self-drive floor deliberately lets it
@@ -340,7 +369,7 @@ describe('scenario 4: a forked follower reconnects (Codex chunk-4 R1 HIGH)', () 
     // Reconnect: joined → the mandatory rejoin pull → the LIVE writer's fresh
     // snapshot must win DESPITE lower coordinates (a fork is not freshness) —
     // forward-only here would strand the device with a frozen mirror.
-    await f.connect(h.port, 'cello');
+    await f.connect(h.port, 'cello', room);
     await until(
       'fork crushed onto the writer',
       () => f.state.seq === md.state.seq && f.state.current?.barId === 'a1',
