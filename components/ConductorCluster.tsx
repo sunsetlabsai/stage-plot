@@ -19,6 +19,15 @@ function exitLabel(kind: ExitPolicy['kind']): string {
   return kind === 'alCoda' ? 'al Coda' : 'al Fine';
 }
 
+// ── 3b chunk 5: the header's relay facet ──────────────────────────────────────
+// null/undefined = relay unconfigured → the shipped "Local MD mode" header,
+// byte-for-byte. The cluster itself renders only when this device's LOCAL
+// session drives (role local or writer) — a follower gets RelayStrip instead.
+export type ClusterRelayState =
+  | { kind: 'available'; onGoLive: () => void } // configured, not connected
+  | { kind: 'connecting' } // socket up-ing / reconnecting — still conducting locally
+  | { kind: 'live'; code: string; onShowQr: () => void }; // we hold the baton
+
 export interface ConductorClusterProps {
   active: boolean; // false while the async programHash is still resolving
   readout: { absNumber: number; passLabel: string | null } | null;
@@ -45,6 +54,8 @@ export interface ConductorClusterProps {
   micStatus: TempoDetectorStatus;
   shadow: { detectedBpm: number; confidence: number; statedBpm: number | null } | null;
   validationLogCount: number;
+  // 3b chunk 5: relay facet for the header (absent = shipped single-device header).
+  relay?: ClusterRelayState | null;
   onEnableMic: () => void; // originates from this click (the iOS gesture requirement)
   onDisableMic: () => void;
   onCopyLog: () => void;
@@ -80,6 +91,7 @@ export default function ConductorCluster({
   micStatus,
   shadow,
   validationLogCount,
+  relay = null,
   onEnableMic,
   onDisableMic,
   onCopyLog,
@@ -104,9 +116,44 @@ export default function ConductorCluster({
     <div className="bg-zinc-900 border-t border-zinc-800 text-xs">
       {/* Mode header — labelled "Local MD mode" (drives only THIS device, no relay). */}
       <div className="flex items-center justify-between px-3 py-1.5">
-        <span className="font-bold uppercase tracking-wide text-amber-400">
-          Local MD mode
-        </span>
+        {/* 3b chunk 5: the relay facet. LIVE = we hold the room's baton (emerald);
+            connecting = honest amber while the MD keeps conducting locally (the
+            self-drive floor — never an interruption); available = the Go-live
+            door; unconfigured = the shipped header, byte-for-byte. */}
+        {relay?.kind === 'live' ? (
+          <span className="flex items-center gap-2">
+            <span className="font-bold uppercase tracking-wide text-emerald-400">Conducting</span>
+            <span className="inline-flex items-center gap-1 rounded bg-emerald-950 border border-emerald-800 px-2 py-0.5 text-emerald-300">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> LIVE
+            </span>
+            <button
+              onClick={relay.onShowQr}
+              className="rounded px-2 py-0.5 bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+            >
+              Room <span className="font-mono font-bold text-white tracking-widest">{relay.code}</span> &middot; QR
+            </button>
+          </span>
+        ) : (
+          <span className="flex items-center gap-2">
+            <span className="font-bold uppercase tracking-wide text-amber-400">
+              Local MD mode
+            </span>
+            {relay?.kind === 'available' && (
+              <button
+                onClick={relay.onGoLive}
+                className="rounded px-2 py-0.5 bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+              >
+                Go live
+              </button>
+            )}
+            {relay?.kind === 'connecting' && (
+              <span className="inline-flex items-center gap-1 text-amber-500">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                relay connecting&hellip;
+              </span>
+            )}
+          </span>
+        )}
         <div className="flex items-center gap-3">
           {/* 5b chunk 2 — static-BPM clock opt-in toggle (default OFF = go-tap floor).
               When on, the resolved rung readout tells the MD what it is actually doing

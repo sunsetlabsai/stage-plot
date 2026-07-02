@@ -339,4 +339,38 @@ describe('ConductorCluster', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
     expect(onClearLog).toHaveBeenCalledOnce();
   });
+
+  // ── 3b chunk 5: the header's relay facet (null = shipped header, byte-for-byte) ──
+  it('renders the shipped Local MD header when relay is absent (no Go live door)', () => {
+    render(<ConductorCluster {...props()} />);
+    expect(screen.getByText('Local MD mode')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Go live' })).toBeNull();
+    expect(screen.queryByText('LIVE')).toBeNull();
+  });
+
+  it('offers the Go-live door when the relay is available', () => {
+    const onGoLive = vi.fn();
+    render(<ConductorCluster {...props({ relay: { kind: 'available', onGoLive } })} />);
+    expect(screen.getByText('Local MD mode')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Go live' }));
+    expect(onGoLive).toHaveBeenCalledOnce();
+  });
+
+  it('shows an honest connecting readout while still conducting locally', () => {
+    render(<ConductorCluster {...props({ relay: { kind: 'connecting' } })} />);
+    expect(screen.getByText('Local MD mode')).toBeInTheDocument();
+    expect(screen.getByText(/relay connecting/)).toBeInTheDocument();
+    // The transport is untouched — connecting never interrupts conducting.
+    expect(screen.getByRole('button', { name: /Advance/ })).toBeInTheDocument();
+  });
+
+  it('live: Conducting + LIVE chip + room-code chip that opens the QR', () => {
+    const onShowQr = vi.fn();
+    render(<ConductorCluster {...props({ relay: { kind: 'live', code: 'AB7X', onShowQr } })} />);
+    expect(screen.getByText('Conducting')).toBeInTheDocument();
+    expect(screen.getByText('LIVE')).toBeInTheDocument();
+    expect(screen.queryByText('Local MD mode')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /AB7X/ }));
+    expect(onShowQr).toHaveBeenCalledOnce();
+  });
 });

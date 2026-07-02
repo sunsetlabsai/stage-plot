@@ -97,7 +97,19 @@ import {
 import { reviewFlags } from '@/lib/chart-review';
 import type { FlaggedRef } from '@/lib/chart-review';
 import { useConductorSession } from '@/lib/use-conductor-session';
-import ConductorCluster from '@/components/ConductorCluster';
+import ConductorCluster, { type ClusterRelayState } from '@/components/ConductorCluster';
+import RelayStrip from '@/components/RelayStrip';
+import RelayQrOverlay from '@/components/RelayQrOverlay';
+import {
+  buildJoinUrl,
+  findChartForSongRef,
+  isRoomCodeShaped,
+  loadDeviceLabel,
+  mintRoomCode,
+  normalizeRoomCode,
+  roomNameFor,
+  saveDeviceLabel,
+} from '@/lib/relay-join';
 import { useShow } from '@/lib/use-show';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { normalizeSongKeySafe, displayRole } from '@/lib/normalize';
@@ -875,6 +887,35 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, is
   // Chart navigator state
   const [navigatorSongIdx, setNavigatorSongIdx] = useState<number | null>(null);
 
+  // ── 3b chunk 5: the QR deep link (?join=CODE, lib/relay-join buildJoinUrl) ──
+  // Landing here with a join code auto-opens the navigator on the first song
+  // with charts; once connected, `joined.activeSession` navigates to the live
+  // chart (the switch-session effect in ChartNavigator) — doc §3: "open the
+  // right chart without hunting". Read once on mount; consumed, not reactive.
+  const [joinCode, setJoinCode] = useState<string | null>(null);
+  const joinArmedRef = useRef(false);
+  useEffect(() => {
+    if (joinArmedRef.current) return;
+    const raw = new URLSearchParams(window.location.search).get('join');
+    if (!raw) return;
+    const code = normalizeRoomCode(raw);
+    if (!isRoomCodeShaped(code)) return;
+    const idx = setlist.findIndex((s) => (s.charts ?? []).length > 0);
+    if (idx === -1) return; // nothing to perform on yet — the setlist view stands
+    joinArmedRef.current = true;
+    // Deferred setState (the repo's set-state-in-effect discipline); the armed
+    // ref above already latched, so a re-run can't double-fire.
+    let cancelled = false;
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setJoinCode(code);
+      setNavigatorSongIdx(idx);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [setlist]);
+
   return (
     <div className="bg-zinc-950 min-h-screen text-zinc-100">
       <div className="max-w-2xl mx-auto px-4 py-6">
@@ -1004,6 +1045,7 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, is
           onChangeIdx={setNavigatorSongIdx}
           onChangeRole={handleRoleChange}
           onClose={() => setNavigatorSongIdx(null)}
+          joinCode={joinCode}
         />
       )}
     </div>
@@ -2500,8 +2542,69 @@ function RoadmapToolbar({
   );
 }
 
+// ── 3b chunk 5: the join/go-live footer form (design-conductor-3b §3, mockup P3) ──
+// One slim strip asking for exactly what's missing before connecting: the room
+// code (join, unless the QR carried it) and the device name (both flows — the
+// socket is keyed on the label, so it must settle BEFORE the first connect).
+// Locked Q3: name prefills from the last-used device label; typing overrides.
+function RelayPromptForm({
+  kind,
+  initialCode,
+  onSubmit,
+  onCancel,
+}: {
+  kind: 'join' | 'live';
+  initialCode: string; // '' = ask; QR deep links arrive with it filled
+  onSubmit: (code: string, label: string) => void;
+  onCancel: () => void;
+}) {
+  const [code, setCode] = useState(initialCode);
+  const [label, setLabel] = useState(() => loadDeviceLabel());
+  const needCode = kind === 'join';
+  const ready = (!needCode || isRoomCodeShaped(code)) && label.trim().length > 0;
+  return (
+    <form
+      className="flex items-center justify-center gap-2 px-3 py-1.5 text-xs bg-zinc-900 border-t border-zinc-800"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (ready) onSubmit(code, label.trim());
+      }}
+    >
+      <span className="text-zinc-400">{kind === 'join' ? 'Join the room' : 'Go live'}</span>
+      {needCode && (
+        <input
+          value={code}
+          onChange={(e) => setCode(normalizeRoomCode(e.target.value))}
+          placeholder="CODE"
+          autoFocus={initialCode === ''}
+          className="w-20 px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-white font-mono uppercase tracking-[0.2em] text-center"
+          aria-label="Room code"
+        />
+      )}
+      <input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        placeholder="Your name"
+        autoFocus={!needCode || initialCode !== ''}
+        className="w-32 px-2 py-1 rounded bg-zinc-800 border border-zinc-700 text-white"
+        aria-label="Your name"
+      />
+      <button
+        type="submit"
+        disabled={!ready}
+        className="px-3 py-1 rounded bg-emerald-600 text-white font-bold hover:bg-emerald-500 disabled:opacity-30 disabled:cursor-not-allowed"
+      >
+        {kind === 'join' ? 'Join' : 'Go live'}
+      </button>
+      <button type="button" onClick={onCancel} className="text-zinc-500 underline hover:text-white">
+        Cancel
+      </button>
+    </form>
+  );
+}
+
 function ChartNavigator({
-  setlist, currentIdx, roleFilter, allRoles, isOffline, accessToken, isOwner = false, owner, slug, onChangeIdx, onChangeRole, onClose,
+  setlist, currentIdx, roleFilter, allRoles, isOffline, accessToken, isOwner = false, owner, slug, onChangeIdx, onChangeRole, onClose, joinCode = null,
 }: {
   setlist: SetlistSong[];
   currentIdx: number;
@@ -2515,6 +2618,8 @@ function ChartNavigator({
   onChangeIdx: (idx: number) => void;
   onChangeRole: (role: string) => void;
   onClose: () => void;
+  // 3b chunk 5: a QR deep link's room code (?join=CODE) — auto-joins the room.
+  joinCode?: string | null;
 }) {
   const song = setlist[currentIdx];
   const charts = (song?.charts ?? []).filter(
@@ -2551,9 +2656,57 @@ function ChartNavigator({
   // Position in the PLAYED traversal (index, not bar id): a bar can recur across
   // passes (repeats/voltas), so the index is what disambiguates which pass we're on.
   const [barSeekIdx, setBarSeekIdx] = useState<number | null>(null);
-  // "Local MD mode" toggle (Q2): the owner explicitly takes the baton. OFF lets the
-  // owner rehearse with the free self-drive seek without minting/advancing a session.
+  // "Local MD mode" toggle (Q2): explicitly take the baton. OFF lets the player
+  // rehearse with the free self-drive seek without minting/advancing a session.
+  // (3b chunk 5 dropped the owner gate: owner ≠ conductor — anyone in the show
+  // can conduct; the relay's single-writer arbitration is the only authority.)
   const [conducting, setConducting] = useState(false);
+
+  // ── 3b chunk 5: relay intent (design-conductor-3b §10-5) ──
+  // The device's own decision about the room; the HOOK owns all wire truth.
+  // 'prompt-join' / 'prompt-live' swap the footer for the one missing input
+  // (code and/or name) — label must be settled BEFORE connecting, because the
+  // socket is keyed on it (a label change mid-baton would drop the writer).
+  const relayUrl = process.env.NEXT_PUBLIC_RELAY_URL ?? null;
+  const [relayIntent, setRelayIntent] = useState<
+    | { mode: 'off' }
+    | { mode: 'prompt-join'; code: string }
+    | { mode: 'prompt-live' }
+    | { mode: 'joined'; code: string; label: string }
+    | { mode: 'live'; code: string; label: string }
+  >({ mode: 'off' });
+  const [showQr, setShowQr] = useState(false);
+  // Rising-edge latch: go-live claims the baton ONCE per live intent; a later
+  // orphan re-claim is the user's deliberate strip tap, never automatic.
+  const goLiveClaimedRef = useRef(false);
+  // The room code is minted once per navigator lifetime (D3: rotates per show,
+  // not per go-live toggle) so a stray Exit/re-live doesn't strand scanned QRs.
+  const mintedCodeRef = useRef<string | null>(null);
+  const mintedCode = () => {
+    if (mintedCodeRef.current === null) mintedCodeRef.current = mintRoomCode();
+    return mintedCodeRef.current;
+  };
+
+  // A QR deep link auto-joins: stored label goes straight in; no label yet →
+  // the footer asks for the name first (code already known).
+  useEffect(() => {
+    if (!joinCode || relayUrl === null) return;
+    // Deferred setState (the repo's set-state-in-effect discipline).
+    let cancelled = false;
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setRelayIntent((prev) => {
+        if (prev.mode !== 'off') return prev; // never clobber an in-flight intent
+        const label = loadDeviceLabel();
+        return label
+          ? { mode: 'joined', code: joinCode, label }
+          : { mode: 'prompt-join', code: joinCode };
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [joinCode, relayUrl]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [calTool, setCalTool] = useState<'sections' | 'bars' | 'roadmap'>('sections');
   const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
@@ -2955,7 +3108,11 @@ function ChartNavigator({
   // the same shape as the self-drive's `currentStep`), so a live session simply
   // REPLACES barSeekIdx as the source below (one redline, one driver — §1). Per-song,
   // single-device, advance-by-tap; no relay, no clock (those are 3b / chunk 5).
-  const conductorEnabled = isOwner && conducting && barMode;
+  // 3b chunk 5: relayOn = a settled intent (label known, connecting/connected).
+  // A follower must run enabled=true too — mirroring needs the local session
+  // identity (localKey) even when this device never conducts.
+  const relayOn = relayIntent.mode === 'joined' || relayIntent.mode === 'live';
+  const conductorEnabled = (conducting || relayOn) && barMode;
   const conductor = useConductorSession({
     enabled: conductorEnabled,
     // Q1: stable per (chart-in-show) — changing it mints a fresh session.
@@ -2966,8 +3123,89 @@ function ChartNavigator({
     // its stated tempo; a legacy/inline song has none ⇒ null ⇒ manual rung (honest floor).
     // barBeats defaults inside the hook (4/4) until a meter source exists.
     bpm: song.bpm ?? null,
+    // 3b chunk 5: bind the room when the intent is settled. The config's FIELDS
+    // key the socket, so label/code changes only at intent transitions.
+    relay:
+      relayUrl !== null && relayOn
+        ? {
+            url: relayUrl,
+            room: roomNameFor(owner, slug),
+            code: relayIntent.code,
+            deviceLabel: relayIntent.label,
+          }
+        : null,
   });
-  const sessionDriving = conducting && conductor.active;
+  // A follower's redline is wire-driven even though `conducting` is false here.
+  const sessionDriving = (conducting || conductor.relay.role === 'follower') && conductor.active;
+
+  // 3b chunk 5: go-live claims the baton exactly once per live intent (rising
+  // edge). A LATER orphan is never auto-reclaimed — that's the strip's explicit
+  // "take the baton" tap (§4.2: silence over invention).
+  const relayCanClaim = conductor.relay.canClaim;
+  useEffect(() => {
+    if (relayIntent.mode !== 'live') {
+      goLiveClaimedRef.current = false;
+      return;
+    }
+    if (relayCanClaim && !goLiveClaimedRef.current) {
+      goLiveClaimedRef.current = true;
+      conductor.relay.requestClaim();
+    }
+  }, [relayIntent.mode, relayCanClaim, conductor.relay]);
+
+  // 3b chunk 5: switch-session navigation (doc §10-5). When the room announces
+  // a session for a DIFFERENT chart, a follower auto-opens it: song first (the
+  // currentIdx reset effect above then zeroes chart/page; the step recomputes
+  // on the new song and wins the same pass), then the chart within the
+  // role-filtered list. Filtered-out / not-in-setlist deliberately does NOT
+  // navigate — the chartMismatch strip is the honest outcome. The WHICH-step
+  // decision is render-derived; the effect only performs it (deferred setState).
+  const relayActiveSession = conductor.relay.activeSession;
+  const relayRole = conductor.relay.role;
+  let relaySwitchStep: { kind: 'song'; songIdx: number } | { kind: 'chart'; chartIdx: number } | null = null;
+  if (relayRole === 'follower' && relayActiveSession && relayActiveSession.songRef !== chartFileId) {
+    const hit = findChartForSongRef(setlist, relayActiveSession.songRef);
+    if (hit) {
+      if (hit.songIdx !== currentIdx) {
+        relaySwitchStep = { kind: 'song', songIdx: hit.songIdx };
+      } else {
+        const idx = charts.findIndex((c) => c.fileId === relayActiveSession.songRef);
+        if (idx !== -1 && idx !== activeChartIdx) relaySwitchStep = { kind: 'chart', chartIdx: idx };
+      }
+    }
+  }
+  useEffect(() => {
+    if (!relaySwitchStep) return;
+    let cancelled = false;
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      if (relaySwitchStep.kind === 'song') onChangeIdx(relaySwitchStep.songIdx);
+      else setActiveChartIdx(relaySwitchStep.chartIdx);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [relaySwitchStep, onChangeIdx]);
+
+  // 3b chunk 5: the two intent transitions the footer/cluster trigger.
+  // Go-live with a stored label connects immediately and shows the QR; without
+  // one it asks for the name first (label keys the socket — settle it first).
+  const goLive = () => {
+    const label = loadDeviceLabel();
+    if (!label) {
+      setRelayIntent({ mode: 'prompt-live' });
+      return;
+    }
+    setRelayIntent({ mode: 'live', code: mintedCode(), label });
+    setShowQr(true);
+  };
+  // Leaving is total: release the baton if we hold it, then drop the intent
+  // (the hook sees relay:null and closes the socket).
+  const leaveRoom = () => {
+    if (conductor.relay.role === 'writer') conductor.relay.releaseBaton();
+    setRelayIntent({ mode: 'off' });
+    setShowQr(false);
+  };
 
   // Effective (clamped) seek index: a stored index can fall out of range when the
   // traversal shrinks under it (a roadmap/bar edit, or leaving perform for
@@ -3611,12 +3849,41 @@ function ChartNavigator({
         </div>
       )}
 
-      {/* Perform bar transport — the self-drive seek, OR (when the MD takes the baton)
-          the Local MD conductor cluster in its place. Mutually exclusive (§1 / Q3). */}
-      {calMode === 'perform' && barMode && conducting && isOwner ? (() => {
+      {/* Perform bar transport — ONE bottom slot, honesty-first priority
+          (3b chunk 5, design-conductor-3b §10-5): prompt form (a missing input
+          blocks connecting) → conductor cluster (conducting, not a follower) →
+          follower strip (relay on, wire is the writer) → self-drive seek. */}
+      {calMode === 'perform' && barMode && (relayIntent.mode === 'prompt-join' || relayIntent.mode === 'prompt-live') ? (
+        <RelayPromptForm
+          key={relayIntent.mode} // join↔live never share half-typed state
+          kind={relayIntent.mode === 'prompt-join' ? 'join' : 'live'}
+          initialCode={relayIntent.mode === 'prompt-join' ? relayIntent.code : ''}
+          onSubmit={(code, label) => {
+            saveDeviceLabel(label);
+            if (relayIntent.mode === 'prompt-join') {
+              setRelayIntent({ mode: 'joined', code, label });
+            } else {
+              setRelayIntent({ mode: 'live', code: mintedCode(), label });
+              setShowQr(true);
+            }
+          }}
+          onCancel={() => setRelayIntent({ mode: 'off' })}
+        />
+      ) : calMode === 'perform' && barMode && conducting && conductor.relay.role !== 'follower' ? (() => {
         const armed = conductor.armed;
         const armedTarget = armed ? conductor.targets.find((t) => t.barId === armed.directive.barId) : null;
         const fireAtBar = armed ? (barCal?.bars ?? []).find((b) => b.id === armed.fireAt) : null;
+        // Header relay state (mockup P1/P5): live once the intent is settled —
+        // 'joined' counts too, because a follower who took the baton conducts
+        // under the code they joined with. null relayUrl hides the affordance.
+        const clusterRelay: ClusterRelayState | null =
+          relayUrl === null
+            ? null
+            : relayIntent.mode === 'live' || relayIntent.mode === 'joined'
+              ? conductor.relay.status === 'connecting'
+                ? { kind: 'connecting' }
+                : { kind: 'live', code: relayIntent.code, onShowQr: () => setShowQr(true) }
+              : { kind: 'available', onGoLive: goLive };
         return (
           <ConductorCluster
             active={conductor.active}
@@ -3654,7 +3921,45 @@ function ChartNavigator({
             onRedirect={conductor.redirect}
             onToggleAutoFire={() => conductor.setAutoFire(!conductor.autoFireOn)}
             onToggleClock={() => conductor.setClockOn(!conductor.clockOn)}
-            onStop={() => setConducting(false)}
+            relay={clusterRelay}
+            onStop={() => {
+              // Exit hands the room off cleanly: release the baton (followers get
+              // the honest waiting/lost strip) but STAY in the room as a follower.
+              if (conductor.relay.role === 'writer') conductor.relay.releaseBaton();
+              setConducting(false);
+            }}
+          />
+        );
+      })() : calMode === 'perform' && barMode && relayOn ? (() => {
+        // The follower strip (mockups P4/P5/P7). No transport here — with a
+        // relay bound and this device a follower, the wire is the ONE writer.
+        const rs = conductor.relay.activeSession;
+        const roomHit = rs ? findChartForSongRef(setlist, rs.songRef) : null;
+        return (
+          <RelayStrip
+            status={conductor.relay.status === 'connecting' ? 'connecting' : 'joined'}
+            conductorLost={conductor.relay.conductorLost}
+            conductorLabel={conductor.relay.conductorLabel}
+            canClaim={conductor.relay.canClaim}
+            waiting={rs === null}
+            chartMismatch={conductor.relay.chartMismatch}
+            songTitle={
+              conductor.relay.chartMismatch
+                ? roomHit
+                  ? setlist[roomHit.songIdx].title
+                  : null
+                : song?.title ?? null
+            }
+            readout={currentBar
+              ? { absNumber: currentBar.absNumber, passLabel: currentStep && currentStep.pass > 1 ? passOrdinal(currentStep.pass) : null }
+              : null}
+            onTakeBaton={() => {
+              // Claiming IS conducting: flip local intent so the cluster mounts
+              // the moment the relay grants (role writer ⇒ this branch yields).
+              setConducting(true);
+              conductor.relay.requestClaim();
+            }}
+            onLeave={leaveRoom}
           />
         );
       })() : calMode === 'perform' && barMode ? (
@@ -3688,9 +3993,17 @@ function ChartNavigator({
               clear
             </button>
           )}
-          {isOwner && (
-            <button onClick={() => setConducting(true)} className="text-amber-400 hover:text-amber-300 underline">
-              Conduct
+          {/* 3b chunk 5: owner gate dropped (locked Q2 — owner ≠ conductor; the
+              relay's single-writer arbitration is the only authority). */}
+          <button onClick={() => setConducting(true)} className="text-amber-400 hover:text-amber-300 underline">
+            Conduct
+          </button>
+          {relayUrl !== null && relayIntent.mode === 'off' && (
+            <button
+              onClick={() => setRelayIntent({ mode: 'prompt-join', code: '' })}
+              className="text-emerald-400 hover:text-emerald-300 underline"
+            >
+              Join
             </button>
           )}
         </div>
@@ -3704,6 +4017,16 @@ function ChartNavigator({
           onCalibrate={enterCalibrate}
         />
       ) : null}
+
+      {/* 3b chunk 5: the join QR (mockup P2) — shown on go-live and from the
+          cluster's room chip. Dismissable anywhere; never blocks conducting. */}
+      {showQr && (relayIntent.mode === 'live' || relayIntent.mode === 'joined') && (
+        <RelayQrOverlay
+          joinUrl={buildJoinUrl(window.location.origin, owner, slug, relayIntent.code)}
+          code={relayIntent.code}
+          onClose={() => setShowQr(false)}
+        />
+      )}
 
       {/* Perform seek status (a section is parked under the redline) */}
       {calMode === 'perform' && !barMode && seekId && overlayCalibration && (() => {
