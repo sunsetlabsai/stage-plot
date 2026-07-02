@@ -104,6 +104,65 @@ export function helloFrame(room: string, code: string, deviceLabel: string): Cli
   return { type: 'hello', room, code, deviceLabel };
 }
 
+// ── Wire boundary validation ──────────────────────────────────────────────────
+// The socket is a TRUST BOUNDARY: everything off it is `unknown`, and neither
+// side's reducer runtime-checks field shapes (they trust their input types).
+// `parseClientFrame` is the relay's door (Codex chunk-3 R1 HIGH: an admitted
+// client sending {type:'bogus'} or a fieldless known type must close 4002,
+// never crash the relay); the client binding mirrors this for RelayFrames in
+// chunk 4. Opaqueness preserved: `msg` bodies are never deep-validated (the
+// relay rebroadcasts verbatim; the chunk-3a reducer is the authority), and a
+// `snapshot` state is checked ONLY for the identity triple the relay itself
+// reads (its cache tag).
+
+function isSessionKeyShape(v: unknown): v is SessionKey {
+  if (typeof v !== 'object' || v === null) return false;
+  const k = v as Record<string, unknown>;
+  return (
+    typeof k.sessionId === 'string' &&
+    typeof k.songRef === 'string' &&
+    typeof k.programHash === 'string'
+  );
+}
+
+export function parseClientFrame(raw: unknown): ClientFrame | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const f = raw as Record<string, unknown>;
+  switch (f.type) {
+    case 'hello':
+      return typeof f.room === 'string' && f.room !== '' &&
+        typeof f.code === 'string' && f.code !== '' &&
+        typeof f.deviceLabel === 'string'
+        ? { type: 'hello', room: f.room, code: f.code, deviceLabel: f.deviceLabel }
+        : null;
+    case 'session':
+      return isSessionKeyShape(f.session) ? { type: 'session', session: f.session } : null;
+    case 'claim-request':
+      return { type: 'claim-request' };
+    case 'release-baton':
+      return { type: 'release-baton' };
+    case 'hb':
+      return { type: 'hb' };
+    case 'msg':
+      // Opaque to the relay — object-ness is the whole check (dumbness, doc §2).
+      return typeof f.msg === 'object' && f.msg !== null
+        ? { type: 'msg', msg: f.msg as ConductorMessage }
+        : null;
+    case 'snapshot-request':
+      return isSessionKeyShape(f.session) ? { type: 'snapshot-request', session: f.session } : null;
+    case 'snapshot': {
+      // The relay reads exactly the identity triple off the state (its cache
+      // tag, sessionKeyOf) — validate exactly that much, nothing deeper.
+      if (!isSessionKeyShape(f.state)) return null;
+      const state = f.state as unknown as ConductorState;
+      if (f.requestId === undefined) return { type: 'snapshot', state };
+      return typeof f.requestId === 'string' ? { type: 'snapshot', requestId: f.requestId, state } : null;
+    }
+    default:
+      return null;
+  }
+}
+
 // ── The client connection machine (pure) ─────────────────────────────────────
 
 // joining → follower ⇄ writer. "Demoted" is the writer→follower transition (the

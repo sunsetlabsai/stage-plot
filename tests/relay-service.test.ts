@@ -4,7 +4,14 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
 import { startRelay, type RelayHandle } from '../relay/server';
-import type { ClientFrame, RelayFrame, SessionKey } from '../lib/relay-protocol';
+import {
+  type ClientFrame,
+  type RelayFrame,
+  type SessionKey,
+  initClientConn,
+  reduceClientConn,
+  canOfferClaim,
+} from '../lib/relay-protocol';
 import type { ConductorState } from '../lib/conductor-state';
 
 // ── Chunk 3b-3: relay service integration (doc §10-3) ────────────────────────
@@ -149,15 +156,15 @@ describe('join (doc §3)', () => {
     expect(await c.closed).toBe(4001);
   });
 
-  it('a malformed hello (non-string / empty room or code) mints no room — bounced at the boundary', async () => {
+  it('a malformed hello (empty room / missing fields) mints no room — closed 4002 at the parse boundary', async () => {
     const h = await relay();
     const c = await Client.connect(h.port);
     c.send({ type: 'hello', room: '', code: 'XYZW', deviceLabel: 'dev' });
-    expect(await c.closed).toBe(4001);
+    expect(await c.closed).toBe(4002);
     // the empty name did not become a joinable room
     const probe = await Client.connect(h.port);
     probe.send({ type: 'hello', room: '', code: 'anything', deviceLabel: 'dev' } as ClientFrame);
-    expect(await probe.closed).toBe(4001);
+    expect(await probe.closed).toBe(4002);
   });
 
   it('non-JSON and shapeless payloads close 4002 (not our client)', async () => {
@@ -168,6 +175,32 @@ describe('join (doc §3)', () => {
     const c2 = await Client.connect(h.port);
     c2.send({ notype: true } as unknown as ClientFrame);
     expect(await c2.closed).toBe(4002);
+  });
+
+  it('an ADMITTED client sending an unknown type or a fieldless known type closes 4002 and cannot crash the relay (Codex R1 HIGH)', async () => {
+    const h = await relay();
+    const { md } = await writerFor(h.port);
+    // unknown type
+    const a = await join(h.port);
+    a.send({ type: 'bogus' } as unknown as ClientFrame);
+    expect(await a.closed).toBe(4002);
+    // known types missing their required fields — each previously a crash path
+    for (const bad of [
+      { type: 'session' },                                  // sessionKeyEquals(undefined) deref
+      { type: 'snapshot-request' },
+      { type: 'msg' },
+      { type: 'snapshot' },                                 // sessionKeyOf(undefined) deref
+      { type: 'session', session: { sessionId: 1 } },       // non-string key field
+      { type: 'snapshot', state: fakeState(KEY_A), requestId: 7 }, // non-string requestId
+    ]) {
+      const c = await Client.connect(h.port);
+      c.send(bad as unknown as ClientFrame);
+      expect(await c.closed).toBe(4002);
+    }
+    // the relay survived it all: the room still works end to end
+    const f = await join(h.port);
+    md.send({ type: 'msg', msg: fakeMsg(KEY_A) as never });
+    expect(await f.next()).toEqual({ type: 'msg', msg: fakeMsg(KEY_A) });
   });
 
   it('late joiner gets the live activeSession + hasWriter in joined (HIGH-1)', async () => {
@@ -191,17 +224,41 @@ describe('claim (doc §4.1)', () => {
     expect(await b.next()).toEqual({ type: 'claim-denied', epoch: 1 });
   });
 
-  it('release-baton frees the baton with NO conductor-lost (deliberate handoff, §4.1-5); next claim = epoch+1', async () => {
+  it('release-baton = INSTANT orphan (§4.1-5): conductor-lost to all (incl. the releaser); next claim = epoch+1, no wait', async () => {
     const h = await relay();
     const { md } = await writerFor(h.port);
     const b = await join(h.port); // joins after the announce — activeSession came in `joined`
     md.send({ type: 'release-baton' });
-    // release has no ack — prove it landed before racing the claim in from
-    // another socket: the ex-writer's next msg bounces not-writer.
-    md.send({ type: 'msg', msg: fakeMsg(KEY_A) as never });
-    expect((await md.next()).type).toBe('not-writer');
+    expect(await b.next()).toEqual({ type: 'conductor-lost' }); // followers' hasWriter clears → claim affordance opens
+    expect(await md.next()).toEqual({ type: 'conductor-lost' }); // ex-writer's machine fails safe (already demoted locally)
     b.send({ type: 'claim-request' });
-    expect(await b.next()).toEqual({ type: 'claim-grant', epoch: 2 }); // and no conductor-lost arrived first
+    expect(await b.next()).toEqual({ type: 'claim-grant', epoch: 2 });
+  });
+
+  it('deliberate handoff is reachable THROUGH the client machine (Codex R1 HIGH-2): release → conductor-lost → canOfferClaim → grant', async () => {
+    const h = await relay();
+    const { md } = await writerFor(h.port);
+    const f = await join(h.port);
+    // Drive the REAL chunk-1 machine with the wire frames this follower saw.
+    let conn = initClientConn();
+    conn = reduceClientConn(conn, {
+      kind: 'frame',
+      frame: { type: 'joined', epoch: 1, hasWriter: true, activeSession: KEY_A },
+    }).conn;
+    expect(canOfferClaim(conn)).toBe(false); // a writer exists — affordance closed
+    md.send({ type: 'release-baton' });
+    const lost = await f.next();
+    conn = reduceClientConn(conn, { kind: 'frame', frame: lost }).conn;
+    expect(canOfferClaim(conn)).toBe(true); // THE fix: the broadcast opens it
+    // the user taps "Take the baton" — send exactly what the machine says to send
+    const claim = reduceClientConn(conn, { kind: 'request-claim' });
+    const send = claim.effects.find((e) => e.kind === 'send');
+    expect(send).toBeDefined();
+    f.send((send as { frame: ClientFrame }).frame);
+    const grant = await f.next();
+    expect(grant).toEqual({ type: 'claim-grant', epoch: 2 });
+    conn = reduceClientConn(claim.conn, { kind: 'frame', frame: grant }).conn;
+    expect(conn.phase).toBe('writer'); // handoff complete, end to end
   });
 });
 

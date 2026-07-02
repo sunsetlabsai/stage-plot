@@ -3,7 +3,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { type RelayEffect, type RelayInput, HB_MS, HB_MISS, initRelayState, reduceRelay } from './relay-core';
-import type { ClientFrame } from '../lib/relay-protocol';
+import { parseClientFrame } from '../lib/relay-protocol';
 
 // ── Conductor authority, chunk 3b-3: the relay service (the impure binding) ──
 //
@@ -88,16 +88,18 @@ export function startRelay(opts: RelayOptions): Promise<RelayHandle> {
     const conn = String(nextConnId++);
     sockets.set(conn, ws);
     ws.on('message', (data) => {
-      let frame: ClientFrame;
+      let raw: unknown;
       try {
-        frame = JSON.parse(String(data)) as ClientFrame;
+        raw = JSON.parse(String(data));
       } catch {
         ws.close(4002, 'bad frame'); // not JSON — not our client
         return;
       }
-      // Boundary shape check (external input): everything else is validated by
-      // the pure core per frame type.
-      if (typeof frame !== 'object' || frame === null || typeof frame.type !== 'string') {
+      // The socket is the trust boundary: full per-type shape validation BEFORE
+      // the reducer (Codex chunk-3 HIGH — unknown types and fieldless known
+      // types must close, never crash). The pure core trusts its input types.
+      const frame = parseClientFrame(raw);
+      if (frame === null) {
         ws.close(4002, 'bad frame');
         return;
       }

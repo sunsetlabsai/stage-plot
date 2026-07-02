@@ -167,12 +167,15 @@ function reduceFrame(state: RelayState, conn: string, frame: ClientFrame, now: n
     }
 
     case 'release-baton': {
-      // Deliberate handoff (§4.1 step 5): the baton goes free with no orphan
-      // wait and no conductor-lost (nothing died). Pending requests forwarded
-      // to the departing writer are answered like an orphan's (never hang).
+      // Deliberate handoff (§4.1 step 5) = an INSTANT orphan (Codex chunk-3
+      // HIGH-2): without the conductor-lost broadcast no follower's hasWriter
+      // ever clears, the claim affordance (follower && !hasWriter) never opens,
+      // and the released baton is unreachable through the client machine — a
+      // permanently headless room. "No orphan wait" still holds: the baton is
+      // free NOW (no lease lapse), the first claim wins immediately. And the
+      // honesty frame is honest — no one is conducting.
       if (room.writerConn !== conn) return { state, effects: [] };
-      room.writerConn = null;
-      return { state, effects: drainPending(room, room.snapshotCache) };
+      return { state, effects: orphan(room) };
     }
 
     case 'msg': {
@@ -239,9 +242,10 @@ function hello(
   // client machine never re-hellos a live socket (reconnect = new socket), so
   // this is protocol misuse → bounce, fail safe.
   if (state.conns.has(conn)) return { state, effects: [{ kind: 'bounce', conn }] };
-  // Boundary validation: this is external input off the LAN. A malformed hello
-  // must not mint junk registry rows (room keyed by `undefined`, etc).
-  if (typeof frame.room !== 'string' || frame.room === '' || typeof frame.code !== 'string' || frame.code === '') {
+  // Defense in depth: `parseClientFrame` (server.ts) is the trust boundary;
+  // this keeps the pure layer junk-proof for direct callers too (no registry
+  // row keyed by an empty room).
+  if (frame.room === '' || frame.code === '') {
     return { state, effects: [{ kind: 'bounce', conn }] };
   }
   const existing = state.rooms.get(frame.room);
