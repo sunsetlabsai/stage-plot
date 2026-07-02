@@ -48,8 +48,12 @@ function run(inputs: Parameters<typeof reduceClientConn>[1][], from: ClientConn 
   return { conn, effects };
 }
 
-const joined = (activeSession: SessionKey | null, hasWriter = activeSession !== null) =>
-  ({ kind: 'frame', frame: { type: 'joined', epoch: 1, hasWriter, activeSession } }) as const;
+const joined = (
+  activeSession: SessionKey | null,
+  hasWriter = activeSession !== null,
+  writerLabel: string | null = null,
+) =>
+  ({ kind: 'frame', frame: { type: 'joined', epoch: 1, hasWriter, activeSession, writerLabel } }) as const;
 
 describe('sessionKeyEquals — identity is the FULL triple', () => {
   it('matches only when every field matches', () => {
@@ -302,6 +306,46 @@ describe('claim lifecycle (§4.1–§4.3)', () => {
   });
 });
 
+describe('writer attribution — "X is conducting" (§4.3, chunk 5)', () => {
+  it('joined carries the live writer\'s label for a late joiner', () => {
+    const { conn } = run([joined(KEY_A, true, 'Rachel')]);
+    expect(conn.writerLabel).toBe('Rachel');
+  });
+
+  it('the relay-authored writer frame records who took the baton (and that a writer is live)', () => {
+    const { conn, effects } = run([
+      joined(null, false),
+      { kind: 'frame', frame: { type: 'writer', label: 'Marcus' } },
+    ]);
+    expect(conn.writerLabel).toBe('Marcus');
+    expect(conn.hasWriter).toBe(true);
+    expect(conn.conductorLost).toBe(false);
+    expect(effects).toEqual([]); // honesty UI only — no routing consequence
+    expect(canOfferClaim(conn)).toBe(false);
+  });
+
+  it('conductor-lost clears the label with the baton', () => {
+    const { conn } = run([
+      joined(KEY_A, true, 'Rachel'),
+      { kind: 'frame', frame: { type: 'conductor-lost' } },
+    ]);
+    expect(conn.writerLabel).toBeNull();
+    expect(conn.conductorLost).toBe(true);
+  });
+
+  it('claim-grant nulls the label — the writer is US, the label is for followers', () => {
+    const { conn } = run([
+      joined(null, false),
+      { kind: 'frame', frame: { type: 'writer', label: 'Rachel' } },
+      { kind: 'frame', frame: { type: 'conductor-lost' } },
+      { kind: 'request-claim' },
+      { kind: 'frame', frame: { type: 'claim-grant', epoch: 2 } },
+    ]);
+    expect(conn.phase).toBe('writer');
+    expect(conn.writerLabel).toBeNull();
+  });
+});
+
 describe('writer duties and echoes', () => {
   const writer = () =>
     run([
@@ -489,8 +533,9 @@ describe('parseClientFrame', () => {
 // (doc §8/D5) — deep shape is NOT checked here by design.
 describe('parseRelayFrame', () => {
   it.each([
-    ['joined (live session)', { type: 'joined', epoch: 2, hasWriter: true, activeSession: KEY_A }],
-    ['joined (empty room)', { type: 'joined', epoch: 0, hasWriter: false, activeSession: null }],
+    ['joined (live session)', { type: 'joined', epoch: 2, hasWriter: true, activeSession: KEY_A, writerLabel: 'Rachel' }],
+    ['joined (empty room)', { type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null }],
+    ['writer attribution', { type: 'writer', label: 'Rachel' }],
     ['session', { type: 'session', session: KEY_A }],
     ['claim-grant', { type: 'claim-grant', epoch: 3 }],
     ['claim-denied', { type: 'claim-denied', epoch: 3 }],
@@ -511,10 +556,13 @@ describe('parseRelayFrame', () => {
     ['null', null],
     ['no type', { epoch: 1 }],
     ['unknown type', { type: 'bogus' }],
-    ['joined missing epoch', { type: 'joined', hasWriter: true, activeSession: null }],
-    ['joined missing hasWriter', { type: 'joined', epoch: 1, activeSession: null }],
-    ['joined activeSession undefined (must be null or a key)', { type: 'joined', epoch: 1, hasWriter: false }],
-    ['joined partial activeSession', { type: 'joined', epoch: 1, hasWriter: true, activeSession: { sessionId: 's' } }],
+    ['joined missing epoch', { type: 'joined', hasWriter: true, activeSession: null, writerLabel: null }],
+    ['joined missing hasWriter', { type: 'joined', epoch: 1, activeSession: null, writerLabel: null }],
+    ['joined activeSession undefined (must be null or a key)', { type: 'joined', epoch: 1, hasWriter: false, writerLabel: null }],
+    ['joined partial activeSession', { type: 'joined', epoch: 1, hasWriter: true, activeSession: { sessionId: 's' }, writerLabel: null }],
+    ['joined writerLabel undefined (must be null or a string)', { type: 'joined', epoch: 1, hasWriter: false, activeSession: null }],
+    ['writer without label', { type: 'writer' }],
+    ['writer non-string label', { type: 'writer', label: 7 }],
     ['session without key', { type: 'session' }],
     ['claim-grant non-numeric epoch', { type: 'claim-grant', epoch: '3' }],
     ['claim-denied missing epoch', { type: 'claim-denied' }],

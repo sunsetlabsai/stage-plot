@@ -86,14 +86,19 @@ export type RelayFrame =
       epoch: number;
       hasWriter: boolean;
       activeSession: SessionKey | null;                 // null = none announced yet (doc §4)
-      // NB: no `writer` field — writer is a CONNECTION (doc §2), and `joined` only
-      // ever answers a fresh `hello` on a NEW connection, which by definition is
-      // not writerConn. A device that was the writer re-earns the baton by claim.
+      // Late-joiner attribution (§4.3, chunk 5): the live writer's deviceLabel,
+      // from the relay's OWN member registry (never a payload — dumbness holds).
+      // NB: still no writer *identity* field — writer is a CONNECTION (doc §2),
+      // and `joined` only ever answers a fresh `hello` on a NEW connection,
+      // which by definition is not writerConn. A device that was the writer
+      // re-earns the baton by claim. The label is honesty UI, not authority.
+      writerLabel: string | null;
     }
   | { type: 'session'; session: SessionKey }            // switch: change chart, pull snapshot
   | { type: 'claim-grant'; epoch: number }              // you are the writer; mint via acceptBaton
   | { type: 'claim-denied'; epoch: number }             // someone else holds/won it
   | { type: 'msg'; msg: ConductorMessage }              // fan-out delivery
+  | { type: 'writer'; label: string }                   // relay-authored on grant: "X is conducting" (§4.3)
   | { type: 'not-writer'; epoch: number; activeSession: SessionKey | null } // demote + resync
   | { type: 'snapshot-needed'; session: SessionKey; requestId: string }     // relay→writer
   | { type: 'snapshot'; state: ConductorState; stale: boolean }             // full-key-checked on adopt
@@ -214,12 +219,14 @@ export function parseRelayFrame(raw: unknown): RelayFrame | null {
     case 'joined':
       return typeof f.epoch === 'number' &&
         typeof f.hasWriter === 'boolean' &&
-        (f.activeSession === null || isSessionKeyShape(f.activeSession))
+        (f.activeSession === null || isSessionKeyShape(f.activeSession)) &&
+        (f.writerLabel === null || typeof f.writerLabel === 'string')
         ? {
             type: 'joined',
             epoch: f.epoch,
             hasWriter: f.hasWriter,
             activeSession: f.activeSession as SessionKey | null,
+            writerLabel: f.writerLabel as string | null,
           }
         : null;
     case 'session':
@@ -230,6 +237,8 @@ export function parseRelayFrame(raw: unknown): RelayFrame | null {
       return typeof f.epoch === 'number' ? { type: 'claim-denied', epoch: f.epoch } : null;
     case 'msg':
       return isConductorMessageShape(f.msg) ? { type: 'msg', msg: f.msg } : null;
+    case 'writer':
+      return typeof f.label === 'string' ? { type: 'writer', label: f.label } : null;
     case 'not-writer':
       return typeof f.epoch === 'number' &&
         (f.activeSession === null || isSessionKeyShape(f.activeSession))
@@ -264,6 +273,8 @@ export interface ClientConn {
   hasWriter: boolean;                 // someone holds the baton (honesty UI)
   conductorLost: boolean;             // orphan banner (doc §4.2); claim affordance
                                       // is derived: follower && !hasWriter
+  writerLabel: string | null;         // "X is conducting" (§4.3) — honesty UI only,
+                                      // never authority; null = unknown/none/it's us
   activeSession: SessionKey | null;   // the room's live session; null = waiting
   awaitingSnapshot: SessionKey | null; // the ONE outstanding pull (doc §5)
 }
@@ -274,6 +285,7 @@ export function initClientConn(): ClientConn {
     epoch: 0,
     hasWriter: false,
     conductorLost: false,
+    writerLabel: null,
     activeSession: null,
     awaitingSnapshot: null,
   };
@@ -364,6 +376,7 @@ function reduceFrame(conn: ClientConn, frame: RelayFrame): ClientReduction {
         epoch: frame.epoch,
         hasWriter: frame.hasWriter,
         conductorLost: false,
+        writerLabel: frame.writerLabel,
         activeSession: frame.activeSession,
         awaitingSnapshot: null,
       };
@@ -400,6 +413,7 @@ function reduceFrame(conn: ClientConn, frame: RelayFrame): ClientReduction {
           epoch: frame.epoch,
           hasWriter: true,
           conductorLost: false,
+          writerLabel: null, // the writer is US — the label is for followers' UI
           awaitingSnapshot: null,
         },
         effects: [{ kind: 'became-writer', epoch: frame.epoch }],
@@ -424,6 +438,14 @@ function reduceFrame(conn: ClientConn, frame: RelayFrame): ClientReduction {
         conn: { ...conn, hasWriter: true, conductorLost: false },
         effects: [{ kind: 'reduce-msg', msg: frame.msg }],
       };
+
+    // Relay-authored attribution (§4.3): someone took the baton — record who.
+    // Honesty UI only, no routing consequence. Receiving this while in phase
+    // 'writer' would mean the relay granted past us; the AUTHORITY heal for
+    // that is not-writer/conductor-lost (which the relay also sends on those
+    // paths) — this frame just keeps the name honest.
+    case 'writer':
+      return noop({ ...conn, hasWriter: true, conductorLost: false, writerLabel: frame.label });
 
     // The zombie-MD path (doc §4.2): we believed we were the writer; the relay
     // says no. Demote, adopt the relay's view of the live session, resync.
@@ -488,7 +510,8 @@ function reduceFrame(conn: ClientConn, frame: RelayFrame): ClientReduction {
     // ex-writer's own local state is the freshest in the room — it keeps
     // self-driving on it, and can take its own baton back (epoch+1) in one tap.
     case 'conductor-lost': {
-      const flagged: ClientConn = { ...conn, hasWriter: false, conductorLost: true };
+      // No one is conducting — the label clears with the baton (§4.2 honesty).
+      const flagged: ClientConn = { ...conn, hasWriter: false, conductorLost: true, writerLabel: null };
       if (conn.phase !== 'writer') return noop(flagged);
       return {
         conn: { ...flagged, phase: 'follower' },

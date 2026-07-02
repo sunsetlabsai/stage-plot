@@ -128,7 +128,7 @@ describe('join (doc §3)', () => {
     const h = await relay();
     const c = await Client.connect(h.port);
     c.send(HELLO());
-    expect(await c.next()).toEqual({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null });
+    expect(await c.next()).toEqual({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null });
   });
 
   it('right code admits a second device; WRONG code is bounced at the door (close 4001)', async () => {
@@ -208,7 +208,9 @@ describe('join (doc §3)', () => {
     await writerFor(h.port);
     const late = await Client.connect(h.port);
     late.send(HELLO());
-    expect(await late.next()).toEqual({ type: 'joined', epoch: 1, hasWriter: true, activeSession: KEY_A });
+    // §4.3: the late joiner learns WHO is conducting from the relay's own
+    // member registry — 'dev' is the writer's hello deviceLabel.
+    expect(await late.next()).toEqual({ type: 'joined', epoch: 1, hasWriter: true, activeSession: KEY_A, writerLabel: 'dev' });
   });
 });
 
@@ -220,6 +222,8 @@ describe('claim (doc §4.1)', () => {
     const b = await join(h.port);
     a.send({ type: 'claim-request' });
     expect(await a.next()).toEqual({ type: 'claim-grant', epoch: 1 });
+    // §4.3: the grant is announced to everyone EXCEPT the grantee.
+    expect(await b.next()).toEqual({ type: 'writer', label: 'dev' });
     b.send({ type: 'claim-request' });
     expect(await b.next()).toEqual({ type: 'claim-denied', epoch: 1 });
   });
@@ -243,7 +247,7 @@ describe('claim (doc §4.1)', () => {
     let conn = initClientConn();
     conn = reduceClientConn(conn, {
       kind: 'frame',
-      frame: { type: 'joined', epoch: 1, hasWriter: true, activeSession: KEY_A },
+      frame: { type: 'joined', epoch: 1, hasWriter: true, activeSession: KEY_A, writerLabel: 'md' },
     }).conn;
     expect(canOfferClaim(conn)).toBe(false); // a writer exists — affordance closed
     md.send({ type: 'release-baton' });
@@ -399,7 +403,7 @@ describe('failover (doc §4.2)', () => {
     late.send(HELLO());
     // §7 "Join during orphan": no writer, but the session identity survives the
     // orphan (only a reboot resets it) — the joiner can still pull the stale cache.
-    expect(await late.next()).toEqual({ type: 'joined', epoch: 1, hasWriter: false, activeSession: KEY_A });
+    expect(await late.next()).toEqual({ type: 'joined', epoch: 1, hasWriter: false, activeSession: KEY_A, writerLabel: null });
   });
 
   it('lease lapse (no hb) orphans the baton; hb traffic keeps it alive', async () => {
@@ -437,7 +441,7 @@ describe('reboot-readmit (journal)', () => {
     // epoch preserved, hasWriter false, activeSession null (Codex R2 MED-1)
     const c = await Client.connect(h2.port);
     c.send(HELLO('gig', 'XYZW'));
-    expect(await c.next()).toEqual({ type: 'joined', epoch: 1, hasWriter: false, activeSession: null });
+    expect(await c.next()).toEqual({ type: 'joined', epoch: 1, hasWriter: false, activeSession: null, writerLabel: null });
     // the cache did not survive (deliberately not journaled)
     c.send({ type: 'snapshot-request', session: KEY_A });
     expect(await c.next()).toEqual({ type: 'snapshot-none', session: KEY_A });

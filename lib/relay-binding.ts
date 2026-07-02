@@ -94,6 +94,7 @@ export interface RelayFacts {
   phase: ClientConn['phase'];
   canClaim: boolean; // follower && !hasWriter && a chart is loaded to conduct
   conductorLost: boolean; // orphan banner
+  conductorLabel: string | null; // "X is conducting" (§4.3); null = unknown/none/us
   activeSession: SessionKey | null;
   // The room is running a session this device can't mirror: no chart loaded, a
   // different chart, or the same chart compiled to a different programHash
@@ -106,6 +107,7 @@ export function relayFacts(b: RelayBinding): RelayFacts {
     phase: b.conn.phase,
     canClaim: canOfferClaim(b.conn) && b.localKey !== null,
     conductorLost: b.conn.conductorLost,
+    conductorLabel: b.conn.writerLabel,
     activeSession: b.conn.activeSession,
     chartMismatch:
       b.conn.activeSession !== null && !sessionKeyEquals(b.conn.activeSession, b.localKey),

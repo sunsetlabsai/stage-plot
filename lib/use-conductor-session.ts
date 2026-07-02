@@ -145,6 +145,7 @@ export interface RelaySurface {
   role: 'local' | 'writer' | 'follower'; // follower = the wire owns this session's motion
   canClaim: boolean; // "Take the baton" affordance (follower && !hasWriter && chart ready)
   conductorLost: boolean; // orphan banner
+  conductorLabel: string | null; // "X is conducting" attribution (§4.3); null = unknown/none/us
   activeSession: SessionKey | null; // what the room is running (page switches charts on it)
   chartMismatch: boolean; // room session ≠ this device's chart — honesty banner, no mirror
   requestClaim: () => void;
@@ -397,6 +398,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     a.phase === b.phase &&
     a.canClaim === b.canClaim &&
     a.conductorLost === b.conductorLost &&
+    a.conductorLabel === b.conductorLabel &&
     a.chartMismatch === b.chartMismatch &&
     a.activeSession === b.activeSession; // conn holds the same reference between moves
 
@@ -963,6 +965,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
           role: relayFactsState.phase === 'writer' ? 'writer' : 'follower',
           canClaim: relayFactsState.canClaim,
           conductorLost: relayFactsState.conductorLost,
+          conductorLabel: relayFactsState.conductorLabel,
           activeSession: relayFactsState.activeSession,
           chartMismatch: relayFactsState.chartMismatch,
           requestClaim: () => feedRef.current({ kind: 'request-claim' }),
@@ -973,6 +976,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
           role: 'local',
           canClaim: false,
           conductorLost: false,
+          conductorLabel: null,
           activeSession: null,
           chartMismatch: false,
           requestClaim: () => {},

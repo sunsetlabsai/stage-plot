@@ -866,7 +866,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     ]);
 
     // Admitted to an empty room: joined + claimable (the chart is loaded).
-    act(() => sock.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    act(() => sock.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null }));
     expect(result.current.relay.status).toBe('joined');
     expect(result.current.relay.role).toBe('follower');
     expect(result.current.relay.canClaim).toBe(true);
@@ -908,7 +908,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
 
     // Join a room where that session is live → the binding pulls it.
     act(() => sock.open());
-    act(() => sock.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key }));
+    act(() => sock.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key, writerLabel: 'MD' }));
     expect(result.current.relay.role).toBe('follower');
     expect(result.current.relay.chartMismatch).toBe(false); // same chart → same hash
     expect(sock.frames().at(-1)).toEqual({ type: 'snapshot-request', session: key });
@@ -946,7 +946,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     expect(result.current.active).toBe(true);
     const first = h.sock();
     act(() => first.open());
-    act(() => first.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    act(() => first.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null }));
     expect(result.current.relay.status).toBe('joined');
 
     // Drop: back to connecting, and a NEW socket dials after the backoff.
@@ -963,7 +963,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     ]);
     // The localKey survived the reconnect: joining a room running OUR chart is
     // claimable/mirrorable immediately (no re-hash needed).
-    act(() => second.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    act(() => second.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null }));
     expect(result.current.relay.canClaim).toBe(true);
   });
 
@@ -983,7 +983,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     md = dispatch(md, { kind: 'advance' }, 20).session; // → b2, seq 2
     const key = { sessionId: md.state.sessionId, songRef: md.state.songRef, programHash: md.state.programHash };
     act(() => first.open());
-    act(() => first.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key }));
+    act(() => first.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key, writerLabel: 'MD' }));
     act(() => first.push({ type: 'snapshot', state: md.state, stale: false }));
     expect(result.current.current?.barId).toBe('b2');
 
@@ -1003,7 +1003,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     });
     const second = h.sock();
     act(() => second.open());
-    act(() => second.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key }));
+    act(() => second.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key, writerLabel: 'MD' }));
     act(() => second.push({ type: 'snapshot', state: md.state, stale: false }));
     expect(result.current.current?.barId).toBe('b2'); // crushed onto the writer
     expect(result.current.state?.seq).toBe(2);
@@ -1022,7 +1022,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     );
     await waitFor(() => expect(result.current.active).toBe(true));
     act(() => h.sock().open());
-    act(() => h.sock().push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    act(() => h.sock().push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null }));
     expect(result.current.relay.canClaim).toBe(true);
 
     // Toggle the relay OFF (identity unchanged ⇒ local-ready never re-fires)...
@@ -1033,7 +1033,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     rerender(args({ relay: h.relay }));
     expect(h.sockets).toHaveLength(2);
     act(() => h.sock().open());
-    act(() => h.sock().push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    act(() => h.sock().push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null }));
     expect(result.current.relay.canClaim).toBe(true);
   });
 
