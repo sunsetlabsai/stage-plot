@@ -70,6 +70,25 @@ service worker caches the app + charts. This was always required and still is.
 
 There is no step where anyone touches a terminal, a router admin page, or a certificate.
 
+### On-ramps: how the band gets internet at the venue (any of these, per gig)
+
+All three hit the same cloud relay; mix and match per venue, nothing about the design
+changes. The invariant: **every device that wants to mirror holds a path to the relay for
+as long as it wants to mirror** (a drop = self-drive until rejoin, correct-never-wrong).
+
+| On-ramp | Band carries | Config at the venue |
+|---|---|---|
+| Venue Wi-Fi | nothing | everyone joins venue Wi-Fi (passwords / captive portals, per venue) |
+| Phone hotspot | nothing | everyone joins one member's hotspot; its single LTE link carries the room (tiny frames — one bar of signal suffices) |
+| **Band AP with backhaul** (travel router on venue ethernet, or tethered to a phone) | a travel router | **none** — devices auto-join the familiar SSID they've joined before; router tethers or plugs in |
+
+The third row redeems the original premise honestly: "nothing but an existing Wi-Fi AP"
+IS the workflow — provided the AP can reach the internet. It needs zero special
+configuration (no DNS override, no static lease, no relay box) because all of that
+apparatus existed only to fake `relay.showrunr.ai` inside a disconnected bubble; with real
+backhaul, the real name answers. Only the AP that CANNOT reach the internet ever required
+carrying a server, and that case is now officially the self-drive floor (§8 Q5).
+
 **Degrade ladder (all shipped behavior, unchanged):** device loses signal → it self-drives,
 rejoins + snapshot-pulls when signal returns. Relay unreachable for everyone → whole room
 self-drives (same floor as "relay box died" in the shipped failure matrix). MD's device
@@ -224,3 +243,11 @@ Consequences, pinned:
 5. **The dead-venue story:** officially "self-drive floor, no togetherness." If real
    demand emerges: native app (true P2P) — NOT a hardware kit. Recorded so the Pi never
    comes back.
+6. **Mid-show backhaul loss (v2 candidate, discussed with Graham 2026-07-02):** the cloud
+   star requires continuous backhaul from every mirroring device. A WebRTC-data-channel
+   hybrid — cloud relay does signaling at soundcheck, deltas then flow peer-to-peer over
+   the local network — could survive backhaul dying mid-show (established local ICE pairs
+   outlive the internet). The 3b rejection of WebRTC ("signaling needs a channel first")
+   dissolves once a cloud relay exists to sign through. Real cost: mesh complexity, NAT
+   variance, and the baton arbiter needs a home. Deliberately NOT v1; recorded so the
+   strongest objection to the star has a named answer.
