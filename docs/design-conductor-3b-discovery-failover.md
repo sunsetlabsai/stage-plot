@@ -147,6 +147,14 @@ provides — and on a few things the band prepares.
   our own AP (§1a already gives us a stable name), and can't carry the room code.
 - **D3. Room codes rotate per show** (generated at room-create, shown beside the QR). Stale
   QR screenshots from last week don't admit.
+- **Room create = the FIRST `hello`** (pinned at chunk 3): there is no separate create
+  frame — the opening device generates the slug + code app-side, and its `hello` for an
+  unknown room creates it (epoch 0, journaled) with that code as the door. Later `hello`s
+  must match the journaled code. A typo'd room name at join therefore creates a phantom
+  room rather than bouncing — benign on a band-owned relay (rooms are keyed; the code
+  still guards the real one), and it keeps the relay one-frame dumb. One `hello` per
+  connection: a re-`hello` on an admitted connection is bounced (a second admit would
+  double-enroll the connection across rooms — a fan-out leak).
 
 ## 4. The claim protocol (baton lifecycle)
 
@@ -183,7 +191,14 @@ session to request a snapshot for.
    frame (§4.4), never by a claim. The client binding (build chunk 4) gates the claim UI
    and snapshot adoption on matching `activeSession` metadata.
 5. A **deliberate handoff** ("you conduct the next set") is the same flow with the old MD
-   releasing first (`release-baton`), so the grant needs no orphan wait.
+   releasing first (`release-baton`). **The relay treats a release as an INSTANT orphan**
+   (Codex chunk-3 HIGH-2): baton freed, `conductor-lost` broadcast, pending requests
+   drained — without the broadcast no follower's `hasWriter` ever clears, so the claim
+   affordance (`follower && !hasWriter`) never opens and the released baton is unreachable
+   through the client machine (a permanently headless room — release has no lease to
+   lapse). "No orphan wait" still holds: the baton is free immediately and the first
+   claim wins; and the honesty frame is honest — no one is conducting until the next
+   grant.
 
 ### 4.2 MD death (the failover)
 - **Detection = lease.** The writer connection heartbeats (app-level `hb` frame every
@@ -285,7 +300,8 @@ Client↔relay frames (JSON over one `wss://` socket). The `msg` frame body is t
 → claim-request    {}
 ← claim-grant      { epoch }                              // you are the writer; mint via acceptBaton
 ← claim-denied     { epoch }                              // someone else holds/won it
-→ release-baton    {}                                     // deliberate handoff
+→ release-baton    {}                                     // deliberate handoff — relay treats
+                                                          //  as instant orphan (conductor-lost)
 → msg              { msg: ConductorMessage }              // writer only; fans out to the room
 ← msg              { msg: ConductorMessage }              // fan-out delivery
 ← not-writer       { epoch, activeSession }               // your msg bounced; demote + resync
@@ -311,8 +327,13 @@ free/orphaned baton; (4) the **room registry is journaled to disk as
 not reissue epoch N), and the roomCode must survive the same reboot or the failure matrix's
 "same QR readmits" promise is false (Codex R1 HIGH-3: journaling epoch alone would bounce
 every rejoining `hello` at the code check). The snapshot cache is deliberately NOT
-journaled — ephemeral, honest-stale at best. Only `msg` and `session` fan out; every other
-frame is point-to-point routing per the table above.
+journaled — ephemeral, honest-stale at best. Only `msg`, `session`, and `conductor-lost`
+fan out; every other frame is point-to-point routing per the table above. (5) **The socket
+is a trust boundary**: every inbound frame is shape-validated per type BEFORE the reducer
+(`parseClientFrame`, chunk-3 HIGH — unknown types and fieldless known types close 4002,
+never crash); validation stays as dumb as the relay — `msg` bodies are never deep-parsed,
+and a `snapshot` state is checked only for the identity triple the relay itself reads.
+The client binding mirrors this for relay frames (chunk 4).
 
 ## 7. Failure matrix (every row degrades to self-drive, never to wrong)
 

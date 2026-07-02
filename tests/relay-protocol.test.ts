@@ -6,6 +6,7 @@ import {
   type SessionKey,
   canOfferClaim,
   helloFrame,
+  parseClientFrame,
   initClientConn,
   reduceClientConn,
   sessionKeyEquals,
@@ -433,5 +434,49 @@ describe('failover (§4.2/§7)', () => {
     const { conn, effects } = run([joined(KEY_A)], initClientConn());
     expect(conn.phase).toBe('follower');
     expect(effects.at(-1)).toEqual({ kind: 'send', frame: { type: 'snapshot-request', session: KEY_A } });
+  });
+});
+
+// ── parseClientFrame: the wire trust boundary (chunk 3, Codex R1 HIGH) ────────
+describe('parseClientFrame', () => {
+  it.each([
+    ['hello', helloFrame('gig', 'XYZW', 'dev')],
+    ['session', { type: 'session', session: KEY_A }],
+    ['claim-request', { type: 'claim-request' }],
+    ['release-baton', { type: 'release-baton' }],
+    ['hb', { type: 'hb' }],
+    ['msg', { type: 'msg', msg: fakeMsg(KEY_A) }],
+    ['snapshot-request', { type: 'snapshot-request', session: KEY_A }],
+    ['snapshot (upload)', { type: 'snapshot', state: fakeState(KEY_A) }],
+    ['snapshot (reply)', { type: 'snapshot', requestId: '7', state: fakeState(KEY_A) }],
+  ])('accepts a well-formed %s frame', (_name, frame) => {
+    expect(parseClientFrame(JSON.parse(JSON.stringify(frame)))).toEqual(frame);
+  });
+
+  it.each([
+    ['not an object', 'hello'],
+    ['null', null],
+    ['no type', { room: 'gig' }],
+    ['unknown type', { type: 'bogus' }],
+    ['hello missing fields', { type: 'hello', room: 'gig' }],
+    ['hello empty room', { type: 'hello', room: '', code: 'XYZW', deviceLabel: 'd' }],
+    ['hello empty code', { type: 'hello', room: 'gig', code: '', deviceLabel: 'd' }],
+    ['session without key', { type: 'session' }],
+    ['session partial key', { type: 'session', session: { sessionId: 's' } }],
+    ['session non-string key field', { type: 'session', session: { ...KEY_A, programHash: 9 } }],
+    ['msg without body', { type: 'msg' }],
+    ['snapshot-request without key', { type: 'snapshot-request' }],
+    ['snapshot without state', { type: 'snapshot' }],
+    ['snapshot state missing identity triple', { type: 'snapshot', state: { seq: 1 } }],
+    ['snapshot non-string requestId', { type: 'snapshot', requestId: 7, state: fakeState(KEY_A) }],
+  ])('rejects %s → null (close 4002, never a reducer crash)', (_name, raw) => {
+    expect(parseClientFrame(raw)).toBeNull();
+  });
+
+  it('stays dumb: a msg body is NOT deep-validated (payload opaque to the relay, doc §2)', () => {
+    expect(parseClientFrame({ type: 'msg', msg: { anything: true } })).toEqual({
+      type: 'msg',
+      msg: { anything: true },
+    });
   });
 });
