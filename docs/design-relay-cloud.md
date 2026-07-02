@@ -10,7 +10,11 @@ global durable monotone grant counter** (S5) with **write-ahead-before-ack** jou
 policy (S2) — room records become droppable cache; plus tiered pre-admission payload caps
 (S3), `joined` extended-never-reshaped, `use-conductor-session` config/lifecycle as a
 first-class change surface, typed-code join scoped to the show page (global `/join`
-cut-eligible). Awaiting Codex R3 via Graham, then GO before any build.
+cut-eligible).
+**Codex R3 = GO-WITH-NITS (2 LOW, both doc-consistency, both folded).** R3 confirmed:
+cross-room epoch interleave safe under the shipped reducer; write-ahead-before-ack is the
+right durability point — **build note: "flushed durable" must be real (fsync), not just
+writeFileSync + rename.** Awaiting Graham's GO before any build.
 **Date:** 2026-07-02
 **Branch:** `opus/design-relay-cloud`
 **Parent:** `design-conductor-authority.md` (epic), `design-conductor-3b-discovery-failover.md`
@@ -241,8 +245,8 @@ all three:
 
 - **`hello` gains `intent: 'create' | 'join'`.**
 - **Create:** no room field sent. The relay mints an unused 6-char code (S1 alphabet) —
-  it holds the registry, so "unused" is a lookup, not a probability — seeds the time-floor
-  epoch (S5), journals, and replies `joined { room, created: true, epoch, hasWriter:
+  it holds the registry, so "unused" is a lookup, not a probability — seeds the room's
+  epoch from the global grant counter (S5), journals write-ahead, and replies `joined { room, created: true, epoch, hasWriter:
   false, activeSession: null }`. The QR renders from the response. **Collisions cannot
   occur, so no collision path exists to get wrong.**
 - **Join:** `room` (the code) required; unknown room → bounced with `no-room`. **A typo'd
@@ -359,8 +363,9 @@ never see room identity.
    either satisfies the four requirements.
 2. **Rate-limit + GC constants:** defaults in chunk 1 code review (hello: 10/min/IP burst
    20; creates: 3/min/IP burst 5; frames: 30/s/conn; conns: 20/IP; room cap: 500;
-   unclaimed GC: 15min; abandoned GC: 24h; journal debounce: 1s). Tune at UAT, not worth
-   debating now.
+   unclaimed GC: 15min; abandoned GC: 24h; **GC-compaction coalesce: 1s — compaction
+   ONLY; authority-bearing create/grant writes are NEVER debounced**, per S2's
+   write-ahead-before-ack rule). Tune at UAT, not worth debating now.
 3. **Room-code length:** 6 (S1). Could go 5 if typing feels heavy at UAT; not below.
 4. **Multi-region later?** v1 = single region nearest home turf. A band tour crossing
    oceans adds ~150ms — still fine at bar grain. Revisit only with real demand.
