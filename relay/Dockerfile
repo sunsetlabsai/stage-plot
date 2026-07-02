@@ -9,8 +9,10 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 # Only the two build-time packages — NOT the app's full dependency tree.
-# ws is pinned to the app's package.json range so client/server stay in step.
-RUN npm install --no-save ws@^8.21.0 esbuild@^0.25.0
+# EXACT versions, matching package-lock.json (Codex chunk-3 MED-1: a range
+# here would let a redeploy of the same commit silently bundle a different
+# ws/esbuild than the one reviewed). Bump these WITH the lockfile.
+RUN npm install --no-save --save-exact ws@8.21.0 esbuild@0.28.1
 COPY lib ./lib
 COPY relay ./relay
 # bufferutil/utf-8-validate are ws's OPTIONAL native accelerators, loaded in a

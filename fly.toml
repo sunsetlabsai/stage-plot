@@ -15,6 +15,12 @@
 #   fly certs add relay.showrunr.ai        # then CNAME relay → showrunr-relay.fly.dev
 # Every update after that: fly deploy
 #
+# ⚠ AFTER EVERY DEPLOY, VERIFY THE ARBITER IS ALONE (fly.toml cannot express a
+# machine-count MAX — the scale pin is account state, not config; Codex
+# chunk-3 LOW-2):
+#   fly machines list   # exactly ONE machine, state "started" — if two ever
+#                       # appear: fly scale count 1 immediately
+#
 # TLS terminates at Fly's edge on 443 (D2 — venue Wi-Fi blocks odd ports) and
 # forwards plain ws to 8787. RELAY_TRUST_PROXY makes fly-client-ip the
 # rate-limit grain (S3) — correct ONLY behind Fly's proxy, never direct.
