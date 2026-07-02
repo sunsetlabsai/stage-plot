@@ -189,6 +189,14 @@ session to request a snapshot for.
   *already* self-driving correctly: no new deltas are arriving, and the per-device redline
   floor (epic §4 "MD device dies → everyone falls to self-drive") needs no message to keep
   playing. `conductor-lost` is honesty UI, not a mechanism.
+- **The orphaned writer may hear its own funeral.** If the MD's connection is alive but
+  lease-lapsed (e.g. app backgrounded), the relay's `conductor-lost` broadcast reaches it
+  too. The pure client machine **fails safe**: a believed-writer that receives
+  `conductor-lost` self-demotes to follower (invariant: `phase === 'writer'` ⇒ this
+  connection is the relay's `writerConn`). It does *not* pull a snapshot — there is no
+  live writer to resync from, and its own local state is the freshest in the room; it may
+  simply re-claim (§4.3). Its next `msg` would bounce `not-writer` anyway — belt and
+  suspenders.
 - **Re-claim = §4.1 against an orphaned baton.** Whoever taps "Take the baton" (confirm
   dialog — D4) claims; epoch bumps; the room converges on the new MD. Musically this is
   exactly the stage reality: the band keeps playing, someone picks up the baton.
@@ -261,9 +269,13 @@ Client↔relay frames (JSON over one `wss://` socket). The `msg` frame body is t
 
 ```
 → hello            { room, code, deviceLabel }            // join; bounced on bad code
-← joined           { epoch, writer: boolean, hasWriter,   // you're in; authority facts +
+← joined           { epoch, hasWriter,                    // you're in; authority facts +
                      activeSession: SessionKey | null }   //  which session is live (HIGH-1);
-                                                          //  null = none announced yet (§4)
+                                                          //  null = none announced yet (§4).
+                                                          //  No `writer` field: writer is a
+                                                          //  CONNECTION, and `joined` only ever
+                                                          //  answers a fresh connection, which
+                                                          //  by definition is not writerConn
 → session          { session: SessionKey }                // writer only; relay stores+broadcasts
 ← session          { session: SessionKey }                // switch: change chart, pull snapshot
 → claim-request    {}

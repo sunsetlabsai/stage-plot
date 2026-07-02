@@ -84,9 +84,11 @@ export type RelayFrame =
   | {
       type: 'joined';
       epoch: number;
-      writer: boolean;
       hasWriter: boolean;
       activeSession: SessionKey | null;                 // null = none announced yet (doc §4)
+      // NB: no `writer` field — writer is a CONNECTION (doc §2), and `joined` only
+      // ever answers a fresh `hello` on a NEW connection, which by definition is
+      // not writerConn. A device that was the writer re-earns the baton by claim.
     }
   | { type: 'session'; session: SessionKey }            // switch: change chart, pull snapshot
   | { type: 'claim-grant'; epoch: number }              // you are the writer; mint via acceptBaton
@@ -324,11 +326,27 @@ function reduceFrame(conn: ClientConn, frame: RelayFrame): ClientReduction {
       if (!sessionKeyEquals(conn.awaitingSnapshot, frame.session)) return noop(conn);
       return noop({ ...conn, awaitingSnapshot: null });
 
-    // Baton orphaned (doc §4.2): honesty UI, not a mechanism — we are already
+    // Baton orphaned (doc §4.2): honesty UI for followers — they are already
     // self-driving correctly (no deltas are arriving). A pending pull stays
     // outstanding: the relay answers it with the stale cache or snapshot-none.
-    case 'conductor-lost':
-      return noop({ ...conn, hasWriter: false, conductorLost: true });
+    //
+    // FAIL SAFE for a believed-writer (Codex build R1 HIGH): the orphaned
+    // writer's own connection may receive this broadcast (wedged device, lease
+    // missed, socket still open). Relay truth at orphan time is that NO
+    // connection is the writer — staying in phase 'writer' would be an invalid
+    // state (writer && !hasWriter) that drops the next MD's session/msg frames
+    // as "echoes" and can never offer re-claim. So self-demote. Deliberately NO
+    // pull: unlike `not-writer` there is no live writer to resync to, and the
+    // ex-writer's own local state is the freshest in the room — it keeps
+    // self-driving on it, and can take its own baton back (epoch+1) in one tap.
+    case 'conductor-lost': {
+      const flagged: ClientConn = { ...conn, hasWriter: false, conductorLost: true };
+      if (conn.phase !== 'writer') return noop(flagged);
+      return {
+        conn: { ...flagged, phase: 'follower' },
+        effects: [{ kind: 'demoted', epoch: conn.epoch }],
+      };
+    }
   }
 }
 

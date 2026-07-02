@@ -47,7 +47,7 @@ function run(inputs: Parameters<typeof reduceClientConn>[1][], from: ClientConn 
 }
 
 const joined = (activeSession: SessionKey | null, hasWriter = activeSession !== null) =>
-  ({ kind: 'frame', frame: { type: 'joined', epoch: 1, writer: false, hasWriter, activeSession } }) as const;
+  ({ kind: 'frame', frame: { type: 'joined', epoch: 1, hasWriter, activeSession } }) as const;
 
 describe('sessionKeyEquals — identity is the FULL triple', () => {
   it('matches only when every field matches', () => {
@@ -353,6 +353,23 @@ describe('failover (§4.2/§7)', () => {
     expect(conn.conductorLost).toBe(true);
     expect(conn.awaitingSnapshot).toEqual(KEY_A); // relay answers it: stale cache or snapshot-none
     expect(canOfferClaim(conn)).toBe(true);
+  });
+
+  it('conductor-lost as a believed-writer FAILS SAFE: demote to follower, claim affordance open (Codex R1 HIGH)', () => {
+    const writer = run([
+      joined(null, false),
+      { kind: 'frame', frame: { type: 'claim-grant', epoch: 3 } },
+      { kind: 'announce-session', session: KEY_A },
+    ]).conn;
+    const { conn, effects } = run([{ kind: 'frame', frame: { type: 'conductor-lost' } }], writer);
+    expect(conn.phase).toBe('follower'); // never writer && !hasWriter — the invalid state
+    expect(conn.hasWriter).toBe(false);
+    expect(conn.conductorLost).toBe(true);
+    expect(effects).toEqual([{ kind: 'demoted', epoch: 3 }]); // NO pull: no live writer to resync to
+    expect(canOfferClaim(conn)).toBe(true); // can take its own baton back (epoch+1)
+    // ...and the next MD's session frame now moves it like any follower.
+    const next = run([{ kind: 'frame', frame: { type: 'session', session: KEY_B } }], conn);
+    expect(next.effects.map((e) => e.kind)).toEqual(['switch-session', 'send']);
   });
 
   it('zombie demote: not-writer as a believed-writer → follower + demoted + resync to the relay session', () => {
