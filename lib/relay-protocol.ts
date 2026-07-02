@@ -163,6 +163,95 @@ export function parseClientFrame(raw: unknown): ClientFrame | null {
   }
 }
 
+// The client's side of the boundary (chunk 4, the mirror parseClientFrame
+// promised). Same "validate exactly what YOU read" rule: the conn machine reads
+// frame fields; the mirror path hands `msg` to `reduceConductor`, whose ADMISSION
+// reads the ConductorMessage ENVELOPE (identity triple, epoch/seq numbers,
+// payload.kind) — so the envelope is validated here. Payload BODIES (an arm's
+// directive, a snapshot's vm) are deliberately NOT deep-validated: they originate
+// from another instance of THIS app holding the writer connection, and the v1
+// trust model (doc §8/D5: AP possession + room code IS the boundary, no crypto)
+// places admitted devices on the band trust plane — the same plane on which we
+// adopt a snapshot's vm wholesale. A malformed frame from that plane is a local
+// client failure (rejoin), not the shared-relay crash class chunk 3 closed.
+// The payload discriminators the chunk-3a reducer actually switches on
+// (conductor-state.ts ConductorPayload). "Validate what you read" (Codex
+// chunk-4 R1 MED): admission reads payload.kind and the reducer's switch is
+// exhaustive over exactly these — an unknown discriminator must be dropped at
+// the boundary (bad-frame), never fall off the switch. The mixed-version
+// consequence is the designed one: a dropped delta is healed by the NEXT
+// delta's seq gap → needsSnapshot → pull (the one recovery door).
+const PAYLOAD_KINDS = new Set(['claim', 'advance', 'redirect', 'arm', 'commit', 'disarm', 'clock']);
+
+function isConductorMessageShape(v: unknown): v is ConductorMessage {
+  if (!isSessionKeyShape(v)) return false;
+  const m = v as unknown as Record<string, unknown>;
+  if (
+    typeof m.epoch !== 'number' ||
+    typeof m.seq !== 'number' ||
+    typeof m.sentAt !== 'number' ||
+    typeof m.payload !== 'object' ||
+    m.payload === null
+  ) {
+    return false;
+  }
+  const kind = (m.payload as Record<string, unknown>).kind;
+  return typeof kind === 'string' && PAYLOAD_KINDS.has(kind);
+}
+
+// A ConductorState carries the identity triple plus the authority coordinates the
+// admission path reads; validate that envelope, adopt the rest on band trust.
+function isConductorStateShape(v: unknown): v is ConductorState {
+  if (!isSessionKeyShape(v)) return false;
+  const s = v as unknown as Record<string, unknown>;
+  return typeof s.epoch === 'number' && typeof s.seq === 'number';
+}
+
+export function parseRelayFrame(raw: unknown): RelayFrame | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const f = raw as Record<string, unknown>;
+  switch (f.type) {
+    case 'joined':
+      return typeof f.epoch === 'number' &&
+        typeof f.hasWriter === 'boolean' &&
+        (f.activeSession === null || isSessionKeyShape(f.activeSession))
+        ? {
+            type: 'joined',
+            epoch: f.epoch,
+            hasWriter: f.hasWriter,
+            activeSession: f.activeSession as SessionKey | null,
+          }
+        : null;
+    case 'session':
+      return isSessionKeyShape(f.session) ? { type: 'session', session: f.session } : null;
+    case 'claim-grant':
+      return typeof f.epoch === 'number' ? { type: 'claim-grant', epoch: f.epoch } : null;
+    case 'claim-denied':
+      return typeof f.epoch === 'number' ? { type: 'claim-denied', epoch: f.epoch } : null;
+    case 'msg':
+      return isConductorMessageShape(f.msg) ? { type: 'msg', msg: f.msg } : null;
+    case 'not-writer':
+      return typeof f.epoch === 'number' &&
+        (f.activeSession === null || isSessionKeyShape(f.activeSession))
+        ? { type: 'not-writer', epoch: f.epoch, activeSession: f.activeSession as SessionKey | null }
+        : null;
+    case 'snapshot-needed':
+      return isSessionKeyShape(f.session) && typeof f.requestId === 'string'
+        ? { type: 'snapshot-needed', session: f.session, requestId: f.requestId }
+        : null;
+    case 'snapshot':
+      return isConductorStateShape(f.state) && typeof f.stale === 'boolean'
+        ? { type: 'snapshot', state: f.state, stale: f.stale }
+        : null;
+    case 'snapshot-none':
+      return isSessionKeyShape(f.session) ? { type: 'snapshot-none', session: f.session } : null;
+    case 'conductor-lost':
+      return { type: 'conductor-lost' };
+    default:
+      return null;
+  }
+}
+
 // ── The client connection machine (pure) ─────────────────────────────────────
 
 // joining → follower ⇄ writer. "Demoted" is the writer→follower transition (the

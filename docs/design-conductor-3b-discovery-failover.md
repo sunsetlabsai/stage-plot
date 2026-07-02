@@ -413,6 +413,70 @@ Gated commits, Codex per chunk; each demonstrable.
 7. *(Optional, cut-eligible)* **Relay-served text-only guest status page** (§1b as
    rescoped) — song/section/bar + conductor banner, no chart render.
 
+### Build pins — chunk 4 (client binding), folded back post-build
+
+Decisions made while building chunk 4, now canonical:
+
+- **Architecture: a second pure layer** (`lib/relay-binding.ts`) between the frozen chunk-1
+  conn machine and the hook. It owns exactly the gates the machine cannot know because they
+  depend on the device's LOCAL chart (`localKey`): mirror/adopt only when `localKey`
+  field-wise equals the room's key (`reduceConductor` throws by design on a hash mismatch —
+  a mismatch is the honest `chartMismatch` fact, never a throw), claim gated on having a
+  chart, the writer's §4.4 re-announce, and the §4.1-3 grant order (announce → snapshot
+  upload → claim) pinned purely via feedback inputs (`baton-accepted`, `serve-state`,
+  `mirror-outcome`). The hook executes effects against its ONE `ConductorSession` and the
+  socket; nothing else.
+- **`parseRelayFrame` depth = "validate what you read"** (the §6 rule-5 client mirror):
+  frame fields plus the `ConductorMessage`/`ConductorState` ENVELOPE the reducer's admission
+  path reads (identity triple, epoch/seq/sentAt numbers, `payload.kind` — which must be one
+  of the KNOWN `ConductorPayload` discriminators, Codex chunk-4 R1 MED: the reducer's switch
+  is exhaustive over them, so an unknown kind is dropped at the boundary rather than falling
+  off the switch; the mixed-version heal is the designed one — the next delta's seq gap →
+  `needsSnapshot` → pull). Payload BODIES and a snapshot's vm are deliberately NOT
+  deep-validated — they originate from another instance of this app on the band trust plane
+  (§8/D5), the same plane on which a snapshot's vm is adopted wholesale. Garbage is DROPPED
+  client-side (`bad-frame`), not closed — the relay is our box; a bad frame off it is a bug
+  to survive, not a peer to eject.
+- **`dispatch` returns the minted `msg` iff it APPLIED** (the fan-out seam). A rejected mint
+  is never returned — fanning out a message the writer's own reducer refused would hand
+  followers a delta their mirrors also refuse.
+- **Follower hard gate on local dispatch**: with a relay bound and phase `follower`, local
+  gestures/clock do NOT dispatch — the wire is the session's one writer; a local dispatch
+  would burn seq numbers the mirror never saw and freeze it silently (`ignored` forever).
+  `joining` is deliberately NOT blocked: the self-drive floor — an MD whose relay box died
+  keeps conducting. A disconnected follower therefore CAN fork (self-drive mints local seqs
+  the writer never saw); the fork is crushed at rejoin by the adoption rule below.
+- **Snapshot adoption has TWO authority regimes**, told apart by the wire's `stale` flag
+  (`shouldAdoptSnapshot`, Codex chunk-4 R1 HIGH). FRESH (`stale: false`) is authored by the
+  room's LIVE writer answering this pull — THE authority within a session — and is adopted
+  UNCONDITIONALLY: a follower that self-drove while offline holds coordinates on a FORK, not
+  on the writer's timeline, so comparing them is meaningless, and rejecting the writer's
+  snapshot would strand the device (every later delta lands `ignored`, a silently frozen
+  mirror). The rejoin pull is mandatory (`joined` always pulls the active session), so fresh
+  force-adoption is the fork-crushing door. STALE (`stale: true`) is the relay's claim-time
+  cache, served only when NO writer is live — unattributed, so forward-only coordinates
+  apply (`stateSupersedes`: higher epoch, or same epoch + higher seq). The load-bearing
+  stale case: an EX-WRITER reconnects and its join-pull is answered by that cache, which is
+  BEHIND the freshest state in the room (§4.2) — adopting it would rewind the one device
+  that's right.
+- **Chart-arrived-late heal**: a snapshot gated away by `localKey` consumed the machine's
+  outstanding pull, so `local-ready` landing ON the active key force-feeds `needsSnapshot`
+  to re-open it (pull is idempotent per key) — convergence now, not at the next delta's gap.
+- **Writer epoch-inherit at re-key** (§4.4 mechanics): `initSession` mints epoch 0, so a
+  writer's fresh session (next song / recompile) is rebased onto the relay grant
+  (`conn.epoch`) BEFORE `local-ready` announces it; seq stays 0 (per-session restart).
+- **`localKey` outlives the socket**: the conn machine resets on every (re)connect and
+  teardown, but `localKey` tracks the SESSION lifecycle (`local-ready`/`local-gone` from the
+  hook's identity effect) — wiping it on socket teardown would strand a config change or
+  relay off→on toggle (identity unchanged ⇒ `local-ready` never re-fires).
+- **Hook constants**: app heartbeat 1000ms (half the relay lease `HB_MS`); reconnect backoff
+  flat 1500ms (the relay is the band's own box — the only recovery is it coming back).
+- **Surface**: `relay: RelaySurface` on the conductor surface — `status off|connecting|joined`,
+  `role local|writer|follower`, `canClaim`, `conductorLost`, `activeSession`,
+  `chartMismatch`, `requestClaim()`, `releaseBaton()`. No relay configured = hard-coded OFF
+  block (shipped single-device behaviour byte-for-byte). Chart navigation on
+  `switch-session` and all banners are chunk 5.
+
 ## 11. Test plan spine
 
 Pure-first (chunks 1–2 carry the bulk): frame-sequence tables driving the client state

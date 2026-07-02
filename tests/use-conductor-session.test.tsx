@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { renderHook, act, waitFor, cleanup } from '@testing-library/react';
-import { useConductorSession } from '../lib/use-conductor-session';
+import { useConductorSession, type RelaySocket } from '../lib/use-conductor-session';
 import { barMs } from '../lib/tempo';
+import { programHash as computeProgramHash } from '../lib/conductor-state';
+import { initSession, dispatch, type ConductorSession } from '../lib/conductor-session';
+import { compileRoadmap } from '../lib/roadmap-vm';
+import { barsInOrder } from '../lib/chart-calibration';
 import type { ChartCalibration, RoadmapMarker, SectionAnchor } from '../lib/types';
 
 // ── Conductor authority, chunk 4: the React binding (jsdom) ──────────────────
@@ -774,5 +778,271 @@ describe('useConductorSession — the confidence gate (5b chunk 3)', () => {
     // no corruption: the MD's manual "Go now" still jumps to the target
     act(() => result.current.commit());
     expect(result.current.armed).toBeNull();
+  });
+});
+
+// ── 3b chunk 4: the relay slice (socket seam + gates, jsdom) ──────────────────
+// The routing/gating matrix lives in tests/relay-binding.test.ts (pure) and the
+// multi-device convergence proof in tests/relay-e2e.test.ts (real relay). These
+// assert the HOOK wiring only: the injected socket lifecycle (hello on open),
+// the local-ready hand-off from the async programHash, the fan-out seam on the
+// real dispatch path, and the follower hard gate on local gestures.
+describe('useConductorSession — relay binding (3b chunk 4)', () => {
+  class FakeSocket implements RelaySocket {
+    sent: string[] = [];
+    onopen: (() => void) | null = null;
+    onmessage: ((ev: { data: unknown }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    closedByClient = false;
+    constructor(public url: string) {}
+    send(data: string) {
+      this.sent.push(data);
+    }
+    close() {
+      this.closedByClient = true;
+    }
+    // Test controls — the hook assigns handlers AFTER the factory returns, so
+    // tests drive these inside act() once rendered.
+    open() {
+      this.onopen?.();
+    }
+    push(frame: unknown) {
+      this.onmessage?.({ data: JSON.stringify(frame) });
+    }
+    drop() {
+      this.onclose?.();
+    }
+    frames(): Array<Record<string, unknown>> {
+      return this.sent.map((s) => JSON.parse(s) as Record<string, unknown>);
+    }
+  }
+
+  function relayHarness() {
+    const sockets: FakeSocket[] = [];
+    const socketFactory = (url: string) => {
+      const s = new FakeSocket(url);
+      sockets.push(s);
+      return s;
+    };
+    const relay = {
+      url: 'wss://relay.test:8787',
+      room: 'band-show',
+      code: 'XYZW',
+      deviceLabel: 'Rachel',
+      socketFactory,
+    };
+    return { sockets, relay, sock: () => sockets.at(-1)! };
+  }
+
+  /** The MD-side state another device would broadcast: the SAME chart compiled
+   *  to the SAME hash the hook computes locally (identity by construction). */
+  async function simPeer(sessionId: string, songRef: string, c: ChartCalibration): Promise<ConductorSession> {
+    const compiled = compileRoadmap(barsInOrder(c), c.roadmap ?? []);
+    if (!compiled.ok) throw new Error('sim compile failed');
+    const hash = await computeProgramHash(barsInOrder(c), c.roadmap ?? []);
+    return initSession(sessionId, songRef, hash, compiled.compiled, 0);
+  }
+
+  it('exposes the hard OFF block when no relay is configured', async () => {
+    const { result } = renderHook(() => useConductorSession(args()));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    expect(result.current.relay.status).toBe('off');
+    expect(result.current.relay.role).toBe('local');
+    expect(result.current.relay.canClaim).toBe(false);
+  });
+
+  it('writer flow: hello → joined → claim → grant sequence → advances fan out (§4.1)', async () => {
+    const h = relayHarness();
+    const { result } = renderHook(() => useConductorSession(args({ relay: h.relay })));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    expect(result.current.relay.status).toBe('connecting');
+    expect(h.sockets).toHaveLength(1);
+    const sock = h.sock();
+
+    // Socket opens → hello with room/code/label.
+    act(() => sock.open());
+    expect(sock.frames()).toEqual([
+      { type: 'hello', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel' },
+    ]);
+
+    // Admitted to an empty room: joined + claimable (the chart is loaded).
+    act(() => sock.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    expect(result.current.relay.status).toBe('joined');
+    expect(result.current.relay.role).toBe('follower');
+    expect(result.current.relay.canClaim).toBe(true);
+
+    // Claim → grant: acceptBaton rebirths the session at the granted epoch and
+    // the binding emits announce → snapshot upload → claim, in pinned order.
+    act(() => result.current.relay.requestClaim());
+    act(() => sock.push({ type: 'claim-grant', epoch: 1 }));
+    expect(result.current.relay.role).toBe('writer');
+    expect(result.current.state?.epoch).toBe(1);
+    expect(result.current.state?.seq).toBe(0);
+    const hash = result.current.state!.programHash;
+    const key = { sessionId: 'chart1::owner/show', songRef: 'chart1', programHash: hash };
+    const afterGrant = sock.frames().slice(1);
+    expect(afterGrant.map((f) => f.type)).toEqual(['claim-request', 'session', 'snapshot', 'msg']);
+    expect(afterGrant[1]).toEqual({ type: 'session', session: key });
+    expect((afterGrant[3] as { msg: { payload: { kind: string } } }).msg.payload.kind).toBe('claim');
+
+    // The fan-out seam: a local advance broadcasts exactly the applied mint.
+    act(() => result.current.advance());
+    expect(result.current.current?.barId).toBe('b1');
+    const last = sock.frames().at(-1) as { type: string; msg: { seq: number; payload: { kind: string } } };
+    expect(last.type).toBe('msg');
+    expect(last.msg.payload.kind).toBe('advance');
+    expect(last.msg.seq).toBe(1);
+  });
+
+  it('follower flow: join pulls, adopts the writer state, mirrors live msgs; local gestures are hard-gated', async () => {
+    const h = relayHarness();
+    const { result } = renderHook(() => useConductorSession(args({ relay: h.relay })));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    const sock = h.sock();
+
+    // A peer MD elsewhere on the SAME chart, two bars in.
+    let md = await simPeer('chart1::owner/show', 'chart1', cal);
+    md = dispatch(md, { kind: 'advance' }, 10).session; // → b1
+    md = dispatch(md, { kind: 'advance' }, 20).session; // → b2
+    const key = { sessionId: md.state.sessionId, songRef: md.state.songRef, programHash: md.state.programHash };
+
+    // Join a room where that session is live → the binding pulls it.
+    act(() => sock.open());
+    act(() => sock.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key }));
+    expect(result.current.relay.role).toBe('follower');
+    expect(result.current.relay.chartMismatch).toBe(false); // same chart → same hash
+    expect(sock.frames().at(-1)).toEqual({ type: 'snapshot-request', session: key });
+
+    // The served snapshot re-bases the local session onto the writer's state.
+    act(() => sock.push({ type: 'snapshot', state: md.state, stale: false }));
+    expect(result.current.current?.barId).toBe('b2');
+    expect(result.current.state?.seq).toBe(2);
+
+    // Live delta mirrors bar-for-bar.
+    const step = dispatch(md, { kind: 'advance' }, 30); // → b3, seq 3
+    act(() => sock.push({ type: 'msg', msg: step.msg }));
+    expect(result.current.current?.barId).toBe('b3');
+
+    // The follower hard gate: local gestures must NOT fork the wire's seq.
+    const sentBefore = sock.sent.length;
+    act(() => result.current.advance());
+    expect(result.current.current?.barId).toBe('b3'); // unmoved
+    expect(result.current.state?.seq).toBe(3); // no burned seq
+    expect(sock.sent.length).toBe(sentBefore); // nothing broadcast
+
+    // A seq GAP routes to needsSnapshot → exactly one re-pull (the recovery door).
+    const gap = { ...step.msg!, seq: 9, payload: { kind: 'advance' } };
+    act(() => sock.push({ type: 'msg', msg: gap }));
+    expect(sock.frames().at(-1)).toEqual({ type: 'snapshot-request', session: key });
+  });
+
+  it('a socket drop resets to connecting and reconnects with a fresh hello (failure matrix row 1)', async () => {
+    vi.useFakeTimers();
+    const h = relayHarness();
+    const { result } = renderHook(() => useConductorSession(args({ relay: h.relay })));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync(); // flush the async programHash resolve
+    });
+    expect(result.current.active).toBe(true);
+    const first = h.sock();
+    act(() => first.open());
+    act(() => first.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    expect(result.current.relay.status).toBe('joined');
+
+    // Drop: back to connecting, and a NEW socket dials after the backoff.
+    act(() => first.drop());
+    expect(result.current.relay.status).toBe('connecting');
+    act(() => {
+      vi.advanceTimersByTime(2000); // > RELAY_RECONNECT_MS
+    });
+    expect(h.sockets).toHaveLength(2);
+    const second = h.sock();
+    act(() => second.open());
+    expect(second.frames()).toEqual([
+      { type: 'hello', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel' },
+    ]);
+    // The localKey survived the reconnect: joining a room running OUR chart is
+    // claimable/mirrorable immediately (no re-hash needed).
+    act(() => second.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    expect(result.current.relay.canClaim).toBe(true);
+  });
+
+  it('a follower that self-drove while offline is crushed back onto the writer on rejoin (Codex R1 HIGH)', async () => {
+    vi.useFakeTimers();
+    const h = relayHarness();
+    const { result } = renderHook(() => useConductorSession(args({ relay: h.relay })));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync(); // flush the async programHash resolve
+    });
+    expect(result.current.active).toBe(true);
+    const first = h.sock();
+
+    // Converge as a follower on the peer MD's session (writer two bars in).
+    let md = await simPeer('chart1::owner/show', 'chart1', cal);
+    md = dispatch(md, { kind: 'advance' }, 10).session; // → b1
+    md = dispatch(md, { kind: 'advance' }, 20).session; // → b2, seq 2
+    const key = { sessionId: md.state.sessionId, songRef: md.state.songRef, programHash: md.state.programHash };
+    act(() => first.open());
+    act(() => first.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key }));
+    act(() => first.push({ type: 'snapshot', state: md.state, stale: false }));
+    expect(result.current.current?.barId).toBe('b2');
+
+    // Wi-Fi dies → 'joining' → the self-drive floor deliberately unblocks
+    // local gestures: the follower forks AHEAD of the writer's coordinates.
+    act(() => first.drop());
+    act(() => result.current.advance()); // → b3, local seq 3 (a FORK)
+    act(() => result.current.advance()); // → wraps to b1, local seq 4
+    expect(result.current.state?.seq).toBe(4);
+    expect(result.current.current?.barId).toBe('b1');
+
+    // Rejoin: the mandatory pull is answered by the LIVE writer's FRESH
+    // snapshot at LOWER coordinates — it must force-adopt (fork ≠ freshness);
+    // forward-only here would freeze the mirror forever.
+    act(() => {
+      vi.advanceTimersByTime(2000); // > RELAY_RECONNECT_MS
+    });
+    const second = h.sock();
+    act(() => second.open());
+    act(() => second.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key }));
+    act(() => second.push({ type: 'snapshot', state: md.state, stale: false }));
+    expect(result.current.current?.barId).toBe('b2'); // crushed onto the writer
+    expect(result.current.state?.seq).toBe(2);
+
+    // ...and live deltas mirror again (they would land `ignored` on the fork).
+    const step = dispatch(md, { kind: 'advance' }, 30); // → b3, seq 3
+    act(() => second.push({ type: 'msg', msg: step.msg }));
+    expect(result.current.current?.barId).toBe('b3');
+  });
+
+  it('relay off→on with the SAME session keeps the localKey (teardown must not strand the binding)', async () => {
+    const h = relayHarness();
+    const { result, rerender } = renderHook(
+      (p: Parameters<typeof useConductorSession>[0]) => useConductorSession(p),
+      { initialProps: args({ relay: h.relay }) },
+    );
+    await waitFor(() => expect(result.current.active).toBe(true));
+    act(() => h.sock().open());
+    act(() => h.sock().push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    expect(result.current.relay.canClaim).toBe(true);
+
+    // Toggle the relay OFF (identity unchanged ⇒ local-ready never re-fires)...
+    rerender(args({ relay: null }));
+    expect(result.current.relay.status).toBe('off');
+    // ...and back ON: a fresh socket dials, and the surviving localKey still
+    // gates claim/mirror correctly after the rejoin.
+    rerender(args({ relay: h.relay }));
+    expect(h.sockets).toHaveLength(2);
+    act(() => h.sock().open());
+    act(() => h.sock().push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null }));
+    expect(result.current.relay.canClaim).toBe(true);
+  });
+
+  it('unmount closes the socket without a reconnect (teardown is not a drop)', async () => {
+    const h = relayHarness();
+    const { result, unmount } = renderHook(() => useConductorSession(args({ relay: h.relay })));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    unmount();
+    expect(h.sock().closedByClient).toBe(true);
+    expect(h.sockets).toHaveLength(1); // no retry socket
   });
 });
