@@ -166,9 +166,13 @@ session to request a snapshot for.
    process; requests serialize — no tie to break).
 3. **The new MD mints the new generation out of band** (fixed ground): a new pure helper
    `acceptBaton(session, grantedEpoch, now)` in `conductor-session.ts` — epoch := granted,
-   seq := 0, its OWN authoritative vm/current/clock, armed := null. It (re-)announces
-   `session {SessionKey}` (idempotent mid-song — same key), uploads this state as
-   `snapshot {state}` to the relay (cache, §D6), and broadcasts a `claim` message.
+   seq := 0, its OWN authoritative vm/current/clock, armed := null (a telegraphed cue was
+   the old MD's intent; never inherited). It also mints and returns the `claim`
+   ConductorMessage to broadcast — `dispatch` can't (claim is a snapshot boundary, not a
+   delta: handled entirely in reducer admission, seq ignored — so it rides seq 0 and
+   consumes no seq). The binding then (re-)announces `session {SessionKey}` (idempotent
+   mid-song — same key), uploads this state as `snapshot {state}` to the relay (cache,
+   §D6), and broadcasts the claim.
 4. Followers reduce the `claim`: higher epoch → `needsSnapshot` (shipped path,
    `conductor-state.ts:189-191`) → they pull → they mirror the new generation. A follower
    that missed the claim entirely hits the future-epoch door on the next delta

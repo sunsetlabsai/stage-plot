@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { initSession, dispatch, shouldAutoFire } from '../lib/conductor-session';
+import { initSession, dispatch, acceptBaton, shouldAutoFire } from '../lib/conductor-session';
+import { reduceConductor, type ConductorMessage } from '../lib/conductor-state';
 import { compileRoadmap, applyOverride, type CompiledRoadmap } from '../lib/roadmap-vm';
 import type { RoadmapMarker } from '../lib/types';
 
@@ -138,6 +139,114 @@ describe('redirect equivalence', () => {
       barId: 'b3',
     });
     expect(s.state.vm).toEqual(direct);
+  });
+});
+
+// ── acceptBaton (3b chunk 2: mint the new baton generation) ──────────────────
+describe('acceptBaton', () => {
+  // A device that has been mirroring: some real position, a pending armed cue,
+  // live clock — the state a claimer actually holds when the old MD dies.
+  function midSongSession() {
+    let s = freshSession(linear4(), 0);
+    s = dispatch(s, { kind: 'advance' }, 10).session; // current = b1
+    s = dispatch(s, { kind: 'advance' }, 20).session; // current = b2
+    s = dispatch(s, { kind: 'arm', armed: { fireAt: 'b3', directive: { kind: 'jumpTo', barId: 'b4' } } }, 30).session;
+    s = dispatch(s, { kind: 'clock', clock: { tempoBpm: 120, confidence: 0.9 } }, 40).session;
+    return s;
+  }
+
+  it('mints the new generation: epoch := granted, seq := 0, armed cleared, updatedAt = now; OWN vm/current/clock carried verbatim', () => {
+    const before = midSongSession();
+    const { session: after } = acceptBaton(before, 5, 100);
+    expect(after.state.epoch).toBe(5);
+    expect(after.state.seq).toBe(0);
+    expect(after.state.armed).toBeNull(); // the old MD's cue is never inherited
+    expect(after.state.updatedAt).toBe(100);
+    // own authority carries forward
+    expect(after.state.vm).toEqual(before.state.vm);
+    expect(after.state.current).toEqual(before.state.current);
+    expect(after.state.clock).toEqual({ tempoBpm: 120, confidence: 0.9 });
+    // identity + program pin untouched
+    expect(after.state.sessionId).toBe(before.state.sessionId);
+    expect(after.state.songRef).toBe(before.state.songRef);
+    expect(after.state.programHash).toBe(before.state.programHash);
+    expect(after.compiled).toBe(before.compiled);
+    expect(after.programHash).toBe(before.programHash);
+    // pure: input untouched
+    expect(before.state.epoch).toBe(0);
+    expect(before.state.armed).not.toBeNull();
+  });
+
+  it('returns the claim broadcast: full session key, (grantedEpoch, seq 0), sentAt = now, payload claim', () => {
+    const { session, claim } = acceptBaton(midSongSession(), 5, 100);
+    expect(claim).toEqual({
+      sessionId: session.state.sessionId,
+      songRef: session.state.songRef,
+      programHash: session.state.programHash,
+      epoch: 5,
+      seq: 0,
+      sentAt: 100,
+      payload: { kind: 'claim' },
+    });
+  });
+
+  it('the claim consumes no seq: the first post-accept dispatch mints (grantedEpoch, seq 1)', () => {
+    const { session } = acceptBaton(midSongSession(), 5, 100);
+    const r = dispatch(session, { kind: 'advance' }, 110);
+    expect(r.outcome).toBe('applied');
+    expect(r.session.state.epoch).toBe(5);
+    expect(r.session.state.seq).toBe(1);
+  });
+
+  it('follower on the old epoch converges: claim → needsSnapshot → adopt snapshot → next delta applies contiguously', () => {
+    // Two mirrors of the same generation; the old MD dies; B claims at epoch+1.
+    const compiled = linear4();
+    const follower = midSongSession();
+    const { session: md, claim } = acceptBaton(midSongSession(), 1, 100);
+
+    // 1. claim broadcast → the shipped snapshot boundary
+    const r1 = reduceConductor(compiled, PH, follower.state, claim);
+    expect(r1.status).toBe('needsSnapshot');
+    expect(r1.state).toBe(follower.state); // unchanged until the pull lands
+
+    // 2. adopt the new MD's snapshot (what acceptBaton uploaded to the relay)
+    const mirrored = md.state;
+
+    // 3. the new MD's first delta is contiguous from the snapshot → applied
+    const r2 = dispatch(md, { kind: 'advance' }, 110); // mints (epoch 1, seq 1)
+    const delta: ConductorMessage = {
+      sessionId: mirrored.sessionId,
+      songRef: mirrored.songRef,
+      programHash: mirrored.programHash,
+      epoch: 1,
+      seq: 1,
+      sentAt: 110,
+      payload: { kind: 'advance' },
+    };
+    const r3 = reduceConductor(compiled, PH, mirrored, delta);
+    expect(r3.status).toBe('applied');
+    if (r3.status !== 'applied') throw new Error('unreachable');
+    expect(r3.state).toEqual(r2.session.state); // full convergence
+  });
+
+  it('equal/lower-epoch claim is ignored by a mirror (replay no-op)', () => {
+    const compiled = linear4();
+    const mirror = midSongSession(); // epoch 0
+    const { session: promoted, claim: claim1 } = acceptBaton(midSongSession(), 1, 100);
+    // equal epoch: the new MD's own mirror path sees its claim echo — ignored
+    expect(reduceConductor(compiled, PH, promoted.state, claim1).status).toBe('ignored');
+    // lower epoch: a stale replayed claim against an already-advanced mirror
+    const advanced = acceptBaton(mirror, 2, 200).session;
+    expect(reduceConductor(compiled, PH, advanced.state, claim1).status).toBe('ignored');
+  });
+
+  it('cross-session claim is ignored at the scope gate — never needsSnapshot (Codex R1 MED-1: the session frame moves that follower, not the claim)', () => {
+    const compiled = linear4();
+    const otherShow = initSession('s2', 'song1', PH, compiled, 0); // different sessionId
+    const { claim } = acceptBaton(freshSession(), 7, 100); // claim for s1
+    const r = reduceConductor(compiled, PH, otherShow.state, claim);
+    expect(r.status).toBe('ignored');
+    expect(r.state).toBe(otherShow.state);
   });
 });
 
