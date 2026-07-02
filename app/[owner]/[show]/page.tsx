@@ -3852,8 +3852,13 @@ function ChartNavigator({
       {/* Perform bar transport — ONE bottom slot, honesty-first priority
           (3b chunk 5, design-conductor-3b §10-5): prompt form (a missing input
           blocks connecting) → conductor cluster (conducting, not a follower) →
-          follower strip (relay on, wire is the writer) → self-drive seek. */}
-      {calMode === 'perform' && barMode && (relayIntent.mode === 'prompt-join' || relayIntent.mode === 'prompt-live') ? (
+          follower strip (relay on, wire is the writer) → self-drive seek.
+          The prompt and follower rows deliberately do NOT gate on barMode: a
+          joined device must ALWAYS show its room state + Leave (doc §honesty —
+          "chart not on this device"), even when the local chart has no bar
+          calibration to perform on. Only the transports (cluster / self-drive)
+          need barMode. */}
+      {calMode === 'perform' && (relayIntent.mode === 'prompt-join' || relayIntent.mode === 'prompt-live') ? (
         <RelayPromptForm
           key={relayIntent.mode} // join↔live never share half-typed state
           kind={relayIntent.mode === 'prompt-join' ? 'join' : 'live'}
@@ -3930,9 +3935,12 @@ function ChartNavigator({
             }}
           />
         );
-      })() : calMode === 'perform' && barMode && relayOn ? (() => {
+      })() : calMode === 'perform' && relayOn ? (() => {
         // The follower strip (mockups P4/P5/P7). No transport here — with a
         // relay bound and this device a follower, the wire is the ONE writer.
+        // Not barMode-gated: an uncalibrated local chart still mirrors NOTHING
+        // (localKey null ⇒ chartMismatch), and the strip must say so + offer
+        // Leave rather than leaving a silently-connected device (Codex finding).
         const rs = conductor.relay.activeSession;
         const roomHit = rs ? findChartForSongRef(setlist, rs.songRef) : null;
         return (
