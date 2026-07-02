@@ -1,12 +1,16 @@
 # Conductor transport — cloud relay as the one deployment (kills the local-box story)
 
-**Status:** v2 — DESIGN-ONLY. Not built. **Codex R1 = NO-GO (3 HIGH / 5 MED / 2 LOW) — ALL
-TEN FOLDED.** The three HIGHs plus two MEDs shared ONE root cause: v1's D4 kept the shipped
-*implicit-create-on-first-hello* semantics, which only ever made sense on a band-private
-box. v2 replaces it with an explicit create/join wire intent + **relay-minted** codes
-(§4), which dissolves the collision path, kills phantom-room creation as an attack
-surface, and forces the room-lifecycle/epoch question into the open (S5's time-floored
-epochs). Awaiting Codex R2 via Graham, then GO before any build.
+**Status:** v3 — DESIGN-ONLY. Not built.
+**Codex R1 = NO-GO (3H/5M/2L), all folded** — root cause: v1's D4 kept the shipped
+*implicit-create-on-first-hello*, which only made sense on a band-private box; v2 moved to
+explicit create/join intent + relay-minted codes.
+**Codex R2 = NO-GO (2H/3M/1L), all folded** — root cause of both HIGHs: v2 tied per-room
+epoch monotonicity to a per-room record and a clock, and lost when either lied. v3: **one
+global durable monotone grant counter** (S5) with **write-ahead-before-ack** journal
+policy (S2) — room records become droppable cache; plus tiered pre-admission payload caps
+(S3), `joined` extended-never-reshaped, `use-conductor-session` config/lifecycle as a
+first-class change surface, typed-code join scoped to the show page (global `/join`
+cut-eligible). Awaiting Codex R3 via Graham, then GO before any build.
 **Date:** 2026-07-02
 **Branch:** `opus/design-relay-cloud`
 **Parent:** `design-conductor-authority.md` (epic), `design-conductor-3b-discovery-failover.md`
@@ -164,35 +168,53 @@ not a nation-state; the responses are proportionate:
   token bucket, ban-listed after sustained abuse; (b) **per-IP room *creates*** (tighter
   bucket — creating costs the relay a journal write, guessing doesn't); (c) per-connection
   frame rate (a joined guest can't flood the fan-out); (d) per-IP concurrent-connection
-  cap. Plus two structural backstops: a **global active-room cap** (bounce `relay-full` —
-  honest, and it turns a create-flood into a bounded nuisance instead of disk exhaustion)
-  and **debounced journal writes** (the journal is an integrity record, not a
-  per-frame WAL — write-rate must be relay-paced, not attacker-paced). Constants
-  defer-with-default (§8 Q2). Note §4 removes the biggest creation surface outright:
-  join-typos can no longer create rooms at all.
-- **S3. Payload caps, per frame type — validate before you buy** (Codex R1 MED-5:
-  a blanket `ws` maxPayload still lets every frame cost a full parse of the largest
-  legit size). (a) `ws` `maxPayload` sized to the largest legit frame (`snapshot`,
-  generous fixed budget); (b) **per-frame-type size budgets** enforced at the boundary —
-  a `hello` has no business being 200KB; (c) **string-field length caps** (`deviceLabel`,
-  code, etc.) in `parseClientFrame`; (d) a **cap on pending snapshot-requests per room**
-  (the one place the relay queues state on behalf of strangers). Shape-validation order
-  stays cheap-first: length check → JSON parse → per-type shape.
+  cap. Plus a structural backstop: a **global active-room cap** (bounce `relay-full` —
+  honest, and it turns a create-flood into a bounded nuisance instead of disk exhaustion).
+  **Journal write policy (Codex R2 HIGH-2 — v2's blanket "debounce" was wrong):
+  authority-bearing writes are synchronous write-ahead** — a create or claim-grant is
+  flushed durable BEFORE the ack leaves the relay (a grant acknowledged but not durable
+  can be reissued after a crash — the exact reuse the invariant forbids). Only
+  non-authority journal activity (GC compaction) may coalesce. Write *rate* is protected
+  by the throttles, not by deferring durability: creates are IP-throttled + room-capped,
+  and grants require holding a room's code (band trust plane, human-scale frequency).
+  Constants defer-with-default (§8 Q2). Note §4 removes the biggest creation surface
+  outright: join-typos can no longer create rooms at all.
+- **S3. Payload caps, tiered by admission state — validate before you buy** (Codex R1
+  MED-5 + R2 MED-5: budgets must bind BEFORE a client is anyone). Tiers:
+  (a) **pre-admission: a connection's first frame must be a `hello` and is capped at a
+  small raw-byte budget (~1KB)** — length-checked on the wire BEFORE JSON parse; an
+  unauthenticated stranger can never make the relay parse snapshot-sized JSON, and the
+  S2 frame-rate cap applies from byte one (pre-admission included), not just to joined
+  guests; (b) **post-admission, non-writer:** per-frame-type budgets (`hello`-sized
+  control frames only — a follower never legitimately sends big frames);
+  (c) **writer only:** the generous `snapshot` budget — the one large frame is only legal
+  from `writerConn` (shipped rule 2), so `ws` `maxPayload` alone never defines a
+  stranger's cost. Plus **string-field length caps** (`deviceLabel`, code, `showRef`) in
+  `parseClientFrame` and a **cap on pending snapshot-requests per room**. Validation
+  order stays cheap-first: raw length (per tier) → JSON parse → per-type shape.
 - **S4. Origin allowlist.** Browsers send `Origin`; accept only `https://showrunr.ai`
   (+ configured preview origins). Belt, not crypto — non-browser clients can lie — but it
   zeroes the drive-by-website vector against members' browsers and costs one header check.
-- **S5. Room lifecycle + the epoch invariant** (Codex R1 HIGH-1: v1's "GC drops the
-  journal entry, stale QR re-creates, epoch floor preserved" was FALSE — a dropped entry
-  re-creating at epoch 0 reissues epochs the shipped protocol promises never to reuse,
-  discovery doc §6 rule 4). Lifecycle: **unclaimed rooms** (created, writer never claimed)
-  GC after **15 min**; **abandoned rooms** (empty, no activity) GC after **24h**. The
-  invariant is preserved not by tombstones but by **time-floored epochs**: room creation
-  seeds `epoch := seconds-since-2026-01-01` (a monotone clock the relay already trusts for
-  leases), and every claim grants `max(journaledEpoch, timeFloor) + 1`. A code re-minted
-  days after its GC starts at a strictly higher epoch than anything the dead room ever
-  issued — old offline clients reconcile exactly as the shipped future-epoch door already
-  specifies (`needsSnapshot` → pull). No unbounded tombstone table, no invariant bent.
-  The reducer never assumed dense epochs — only ordering (fixed ground).
+- **S5. Room lifecycle + the epoch invariant** (Codex R1 HIGH-1 → R2 HIGH-1, two dead
+  attempts is enough: v1's "GC preserves the floor" was false, and v2's time-floored
+  epochs were false too — rapid claim/release cycles advance epochs faster than wall
+  seconds, and clock rollback breaks the floor independently; any scheme that ties
+  per-room monotonicity to a per-room record OR a clock loses when the record dies or
+  the clock lies). Lifecycle: **unclaimed rooms** (created, writer never claimed) GC
+  after **15 min**; **abandoned rooms** (empty, no activity) GC after **24h**.
+  The invariant is preserved by removing its per-room dependency: **one global, durable,
+  monotone grant counter.** Every epoch the relay ever issues — room create seed and
+  every claim grant, across ALL rooms — is `++globalEpochCounter`, journaled write-ahead
+  (S2: flushed before the ack). Per-room epochs are then a strictly increasing
+  subsequence of a single never-decreasing integer, so **no room can ever see a reissued
+  epoch, no matter what was GC'd, re-minted, or when** — room records become freely
+  droppable cache, not integrity state. No tombstones, no wall clock, no high-water math;
+  crash-restore reads one integer back. Cost: epochs interleave across rooms (room A gets
+  5, room B gets 6, A's next is 7) — the reducer never assumed density, only ordering
+  within its room (fixed ground), and the shipped future-epoch door (`needsSnapshot` →
+  pull) is exactly how a returning client reconciles. Defense-in-depth: restore adds a
+  fixed slack (+1000) on unclean shutdown; harmless (gaps are free) and covers a torn
+  final write.
 - **What we deliberately still don't do (v1):** crypto identity, accounts-gated rooms,
   E2E payload encryption. The payload is bar positions of a setlist — the code door plus
   S1-S5 is proportionate. Revisit if the product grows beyond "a band and its show."
@@ -240,9 +262,19 @@ all three:
 Consequences, pinned:
 - Wire changes, complete list: `hello.intent`, `hello.showRef` (create only),
   `joined.created` + `joined.room` + `joined.showRef`, `no-room` bounce, `relay-full`
-  bounce (S2). Version skew between app and relay already closes 4002 (shipped rule 5);
-  relay deploys with the app change — no compat shim.
-- Journal entry becomes `{room, epoch, showRef}` (`roomCode` merged into `room`).
+  bounce (S2). **`joined` is EXTENDED, never reshaped** (Codex R2 MED-4): every shipped
+  field — `epoch`, `hasWriter`, `activeSession`, `writerLabel` — survives byte-for-byte;
+  new fields are additive, so the shipped conn-machine parse paths keep working unread.
+  Version skew between app and relay already closes 4002 (shipped rule 5); relay deploys
+  with the app change — no compat shim.
+- Journal becomes: the **global epoch counter** (S5, the one integrity datum) + a room
+  registry `{room, epoch, showRef}` (`roomCode` merged into `room`; droppable per S5).
+- **Typed-code join is scoped to the show page in v1** (Codex R2 LOW-6): the member opens
+  their show and types the code there — the shipped assumption that joiners land on a
+  show URL (`lib/relay-join.ts:3`) stays true. A generic global `/join` route (navigate
+  anywhere via the echoed `showRef`) is specced by this doc but **cut-eligible**, built
+  last or not at all; `showRef` ships regardless (it costs one opaque field and unlocks
+  the route whenever wanted).
 - Show-slug stops being the room key; `SessionKey` carries all musical identity.
 - Rooms are per-gig ephemera (S5), not stable show addresses. Going live twice in one
   night mints two rooms; the QR is the address.
@@ -252,9 +284,15 @@ Honest list of every shipped surface D4 + §5 touch: `lib/relay-protocol.ts` (he
 shapes, `no-room`/`relay-full`, conn-machine create/join arms), `lib/relay-binding.ts`
 (create-vs-join entry), `lib/relay-join.ts` (4-char code assumption, `roomNameFor(owner,
 slug)` — deleted), the show page's QR/join URL construction and Join screen
-(`app/[owner]/[show]/page.tsx`), `lib/use-conductor-session.ts` (backoff constant), and
-their tests. The reducer (`lib/conductor-state.ts`) and `conductor-session.ts` remain
-genuinely zero-change — they never see room identity.
+(`app/[owner]/[show]/page.tsx`), **`lib/use-conductor-session.ts` as a FIRST-CLASS
+surface, not a constant tweak** (Codex R2 MED-3): its `RelayConfig` requires `room`/`code`
+up front and sends `helloFrame(room, code, label)` on socket open — under D4-create
+neither exists until `joined` returns them, so the config model splits into
+create-mode (no room; adopt `joined.room`, hold it across reconnects for THIS live
+session) vs join-mode (room known), and the hook's open/reconnect lifecycle changes with
+it — plus the backoff jitter (§5), and all their tests. The reducer
+(`lib/conductor-state.ts`) and `conductor-session.ts` remain genuinely zero-change — they
+never see room identity.
 
 ## 5. WAN behavior deltas (constants, not architecture)
 
@@ -294,15 +332,20 @@ genuinely zero-change — they never see room identity.
 
 ## 7. Build outline (after sign-off — gated, Codex per chunk)
 
-1. **Relay hardening** (`relay/server.ts` + `relay-core.ts`): S1-S5 (incl. time-floored
-   epochs, unclaimed/abandoned GC, create throttles, room cap, per-frame budgets, pending
-   snapshot-request cap) + D4 create/join intent with relay-minted codes + `showRef` +
-   `/healthz`. Tests: rate-limit buckets per grain, origin bounce, per-frame-type payload
-   bounce, GC sweeps (both TTLs), **GC'd-code re-mint gets a strictly higher epoch**
-   (the HIGH-1 regression test), `no-room`/`relay-full` bounces, journal debounce.
-2. **Client binding + join surfaces** (the MED-7 inventory): protocol/conn-machine
-   create/join arms, `relay-join.ts` rewrite, QR/Join screen on the show page,
-   `showRef`-directed navigation for typed codes, backoff jitter. Tests per surface.
+1. **Relay hardening** (`relay/server.ts` + `relay-core.ts`): S1-S5 (global epoch
+   counter, write-ahead-before-ack, unclaimed/abandoned GC, create throttles, room cap,
+   tiered payload budgets, pending snapshot-request cap) + D4 create/join intent with
+   relay-minted codes + `showRef` + `/healthz`. Tests: rate-limit buckets per grain
+   (incl. pre-admission), origin bounce, pre-hello 1KB cap (snapshot-sized first frame
+   bounced unparsed), GC sweeps (both TTLs), **the R1/R2-HIGH-1 regression: GC'd-code
+   re-mint after rapid claim/release churn still grants strictly higher epochs**,
+   **crash-restore: ack'd grant survives restart, un-ack'd never reissues** (write-ahead
+   ordering), `no-room`/`relay-full` bounces.
+2. **Client binding + join surfaces** (the MED-7 + R2-MED-3 inventory): protocol/
+   conn-machine create/join arms (`joined` extended, shipped fields untouched),
+   `use-conductor-session` config split (create-mode adopts `joined.room`) + reconnect
+   lifecycle, `relay-join.ts` rewrite, QR/Join screen on the show page, backoff jitter.
+   Tests per surface. Generic `/join` route via `showRef`: cut-eligible tail.
 3. **Deploy** (`fly.toml` or equivalent in-repo — **instance count 1 + stop-then-start
    pinned per D1**, volume, secrets, DNS cutover of `relay.showrunr.ai`,
    `NEXT_PUBLIC_RELAY_URL` on Vercel). Smoke: two devices on different networks (one on
