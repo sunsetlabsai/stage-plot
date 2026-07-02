@@ -87,6 +87,57 @@ export function dispatch(
   return { session, outcome: outcome.status };
 }
 
+// ── acceptBaton: mint the new baton generation (3b chunk 2) ───────────────────
+//
+// (design-conductor-3b-discovery-failover.md §4.1 step 3). The relay granted this
+// device the baton at `grantedEpoch` (`claim-grant`, relay-assigned monotonic —
+// the pure client machine's `became-writer` effect is the caller). The new MD's
+// OWN local state is the authority for the new generation: as the freshest mirror
+// in the room (or the self-driving survivor), its vm/current/clock carry forward
+// verbatim. What changes:
+//   • epoch := grantedEpoch  — the new generation (every follower's epoch gate
+//     routes to needsSnapshot on the claim broadcast, conductor-state.ts:189-191);
+//   • seq := 0               — per-session/per-generation restart (§4.4; the
+//     reducer's contiguity check is state-local, so this is well-formed);
+//   • armed := null          — a telegraphed change was the OLD MD's intent; the
+//     new MD re-arms deliberately, never inherits a cue it didn't call;
+//   • updatedAt := now       — the generation boundary.
+//
+// Returns the reborn session PLUS the `claim` ConductorMessage to broadcast.
+// `dispatch` cannot mint it: claim is a SNAPSHOT BOUNDARY, not a delta — the
+// reducer handles it entirely in admission (equal-epoch claim = ignored locally,
+// which is correct: the MD needs no re-base from itself) and ignores its seq, so
+// the claim rides (grantedEpoch, seq 0) and consumes no seq. The binding then
+// announces `session {SessionKey}`, uploads `state` as the relay snapshot cache,
+// and broadcasts this claim (§4.1 order).
+//
+// No grantedEpoch validation: the relay is the single monotonic arbiter — every
+// epoch a device ever mirrors descends from a past grant, so a grant below the
+// local epoch is impossible by construction (not a runtime condition).
+export function acceptBaton(
+  session: ConductorSession,
+  grantedEpoch: number,
+  now: number,
+): { session: ConductorSession; claim: ConductorMessage } {
+  const state: ConductorState = {
+    ...session.state,
+    epoch: grantedEpoch,
+    seq: 0,
+    armed: null,
+    updatedAt: now,
+  };
+  const claim: ConductorMessage = {
+    sessionId: state.sessionId,
+    songRef: state.songRef,
+    programHash: state.programHash,
+    epoch: grantedEpoch,
+    seq: 0, // ignored for claim (conductor-state.ts:63) — claims are boundaries, not deltas
+    sentAt: now,
+    payload: { kind: 'claim' },
+  };
+  return { session: { ...session, state }, claim };
+}
+
 // The auto-fire seam (design-conductor-chunk5.md §2). Chunk 5a fills the chunk-4
 // hard-OFF stub with the §3.5 gate for MANUAL advance. SAME signature (chunk-4
 // frozen). The frozen hook contract ANDs in the arm-time local bit:
