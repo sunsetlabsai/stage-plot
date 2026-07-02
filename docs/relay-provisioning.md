@@ -25,7 +25,9 @@ set-and-forget.
 ### 1. The relay box
 
 Any machine that can sit at the venue and run Node (a laptop, a Pi). Clone
-the repo and `npm install` on it at home. The relay runs with:
+the repo and `npm install` on it **at home** — this installs `tsx` (a
+declared devDependency), so `npx tsx` below resolves from `node_modules`
+and never reaches for the network at the venue. The relay runs with:
 
 ```sh
 RELAY_CERT=... RELAY_KEY=... npx tsx relay/start.ts
@@ -101,7 +103,7 @@ build-time env var on the deployment, not a venue step.
 | symptom | cause | fix |
 | --- | --- | --- |
 | Devices stuck on "Joining the room…" | DNS override missing, or relay not running, or cert expired (browser silently refuses wss) | `ping relay.showrunr.ai` from a phone browser won't tell you much — check the AP's DNS mapping, check the relay process is up, run `provision-cert.sh check` |
-| Relay logs close code `4001` | wrong room or join code | Re-scan the QR; codes are per-go-live |
+| Relay logs close code `4001` | wrong room or join code | Re-scan the QR shown by the current conductor; a code from an earlier room create is stale |
 | Relay logs close code `4002` | malformed frame (version skew between app and relay) | Update the relay box's checkout to match the deployed app |
 | "Conductor lost" strip | MD's device left the AP or the app backgrounded long enough to miss heartbeats | MD rejoins, or anyone with the chart taps **Take the baton** |
 | Chart-mismatch strip on a follower | that device doesn't have the conductor's chart (or it isn't calibrated) | Sync/calibrate the chart at home next time; the strip names the chart when it can |
