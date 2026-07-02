@@ -48,7 +48,7 @@ function run(inputs: BindingInput[], from: RelayBinding = initRelayBinding()) {
 // Raw wire frames (the binding parses; feed JSON-shaped objects, not typed frames).
 const raw = (frame: unknown): BindingInput => ({ kind: 'raw-frame', raw: frame });
 const joined = (activeSession: SessionKey | null, hasWriter = activeSession !== null) =>
-  raw({ type: 'joined', epoch: 1, hasWriter, activeSession });
+  raw({ type: 'joined', epoch: 1, hasWriter, activeSession, writerLabel: null });
 
 /** A follower on KEY_A with the chart loaded and the join-pull already answered. */
 function followerOnA(): RelayBinding {
@@ -323,6 +323,7 @@ describe('relayFacts', () => {
       phase: 'joining',
       canClaim: false,
       conductorLost: false,
+      conductorLabel: null,
       activeSession: null,
       chartMismatch: false,
     });

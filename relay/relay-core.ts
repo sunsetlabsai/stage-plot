@@ -43,7 +43,11 @@ export interface RoomState {
   writerAliveAt: number;               // last proof of life (hb / any writer frame)
   activeSession: SessionKey | null;    // writer-announced; null until then + after reboot
   snapshotCache: { key: SessionKey; state: ConductorState } | null;
-  members: Set<string>;                // admitted connection ids
+  // Admitted connection id → deviceLabel (from `hello`). The label exists so
+  // the relay can attribute ITS OWN grants ("Rachel is conducting", doc §4.3)
+  // — attribution comes from this registry, never from parsing payloads, so
+  // dumbness is preserved.
+  members: Map<string, string>;
   // Outstanding forwarded snapshot requests: requestId → who asked, for what.
   pending: Map<string, { conn: string; session: SessionKey }>;
 }
@@ -68,7 +72,7 @@ export function initRelayState(
       writerAliveAt: 0,
       activeSession: null,
       snapshotCache: null,
-      members: new Set(),
+      members: new Map(),
       pending: new Map(),
     });
   }
@@ -157,11 +161,16 @@ function reduceFrame(state: RelayState, conn: string, frame: ClientFrame, now: n
       room.epoch += 1; // never reused: journaled below (rule 4)
       room.writerConn = conn;
       room.writerAliveAt = now;
+      // Attribution (doc §4.3, chunk 5): the relay announces WHO took the baton
+      // to everyone else, from its own member registry (never a payload). The
+      // grantee doesn't need it — `claim-grant` is its answer.
+      const label = room.members.get(conn) ?? '';
       return {
         state,
         effects: [
           { kind: 'journal', room: roomName!, roomCode: room.roomCode, epoch: room.epoch },
           { kind: 'send', to: conn, frame: { type: 'claim-grant', epoch: room.epoch } },
+          ...broadcast(room, conn, { type: 'writer', label }),
         ],
       };
     }
@@ -252,7 +261,7 @@ function hello(
   if (existing) {
     // The bouncer, not cryptography (doc §3): stale QR screenshots don't admit.
     if (existing.roomCode !== frame.code) return { state, effects: [{ kind: 'bounce', conn }] };
-    existing.members.add(conn);
+    existing.members.set(conn, frame.deviceLabel);
     state.conns.set(conn, frame.room);
     return {
       state,
@@ -264,6 +273,11 @@ function hello(
           epoch: existing.epoch,
           hasWriter: existing.writerConn !== null,
           activeSession: existing.activeSession,
+          // Late-joiner attribution (§4.3): who is conducting right now.
+          writerLabel:
+            existing.writerConn === null
+              ? null
+              : existing.members.get(existing.writerConn) ?? null,
         },
       }],
     };
@@ -276,7 +290,7 @@ function hello(
     writerAliveAt: now,
     activeSession: null,
     snapshotCache: null,
-    members: new Set([conn]),
+    members: new Map([[conn, frame.deviceLabel]]),
     pending: new Map(),
   };
   state.rooms.set(frame.room, room);
@@ -285,7 +299,11 @@ function hello(
     state,
     effects: [
       { kind: 'journal', room: frame.room, roomCode: frame.code, epoch: 0 },
-      { kind: 'send', to: conn, frame: { type: 'joined', epoch: 0, hasWriter: false, activeSession: null } },
+      {
+        kind: 'send',
+        to: conn,
+        frame: { type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null },
+      },
     ],
   };
 }
@@ -323,7 +341,7 @@ function sweepLeases(state: RelayState, now: number, leaseMs: number): RelayRedu
 function orphan(room: RoomState): RelayEffect[] {
   room.writerConn = null;
   const effects: RelayEffect[] = [];
-  for (const m of room.members) effects.push({ kind: 'send', to: m, frame: { type: 'conductor-lost' } });
+  for (const m of room.members.keys()) effects.push({ kind: 'send', to: m, frame: { type: 'conductor-lost' } });
   effects.push(...drainPending(room, room.snapshotCache));
   return effects;
 }
@@ -361,10 +379,11 @@ function notWriter(state: RelayState, room: RoomState, conn: string): RelayReduc
   };
 }
 
-// Only msg + session fan out (doc §6) — to every admitted member EXCEPT the
-// sender (the writer's own state is authoritative; it ignores echoes anyway).
+// Only msg + session (doc §6) and the relay-authored `writer` attribution fan
+// out — to every admitted member EXCEPT the sender/grantee (the writer's own
+// state is authoritative; it ignores echoes anyway).
 function broadcast(room: RoomState, sender: string, frame: RelayFrame): RelayEffect[] {
   const effects: RelayEffect[] = [];
-  for (const m of room.members) if (m !== sender) effects.push({ kind: 'send', to: m, frame });
+  for (const m of room.members.keys()) if (m !== sender) effects.push({ kind: 'send', to: m, frame });
   return effects;
 }

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Conductor 3b chunk 5 — Join/QR + failover UI mockups</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { background: #0a0a0b; }
+  .panel-note { color: #71717a; font-size: 0.75rem; line-height: 1.5; }
+  /* Fake chart backdrop so the strips read in context */
+  .chart-bg {
+    background:
+      repeating-linear-gradient(0deg, #18181b 0 2px, transparent 2px 26px),
+      repeating-linear-gradient(90deg, #18181b 0 2px, transparent 2px 90px),
+      #111113;
+  }
+  .qr-fake {
+    width: 220px; height: 220px; background:
+      conic-gradient(#000 25%, #fff 0 50%, #000 0 75%, #fff 0) 0 0/20px 20px,
+      #fff;
+    image-rendering: pixelated;
+  }
+</style>
+</head>
+<body class="text-zinc-200 antialiased">
+<div class="max-w-3xl mx-auto px-6 py-10 space-y-14">
+
+  <header class="space-y-2">
+    <h1 class="text-xl font-bold text-white">Conductor 3b · chunk 5 — Join/QR + failover UI</h1>
+    <p class="panel-note">
+      Doc §10.5: join screen (auto-open activeSession's chart, chart-not-on-device honesty),
+      QR render, conductor-lost banner, "Take the baton" confirm, "X is conducting" attribution.
+      All strips live where the ConductorCluster lives today: a compact text-xs bar pinned under
+      the chart. Nothing here invents new relay facts — every element maps to a field already on
+      <code class="text-zinc-400">RelaySurface</code>.
+    </p>
+  </header>
+
+  <!-- ═══════════════ 1. MD cluster, gone live ═══════════════ -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">1 · MD cluster — live to the room (role: writer)</h2>
+    <p class="panel-note">
+      The shipped cluster, with the header made relay-aware. "Local MD mode" (amber) becomes
+      "Conducting · LIVE" (emerald) when the relay is joined and we hold the baton. A room chip
+      shows the code and opens the QR overlay (panel 2). Everything below the header row is the
+      shipped chunk-4/5b cluster, unchanged.
+    </p>
+    <div class="rounded-lg overflow-hidden border border-zinc-800">
+      <div class="chart-bg h-28 relative">
+        <div class="absolute inset-x-10 top-8 border-t-2 border-red-500/70"></div>
+      </div>
+      <div class="bg-zinc-900 border-t border-zinc-800 text-xs">
+        <div class="flex items-center justify-between px-3 py-1.5">
+          <span class="flex items-center gap-2">
+            <span class="font-bold uppercase tracking-wide text-emerald-400">Conducting</span>
+            <span class="inline-flex items-center gap-1 rounded bg-emerald-950 border border-emerald-800 px-2 py-0.5 text-emerald-300">
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> LIVE
+            </span>
+            <button class="rounded px-2 py-0.5 bg-zinc-800 text-zinc-300 hover:bg-zinc-700">
+              Room <span class="font-mono font-bold text-white tracking-widest">XYZW</span> · QR
+            </button>
+          </span>
+          <div class="flex items-center gap-3">
+            <button class="rounded px-2 py-0.5 bg-sky-700 text-white">Clock: on</button>
+            <button class="rounded px-2 py-0.5 bg-zinc-800 text-zinc-300">Auto-fire: off</button>
+            <button class="text-zinc-500 underline">Exit</button>
+          </div>
+        </div>
+        <div class="flex items-center justify-center gap-3 py-1.5">
+          <span class="text-zinc-400 min-w-[6rem] text-center">
+            Bar <span class="font-bold text-red-400">24</span> <span class="text-zinc-500">· 2nd pass</span>
+          </span>
+          <button class="px-3 py-1 rounded bg-red-600 text-white font-bold">Advance &rarr;</button>
+          <button class="px-3 py-1 rounded bg-zinc-800 text-zinc-200">On the 1</button>
+        </div>
+        <div class="border-t border-zinc-800 px-3 py-1.5 flex items-center justify-center">
+          <button class="px-3 py-1 rounded bg-zinc-800 text-zinc-200">Arm change&hellip;</button>
+        </div>
+      </div>
+    </div>
+    <p class="panel-note">
+      States of the same chip: <span class="text-zinc-300">relay off</span> = header stays
+      "Local MD mode" exactly as shipped (byte-for-byte rule) with one added header button
+      <span class="text-zinc-300">"Go live"</span>; <span class="text-zinc-300">connecting</span> =
+      chip reads "connecting…" (zinc, pulsing dot); <span class="text-zinc-300">socket lost</span> =
+      chip reads "relay lost — self-driving" (amber) while the MD keeps conducting locally
+      (the self-drive floor — no modal, no interruption).
+    </p>
+  </section>
+
+  <!-- ═══════════════ 2. QR overlay ═══════════════ -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">2 · QR overlay (from the room chip / Go live)</h2>
+    <p class="panel-note">
+      D1: QR encodes <code class="text-zinc-400">https://showrunr.ai/join?relay=…&room=&lt;slug&gt;&code=XYZW</code>.
+      The 4-char code in large type is the can't-scan fallback (D1) — codes rotate per show (D3).
+      Dismiss anywhere; conducting is not blocked behind it.
+    </p>
+    <div class="rounded-lg overflow-hidden border border-zinc-800 relative">
+      <div class="chart-bg h-[430px]"></div>
+      <div class="absolute inset-0 bg-black/70 flex items-center justify-center">
+        <div class="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-80 text-center space-y-4">
+          <div class="text-sm font-bold text-white">Follow this performance</div>
+          <div class="qr-fake mx-auto rounded"></div>
+          <div>
+            <div class="text-[11px] uppercase tracking-wide text-zinc-500">or enter room code</div>
+            <div class="font-mono text-4xl font-bold tracking-[0.3em] text-white mt-1">XYZW</div>
+          </div>
+          <div class="text-xs text-zinc-500">Scan with your phone camera — opens straight into the show.</div>
+          <button class="w-full py-2 rounded bg-zinc-800 text-zinc-200 text-xs hover:bg-zinc-700">Done</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ 3. Join screen ═══════════════ -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">3 · Join screen — manual code entry (/join, no params)</h2>
+    <p class="panel-note">
+      The QR deep link skips this entirely (auto-joins with the URL params). This screen is the
+      typed-code fallback: room = show slug from the URL path they're already on, or typed here.
+      One field that matters: the code.
+    </p>
+    <div class="rounded-lg border border-zinc-800 bg-[#0e0e10] p-10 flex items-center justify-center">
+      <div class="w-72 space-y-5 text-center">
+        <div class="text-sm font-bold text-white">Join a performance</div>
+        <div class="space-y-2">
+          <input class="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600" placeholder="Show (e.g. rachel/summer-tour)" value="rachel/summer-tour" />
+          <input class="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-3 text-center font-mono text-2xl tracking-[0.3em] uppercase placeholder-zinc-700" placeholder="CODE" maxlength="4" />
+        </div>
+        <button class="w-full py-2.5 rounded bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-500">Join</button>
+        <div class="text-[11px] text-zinc-600">Ask whoever's running the show for the code on their screen.</div>
+      </div>
+    </div>
+    <p class="panel-note">
+      Error state: wrong/stale code (relay bounce 4001) → the code field shakes, copy
+      <span class="text-zinc-300">"That code isn't current — check the conductor's screen."</span>
+      No retry limit (band trust plane, D5).
+    </p>
+  </section>
+
+  <!-- ═══════════════ 4. Follower — mirroring ═══════════════ -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">4 · Follower strip — mirroring (role: follower, writer live)</h2>
+    <p class="panel-note">
+      The follower's replacement for the cluster: a single slim strip. Attribution from
+      <code class="text-zinc-400">conductorLabel</code> ("Rachel is conducting" — relay-authored,
+      §4.3). No transport controls (follower hard gate — local taps are inert). The chart above
+      follows the wire; page turns are automatic.
+    </p>
+    <div class="rounded-lg overflow-hidden border border-zinc-800">
+      <div class="chart-bg h-28 relative">
+        <div class="absolute inset-x-10 top-16 border-t-2 border-red-500/70"></div>
+      </div>
+      <div class="bg-zinc-900 border-t border-zinc-800 text-xs">
+        <div class="flex items-center justify-between px-3 py-1.5">
+          <span class="flex items-center gap-2">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+            <span class="text-zinc-300"><span class="font-bold text-white">Rachel</span> is conducting</span>
+            <span class="text-zinc-500">· Bar <span class="font-bold text-red-400">24</span> · 2nd pass</span>
+          </span>
+          <button class="text-zinc-500 underline hover:text-white">Leave</button>
+        </div>
+      </div>
+    </div>
+    <p class="panel-note">
+      When <code class="text-zinc-400">conductorLabel</code> is null but a writer is live
+      (pre-attribution edge): the strip reads <span class="text-zinc-300">"Following the conductor"</span> —
+      never a made-up name.
+    </p>
+  </section>
+
+  <!-- ═══════════════ 5. Conductor lost ═══════════════ -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">5 · Conductor lost (orphan) → Take the baton</h2>
+    <p class="panel-note">
+      <code class="text-zinc-400">conductorLost</code>: the amber honesty strip. The device
+      self-drives (taps work again — the strip says so). "Take the baton" shows only when
+      <code class="text-zinc-400">canClaim</code> (chart loaded). Same strip serves a deliberate
+      handoff (release = instant orphan, §4.1-5).
+    </p>
+    <div class="rounded-lg overflow-hidden border border-zinc-800">
+      <div class="chart-bg h-24 relative">
+        <div class="absolute inset-x-10 top-12 border-t-2 border-red-500/70"></div>
+      </div>
+      <div class="bg-zinc-900 border-t border-amber-900/60 text-xs">
+        <div class="flex items-center justify-between px-3 py-1.5 bg-amber-950/40">
+          <span class="flex items-center gap-2 text-amber-300">
+            <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+            Conductor lost — you're on your own chart for now
+          </span>
+          <span class="flex items-center gap-2">
+            <button class="px-3 py-1 rounded bg-amber-600 text-white font-bold hover:bg-amber-500">Take the baton</button>
+            <button class="text-zinc-500 underline hover:text-white">Leave</button>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <p class="panel-note">Tapping it swaps the strip in place for a one-line confirm — no modal, one tap to commit, mid-song safe:</p>
+    <div class="rounded-lg overflow-hidden border border-zinc-800">
+      <div class="bg-zinc-900 text-xs">
+        <div class="flex items-center justify-between px-3 py-1.5 bg-amber-950/40">
+          <span class="text-amber-200">Take over as conductor? Everyone follows <span class="font-bold text-white">this device</span>.</span>
+          <span class="flex items-center gap-2">
+            <button class="px-3 py-1 rounded bg-emerald-600 text-white font-bold hover:bg-emerald-500">Take it</button>
+            <button class="px-2 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700">Cancel</button>
+          </span>
+        </div>
+      </div>
+    </div>
+    <p class="panel-note">
+      On grant the strip becomes panel 1 (the full MD cluster, LIVE) — the granted device picks up
+      from its OWN local position (acceptBaton mints the new generation). If someone else won the
+      race (<code class="text-zinc-400">claim-denied</code> → a `writer` frame arrives): strip
+      returns to panel 4 with <span class="text-zinc-300">"Marcus is conducting"</span> — the
+      denial needs no error toast, the attribution IS the answer.
+    </p>
+  </section>
+
+  <!-- ═══════════════ 6. Chart honesty ═══════════════ -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">6 · Chart honesty — switch-session navigation + not-on-device</h2>
+    <p class="panel-note">
+      <code class="text-zinc-400">activeSession</code> names a chart this device has →
+      <b class="text-zinc-300">auto-open it</b> (doc §3: "a late joiner's app can open the right
+      chart without hunting"). The strip flashes the switch; no button, no question:
+    </p>
+    <div class="rounded-lg overflow-hidden border border-zinc-800">
+      <div class="bg-zinc-900 text-xs">
+        <div class="flex items-center gap-2 px-3 py-1.5">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+          <span class="text-zinc-300"><span class="font-bold text-white">Rachel</span> is conducting · switched to <span class="font-bold text-white">Vehicle</span></span>
+        </div>
+      </div>
+    </div>
+
+    <p class="panel-note">
+      <code class="text-zinc-400">chartMismatch</code> and the chart is NOT on this device (or a
+      different <code class="text-zinc-400">programHash</code> build of it): the honesty strip.
+      The device shows whatever it has; nothing mirrors. It heals itself the moment the chart
+      loads (chart-arrived-late heal, chunk-4 pin).
+    </p>
+    <div class="rounded-lg overflow-hidden border border-zinc-800">
+      <div class="chart-bg h-24"></div>
+      <div class="bg-zinc-900 border-t border-zinc-800 text-xs">
+        <div class="flex items-center justify-between px-3 py-1.5">
+          <span class="flex items-center gap-2 text-zinc-400">
+            <span class="w-1.5 h-1.5 rounded-full bg-zinc-500"></span>
+            The room is playing <span class="font-bold text-zinc-200">Vehicle</span> — not on this device
+          </span>
+          <button class="text-zinc-500 underline hover:text-white">Leave</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ 7. Waiting for a conductor ═══════════════ -->
+  <section class="space-y-3">
+    <h2 class="font-bold text-white">7 · Joined, no conductor yet (activeSession: null)</h2>
+    <p class="panel-note">
+      Doc §4: null activeSession = "waiting for a conductor" + self-drive + the claim affordance.
+      Post-relay-reboot rejoin lands here too.
+    </p>
+    <div class="rounded-lg overflow-hidden border border-zinc-800">
+      <div class="chart-bg h-24"></div>
+      <div class="bg-zinc-900 border-t border-zinc-800 text-xs">
+        <div class="flex items-center justify-between px-3 py-1.5">
+          <span class="flex items-center gap-2 text-zinc-400">
+            <span class="w-1.5 h-1.5 rounded-full bg-zinc-500 animate-pulse"></span>
+            In the room — waiting for a conductor
+          </span>
+          <span class="flex items-center gap-2">
+            <button class="px-3 py-1 rounded bg-zinc-800 text-zinc-200 hover:bg-zinc-700">Conduct from here</button>
+            <button class="text-zinc-500 underline hover:text-white">Leave</button>
+          </span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="panel-note border-t border-zinc-800 pt-6">
+    Mockup only — not app code. Fake QR, fake chart. Every state maps to RelaySurface:
+    status/role/canClaim/conductorLost/conductorLabel/activeSession/chartMismatch/requestClaim/releaseBaton.
+  </footer>
+</div>
+</body>
+</html>
