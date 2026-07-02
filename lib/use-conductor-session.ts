@@ -22,7 +22,7 @@ import {
   initRelayBinding,
   reduceBinding,
   relayFacts,
-  stateSupersedes,
+  shouldAdoptSnapshot,
   type RelayBinding,
   type BindingInput,
   type RelayFacts,
@@ -437,14 +437,17 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
             queue.push({ kind: 'mirror-outcome', outcome: res.status });
             break;
           }
-          // The rebase door. stateSupersedes keeps it forward-only: an
-          // ex-writer's reconnect pull must not rewind the freshest state in
-          // the room with the relay's older stale cache (doc §4.2).
+          // The rebase door, two regimes (relay-binding.ts shouldAdoptSnapshot):
+          // a FRESH snapshot is the live writer's authority — adopted
+          // unconditionally, crushing any offline self-drive fork (Codex R1
+          // HIGH); a STALE claim-time cache is unattributed — forward-only, so
+          // an ex-writer's reconnect pull can't rewind the freshest state in
+          // the room (doc §4.2).
           case 'adopt-snapshot': {
             const d = driverRef.current;
             const s = d.session;
             if (!s) break;
-            if (!stateSupersedes(eff.state, s.state)) break;
+            if (!shouldAdoptSnapshot(eff.stale, eff.state, s.state)) break;
             const nextReck = reckonAfter(
               d.reckoning,
               s.state.current,

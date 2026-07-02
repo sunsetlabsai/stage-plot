@@ -428,11 +428,15 @@ Decisions made while building chunk 4, now canonical:
   socket; nothing else.
 - **`parseRelayFrame` depth = "validate what you read"** (the §6 rule-5 client mirror):
   frame fields plus the `ConductorMessage`/`ConductorState` ENVELOPE the reducer's admission
-  path reads (identity triple, epoch/seq/sentAt numbers, `payload.kind`). Payload bodies and
-  a snapshot's vm are deliberately NOT deep-validated — they originate from another instance
-  of this app on the band trust plane (§8/D5), the same plane on which a snapshot's vm is
-  adopted wholesale. Garbage is DROPPED client-side (`bad-frame`), not closed — the relay is
-  our box; a bad frame off it is a bug to survive, not a peer to eject.
+  path reads (identity triple, epoch/seq/sentAt numbers, `payload.kind` — which must be one
+  of the KNOWN `ConductorPayload` discriminators, Codex chunk-4 R1 MED: the reducer's switch
+  is exhaustive over them, so an unknown kind is dropped at the boundary rather than falling
+  off the switch; the mixed-version heal is the designed one — the next delta's seq gap →
+  `needsSnapshot` → pull). Payload BODIES and a snapshot's vm are deliberately NOT
+  deep-validated — they originate from another instance of this app on the band trust plane
+  (§8/D5), the same plane on which a snapshot's vm is adopted wholesale. Garbage is DROPPED
+  client-side (`bad-frame`), not closed — the relay is our box; a bad frame off it is a bug
+  to survive, not a peer to eject.
 - **`dispatch` returns the minted `msg` iff it APPLIED** (the fan-out seam). A rejected mint
   is never returned — fanning out a message the writer's own reducer refused would hand
   followers a delta their mirrors also refuse.
@@ -440,11 +444,21 @@ Decisions made while building chunk 4, now canonical:
   gestures/clock do NOT dispatch — the wire is the session's one writer; a local dispatch
   would burn seq numbers the mirror never saw and freeze it silently (`ignored` forever).
   `joining` is deliberately NOT blocked: the self-drive floor — an MD whose relay box died
-  keeps conducting; nothing mirrors into a joining session (activeSession null), so no fork.
-- **Snapshot adoption is forward-only** (`stateSupersedes`: higher epoch, or same epoch +
-  higher seq). The load-bearing case: an EX-WRITER reconnects and its join-pull is answered
-  by the relay's own claim-time stale cache, which is BEHIND the freshest state in the room
-  (§4.2) — adopting it would rewind the one device that's right.
+  keeps conducting. A disconnected follower therefore CAN fork (self-drive mints local seqs
+  the writer never saw); the fork is crushed at rejoin by the adoption rule below.
+- **Snapshot adoption has TWO authority regimes**, told apart by the wire's `stale` flag
+  (`shouldAdoptSnapshot`, Codex chunk-4 R1 HIGH). FRESH (`stale: false`) is authored by the
+  room's LIVE writer answering this pull — THE authority within a session — and is adopted
+  UNCONDITIONALLY: a follower that self-drove while offline holds coordinates on a FORK, not
+  on the writer's timeline, so comparing them is meaningless, and rejecting the writer's
+  snapshot would strand the device (every later delta lands `ignored`, a silently frozen
+  mirror). The rejoin pull is mandatory (`joined` always pulls the active session), so fresh
+  force-adoption is the fork-crushing door. STALE (`stale: true`) is the relay's claim-time
+  cache, served only when NO writer is live — unattributed, so forward-only coordinates
+  apply (`stateSupersedes`: higher epoch, or same epoch + higher seq). The load-bearing
+  stale case: an EX-WRITER reconnects and its join-pull is answered by that cache, which is
+  BEHIND the freshest state in the room (§4.2) — adopting it would rewind the one device
+  that's right.
 - **Chart-arrived-late heal**: a snapshot gated away by `localKey` consumed the machine's
   outstanding pull, so `local-ready` landing ON the active key force-feeds `needsSnapshot`
   to re-open it (pull is idempotent per key) — convergence now, not at the next delta's gap.

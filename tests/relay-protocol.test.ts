@@ -524,6 +524,11 @@ describe('parseRelayFrame', () => {
     ['msg missing sentAt', { type: 'msg', msg: { ...KEY_A, epoch: 1, seq: 1, payload: { kind: 'advance' } } }],
     ['msg payload not an object', { type: 'msg', msg: { ...KEY_A, epoch: 1, seq: 1, sentAt: 0, payload: 'advance' } }],
     ['msg payload without kind', { type: 'msg', msg: { ...KEY_A, epoch: 1, seq: 1, sentAt: 0, payload: {} } }],
+    // The reducer's switch is exhaustive over the KNOWN payload kinds — an
+    // unknown discriminator would fall off it, so it is dropped at the
+    // boundary (Codex R1 MED). Mixed-version heal is the designed one: the
+    // next delta's seq gap → needsSnapshot → pull.
+    ['msg with an unknown payload kind', { type: 'msg', msg: { ...KEY_A, epoch: 1, seq: 1, sentAt: 0, payload: { kind: 'futureKind' } } }],
     ['not-writer activeSession undefined', { type: 'not-writer', epoch: 4 }],
     ['snapshot-needed missing requestId', { type: 'snapshot-needed', session: KEY_A }],
     ['snapshot missing stale', { type: 'snapshot', state: fakeState(KEY_A) }],
@@ -537,5 +542,12 @@ describe('parseRelayFrame', () => {
   it('trusts the band plane past the envelope: payload bodies are NOT deep-validated (doc §8/D5)', () => {
     const msg = { ...KEY_A, epoch: 1, seq: 1, sentAt: 0, payload: { kind: 'arm', nonsense: true } };
     expect(parseRelayFrame({ type: 'msg', msg })).toEqual({ type: 'msg', msg });
+  });
+
+  it('admits every ConductorPayload discriminator the reducer switches on', () => {
+    for (const kind of ['claim', 'advance', 'redirect', 'arm', 'commit', 'disarm', 'clock']) {
+      const msg = { ...KEY_A, epoch: 1, seq: 1, sentAt: 0, payload: { kind } };
+      expect(parseRelayFrame({ type: 'msg', msg })).toEqual({ type: 'msg', msg });
+    }
   });
 });

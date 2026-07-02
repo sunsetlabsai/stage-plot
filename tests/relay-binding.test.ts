@@ -8,6 +8,7 @@ import {
   initRelayBinding,
   reduceBinding,
   relayFacts,
+  shouldAdoptSnapshot,
   stateSupersedes,
 } from '../lib/relay-binding';
 
@@ -15,8 +16,9 @@ import {
 // (design-conductor-3b-discovery-failover.md §10-4). The localKey gates the conn
 // machine cannot know: mirror/adopt only on this device's loaded chart, the
 // chart-arrived-late force re-pull, claim gated on having a chart, the writer's
-// §4.4 re-announce, the §4.1-3 grant sequence order, and the forward-only
-// snapshot-adoption guard (`stateSupersedes` — the ex-writer-rewind case).
+// §4.4 re-announce, the §4.1-3 grant sequence order, and the two-regime
+// snapshot-adoption guard (`shouldAdoptSnapshot`: FRESH = live-writer authority
+// force-adopts, STALE = forward-only ex-writer-rewind guard).
 // The binding never touches ConductorState internals, so identity+coordinate
 // stand-ins suffice (same trick as relay-protocol.test.ts) — envelope-complete
 // so parseRelayFrame admits them on the raw-frame path.
@@ -336,7 +338,7 @@ describe('relayFacts', () => {
   });
 });
 
-describe('stateSupersedes — forward-only adoption (the ex-writer-rewind guard)', () => {
+describe('stateSupersedes — forward-only coordinates (the STALE-regime comparator)', () => {
   it.each([
     ['higher epoch', { epoch: 3, seq: 0 }, { epoch: 2, seq: 9 }, true],
     ['same epoch, higher seq', { epoch: 2, seq: 5 }, { epoch: 2, seq: 4 }, true],
@@ -345,5 +347,30 @@ describe('stateSupersedes — forward-only adoption (the ex-writer-rewind guard)
     ['lower epoch, higher seq', { epoch: 1, seq: 99 }, { epoch: 2, seq: 0 }, false],
   ])('%s → %s', (_name, candidate, current, expected) => {
     expect(stateSupersedes(candidate, current)).toBe(expected);
+  });
+});
+
+describe('shouldAdoptSnapshot — the two authority regimes (Codex chunk-4 R1 HIGH)', () => {
+  // FRESH = authored by the LIVE writer answering this pull: THE authority.
+  // Adopted unconditionally — including BACKWARD coordinates, which is the
+  // fork-crush: an offline follower self-drove (allowed — the self-drive
+  // floor), so its coords are on a fork, not on the writer's timeline.
+  it.each([
+    ['backward seq (the reconnected fork)', { epoch: 1, seq: 1 }, { epoch: 1, seq: 9 }],
+    ['equal coordinates (divergent position possible)', { epoch: 1, seq: 3 }, { epoch: 1, seq: 3 }],
+    ['backward epoch (fork crossed a claim it never heard)', { epoch: 1, seq: 2 }, { epoch: 2, seq: 0 }],
+    ['forward (ordinary late join)', { epoch: 2, seq: 0 }, { epoch: 1, seq: 7 }],
+  ])('FRESH adopts unconditionally: %s', (_name, candidate, current) => {
+    expect(shouldAdoptSnapshot(false, candidate, current)).toBe(true);
+  });
+
+  // STALE = the relay's claim-time cache, served only with NO live writer:
+  // unattributed, so forward-only holds (the ex-writer-rewind guard, §4.2).
+  it.each([
+    ['behind the ex-writer', { epoch: 1, seq: 1 }, { epoch: 1, seq: 9 }, false],
+    ['equal coordinates', { epoch: 1, seq: 3 }, { epoch: 1, seq: 3 }, false],
+    ['genuinely forward', { epoch: 2, seq: 0 }, { epoch: 1, seq: 7 }, true],
+  ])('STALE stays forward-only: %s → %s', (_name, candidate, current, expected) => {
+    expect(shouldAdoptSnapshot(true, candidate, current)).toBe(expected);
   });
 });

@@ -1,14 +1,14 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { WebSocket } from 'ws';
 import { startRelay, type RelayHandle } from '../relay/server';
-import { helloFrame, sessionKeyOf, type SessionKey } from '../lib/relay-protocol';
+import { helloFrame, initClientConn, sessionKeyOf, type SessionKey } from '../lib/relay-protocol';
 import {
   type BindingInput,
   type RelayBinding,
   initRelayBinding,
   reduceBinding,
   relayFacts,
-  stateSupersedes,
+  shouldAdoptSnapshot,
 } from '../lib/relay-binding';
 import {
   initSession,
@@ -62,9 +62,16 @@ class Device {
   }
 
   connect(port: number, label: string, room = 'gig', code = 'XYZW'): Promise<void> {
+    // The hook's (re)connect path: fresh conn machine, the localKey SURVIVES.
+    this.binding = { conn: initClientConn(), localKey: this.binding.localKey };
     const ws = new WebSocket(`ws://127.0.0.1:${port}`);
     this.ws = ws;
     ws.on('message', (data) => this.feed({ kind: 'raw-frame', raw: JSON.parse(String(data)) }));
+    // The hook's onclose path: back to 'joining' (the self-drive floor opens).
+    ws.on('close', () => {
+      if (this.ws !== ws) return; // superseded socket
+      this.binding = { conn: initClientConn(), localKey: this.binding.localKey };
+    });
     return new Promise((res, rej) => {
       ws.on('open', () => {
         ws.send(JSON.stringify(helloFrame(room, code, label)));
@@ -123,7 +130,9 @@ class Device {
           }
           case 'adopt-snapshot': {
             const s = this.session!; // key-gated on localKey
-            if (stateSupersedes(eff.state, s.state)) this.session = { ...s, state: eff.state };
+            if (shouldAdoptSnapshot(eff.stale, eff.state, s.state)) {
+              this.session = { ...s, state: eff.state };
+            }
             break;
           }
           case 'accept-baton': {
@@ -304,6 +313,43 @@ describe('scenario 3: session switch (§4.4)', () => {
     md.advance(2000); // → b1
     await until('follower mirrors song B', () => f.state.seq === md.state.seq);
     expect(f.state.current).toEqual({ barId: 'b1', pass: 1 });
+    expect(f.badFrames).toBe(0);
+  });
+});
+
+describe('scenario 4: a forked follower reconnects (Codex chunk-4 R1 HIGH)', () => {
+  it('offline self-drive past the writer → rejoin pull → FRESH snapshot force-adopts → mirrors live', async () => {
+    const h = await relay();
+    const md = await mdWithA(h.port);
+    md.advance(1000); // → a1 (seq 1)
+
+    const f = await joinWithA(h.port, 'cello');
+    await until('follower converged', () => f.state.seq === 1);
+
+    // Wi-Fi dies for the follower. The self-drive floor deliberately lets it
+    // keep playing — it advances on a LOCAL FORK, minting seqs the writer
+    // never saw, ending AHEAD of the writer's coordinates.
+    f.kill();
+    await until('follower offline', () => f.facts.phase === 'joining');
+    f.advance(2000);
+    f.advance(2001);
+    f.advance(2002);
+    expect(f.state.seq).toBe(4); // writer is at seq 1
+    expect(f.state.current).toEqual({ barId: 'a4', pass: 1 });
+
+    // Reconnect: joined → the mandatory rejoin pull → the LIVE writer's fresh
+    // snapshot must win DESPITE lower coordinates (a fork is not freshness) —
+    // forward-only here would strand the device with a frozen mirror.
+    await f.connect(h.port, 'cello');
+    await until(
+      'fork crushed onto the writer',
+      () => f.state.seq === md.state.seq && f.state.current?.barId === 'a1',
+    );
+    expect(f.state.epoch).toBe(md.state.epoch);
+
+    // ...and the mirror is LIVE again, not silently ignoring deltas.
+    md.advance(3000); // → a2
+    await until('mirrors after rejoin', () => f.state.current?.barId === 'a2');
     expect(f.badFrames).toBe(0);
   });
 });

@@ -112,16 +112,10 @@ export function relayFacts(b: RelayBinding): RelayFacts {
   };
 }
 
-// Should an incoming snapshot REPLACE the local session state? Adoption is a
-// REBASE door, and rebasing must only ever move FORWARD along the authority
-// coordinates (epoch, then seq within an epoch — the reducer's own admission
-// order). The case that makes this load-bearing: an EX-WRITER reconnects (its
-// old connection orphaned the baton), rejoins, and the join path pulls — the
-// relay serves its own claim-time cache, which is BEHIND the ex-writer's local
-// state (doc §4.2: the ex-writer's state is the freshest in the room). Adopting
-// it would rewind the one device that's right. Equal coordinates are also
-// skipped — nothing to gain, and dropping the replace keeps `current` reference
-// identity stable for the renderer.
+// Forward-only along the authority coordinates (epoch, then seq within an
+// epoch — the reducer's own admission order). This is the comparator for the
+// STALE regime of `shouldAdoptSnapshot` (below); it is meaningful only when
+// both states sit on the same writer timeline.
 export function stateSupersedes(
   candidate: { epoch: number; seq: number },
   current: { epoch: number; seq: number },
@@ -130,6 +124,34 @@ export function stateSupersedes(
     candidate.epoch > current.epoch ||
     (candidate.epoch === current.epoch && candidate.seq > current.seq)
   );
+}
+
+// Should an incoming snapshot REPLACE the local session state? TWO authority
+// regimes, told apart by the wire's `stale` flag (chunk-3 relay semantics):
+//
+//  • FRESH (stale: false) — authored by the room's LIVE writer answering this
+//    pull. Within a session the live writer is THE authority (single-writer,
+//    doc §2), so a fresh snapshot is adopted UNCONDITIONALLY. The case that
+//    makes this load-bearing (Codex chunk-4 R1 HIGH): a follower that lost its
+//    socket self-drove meanwhile — the self-drive floor deliberately allows it
+//    ('joining' does not block local dispatch) — minting seqs on a FORK that
+//    is not on the writer's timeline. Coordinate comparison across that fork
+//    boundary is meaningless (equal-or-higher local coords can hide a divergent
+//    position), and rejecting the writer's snapshot would strand the device:
+//    every later delta lands `ignored` (seq ≤ local) — a silently frozen
+//    mirror. The rejoin pull is mandatory (`joined` always pulls the active
+//    session), so unconditional fresh adoption is the fork-crushing door.
+//  • STALE (stale: true) — the relay's claim-time cache, served only when NO
+//    writer is live: unattributed, so forward-only applies (stateSupersedes).
+//    The case that makes THIS load-bearing (doc §4.2): an EX-WRITER reconnects
+//    and its join-pull is answered by that cache, which is BEHIND the freshest
+//    state in the room — adopting it would rewind the one device that's right.
+export function shouldAdoptSnapshot(
+  stale: boolean,
+  candidate: { epoch: number; seq: number },
+  current: { epoch: number; seq: number },
+): boolean {
+  return stale ? stateSupersedes(candidate, current) : true;
 }
 
 const noop = (binding: RelayBinding): BindingReduction => ({ binding, effects: [] });

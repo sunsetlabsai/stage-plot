@@ -967,6 +967,53 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
     expect(result.current.relay.canClaim).toBe(true);
   });
 
+  it('a follower that self-drove while offline is crushed back onto the writer on rejoin (Codex R1 HIGH)', async () => {
+    vi.useFakeTimers();
+    const h = relayHarness();
+    const { result } = renderHook(() => useConductorSession(args({ relay: h.relay })));
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync(); // flush the async programHash resolve
+    });
+    expect(result.current.active).toBe(true);
+    const first = h.sock();
+
+    // Converge as a follower on the peer MD's session (writer two bars in).
+    let md = await simPeer('chart1::owner/show', 'chart1', cal);
+    md = dispatch(md, { kind: 'advance' }, 10).session; // → b1
+    md = dispatch(md, { kind: 'advance' }, 20).session; // → b2, seq 2
+    const key = { sessionId: md.state.sessionId, songRef: md.state.songRef, programHash: md.state.programHash };
+    act(() => first.open());
+    act(() => first.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key }));
+    act(() => first.push({ type: 'snapshot', state: md.state, stale: false }));
+    expect(result.current.current?.barId).toBe('b2');
+
+    // Wi-Fi dies → 'joining' → the self-drive floor deliberately unblocks
+    // local gestures: the follower forks AHEAD of the writer's coordinates.
+    act(() => first.drop());
+    act(() => result.current.advance()); // → b3, local seq 3 (a FORK)
+    act(() => result.current.advance()); // → wraps to b1, local seq 4
+    expect(result.current.state?.seq).toBe(4);
+    expect(result.current.current?.barId).toBe('b1');
+
+    // Rejoin: the mandatory pull is answered by the LIVE writer's FRESH
+    // snapshot at LOWER coordinates — it must force-adopt (fork ≠ freshness);
+    // forward-only here would freeze the mirror forever.
+    act(() => {
+      vi.advanceTimersByTime(2000); // > RELAY_RECONNECT_MS
+    });
+    const second = h.sock();
+    act(() => second.open());
+    act(() => second.push({ type: 'joined', epoch: 0, hasWriter: true, activeSession: key }));
+    act(() => second.push({ type: 'snapshot', state: md.state, stale: false }));
+    expect(result.current.current?.barId).toBe('b2'); // crushed onto the writer
+    expect(result.current.state?.seq).toBe(2);
+
+    // ...and live deltas mirror again (they would land `ignored` on the fork).
+    const step = dispatch(md, { kind: 'advance' }, 30); // → b3, seq 3
+    act(() => second.push({ type: 'msg', msg: step.msg }));
+    expect(result.current.current?.barId).toBe('b3');
+  });
+
   it('relay off→on with the SAME session keeps the localKey (teardown must not strand the binding)', async () => {
     const h = relayHarness();
     const { result, rerender } = renderHook(

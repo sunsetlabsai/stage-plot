@@ -174,17 +174,29 @@ export function parseClientFrame(raw: unknown): ClientFrame | null {
 // places admitted devices on the band trust plane — the same plane on which we
 // adopt a snapshot's vm wholesale. A malformed frame from that plane is a local
 // client failure (rejoin), not the shared-relay crash class chunk 3 closed.
+// The payload discriminators the chunk-3a reducer actually switches on
+// (conductor-state.ts ConductorPayload). "Validate what you read" (Codex
+// chunk-4 R1 MED): admission reads payload.kind and the reducer's switch is
+// exhaustive over exactly these — an unknown discriminator must be dropped at
+// the boundary (bad-frame), never fall off the switch. The mixed-version
+// consequence is the designed one: a dropped delta is healed by the NEXT
+// delta's seq gap → needsSnapshot → pull (the one recovery door).
+const PAYLOAD_KINDS = new Set(['claim', 'advance', 'redirect', 'arm', 'commit', 'disarm', 'clock']);
+
 function isConductorMessageShape(v: unknown): v is ConductorMessage {
   if (!isSessionKeyShape(v)) return false;
   const m = v as unknown as Record<string, unknown>;
-  return (
-    typeof m.epoch === 'number' &&
-    typeof m.seq === 'number' &&
-    typeof m.sentAt === 'number' &&
-    typeof m.payload === 'object' &&
-    m.payload !== null &&
-    typeof (m.payload as Record<string, unknown>).kind === 'string'
-  );
+  if (
+    typeof m.epoch !== 'number' ||
+    typeof m.seq !== 'number' ||
+    typeof m.sentAt !== 'number' ||
+    typeof m.payload !== 'object' ||
+    m.payload === null
+  ) {
+    return false;
+  }
+  const kind = (m.payload as Record<string, unknown>).kind;
+  return typeof kind === 'string' && PAYLOAD_KINDS.has(kind);
 }
 
 // A ConductorState carries the identity triple plus the authority coordinates the
