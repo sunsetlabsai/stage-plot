@@ -1,0 +1,7 @@
+# Fly builds the relay image (relay/Dockerfile) from the repo root — keep the
+# context to what it COPYs: lib/ and relay/. Everything heavy stays out.
+*
+!lib/
+!relay/
+relay/certs/
+relay/Dockerfile

@@ -1,0 +1,57 @@
+# ── ShowRunr relay @ relay.showrunr.ai (design-relay-cloud.md §2 D1/D2) ──────
+#
+# ⚠ INSTANCE COUNT = 1 IS A PROTOCOL REQUIREMENT, NOT AN OPS PREFERENCE.
+# The relay is the single baton arbiter: two instances behind one name are two
+# arbiters, and a rolling deploy that overlaps old+new splits the room
+# mid-song. Hence strategy "immediate" (stop-then-start, no overlap), no
+# autoscaling, min == max == 1 machine. The deploy blip degrades to the shipped
+# relay-death row: everyone self-drives, reconnects, rejoins.
+#
+# First-time setup (one-off, needs the Fly account):
+#   fly launch --no-deploy --copy-config --name showrunr-relay
+#   fly volumes create relay_data --region sjc --size 1
+#   fly deploy
+#   fly scale count 1 --max-per-region 1   # pin the arbiter (see warning above)
+#   fly certs add relay.showrunr.ai        # then CNAME relay → showrunr-relay.fly.dev
+# Every update after that: fly deploy
+#
+# TLS terminates at Fly's edge on 443 (D2 — venue Wi-Fi blocks odd ports) and
+# forwards plain ws to 8787. RELAY_TRUST_PROXY makes fly-client-ip the
+# rate-limit grain (S3) — correct ONLY behind Fly's proxy, never direct.
+
+app = "showrunr-relay"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "relay/Dockerfile"
+
+[deploy]
+  strategy = "immediate" # stop-then-start: never two arbiters (Codex R1 MED-6)
+
+[env]
+  RELAY_PORT = "8787"
+  RELAY_JOURNAL = "/data/relay-journal.json"
+  RELAY_ORIGINS = "https://showrunr.ai,https://www.showrunr.ai"
+  RELAY_TRUST_PROXY = "1"
+
+[mounts]
+  source = "relay_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "off" # an idle relay must stay up — gigs join by QR, cold starts drop rooms
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
