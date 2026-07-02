@@ -1,6 +1,12 @@
 # Conductor transport — cloud relay as the one deployment (kills the local-box story)
 
-**Status:** v1 — DESIGN-ONLY. Not built. Awaiting Graham review, then Codex.
+**Status:** v2 — DESIGN-ONLY. Not built. **Codex R1 = NO-GO (3 HIGH / 5 MED / 2 LOW) — ALL
+TEN FOLDED.** The three HIGHs plus two MEDs shared ONE root cause: v1's D4 kept the shipped
+*implicit-create-on-first-hello* semantics, which only ever made sense on a band-private
+box. v2 replaces it with an explicit create/join wire intent + **relay-minted** codes
+(§4), which dissolves the collision path, kills phantom-room creation as an attack
+surface, and forces the room-lifecycle/epoch question into the open (S5's time-floored
+epochs). Awaiting Codex R2 via Graham, then GO before any build.
 **Date:** 2026-07-02
 **Branch:** `opus/design-relay-cloud`
 **Parent:** `design-conductor-authority.md` (epic), `design-conductor-3b-discovery-failover.md`
@@ -29,8 +35,9 @@ it should have been named then.
 
 **The correction:** stop optimizing for the dead-network case. Host the relay in the cloud,
 permanently, at `relay.showrunr.ai`. Then the PWA dials out over *any* internet — venue
-Wi-Fi or one member's phone hotspot (relay traffic is tiny JSON frames; one bar of LTE is
-plenty). Zero hardware. Zero provisioning. Zero cert ceremony. The genuinely-dead venue
+Wi-Fi or one member's phone hotspot (relay traffic is tiny JSON frames — bandwidth is
+never the constraint; *continuity* of the connection is, per §1's invariant). Zero
+hardware. Zero provisioning. Zero cert ceremony. The genuinely-dead venue
 (no cell signal at all) degrades to what the design already guarantees: every device
 self-drives (the Concept A floor). If that case ever matters commercially, the answer is a
 native app, not a Pi.
@@ -79,7 +86,7 @@ as long as it wants to mirror** (a drop = self-drive until rejoin, correct-never
 | On-ramp | Band carries | Config at the venue |
 |---|---|---|
 | Venue Wi-Fi | nothing | everyone joins venue Wi-Fi (passwords / captive portals, per venue) |
-| Phone hotspot | nothing | everyone joins one member's hotspot; its single LTE link carries the room (tiny frames — one bar of signal suffices) |
+| Phone hotspot | nothing | everyone joins one member's hotspot; its single LTE link carries the room. Bandwidth is trivial (tiny frames), but this rides ONE phone's battery + cellular coverage — a real operational dependency, not a guarantee (Codex R1 LOW-10). If it dies: room self-drives, MD's re-created room readmits when signal returns |
 | **Band AP with backhaul** (travel router on venue ethernet, or tethered to a phone) | a travel router | **none** — devices auto-join the familiar SSID they've joined before; router tethers or plugs in |
 
 The third row redeems the original premise honestly: "nothing but an existing Wi-Fi AP"
@@ -105,6 +112,16 @@ the platform, ~$5/mo. Fly.io and Railway both satisfy all four; default Fly (vol
 anycast + `fly.toml` in-repo is the cleanest single-file ops story). A plain VPS also
 works but re-introduces cert ops (even if automated) — only if the platforms disappoint.
 
+**The single-arbiter invariant must be PINNED in deploy config** (Codex R1 MED-6): the
+entire claim protocol assumes one serial relay process — two instances behind one name
+are two baton arbiters, and a rolling deploy that overlaps old+new instances splits the
+room mid-song. Deploy config: **exactly one machine, one region, stop-then-start deploy
+strategy** (no autoscaling, no rolling overlap — `fly.toml` single machine +
+`strategy = "immediate"`, or platform equivalent). The deploy blip degrades to the
+shipped relay-death row: everyone self-drives, reconnects, rejoins. A shared volume does
+NOT make two processes one arbiter; instance count = 1 is a protocol requirement, not an
+ops preference — stated in bold in `relay-ops.md` and as a comment in the config file.
+
 ### D2. One wss URL, standard port
 
 `NEXT_PUBLIC_RELAY_URL=wss://relay.showrunr.ai` — **port 443**, not 8787. Venue/guest
@@ -116,10 +133,11 @@ provisioning ceremony around them is deleted (§6).
 
 ### D3. The relay code itself: minimal, deliberate deltas only
 
-The protocol is untouched. The deltas are all "the socket now faces the public internet"
-(§3) plus room-identity (§4). No frame changes except where §4 says so. The reducer,
-`lib/relay-protocol.ts`, `lib/relay-binding.ts`, and the hook are **zero-change** unless
-§4's room-identity decision touches the join frame — called out there.
+The protocol's *semantics* are untouched — baton, epochs, sessions, snapshots. The deltas
+are "the socket now faces the public internet" (§3) plus room identity/lifecycle (§4).
+The full change-surface inventory lives at the end of §4 (Codex R1 MED-7 — v1 claimed
+"zero-change" too broadly); the genuinely zero-change core is the reducer
+(`lib/conductor-state.ts`) and `conductor-session.ts`, which never see room identity.
 
 ### What does NOT change (fence, explicit)
 
@@ -141,21 +159,40 @@ not a nation-state; the responses are proportionate:
 - **S1. Join-code entropy up.** 4 chars was sized for a private AP. Public door: **6
   chars, unambiguous alphabet** (no 0/O/1/I; ~32^6 ≈ 1.07B) — still shoutable across a
   stage, still fits beside a QR. QR users never type it anyway.
-- **S2. Rate limiting, three grains.** (a) per-IP `hello` attempts (bad-code guesses) —
-  token bucket, ban-listed after sustained abuse; (b) per-connection frame rate (a joined
-  guest can't flood the fan-out); (c) per-IP concurrent-connection cap. Constants are
-  defer-with-default (§8 Q2).
-- **S3. Payload caps.** `ws` `maxPayload` set explicitly (snapshot is the largest legit
-  frame; size one generously and reject beyond). A public socket must not buffer unbounded
-  garbage.
+- **S2. Rate limiting, four grains** (Codex R1 HIGH-2: v1 throttled only bad-code
+  *guesses*; creation itself was the cheaper attack). (a) per-IP `hello` attempts —
+  token bucket, ban-listed after sustained abuse; (b) **per-IP room *creates*** (tighter
+  bucket — creating costs the relay a journal write, guessing doesn't); (c) per-connection
+  frame rate (a joined guest can't flood the fan-out); (d) per-IP concurrent-connection
+  cap. Plus two structural backstops: a **global active-room cap** (bounce `relay-full` —
+  honest, and it turns a create-flood into a bounded nuisance instead of disk exhaustion)
+  and **debounced journal writes** (the journal is an integrity record, not a
+  per-frame WAL — write-rate must be relay-paced, not attacker-paced). Constants
+  defer-with-default (§8 Q2). Note §4 removes the biggest creation surface outright:
+  join-typos can no longer create rooms at all.
+- **S3. Payload caps, per frame type — validate before you buy** (Codex R1 MED-5:
+  a blanket `ws` maxPayload still lets every frame cost a full parse of the largest
+  legit size). (a) `ws` `maxPayload` sized to the largest legit frame (`snapshot`,
+  generous fixed budget); (b) **per-frame-type size budgets** enforced at the boundary —
+  a `hello` has no business being 200KB; (c) **string-field length caps** (`deviceLabel`,
+  code, etc.) in `parseClientFrame`; (d) a **cap on pending snapshot-requests per room**
+  (the one place the relay queues state on behalf of strangers). Shape-validation order
+  stays cheap-first: length check → JSON parse → per-type shape.
 - **S4. Origin allowlist.** Browsers send `Origin`; accept only `https://showrunr.ai`
   (+ configured preview origins). Belt, not crypto — non-browser clients can lie — but it
   zeroes the drive-by-website vector against members' browsers and costs one header check.
-- **S5. Room GC.** On a shared always-on relay, phantom rooms (typo'd creates, abandoned
-  shows) accumulate forever without collection: **empty room + no activity for 24h →
-  journal entry dropped.** (The local-box design never needed this — the box rebooted
-  between gigs.) A GC'd room's stale QR simply re-creates on next use — same recovery row
-  as today's reboot-readmit, epoch floor preserved by §4's journal rule.
+- **S5. Room lifecycle + the epoch invariant** (Codex R1 HIGH-1: v1's "GC drops the
+  journal entry, stale QR re-creates, epoch floor preserved" was FALSE — a dropped entry
+  re-creating at epoch 0 reissues epochs the shipped protocol promises never to reuse,
+  discovery doc §6 rule 4). Lifecycle: **unclaimed rooms** (created, writer never claimed)
+  GC after **15 min**; **abandoned rooms** (empty, no activity) GC after **24h**. The
+  invariant is preserved not by tombstones but by **time-floored epochs**: room creation
+  seeds `epoch := seconds-since-2026-01-01` (a monotone clock the relay already trusts for
+  leases), and every claim grants `max(journaledEpoch, timeFloor) + 1`. A code re-minted
+  days after its GC starts at a strictly higher epoch than anything the dead room ever
+  issued — old offline clients reconcile exactly as the shipped future-epoch door already
+  specifies (`needsSnapshot` → pull). No unbounded tombstone table, no invariant bent.
+  The reducer never assumed dense epochs — only ordering (fixed ground).
 - **What we deliberately still don't do (v1):** crypto identity, accounts-gated rooms,
   E2E payload encryption. The payload is bar positions of a setlist — the code door plus
   S1-S5 is proportionate. Revisit if the product grows beyond "a band and its show."
@@ -168,26 +205,56 @@ named `summer-tour` land in the SAME room — first one creates it, the second b
 bounce on a code mismatch with no way to understand why ("wrong code" that is actually
 "wrong band").
 
-**D4. Room id = the join code itself: client-mints a random 6-char code (S1 alphabet) at
-Go-live; `room == code`.** One identifier, globally unique by entropy, zero lookup
-machinery, and the "type the code" fallback works by construction (the code IS the room
-key — today's flow needed the typer to already know the slug; this deletes that hidden
-assumption). The QR carries what it always carried (`relay`, `room`, `code` — now
-`room === code`; keep both query params so the join URL shape is stable). Colliding mints
-(~1-in-a-billion per active room) are handled honestly: `hello`-create of a room that
-already has a live writer → bounce; the MD's app re-mints and re-renders the QR — one
-frame of retry logic in the client binding, invisible to humans.
+**D4 (v2 — rewritten after Codex R1 HIGH-3/MED-4/MED-8; v1's client-minted
+code-on-implicit-create is DEAD). Explicit create/join intent on the wire; the RELAY
+mints the code; `room == code`.**
+
+The v1 shape inherited the shipped "first `hello` creates the room" trick — fine on a
+private box, incoherent on a shared relay: the wire couldn't distinguish an MD creating
+from a follower joining (HIGH-3: bouncing "existing room with live writer" would bounce
+every legitimate follower), client-side minting made collisions a real race under load or
+abuse (MED-4: birthday math across active + journaled + attacker-created rooms, not
+1-in-a-billion), and a typo'd join manufactured phantom rooms. One shape change deletes
+all three:
+
+- **`hello` gains `intent: 'create' | 'join'`.**
+- **Create:** no room field sent. The relay mints an unused 6-char code (S1 alphabet) —
+  it holds the registry, so "unused" is a lookup, not a probability — seeds the time-floor
+  epoch (S5), journals, and replies `joined { room, created: true, epoch, hasWriter:
+  false, activeSession: null }`. The QR renders from the response. **Collisions cannot
+  occur, so no collision path exists to get wrong.**
+- **Join:** `room` (the code) required; unknown room → bounced with `no-room`. **A typo'd
+  code now bounces honestly instead of manufacturing a phantom room** — the discovery
+  doc's D3 "phantom rooms are benign" note is superseded; on a public relay they were an
+  attack surface (S2), and now they are impossible.
+- **Show identity for the typed-code path (MED-8, the overpromise):** v1 claimed "type the
+  code" works by construction — false: the shipped join flow lands on a show URL and
+  derives everything from it; a generic code-only Join screen wouldn't know which show or
+  charts to open. Fix in the established pattern: the creating `hello` carries an opaque
+  **`showRef` blob** (owner/slug), stored + returned in every `joined` exactly like
+  `activeSession` — the relay stores and echoes it, never interprets it (dumbness
+  preserved). QR joins keep deep-linking as today; a typed-code join navigates via the
+  echoed `showRef`. "Chart not on this device" honesty (discovery doc §4.4) already covers
+  the member who lands on a show they never synced.
 
 Consequences, pinned:
-- The journal entry stays `{room, roomCode, epoch}` (now redundant fields — harmless;
-  epoch monotonicity rule unchanged, volume-backed per D1).
-- Show-slug stops being wire-relevant; `SessionKey` (sessionId/songRef/programHash)
-  already carries ALL musical identity end-to-end. Nothing else reads the room name.
-- Rooms are per-gig ephemera (GC'd, S5), not stable show addresses. A band going live
-  twice in one night mints two rooms; fine — the QR is the address.
-- **This is the only change with wire/client-code contact:** the mint-at-create + collision
-  re-mint in the client binding, and relaxing the "room = show-slug" doc language. The
-  conn machine, reducer, and frames are otherwise untouched.
+- Wire changes, complete list: `hello.intent`, `hello.showRef` (create only),
+  `joined.created` + `joined.room` + `joined.showRef`, `no-room` bounce, `relay-full`
+  bounce (S2). Version skew between app and relay already closes 4002 (shipped rule 5);
+  relay deploys with the app change — no compat shim.
+- Journal entry becomes `{room, epoch, showRef}` (`roomCode` merged into `room`).
+- Show-slug stops being the room key; `SessionKey` carries all musical identity.
+- Rooms are per-gig ephemera (S5), not stable show addresses. Going live twice in one
+  night mints two rooms; the QR is the address.
+
+**Change-surface inventory (Codex R1 MED-7 — v1's "zero-change" claim was too broad).**
+Honest list of every shipped surface D4 + §5 touch: `lib/relay-protocol.ts` (hello/joined
+shapes, `no-room`/`relay-full`, conn-machine create/join arms), `lib/relay-binding.ts`
+(create-vs-join entry), `lib/relay-join.ts` (4-char code assumption, `roomNameFor(owner,
+slug)` — deleted), the show page's QR/join URL construction and Join screen
+(`app/[owner]/[show]/page.tsx`), `lib/use-conductor-session.ts` (backoff constant), and
+their tests. The reducer (`lib/conductor-state.ts`) and `conductor-session.ts` remain
+genuinely zero-change — they never see room identity.
 
 ## 5. WAN behavior deltas (constants, not architecture)
 
@@ -214,29 +281,43 @@ Consequences, pinned:
   the relay is down mid-gig" (answer: nothing — everyone self-drives; fix it after).
   The at-home **member** checklist (PWA install + chart sync) moves to user-facing docs;
   it was never really about the relay.
-- **AMEND discovery/failover doc §1/§2/D5** with a pointer to this doc (crux inverted:
-  secure context is free on a real origin; trust boundary per §3 here). The protocol
+- **AMEND discovery/failover doc §1/§2/D3/D5** with a pointer to this doc (crux inverted:
+  secure context is free on a real origin; trust boundary per §3 here; D3's
+  implicit-create + "phantom rooms benign" superseded by §4 here). The protocol
   sections stand.
+- **AMEND the epic (`design-conductor-authority.md` §5 and the §8 transport language)**
+  (Codex R1 LOW-9): it still canonizes "band-owned AP, no backhaul" as the transport
+  topology, which would mislead every future chunk (3c included). One paragraph + pointer
+  here; the two-axis model and single-writer sections are untouched.
 - **Local-box mode is de-productized, not de-coded:** `ws://` + env-cert paths remain for
   dev/tests. No doc tells a musician to buy hardware.
 
 ## 7. Build outline (after sign-off — gated, Codex per chunk)
 
-1. **Relay hardening** (`relay/server.ts` + `relay-core.ts`): S1-S5 + D4 room=code +
-   `/healthz` + backoff jitter (client constant). Tests: rate-limit buckets, origin
-   bounce, payload cap, GC sweep, create-collision re-mint, journal GC persistence.
-2. **Deploy** (`fly.toml` or equivalent in-repo, volume, secrets, DNS cutover of
-   `relay.showrunr.ai`, `NEXT_PUBLIC_RELAY_URL` on Vercel). Smoke: two devices on
-   different networks (one on LTE hotspot) mirror a session.
-3. **Docs cleanup** (§6) + delete provision-cert.sh.
-4. *(cut-eligible)* Uptime ping/alert on `/healthz`.
+1. **Relay hardening** (`relay/server.ts` + `relay-core.ts`): S1-S5 (incl. time-floored
+   epochs, unclaimed/abandoned GC, create throttles, room cap, per-frame budgets, pending
+   snapshot-request cap) + D4 create/join intent with relay-minted codes + `showRef` +
+   `/healthz`. Tests: rate-limit buckets per grain, origin bounce, per-frame-type payload
+   bounce, GC sweeps (both TTLs), **GC'd-code re-mint gets a strictly higher epoch**
+   (the HIGH-1 regression test), `no-room`/`relay-full` bounces, journal debounce.
+2. **Client binding + join surfaces** (the MED-7 inventory): protocol/conn-machine
+   create/join arms, `relay-join.ts` rewrite, QR/Join screen on the show page,
+   `showRef`-directed navigation for typed codes, backoff jitter. Tests per surface.
+3. **Deploy** (`fly.toml` or equivalent in-repo — **instance count 1 + stop-then-start
+   pinned per D1**, volume, secrets, DNS cutover of `relay.showrunr.ai`,
+   `NEXT_PUBLIC_RELAY_URL` on Vercel). Smoke: two devices on different networks (one on
+   LTE hotspot) mirror a session.
+4. **Docs cleanup** (§6) + delete provision-cert.sh.
+5. *(cut-eligible)* Uptime ping/alert on `/healthz`.
 
 ## 8. Open questions (defer-with-default)
 
 1. **Platform:** Fly vs Railway — default Fly (D1). Graham may have a hosting preference;
    either satisfies the four requirements.
 2. **Rate-limit + GC constants:** defaults in chunk 1 code review (hello: 10/min/IP burst
-   20; frames: 30/s/conn; conns: 20/IP; GC: 24h). Tune at UAT, not worth debating now.
+   20; creates: 3/min/IP burst 5; frames: 30/s/conn; conns: 20/IP; room cap: 500;
+   unclaimed GC: 15min; abandoned GC: 24h; journal debounce: 1s). Tune at UAT, not worth
+   debating now.
 3. **Room-code length:** 6 (S1). Could go 5 if typing feels heavy at UAT; not below.
 4. **Multi-region later?** v1 = single region nearest home turf. A band tour crossing
    oceans adds ~150ms — still fine at bar grain. Revisit only with real demand.
