@@ -147,6 +147,14 @@ provides — and on a few things the band prepares.
   our own AP (§1a already gives us a stable name), and can't carry the room code.
 - **D3. Room codes rotate per show** (generated at room-create, shown beside the QR). Stale
   QR screenshots from last week don't admit.
+- **Room create = the FIRST `hello`** (pinned at chunk 3): there is no separate create
+  frame — the opening device generates the slug + code app-side, and its `hello` for an
+  unknown room creates it (epoch 0, journaled) with that code as the door. Later `hello`s
+  must match the journaled code. A typo'd room name at join therefore creates a phantom
+  room rather than bouncing — benign on a band-owned relay (rooms are keyed; the code
+  still guards the real one), and it keeps the relay one-frame dumb. One `hello` per
+  connection: a re-`hello` on an admitted connection is bounced (a second admit would
+  double-enroll the connection across rooms — a fan-out leak).
 
 ## 4. The claim protocol (baton lifecycle)
 
