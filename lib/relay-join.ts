@@ -1,35 +1,23 @@
-// ── Conductor 3b chunk 5: join/QR plumbing (design-conductor-3b §3, §10-5) ────
+// ── Conductor 3b chunk 5 → cloud-relay chunk 2: join/QR plumbing ──────────────
 //
+// (design-conductor-3b §3, superseded in part by design-relay-cloud.md §4 D4.)
 // Pure helpers for the join flow. The QR/deep-link carries the SHOW URL plus a
-// `join` code param (locked over D1's separate /join route: the follower must
-// land on the show page anyway — that's where the charts are). Room identity is
-// `${owner}/${slug}` (matches the sessionId convention), so "one conductor per
-// show per owner" is structural, not policy.
+// `join` code param (locked: the follower must land on the show page anyway —
+// that's where the charts are). D4: the RELAY mints the room code (room ==
+// code); client-side minting (mintRoomCode) and slug room naming (roomNameFor)
+// are deleted — rooms are per-gig ephemera addressed by the minted code.
 
 import type { SetlistSong } from './types';
 
-// Code alphabet: no 0/O/1/I/L — the can't-scan fallback is READ ALOUD across a
-// stage (D1), so every glyph must survive being shouted over a drummer.
-const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-export const ROOM_CODE_LENGTH = 4;
-
-/** Mint a rotating room code (D3: generated at room-create, per show). */
-export function mintRoomCode(
-  random: (max: number) => number = (max) => {
-    // crypto when available (browser + node); modulo bias is irrelevant at 31 glyphs.
-    const buf = new Uint32Array(1);
-    globalThis.crypto.getRandomValues(buf);
-    return buf[0] % max;
-  },
-): string {
-  let code = '';
-  for (let i = 0; i < ROOM_CODE_LENGTH; i++) code += CODE_ALPHABET[random(CODE_ALPHABET.length)];
-  return code;
-}
+// The RELAY's code alphabet (relay/relay-core.ts CODE_ALPHABET — S1: no
+// 0/O/1/I; the can't-scan fallback is READ ALOUD across a stage, so every
+// glyph must survive being shouted over a drummer). Kept in sync by test.
+const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+export const ROOM_CODE_LENGTH = 6;
 
 /** Uppercase + strip to the code alphabet's shape; '' when hopeless. */
 export function normalizeRoomCode(raw: string): string {
-  return raw.toUpperCase().replace(/[^A-Z2-9]/g, '').slice(0, ROOM_CODE_LENGTH);
+  return raw.toUpperCase().replace(/[^A-HJ-NP-Z2-9]/g, '').slice(0, ROOM_CODE_LENGTH);
 }
 
 export function isRoomCodeShaped(raw: string): boolean {
@@ -39,11 +27,6 @@ export function isRoomCodeShaped(raw: string): boolean {
 /** The QR payload: the show page itself, carrying the join code (locked Q1). */
 export function buildJoinUrl(origin: string, owner: string, slug: string, code: string): string {
   return `${origin}/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}?join=${encodeURIComponent(code)}`;
-}
-
-/** Room name = show identity (doc §3; one conductor per show per owner). */
-export function roomNameFor(owner: string, slug: string): string {
-  return `${owner}/${slug}`;
 }
 
 // ── switch-session chart navigation (doc §10-5: "auto-open activeSession's chart") ──

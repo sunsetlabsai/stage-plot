@@ -100,6 +100,9 @@ export interface RelayFacts {
   // different chart, or the same chart compiled to a different programHash
   // (needs sync / recalibrated elsewhere). Honesty banner, never a wrong chart.
   chartMismatch: boolean;
+  // Cloud-relay D4: the relay-reported room code (creator adopts it; the QR
+  // renders from it). null until admitted.
+  room: string | null;
 }
 
 export function relayFacts(b: RelayBinding): RelayFacts {
@@ -111,6 +114,7 @@ export function relayFacts(b: RelayBinding): RelayFacts {
     activeSession: b.conn.activeSession,
     chartMismatch:
       b.conn.activeSession !== null && !sessionKeyEquals(b.conn.activeSession, b.localKey),
+    room: b.conn.room,
   };
 }
 

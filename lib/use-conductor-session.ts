@@ -17,7 +17,7 @@ import {
   acceptBaton,
   type ConductorSession,
 } from './conductor-session';
-import { helloFrame, initClientConn, sessionKeyOf, type SessionKey } from './relay-protocol';
+import { createHelloFrame, helloFrame, initClientConn, sessionKeyOf, type SessionKey } from './relay-protocol';
 import {
   initRelayBinding,
   reduceBinding,
@@ -87,16 +87,25 @@ export interface RelaySocket {
   close(): void;
   onopen: (() => void) | null;
   onmessage: ((ev: { data: unknown }) => void) | null;
-  onclose: (() => void) | null;
+  // Cloud-relay chunk 2: the close CODE is honesty input (4004 no-room ≠ a
+  // transient drop). Optional/absent-tolerant so fakes and older callers that
+  // invoke onclose() bare keep working; the browser passes a CloseEvent.
+  onclose: ((ev?: { code?: number }) => void) | null;
 }
 
-export interface RelayConfig {
-  url: string; // wss://relay.showrunr.ai:8787 (doc §1a)
-  room: string; // show slug (doc §3)
-  code: string; // the rotating room code (D3)
+// Cloud-relay chunk 2 (design-relay-cloud.md §4 D4 + Codex R2 MED-3): the
+// config model splits on intent. 'create' has NO room — the relay mints the
+// code and returns it on `joined`; the hook adopts it and holds it across
+// reconnects for THIS live session. 'join' names the (relay-minted) code;
+// room == code on the shared relay, so there is no separate code field.
+export type RelayConfig = {
+  url: string; // wss://relay.showrunr.ai (doc D2 — platform TLS on 443)
   deviceLabel: string; // claim attribution ("Rachel is conducting")
   socketFactory?: (url: string) => RelaySocket; // test seam; default = browser WebSocket
-}
+} & (
+  | { mode: 'create'; showRef: string } // opaque owner/slug blob, echoed by the relay
+  | { mode: 'join'; room: string }
+);
 
 export interface UseConductorArgs {
   // isOwner && the MD turned on "Local MD mode" && a performable bar-cal is loaded.
@@ -135,9 +144,18 @@ const VALIDATION_LOG_CAP = 600;
 // HB_MS (2000, doc §4.2) so a single delayed tick never costs a lease miss.
 const RELAY_HB_MS = 1000;
 // Reconnect backoff after a socket drop (failure matrix row 1: reconnect →
-// hello → pull). Flat, not exponential — the relay is the band's own box on the
-// band's own AP; the only recovery is it coming back.
-const RELAY_RECONNECT_MS = 1500;
+// hello → pull). Cloud-relay §5: the relay is a SHARED host now — a whole
+// venue losing Wi-Fi must not thundering-herd it with flat retries.
+// Exponential-ish with jitter, capped, reset on a successful open.
+const RELAY_RECONNECT_BASE_MS = 1500;
+const RELAY_RECONNECT_CAP_MS = 10_000;
+
+// Pure for tests: delay for the Nth consecutive failed attempt (0-based),
+// jittered uniformly over [base/2, base] so simultaneous droppers spread out.
+export function reconnectDelayMs(attempt: number, random: () => number = Math.random): number {
+  const base = Math.min(RELAY_RECONNECT_CAP_MS, RELAY_RECONNECT_BASE_MS * 2 ** attempt);
+  return Math.round(base / 2 + random() * (base / 2));
+}
 
 // 3b chunk 4: the relay-facing slice of the surface (doc §4.3/§7 honesty).
 export interface RelaySurface {
@@ -148,6 +166,12 @@ export interface RelaySurface {
   conductorLabel: string | null; // "X is conducting" attribution (§4.3); null = unknown/none/us
   activeSession: SessionKey | null; // what the room is running (page switches charts on it)
   chartMismatch: boolean; // room session ≠ this device's chart — honesty banner, no mirror
+  // Cloud-relay D4: the room code as the relay reports it — create-mode's QR
+  // renders from this (null while connecting / pre-admission).
+  room: string | null;
+  // Join-mode honesty: the relay bounced 4004 (no such room / expired). The
+  // hook STOPS retrying — a dead code never comes back; the member re-scans.
+  roomGone: boolean;
   requestClaim: () => void;
   releaseBaton: () => void;
 }
@@ -210,8 +234,9 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   const relayCfg = args.relay ?? null;
   const relayOn = relayCfg !== null;
   const relayUrl = relayCfg?.url ?? null;
-  const relayRoom = relayCfg?.room ?? null;
-  const relayCode = relayCfg?.code ?? null;
+  const relayMode = relayCfg?.mode ?? null;
+  const relayJoinRoom = relayCfg !== null && relayCfg.mode === 'join' ? relayCfg.room : null;
+  const relayShowRef = relayCfg !== null && relayCfg.mode === 'create' ? relayCfg.showRef : null;
   const relayLabel = relayCfg?.deviceLabel ?? null;
   const relaySocketFactory = relayCfg?.socketFactory ?? null;
 
@@ -400,7 +425,18 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
     a.conductorLost === b.conductorLost &&
     a.conductorLabel === b.conductorLabel &&
     a.chartMismatch === b.chartMismatch &&
+    a.room === b.room &&
     a.activeSession === b.activeSession; // conn holds the same reference between moves
+
+  // Cloud-relay D4: create-mode's adopted room. Written by feed (below) the
+  // moment `joined` reports a room; held across reconnects for THIS live
+  // session (a reconnect JOINS the adopted room — re-creating would mint a new
+  // code and strand every scanned QR). Reset by the socket effect on config
+  // identity change, and cleared on a 4004 close (the room is gone — the only
+  // heal for the CREATOR is minting a fresh room).
+  const adoptedRoomRef = useRef<string | null>(null);
+  // Join-mode honesty state: 4004 = no such room; retrying is futile.
+  const [roomGone, setRoomGone] = useState(false);
 
   // Drive the pure binding: reduce, execute effects (some loop back as inputs —
   // a QUEUE, not recursion, so ordering stays first-in-first-out), then mirror
@@ -492,6 +528,11 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
         }
       }
     }
+    // D4 room adoption: the conn machine recorded the relay-reported code off
+    // `joined`; hold it for reconnect hellos (synchronous ref — feed runs in
+    // socket macrotasks, same discipline as bindingRef).
+    const joinedRoom = bindingRef.current.conn.room;
+    if (joinedRoom !== null) adoptedRoomRef.current = joinedRoom;
     const f = relayFacts(bindingRef.current);
     setRelayFactsState((prev) => (factsEqual(prev, f) ? prev : f));
   };
@@ -506,14 +547,29 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
   // The socket lifecycle: connect → hello; drop → fresh conn machine + retry
   // (failure matrix row 1 — the localKey SURVIVES a reconnect; the room's conn
   // state does not). Keyed on config FIELDS, so a per-render config object
-  // doesn't churn connections.
+  // doesn't churn connections. Cloud-relay chunk 2: create-mode's FIRST hello
+  // creates (relay mints the code); once `joined` reports the room, every
+  // reconnect JOINS the adopted code; a 4004 in create-mode clears the adopted
+  // room (mint fresh — the QR re-renders), in join-mode it ends the retry loop
+  // honestly (roomGone). Backoff is jittered-exponential (§5), reset on open.
   useEffect(() => {
-    if (relayUrl === null || relayRoom === null || relayCode === null || relayLabel === null) {
+    if (
+      relayUrl === null ||
+      relayMode === null ||
+      relayLabel === null ||
+      (relayMode === 'join' ? relayJoinRoom === null : relayShowRef === null)
+    ) {
       return;
     }
     let alive = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let sock: RelaySocket | null = null;
+    let attempt = 0;
+    adoptedRoomRef.current = null; // a NEW config is a new live session — no stale adoption
+    // Deferred reset (set-state-in-effect discipline): a fresh config starts hopeful.
+    Promise.resolve().then(() => {
+      if (alive) setRoomGone(false);
+    });
     const factory =
       relaySocketFactory ?? ((u: string) => new WebSocket(u) as unknown as RelaySocket);
     const connect = () => {
@@ -522,7 +578,15 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       sock = s;
       sockRef.current = s;
       s.onopen = () => {
-        s.send(JSON.stringify(helloFrame(relayRoom, relayCode, relayLabel)));
+        attempt = 0; // backoff resets on success
+        const room = relayMode === 'join' ? relayJoinRoom : adoptedRoomRef.current;
+        s.send(
+          JSON.stringify(
+            room === null
+              ? createHelloFrame(relayLabel, relayShowRef!) // create-mode, no room yet
+              : helloFrame(room, room, relayLabel), // room == code (D4)
+          ),
+        );
       };
       s.onmessage = (ev) => {
         let raw: unknown;
@@ -533,13 +597,25 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
         }
         feedRef.current({ kind: 'raw-frame', raw });
       };
-      s.onclose = () => {
+      s.onclose = (ev) => {
         if (!alive) return;
         sockRef.current = null;
         bindingRef.current = { conn: initClientConn(), localKey: bindingRef.current.localKey };
         const f = relayFacts(bindingRef.current);
         setRelayFactsState((prev) => (factsEqual(prev, f) ? prev : f));
-        retry = setTimeout(connect, RELAY_RECONNECT_MS);
+        if (ev?.code === 4004) {
+          if (relayMode === 'join') {
+            // The code names no room (typo'd, expired, relay lost it). It will
+            // NEVER come back — stop retrying; the member re-scans/re-types.
+            setRoomGone(true);
+            return;
+          }
+          // Create-mode: our adopted room died (GC / relay restart dropped it).
+          // Clear it — the next connect CREATES a fresh room (new code, QR
+          // re-renders from facts.room; followers rejoin via the new code).
+          adoptedRoomRef.current = null;
+        }
+        retry = setTimeout(connect, reconnectDelayMs(attempt++));
       };
     };
     connect();
@@ -561,7 +637,7 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
       // off the surface hard-codes the 'off' block below, so stale facts are
       // unobservable; a config change re-runs connect(), which re-mirrors.
     };
-  }, [relayUrl, relayRoom, relayCode, relayLabel, relaySocketFactory]);
+  }, [relayUrl, relayMode, relayJoinRoom, relayShowRef, relayLabel, relaySocketFactory]);
 
   // The writer's lease heartbeat (§4.2). The pure binding gates the send on
   // phase — this interval just ticks. Keyed on the mirrored phase so followers
@@ -968,6 +1044,8 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
           conductorLabel: relayFactsState.conductorLabel,
           activeSession: relayFactsState.activeSession,
           chartMismatch: relayFactsState.chartMismatch,
+          room: relayFactsState.room,
+          roomGone,
           requestClaim: () => feedRef.current({ kind: 'request-claim' }),
           releaseBaton: () => feedRef.current({ kind: 'release-baton' }),
         }
@@ -979,6 +1057,8 @@ export function useConductorSession(args: UseConductorArgs): ConductorSurface {
           conductorLabel: null,
           activeSession: null,
           chartMismatch: false,
+          room: null,
+          roomGone: false,
           requestClaim: () => {},
           releaseBaton: () => {},
         },
