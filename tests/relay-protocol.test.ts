@@ -5,6 +5,7 @@ import {
   type ClientEffect,
   type SessionKey,
   canOfferClaim,
+  createHelloFrame,
   helloFrame,
   parseClientFrame,
   parseRelayFrame,
@@ -92,9 +93,15 @@ describe('join (§3 D1 / §7)', () => {
     expect(canOfferClaim(conn)).toBe(true);
   });
 
-  it('helloFrame carries room, code, and device label', () => {
+  it('helloFrame is the JOIN hello: explicit intent + room/code/label (D4)', () => {
     expect(helloFrame('band-show', 'XYZW', 'Rachel')).toEqual({
-      type: 'hello', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel',
+      type: 'hello', intent: 'join', room: 'band-show', code: 'XYZW', deviceLabel: 'Rachel',
+    });
+  });
+
+  it('createHelloFrame carries no room/code (the relay mints) + the opaque showRef (D4)', () => {
+    expect(createHelloFrame('Rachel', 'graham/gig')).toEqual({
+      type: 'hello', intent: 'create', room: '', code: '', deviceLabel: 'Rachel', showRef: 'graham/gig',
     });
   });
 });
@@ -485,7 +492,8 @@ describe('failover (§4.2/§7)', () => {
 // ── parseClientFrame: the wire trust boundary (chunk 3, Codex R1 HIGH) ────────
 describe('parseClientFrame', () => {
   it.each([
-    ['hello', helloFrame('gig', 'XYZW', 'dev')],
+    ['hello (join)', helloFrame('gig', 'XYZW', 'dev')],
+    ['hello (create)', createHelloFrame('dev', 'graham/gig')],
     ['session', { type: 'session', session: KEY_A }],
     ['claim-request', { type: 'claim-request' }],
     ['release-baton', { type: 'release-baton' }],
@@ -504,8 +512,17 @@ describe('parseClientFrame', () => {
     ['no type', { room: 'gig' }],
     ['unknown type', { type: 'bogus' }],
     ['hello missing fields', { type: 'hello', room: 'gig' }],
-    ['hello empty room', { type: 'hello', room: '', code: 'XYZW', deviceLabel: 'd' }],
-    ['hello empty code', { type: 'hello', room: 'gig', code: '', deviceLabel: 'd' }],
+    ['hello without intent (pre-D4 legacy shape — version skew closes 4002)', { type: 'hello', room: 'gig', code: 'XYZW', deviceLabel: 'd' }],
+    ['hello bogus intent', { type: 'hello', intent: 'admin', room: 'gig', code: 'XYZW', deviceLabel: 'd' }],
+    ['join empty room', { type: 'hello', intent: 'join', room: '', code: 'XYZW', deviceLabel: 'd' }],
+    ['join empty code', { type: 'hello', intent: 'join', room: 'gig', code: '', deviceLabel: 'd' }],
+    ['create without showRef', { type: 'hello', intent: 'create', room: '', code: '', deviceLabel: 'd' }],
+    ['create empty showRef', { type: 'hello', intent: 'create', room: '', code: '', deviceLabel: 'd', showRef: '' }],
+    // S3 string caps: an unadmitted stranger can't stuff bytes into the registry/journal
+    ['label over cap', { type: 'hello', intent: 'join', room: 'gig', code: 'XYZW', deviceLabel: 'x'.repeat(65) }],
+    ['room over cap', { type: 'hello', intent: 'join', room: 'r'.repeat(33), code: 'XYZW', deviceLabel: 'd' }],
+    ['code over cap', { type: 'hello', intent: 'join', room: 'gig', code: 'c'.repeat(33), deviceLabel: 'd' }],
+    ['showRef over cap', { type: 'hello', intent: 'create', room: '', code: '', deviceLabel: 'd', showRef: 's'.repeat(257) }],
     ['session without key', { type: 'session' }],
     ['session partial key', { type: 'session', session: { sessionId: 's' } }],
     ['session non-string key field', { type: 'session', session: { ...KEY_A, programHash: 9 } }],
@@ -535,6 +552,10 @@ describe('parseRelayFrame', () => {
   it.each([
     ['joined (live session)', { type: 'joined', epoch: 2, hasWriter: true, activeSession: KEY_A, writerLabel: 'Rachel' }],
     ['joined (empty room)', { type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null }],
+    // D4: joined is EXTENDED never reshaped — the additive fields parse when
+    // present (and the shipped-shape cases above still parse without them).
+    ['joined (created, cloud fields)', { type: 'joined', epoch: 1, hasWriter: false, activeSession: null, writerLabel: null, created: true, room: 'PQ7MX2', showRef: 'graham/gig' }],
+    ['joined (join, null showRef)', { type: 'joined', epoch: 5, hasWriter: true, activeSession: KEY_A, writerLabel: 'md', created: false, room: 'PQ7MX2', showRef: null }],
     ['writer attribution', { type: 'writer', label: 'Rachel' }],
     ['session', { type: 'session', session: KEY_A }],
     ['claim-grant', { type: 'claim-grant', epoch: 3 }],
@@ -561,6 +582,9 @@ describe('parseRelayFrame', () => {
     ['joined activeSession undefined (must be null or a key)', { type: 'joined', epoch: 1, hasWriter: false, writerLabel: null }],
     ['joined partial activeSession', { type: 'joined', epoch: 1, hasWriter: true, activeSession: { sessionId: 's' }, writerLabel: null }],
     ['joined writerLabel undefined (must be null or a string)', { type: 'joined', epoch: 1, hasWriter: false, activeSession: null }],
+    ['joined non-boolean created', { type: 'joined', epoch: 1, hasWriter: false, activeSession: null, writerLabel: null, created: 'yes' }],
+    ['joined non-string room', { type: 'joined', epoch: 1, hasWriter: false, activeSession: null, writerLabel: null, room: 7 }],
+    ['joined non-string non-null showRef', { type: 'joined', epoch: 1, hasWriter: false, activeSession: null, writerLabel: null, showRef: 7 }],
     ['writer without label', { type: 'writer' }],
     ['writer non-string label', { type: 'writer', label: 7 }],
     ['session without key', { type: 'session' }],
