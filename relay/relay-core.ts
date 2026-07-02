@@ -105,7 +105,7 @@ export function initRelayState(restore?: RelayRestore, now = 0): RelayState {
       showRef: r.showRef,
       createdAt: now,      // lifecycle clocks restart at boot: a restored room
       lastActivityAt: now, // no one rejoins is abandoned-GC'd a TTL later
-      claimed: true,       // survived a restart ⇒ skip unclaimed-GC
+      claimed: true,       // only claimed rooms are ever journaled (MED-1)
     });
   }
   return { rooms, conns: new Map(), nextRequestId: 1, grantCounter: restore?.counter ?? 0 };

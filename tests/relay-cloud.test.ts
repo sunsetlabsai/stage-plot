@@ -374,6 +374,8 @@ describe('journal durability (S5)', () => {
     const md = await connect(h1.port);
     send(md, createHelloFrame('dev', SHOW_REF));
     const joined = (await md.next()) as { room: string };
+    send(md, { type: 'claim-request' }); // claim it: only claimed rooms are journaled
+    await md.next();
     await h1.close();
     relays = [];
     expect((JSON.parse(readFileSync(journalPath, 'utf8')) as { clean: boolean }).clean).toBe(true);
@@ -382,6 +384,25 @@ describe('journal durability (S5)', () => {
     send(c, helloFrame(joined.room, joined.room, 'dev'));
     await c.next();
     send(c, { type: 'claim-request' });
-    expect(await c.next()).toEqual({ type: 'claim-grant', epoch: 2 }); // 1 seed + 1, no slack
+    expect(await c.next()).toEqual({ type: 'claim-grant', epoch: 3 }); // seed 1, grant 2, +1 — no slack
+  });
+
+  it('MED-1 regression: never-claimed rooms are NOT journaled — a create-flood dies at restart instead of surviving as "claimed"', async () => {
+    const dir = mkdtempSync(pathJoin(tmpdir(), 'relay-cloud-'));
+    const journalPath = pathJoin(dir, 'journal.json');
+    const h1 = await relay({ journalPath });
+    const md = await connect(h1.port);
+    send(md, createHelloFrame('dev', SHOW_REF)); // created (epoch seed 1) but never claimed
+    const joined = (await md.next()) as { room: string };
+    await h1.close(); // clean — yet the unclaimed room must still be dropped
+    relays = [];
+    expect((JSON.parse(readFileSync(journalPath, 'utf8')) as { rooms: unknown[] }).rooms).toEqual([]);
+    const h2 = await relay({ journalPath });
+    const c = await connect(h2.port);
+    send(c, helloFrame(joined.room, joined.room, 'dev'));
+    expect(await c.closed).toBe(CLOSE_NO_ROOM); // gone — joiner re-creates
+    const d = await connect(h2.port);
+    send(d, createHelloFrame('dev', SHOW_REF));
+    expect((await d.next()) as object).toMatchObject({ type: 'joined', epoch: 2 }); // counter still monotone
   });
 });

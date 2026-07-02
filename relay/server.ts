@@ -200,7 +200,17 @@ export function startRelay(opts: RelayOptions): Promise<RelayHandle> {
 
   function serializeJournal(clean: boolean): string {
     const rooms: JournalV2['rooms'] = [];
-    for (const [room, r] of state.rooms) rooms.push({ room, epoch: r.epoch, showRef: r.showRef });
+    // Never-claimed rooms are droppable cache and are NOT persisted (Codex
+    // chunk-1 MED-1): restore marks every journaled room claimed, so writing
+    // unclaimed rooms would let a create-flood survive a restart under the 24h
+    // abandoned TTL instead of the 15m unclaimed TTL. The counter (the actual
+    // safety invariant) is always persisted; a dropped room's joiner gets 4004
+    // and re-creates. Known bounded gap (LOW-2): a claimed room GC'd within
+    // the compaction coalesce window before a crash can resurrect on restart —
+    // epoch safety unaffected, it just re-expires a TTL later.
+    for (const [room, r] of state.rooms) {
+      if (r.claimed) rooms.push({ room, epoch: r.epoch, showRef: r.showRef });
+    }
     const j: JournalV2 = { v: 2, clean, counter: state.grantCounter, rooms };
     return JSON.stringify(j);
   }
