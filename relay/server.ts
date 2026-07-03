@@ -180,6 +180,16 @@ export function startRelay(opts: RelayOptions): Promise<RelayHandle> {
   const sockets = new Map<string, WebSocket>();
   let nextConnId = 1;
 
+  // Per-connection observability (UAT gap: a failing client was invisible —
+  // the relay logged nothing between boot and shutdown). One line per lifecycle
+  // event on stdout (the platform adds timestamps); no message bodies, no
+  // device labels — connection facts only.
+  // Silent under vitest (NODE_ENV=test) and via RELAY_QUIET=1.
+  const quiet = process.env.RELAY_QUIET === '1' || process.env.NODE_ENV === 'test';
+  function log(line: string): void {
+    if (!quiet) console.log(line);
+  }
+
   function clientIp(req: IncomingMessage): string {
     if (opts.trustProxy) {
       const fly = req.headers['fly-client-ip'];
@@ -243,10 +253,16 @@ export function startRelay(opts: RelayOptions): Promise<RelayHandle> {
     switch (e.kind) {
       case 'send': {
         const ws = sockets.get(e.to);
-        if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(e.frame));
+        if (ws && ws.readyState === ws.OPEN) {
+          if (e.frame.type === 'joined') {
+            log(`conn ${e.to} joined room=${e.frame.room ?? '-'} created=${e.frame.created === true}`);
+          }
+          ws.send(JSON.stringify(e.frame));
+        }
         return;
       }
       case 'bounce': {
+        log(`conn ${e.conn} bounce code=${e.code} reason=${e.reason}`);
         sockets.get(e.conn)?.close(e.code, e.reason);
         return;
       }
@@ -279,6 +295,7 @@ export function startRelay(opts: RelayOptions): Promise<RelayHandle> {
     // member's browser — close. Missing = non-browser client, allowed.
     const origin = req.headers.origin;
     if (origins.length > 0 && typeof origin === 'string' && !origins.includes(origin)) {
+      log(`conn - reject origin=${origin}`);
       ws.close(CLOSE_ORIGIN, 'origin not allowed');
       return;
     }
@@ -294,6 +311,7 @@ export function startRelay(opts: RelayOptions): Promise<RelayHandle> {
 
     const conn = String(nextConnId++);
     sockets.set(conn, ws);
+    log(`conn ${conn} open ip=${ip} origin=${origin ?? '-'}`);
     // S2(c): per-connection frame bucket — applies from byte one (pre-admission
     // included), so a stranger can't even spam cheap frames.
     const frames = new TokenBucket(frameRate.capacity, frameRate.refillPerMs, Date.now());
@@ -351,10 +369,14 @@ export function startRelay(opts: RelayOptions): Promise<RelayHandle> {
         }
       }
 
+      if (frame.type === 'hello') {
+        log(`conn ${conn} hello intent=${frame.intent} room=${frame.room || '-'}`);
+      }
       run({ kind: 'frame', conn, frame, now });
     });
 
-    ws.on('close', () => {
+    ws.on('close', (code) => {
+      log(`conn ${conn} close code=${code}`);
       sockets.delete(conn);
       const n = (connsPerIp.get(ip) ?? 1) - 1;
       if (n <= 0) connsPerIp.delete(ip);
