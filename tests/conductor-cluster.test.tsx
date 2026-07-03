@@ -357,11 +357,18 @@ describe('ConductorCluster', () => {
   });
 
   it('shows an honest connecting readout while still conducting locally', () => {
-    render(<ConductorCluster {...props({ relay: { kind: 'connecting' } })} />);
+    render(<ConductorCluster {...props({ relay: { kind: 'connecting', onShowQr: vi.fn() } })} />);
     expect(screen.getByText('Local MD mode')).toBeInTheDocument();
     expect(screen.getByText(/relay connecting/)).toBeInTheDocument();
     // The transport is untouched — connecting never interrupts conducting.
     expect(screen.getByRole('button', { name: /Advance/ })).toBeInTheDocument();
+  });
+
+  it('connecting chip is tappable and re-opens the overlay (never a dead end)', () => {
+    const onShowQr = vi.fn();
+    render(<ConductorCluster {...props({ relay: { kind: 'connecting', onShowQr } })} />);
+    fireEvent.click(screen.getByRole('button', { name: /relay connecting/ }));
+    expect(onShowQr).toHaveBeenCalledOnce();
   });
 
   it('live: Conducting + LIVE chip + room-code chip that opens the QR', () => {

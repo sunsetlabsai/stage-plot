@@ -99,7 +99,7 @@ import type { FlaggedRef } from '@/lib/chart-review';
 import { useConductorSession } from '@/lib/use-conductor-session';
 import ConductorCluster, { type ClusterRelayState } from '@/components/ConductorCluster';
 import RelayStrip from '@/components/RelayStrip';
-import RelayQrOverlay from '@/components/RelayQrOverlay';
+import RelayQrOverlay, { RelayConnectingOverlay } from '@/components/RelayQrOverlay';
 import {
   buildJoinUrl,
   findChartForSongRef,
@@ -3894,7 +3894,7 @@ function ChartNavigator({
             ? null
             : relayIntent.mode === 'live' || relayIntent.mode === 'joined'
               ? conductor.relay.status === 'connecting' || relayRoomCode === null
-                ? { kind: 'connecting' }
+                ? { kind: 'connecting', onShowQr: () => setShowQr(true) }
                 : { kind: 'live', code: relayRoomCode, onShowQr: () => setShowQr(true) }
               : { kind: 'available', onGoLive: goLive };
         return (
@@ -4047,10 +4047,11 @@ function ChartNavigator({
       ) : null}
 
       {/* 3b chunk 5: the join QR (mockup P2) — shown on go-live and from the
-          cluster's room chip. Dismissable anywhere; never blocks conducting.
-          D4: the code is the relay-minted room (facts.room) — renders once the
-          create's `joined` lands (goLive opens this overlay optimistically;
-          the connecting pulse below is the honest interim). */}
+          cluster's room chip. The QR itself dismisses anywhere; the interim
+          connecting dialog dismisses ONLY via Hide (see RelayConnectingOverlay).
+          Never blocks conducting. D4: the code is the relay-minted room
+          (facts.room) — renders once the create's `joined` lands (goLive opens
+          this overlay optimistically; the connecting pulse is the honest interim). */}
       {showQr &&
         (relayIntent.mode === 'live' || relayIntent.mode === 'joined') &&
         (conductor.relay.room !== null ? (
@@ -4060,20 +4061,10 @@ function ChartNavigator({
             onClose={() => setShowQr(false)}
           />
         ) : (
-          <div
-            className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center"
-            onClick={() => setShowQr(false)}
-            role="dialog"
-            aria-label="Follow this performance"
-          >
-            <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-80 text-center space-y-3">
-              <div className="text-sm font-bold text-white">Follow this performance</div>
-              <div className="inline-flex items-center gap-2 text-xs text-amber-500">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                getting a room code&hellip;
-              </div>
-            </div>
-          </div>
+          // UAT fix: the interim dialog is NOT backdrop-dismissable (a stray/
+          // synthesized tap right after "Go live" was silently killing it) —
+          // explicit Hide only; the cluster's connecting chip re-opens it.
+          <RelayConnectingOverlay onHide={() => setShowQr(false)} />
         ))}
 
       {/* Perform seek status (a section is parked under the redline) */}

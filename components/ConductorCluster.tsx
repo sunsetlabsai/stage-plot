@@ -25,7 +25,10 @@ function exitLabel(kind: ExitPolicy['kind']): string {
 // session drives (role local or writer) — a follower gets RelayStrip instead.
 export type ClusterRelayState =
   | { kind: 'available'; onGoLive: () => void } // configured, not connected
-  | { kind: 'connecting' } // socket up-ing / reconnecting — still conducting locally
+  // socket up-ing / reconnecting — still conducting locally. onShowQr re-opens
+  // the connecting overlay (UAT: with the interim dialog hidden this chip was
+  // the ONLY signal, and it was a dead end — never strand the MD in silence).
+  | { kind: 'connecting'; onShowQr: () => void }
   | { kind: 'live'; code: string; onShowQr: () => void }; // we hold the baton
 
 export interface ConductorClusterProps {
@@ -147,10 +150,13 @@ export default function ConductorCluster({
               </button>
             )}
             {relay?.kind === 'connecting' && (
-              <span className="inline-flex items-center gap-1 text-amber-500">
+              <button
+                onClick={relay.onShowQr}
+                className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-amber-500 bg-zinc-800 hover:bg-zinc-700"
+              >
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
                 relay connecting&hellip;
-              </span>
+              </button>
             )}
           </span>
         )}
