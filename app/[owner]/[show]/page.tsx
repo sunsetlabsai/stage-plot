@@ -50,7 +50,9 @@ import {
   formatBytes,
   type DownloadProgress,
 } from '@/lib/chart-cache';
-import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart } from '@/lib/pdf-viewer';
+import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart, fetchChartBytes } from '@/lib/pdf-viewer';
+import { parseChartDeepLink, buildChartShareUrl, buildShowShareUrl, chartShareFilename } from '@/lib/share';
+import ShareButton from '@/components/ShareButton';
 import ManageChartsModal from '@/components/ManageChartsModal';
 import TapTempo from '@/components/TapTempo';
 import { createBpmWriter, type BpmWriter } from '@/lib/bpm-writer';
@@ -914,6 +916,29 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, is
     };
   }, [setlist]);
 
+  // ── Share deep link (?song=N&chart=ROLE, lib/share buildChartShareUrl) ──
+  // A shared chart link opens the navigator on that song; the role rides along
+  // as a prop and ChartNavigator selects the matching chart. Same read-once /
+  // armed-ref / deferred-setState shape as the ?join handler above. Invalid
+  // song ⇒ ignore, land on the setlist as usual.
+  const [deepLinkRole, setDeepLinkRole] = useState<string | null>(null);
+  const chartLinkArmedRef = useRef(false);
+  useEffect(() => {
+    if (chartLinkArmedRef.current) return;
+    const parsed = parseChartDeepLink(window.location.search, setlist);
+    if (!parsed) return;
+    chartLinkArmedRef.current = true;
+    let cancelled = false;
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setNavigatorSongIdx(parsed.songIdx);
+      setDeepLinkRole(parsed.role);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [setlist]);
+
   return (
     <div className="bg-zinc-950 min-h-screen text-zinc-100">
       <div className="max-w-2xl mx-auto px-4 py-6">
@@ -953,6 +978,11 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, is
                 </span>
               )}
               <p className="text-sm text-zinc-500">{setlist.length} songs</p>
+              {/* Show-level share: the bare show URL (tiers 2/3 — no file). */}
+              <ShareButton
+                title={showInfo.showName || [showInfo.venue, showInfo.eventDate].filter(Boolean).join(' · ') || 'Setlist'}
+                buildUrl={() => buildShowShareUrl(window.location.origin, owner, slug)}
+              />
             </div>
           </div>
           {/* Role selector */}
@@ -1044,6 +1074,7 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, is
           onChangeRole={handleRoleChange}
           onClose={() => setNavigatorSongIdx(null)}
           joinCode={joinCode}
+          initialChartRole={deepLinkRole}
         />
       )}
     </div>
@@ -2602,7 +2633,7 @@ function RelayPromptForm({
 }
 
 function ChartNavigator({
-  setlist, currentIdx, roleFilter, allRoles, isOffline, accessToken, isOwner = false, owner, slug, onChangeIdx, onChangeRole, onClose, joinCode = null,
+  setlist, currentIdx, roleFilter, allRoles, isOffline, accessToken, isOwner = false, owner, slug, onChangeIdx, onChangeRole, onClose, joinCode = null, initialChartRole = null,
 }: {
   setlist: SetlistSong[];
   currentIdx: number;
@@ -2618,6 +2649,8 @@ function ChartNavigator({
   onClose: () => void;
   // 3b chunk 5: a QR deep link's room code (?join=CODE) — auto-joins the room.
   joinCode?: string | null;
+  // Share deep link's chart role (?chart=ROLE) — selects that chart on open.
+  initialChartRole?: string | null;
 }) {
   const song = setlist[currentIdx];
   const charts = (song?.charts ?? []).filter(
@@ -2702,6 +2735,30 @@ function ChartNavigator({
       cancelled = true;
     };
   }, [joinCode, relayUrl]);
+
+  // Share deep link (?chart=ROLE): one-shot select of the matching chart within
+  // the visible (role-filtered) list. Case-insensitive to be forgiving of hand-
+  // edited URLs; no match (renamed role, or hidden by a stored role filter) ⇒
+  // silently ignore — the default first chart stands. Latched so later chart
+  // switches are never clobbered.
+  const chartRoleArmedRef = useRef(false);
+  useEffect(() => {
+    if (chartRoleArmedRef.current || !initialChartRole) return;
+    const wanted = initialChartRole.toLowerCase();
+    const idx = charts.findIndex((c) => c.role.toLowerCase() === wanted);
+    if (idx === -1) return;
+    chartRoleArmedRef.current = true;
+    // Deferred setState (the repo's set-state-in-effect discipline).
+    let cancelled = false;
+    Promise.resolve().then(() => {
+      if (cancelled) return;
+      setActiveChartIdx(idx);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [initialChartRole, charts]);
+
   const [editingId, setEditingId] = useState<string | null>(null);
   const [calTool, setCalTool] = useState<'sections' | 'bars' | 'roadmap'>('sections');
   const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
@@ -3536,6 +3593,30 @@ function ChartNavigator({
             <span className="px-2 py-0.5 bg-amber-900 text-amber-300 text-[10px] font-bold rounded">
               OFFLINE
             </span>
+          )}
+          {/* Chart share: tier 1 shares the PDF itself (bytes via the viewer's
+              own cache/proxy path); tiers 2/3 the ?song&chart deep link. An
+              external-only chart (no fileId) has no bytes and no in-app viewer
+              — its own URL is the honest share. */}
+          {activeChart && (
+            <ShareButton
+              title={`${song.title} – ${activeChart.role}`}
+              buildUrl={() =>
+                activeChart.fileId
+                  ? buildChartShareUrl(window.location.origin, owner, slug, song.position, activeChart.role)
+                  : activeChart.url
+              }
+              getFile={
+                activeChart.fileId
+                  ? async () => {
+                      const bytes = await fetchChartBytes(activeChart, accessToken);
+                      return bytes
+                        ? new File([bytes], chartShareFilename(song.title, activeChart.role), { type: 'application/pdf' })
+                        : null;
+                    }
+                  : undefined
+              }
+            />
           )}
           {/* Suppress the ENTER path on a load-error / unreadable chart: entering
               Calibrate there would let a Save PUT to the same (chart_id, source_hash)
