@@ -60,7 +60,9 @@ function evictOldest() {
 // Fetch the chart's raw bytes — offline cache first, then network (Supabase
 // public URL direct, or the Drive proxy). Returns the ArrayBuffer the document
 // will be parsed from, so the hash and the parse share identical bytes.
-async function fetchChartBytes(chart: Chart, accessToken?: string): Promise<ArrayBuffer | null> {
+// Exported for the share button (tier-1 file share reuses this exact
+// cache/proxy path — do NOT duplicate it).
+export async function fetchChartBytes(chart: Chart, accessToken?: string): Promise<ArrayBuffer | null> {
   const cachedBlob = await getCachedChartBlob(chart);
   if (cachedBlob) return await cachedBlob.arrayBuffer();
 
