@@ -1,6 +1,9 @@
 # Conductor transport — cloud relay as the one deployment (kills the local-box story)
 
-**Status:** v3 — DESIGN-ONLY. Not built.
+**Status:** v4 — chunks 1–3 BUILT, MERGED, DEPLOYED (`relay.showrunr.ai` on Fly, live since
+2026-07-02; UAT fix PR #118). v4 amends the shipped design with **§9: the venue-network
+requirement and the degraded-state contract**, ratified by Graham 2026-08-04. §8 Q5 and Q6
+are RESOLVED by §9 — read §9 before re-litigating either.
 **Codex R1 = NO-GO (3H/5M/2L), all folded** — root cause: v1's D4 kept the shipped
 *implicit-create-on-first-hello*, which only made sense on a band-private box; v2 moved to
 explicit create/join intent + relay-minted codes.
@@ -14,9 +17,9 @@ cut-eligible).
 **Codex R3 = GO-WITH-NITS (2 LOW, both doc-consistency, both folded).** R3 confirmed:
 cross-room epoch interleave safe under the shipped reducer; write-ahead-before-ack is the
 right durability point — **build note: "flushed durable" must be real (fsync), not just
-writeFileSync + rename.** Awaiting Graham's GO before any build.
-**Date:** 2026-07-02
-**Branch:** `opus/design-relay-cloud`
+writeFileSync + rename.** Graham gave GO; chunks 1–3 shipped as PRs #115/#116/#117.
+**Date:** 2026-07-02 (v3) · 2026-08-04 (v4 amendment)
+**Branch:** `opus/design-relay-cloud` (v3) · `opus/relay-venue-network-requirement` (v4)
 **Parent:** `design-conductor-authority.md` (epic), `design-conductor-3b-discovery-failover.md`
 (the protocol — UNCHANGED by this doc except where called out), chunk 6
 (`relay/provision-cert.sh` + `docs/relay-provisioning.md` — RETIRED by this doc).
@@ -369,10 +372,17 @@ never see room identity.
 3. **Room-code length:** 6 (S1). Could go 5 if typing feels heavy at UAT; not below.
 4. **Multi-region later?** v1 = single region nearest home turf. A band tour crossing
    oceans adds ~150ms — still fine at bar grain. Revisit only with real demand.
-5. **The dead-venue story:** officially "self-drive floor, no togetherness." If real
-   demand emerges: native app (true P2P) — NOT a hardware kit. Recorded so the Pi never
-   comes back.
-6. **Mid-show backhaul loss (v2 candidate, discussed with Graham 2026-07-02):** the cloud
+5. **The dead-venue story:** ✅ **RESOLVED 2026-08-04 — see §9.2.** Officially "self-drive
+   floor, no togetherness." Reaffirmed and promoted from a deferred question to a stated
+   product requirement. If real demand emerges: native app (true P2P) — NOT a hardware
+   kit. Recorded so the Pi never comes back.
+6. **Mid-show backhaul loss** — ✅ **RESOLVED 2026-08-04: DECLINED for v1, see §9.4.**
+   Graham re-raised this independently on 2026-08-03 ("limited backhaul for the purposes of
+   establishing the connection"), which is this question restated — evidence that leaving it
+   "open" makes it recur. It is now closed with a rationale and a named re-open trigger.
+   Original text retained below for the record.
+
+   *(v2 candidate, discussed with Graham 2026-07-02):* the cloud
    star requires continuous backhaul from every mirroring device. A WebRTC-data-channel
    hybrid — cloud relay does signaling at soundcheck, deltas then flow peer-to-peer over
    the local network — could survive backhaul dying mid-show (established local ICE pairs
@@ -380,3 +390,130 @@ never see room identity.
    dissolves once a cloud relay exists to sign through. Real cost: mesh complexity, NAT
    variance, and the baton arbiter needs a home. Deliberately NOT v1; recorded so the
    strongest objection to the star has a named answer.
+
+---
+
+## 9. The venue-network requirement and the degraded-state contract (v4, ratified 2026-08-04)
+
+Added after Graham raised venue backhaul as a blocker to putting ShowRunr in outside
+testers' hands. This section states as **product requirements** what §1 and §8 previously
+carried as implementation notes and deferred questions.
+
+### 9.1 Two independent offline stories — do not conflate them
+
+Graham's framing, 2026-08-04. ShowRunr makes two different "works offline" claims, with
+different requirements. Most of the confusion in this area comes from treating them as one.
+
+| | **Solo mode** | **Conductor mode** |
+|---|---|---|
+| Covers | charts, setlist, stage plot, input list, notes | shared navigation: position mirroring, moving redline, baton |
+| Connectivity to **start** | required once (cache warm) | required |
+| Connectivity **during** the show | **not required** | **required, continuously** |
+| Status | shipped | shipped (chunks 1–3) |
+
+The solo floor is real and verified in code: `public/sw.js` caches the app shell (`/` plus
+the PDF worker), serves navigations network-first with cache fallback, keeps a separate
+chart cache, and accepts a `WARM_CACHE` message for pre-warming. **A device that has opened
+the show once while online will open and render its charts with zero connectivity.**
+
+That conditional matters: the floor is only there if the warm happened. A device installing
+the PWA for the first time *at* a dead venue has nothing cached and gets nothing. See §9.5.
+
+> "ShowRunr works offline" is **true of solo mode and false of conductor mode.** Never say
+> it unqualified to a tester.
+
+### 9.2 The requirement (v1, ratified)
+
+**Every device that wants to mirror holds a path to `relay.showrunr.ai` for as long as it
+wants to mirror.**
+
+Stated plainly, because the shorthand keeps drifting: this is **persistent backhaul for the
+duration of the show, not merely enough to establish the room.** The relay is a dumb star —
+every navigation frame flows through it, for the whole show. There is no post-join handoff
+to a local transport. The architecture in which establishment alone needs the internet is
+§8 Q6, declined for v1 (§9.4).
+
+**An AP without backhaul buys nothing.** A browser tab cannot accept incoming connections,
+so devices sharing a disconnected LAN have no one to talk to. **"Local AP, no internet" and
+"no network at all" are the same case** — the router's presence is irrelevant. This is the
+same physics that killed the local-box story in §0; it did not change.
+
+**Governing constraint (Graham, 2026-08-04): simplicity for the conductor and the players
+outranks venue coverage.** Setup must not be hard for anyone. A requirement of "the venue
+needs working internet" is accepted as fair, and is cheaper than any mechanism that would
+relax it.
+
+### 9.3 Degraded-state contract — the build item
+
+The failure this defends against is **not** "the venue had no internet." It is *"something
+looked broken and the player could not tell whether it was working."* The degraded state is
+a good product — your whole chart book, minus sync — and today we do not say so.
+
+Requirements:
+
+1. **Loss of the relay is a named state, not a silent one.** A device that was mirroring and
+   is no longer mirroring says so.
+2. **Name what still works.** The message is "charts only — no conductor sync," never a bare
+   error. The player should understand they have lost a feature, not the app.
+3. **Never a dead end.** Any degraded state carries an affordance back (retry / re-open the
+   join sheet). Partially shipped in PR #118 (`RelayConnectingOverlay`, tappable connecting
+   chip); extend to cover the post-join drop, not only the pre-join hang.
+4. **Distinguish "never connected" from "lost connection."** They have different causes and
+   different user actions; today they can look alike.
+5. **The conductor sees follower reality.** An MD driving a room where nobody is mirroring
+   should know. Silent solo-conducting is the worst version of this bug.
+
+**Build:** a UI-only chunk. Zero protocol contact, no relay change, no new transport. Not
+started — build after Codex GO, per the standing gate.
+
+### 9.4 §8 Q6 (WebRTC hybrid) — DECLINED for v1
+
+The idea: relay does signaling at soundcheck, deltas then flow peer-to-peer over the venue
+LAN, so an established room survives backhaul dying mid-show.
+
+Declined, for three reasons:
+
+1. **It contradicts the governing constraint.** It adds a second transport and a fallback
+   negotiation between them. Complexity lands on the exact surface — go-live at a gig —
+   that §9.2 says must stay simple.
+2. **New failure class, worst-timed.** Peer-mesh problems (NAT variance, ICE, the baton
+   arbiter's home) are the kind that pass at rehearsal and fail at the venue.
+3. **It fails where it is needed.** Guest Wi-Fi that isolates clients blocks peer traffic
+   outright — and hostile guest Wi-Fi is precisely the venue class this was meant to save.
+   So it adds risk in the venues that already work and does not rescue many that don't.
+
+**Re-open trigger (evidence, not anticipation):** outside-tester sessions show that
+*mid-show backhaul loss* — as distinct from never having usable internet, or from onboarding
+failures — is a material cause of failed sessions. Absent that evidence, this stays closed.
+If the dead-venue case ever becomes commercially real, §8 Q5's answer stands: a native app,
+not a hardware kit and not a mesh.
+
+### 9.5 Tester-facing preconditions
+
+What must be said plainly to outside testers, and what must be true before they get it.
+
+**Onboarding (mandatory, not advisory):** every device opens the show once while online
+before leaving for the gig. This warms the service worker and chart cache. Without it there
+is no solo floor — see §9.1. The most likely tester failure is not exotic venue networking;
+it is skipping this step.
+
+**The stated requirement:** conductor mode needs working internet at the venue for the whole
+show. One member's phone hotspot is a fully supported answer (§1 on-ramps) — frames are
+tiny; it is continuity, not bandwidth, that matters.
+
+**Named venue risks — all of these look like "there is Wi-Fi" and behave like a dead
+network:**
+- **Captive portals** — per-device sign-in, very common in bars. Every device must complete it.
+- **Client isolation** — devices cannot see each other. Harmless to us (we are a star, not a
+  mesh), and worth noting as the reason §9.4 would not have helped.
+- **An AP with no backhaul** — buys nothing (§9.2).
+
+**What to promise:** if the internet drops, nobody loses their charts; they lose the moving
+redline and shared navigation until signal returns, then rejoin and re-sync. That is the
+honest, and genuinely decent, floor.
+
+### 9.6 Sequencing note
+
+The parked phone retest gates this. Until conductor mode is verified working end-to-end on
+Graham's own phone, handing it to outside testers measures onboarding, not transport.
+Retest first, then §9.3, then testers.
