@@ -1,7 +1,7 @@
 # Design — Admin identity, invite gate, tester deletion, and profiles read scope
 
 Status: **DESIGN — Codex R2 folded, awaiting R3**
-Version: **v3.0** (v1 = pre-Codex, v2 = R1)
+Version: **v3.1** (v1 = pre-Codex, v2 = R1, v3 = R2)
 Scope: admin authn/authz, signup gating, tester deletion, `profiles` RLS
 Driver: handing ShowRunr to outside UAT testers
 
@@ -26,6 +26,12 @@ Driver: handing ShowRunr to outside UAT testers
 | §3.1 / §3.6 / §5 — the three `auth.users` references this design **itself introduced** are now `ON DELETE SET NULL`; audit gains `actor_email` + target snapshots | Codex R2 high |
 | §6.2 — deletion counts distinguish **attempted vs succeeded** storage removals | Codex R2 condition on hard delete |
 | §3.3 — seed **both** Graham accounts if both should be admin; no runtime bootstrap | Codex R2 answer |
+
+**v3.1:** §3.3 pre-build gate **resolved** — Graham, 2026-08-10: the platform
+owner is **`graham.edwards@gmail.com`**, seeded as the sole bootstrap admin.
+Raised two consequences of that choice which need checking before the migration
+runs (profile existence vs the `/claim` redirect; the stale `seed_profiles.sql`
+placeholder UUIDs).
 
 ---
 
@@ -155,7 +161,7 @@ the moment nobody is watching.
 INSERT INTO admin_users (user_id, note)
 SELECT id, 'bootstrap: platform owner'
 FROM auth.users
-WHERE lower(email) = lower('<GRAHAM_ACCOUNT_EMAIL>')
+WHERE lower(email) = 'graham.edwards@gmail.com'
 ON CONFLICT (user_id) DO NOTHING;
 ```
 
@@ -163,31 +169,44 @@ ON CONFLICT (user_id) DO NOTHING;
 from configuration. After the seed, membership changes only through an
 admin-authenticated action, which is audited (§3.6).
 
-**★ PRE-BUILD GATE — needs Graham.** Which account is the platform owner?
-`supabase/seeds/seed_profiles.sql` has handles `graham` and `fernando` with
-placeholder UUIDs, so it cannot be inferred. The reported AI-key symptom came
-from `graham.edwards@gmail.com`; this repo's git identity is
-`graham@salonhq.co`. **Both may exist as separate accounts.** Verify with:
+**★ RESOLVED — Graham, 2026-08-10: `graham.edwards@gmail.com`.**
+
+That is the seeded platform owner and the **only** admin at bootstrap.
+`graham@salonhq.co` (this repo's git identity) is **not** seeded. If it turns out
+to be a separate account that also needs admin, it is granted through the normal
+admin-authenticated path and audited (§3.6) — that is exactly why no runtime
+bootstrap exists to fall back on.
+
+Verify the account resolves before running the migration:
 
 ```sql
 SELECT u.id, u.email, p.owner_slug
 FROM auth.users u LEFT JOIN profiles p ON p.id = u.id
-WHERE u.email IN ('graham.edwards@gmail.com', 'graham@salonhq.co');
+WHERE lower(u.email) = 'graham.edwards@gmail.com';
 ```
 
-**If both accounts exist and both should be admin, seed both** — the `INSERT ...
-SELECT` above already accepts a list, so it is a wider `IN` clause and nothing
-more (Codex R2: *"seed both exact user IDs/emails in the migration; do not revive
-runtime bootstrap"*). The guard then asserts `count(*) = 2` rather than mere
-non-emptiness, so a typo in either address still fails loudly.
+Two things this query also settles, both of which matter and neither of which I
+can check from here (the local `SUPABASE_SERVICE_ROLE_KEY` returns 401):
+
+- **Does the account have a `profiles` row?** If `owner_slug` is null, the first
+  `/admin` visit will be intercepted by the profile-completeness redirect
+  (`middleware.ts:74-92`) and bounce to `/claim` before the admin layout ever
+  runs. Admin would appear broken for the one account that must not be. Claim a
+  handle first, or the §3.4 gate needs to exempt `/admin` from that redirect.
+- **Is it the `graham` handle in `supabase/seeds/seed_profiles.sql`?** That seed
+  carries placeholder UUIDs, so it may point at a different account entirely.
 
 If the migration's `SELECT` matches zero rows it inserts nothing **silently** —
-the exact failure mode Codex flagged. Guard it:
+the exact failure mode Codex flagged. Guard it with an exact count, so a typo
+fails loudly rather than yielding an admin-less deployment:
 
 ```sql
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM admin_users) THEN
-    RAISE EXCEPTION 'admin bootstrap matched no user — check the email';
+DO $$
+DECLARE n int;
+BEGIN
+  SELECT count(*) INTO n FROM admin_users;
+  IF n <> 1 THEN
+    RAISE EXCEPTION 'admin bootstrap expected exactly 1 admin, found %', n;
   END IF;
 END $$;
 ```
@@ -228,6 +247,15 @@ the admin lookup in middleware at all.**
   renders the real 404 — no separate rewrite needed, and it does not confirm that
   `/admin` exists. `app/admin/page.tsx` stays a client component, rendered inside
   that layout.
+- **`/admin` joins `PROFILE_CHECK_EXEMPT`** (`middleware.ts:19-21`). *Added in
+  v3.1.* The profile-completeness redirect (`:74-92`) fires on every non-exempt
+  path, so an admin without a `profiles` row would be bounced to `/claim` before
+  the admin layout ever ran — admin unreachable for the one account that must
+  never lose access. One line, and it removes a whole class of lockout
+  independent of whether the seeded account happens to have claimed a handle.
+  Note this is safe precisely because the layout gate (above) is authoritative:
+  exempting a path from the *profile* redirect does not exempt it from the
+  *admin* check.
 - **Middleware keeps only optimistic checks:** session-cookie presence for
   `/dashboard`, `/library`, `/admin`. No `admin_users` query.
 - Fix item (5) in the same pass: prefix matching instead of `===`, and carry the
@@ -599,6 +627,8 @@ Server:
 Middleware / gate:
 
 13. `/admin` signed out → `/sign-in?redirect=/admin`; signed-in non-admin → 404.
+13a. An admin **with no `profiles` row** reaches `/admin` and is **not** redirected
+     to `/claim` (§3.4 exemption) — while a non-admin with no profile still is.
 14. `/dashboard/anything` is gated (the `===` regression); redirect target
     reflects the requested path.
 
