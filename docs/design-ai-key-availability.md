@@ -1,8 +1,19 @@
 # Design — AI key availability: capability probe + real empty state
 
-Status: **DESIGN — pre-Codex, not built**
-Version: v1.0
+Status: **DESIGN — Codex R1 folded (no blockers), awaiting R2**
+Version: **v2.0** (v1.0 = pre-Codex)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
+
+**v2 changelog** — Codex R1 returned **no blockers**; three refinements folded:
+
+| Change | Source |
+|---|---|
+| §4 — `lib/agent-key.ts` extraction is now **decided**, not an open question. The shared **fallback quota state** moves with it. | Codex R1 high |
+| §5.1 NEW — a stale/invalid saved BYOA key currently **masks working try-it**. Adds a prominent Clear-key action + re-probe. | Codex R1 medium |
+| §4 / §6 — probe `error` stays **distinct from `unconfigured`** internally, even though user-facing copy converges. | Codex R1 medium |
+| §7 — raise the quota for UAT (was an open question) | Codex R1 answer |
+| §5 — do **not** hide the AI tab; show the honest empty state | Codex R1 answer |
+| §6 — exposing `source` behind admin auth confirmed fine | Codex R1 answer |
 
 ---
 
@@ -123,12 +134,36 @@ New route: `GET /api/agent/capabilities`.
   advisory; the probe inherits that and does not make it worse.
 - Cache-Control: `no-store`. A cached "available" would be worse than no probe.
 
-**Divergence risk, called out for Codex:** the probe duplicates the chat route's
-resolution logic. If they drift, the panel will say one thing and the send will
-do another. Preferred mitigation: extract the resolution into
-`lib/agent-key.ts` — `resolveKeyMode(clientKey, ip, { consume: boolean })` —
-and have both routes call it. Costs a small refactor of a working route; buys
-structural agreement.
+**Extraction is DECIDED, not optional.** v1 left this as an open question; Codex
+R1 closed it: *"extract `lib/agent-key.ts`. Do not duplicate capability
+resolution. The current quota fallback is module-local in
+`app/api/agent/chat/route.ts:15`; if probe/send each grow their own fallback
+state, no-Redis behavior will drift immediately."*
+
+That second sentence is the sharp part and is why this is not a style preference.
+`fallbackQuota` is a module-level `Map` (`route.ts:16`). A probe route with its
+own copy would count in a **different map** from the sender — so with Redis down,
+the panel and the send would disagree about how many messages remain, in the
+exact scenario where the fallback is load-bearing.
+
+**New `lib/agent-key.ts` owns all of it:**
+
+```ts
+export async function resolveKeyMode(
+  clientKey: string | undefined,
+  ip: string,
+  opts: { consume: boolean },
+): Promise<KeyMode>
+```
+
+- the `fallbackQuota` map — **one instance**, imported by both routes
+- `consumeTryitQuota` / `peekTryitQuota` (`consume: true | false`)
+- the `getAdminConfig('claude_tryit_key')` lookup
+- the BYOA-wins precedence currently at `route.ts:100-123`
+
+`app/api/agent/chat/route.ts` and the new capabilities route both call it and
+neither owns quota state. This is a refactor of a working route; it is justified
+by the drift it forecloses, not by tidiness.
 
 **Rate limiting:** the probe is unauthenticated and hits Redis. Reuse
 `checkRateLimit(ip, 'agent-capabilities')` from `lib/admin-rate-limit.ts:11-21`.
@@ -150,7 +185,40 @@ that key wins at `route.ts:100-104` regardless of try-it state.
 | 3 | `available`, remaining > 0 | Today's behavior + honest count: "*N free messages remaining.*" (existing copy at `page.tsx:5324-5329`, now correct on first paint instead of only after a send). |
 | 4 | `exhausted` | Existing exhausted copy, key field **expanded** (`needsKey` already does this once the flag is set). |
 | 5 | **`unconfigured`** | **New — the state that has no design today.** |
-| 6 | probe `error` | Treat as state 5, with a softer lead ("Couldn't check AI availability"). Never claim "try it free". |
+| 6 | probe `error` | Renders **as** state 5 for the user, with a softer lead ("Couldn't check AI availability"). Never claims "try it free". |
+| 7 | BYOA key present **and rejected** | **New in v2 — see §5.1.** |
+
+**States 5 and 6 look the same to the user but must not be conflated
+internally** (Codex R1 medium). The probe returns `unconfigured` and `error` as
+**distinct values**, and `/admin` (§6) and any logging keep them apart. The
+distinction is "try-it is intentionally off" vs "Redis or the API is down" —
+which is precisely the question Graham had to ask a human to answer this week.
+Converging them in the UI is a copy decision; converging them in the data would
+throw away the diagnostic.
+
+### 5.1 A stale BYOA key masks working try-it (new in v2)
+
+Codex R1 medium, verified: §5 skips the probe whenever localStorage holds a key,
+and `route.ts:100-104` prefers `Authorization` unconditionally. So a user whose
+saved key has been **revoked, rotated, or mistyped** sees only:
+
+> Invalid API key. Check your key and try again.
+
+(`route.ts:149-156`) — even when try-it is configured and would have worked. The
+app has a working path available and never offers it. For a UAT tester who pasted
+a key once, months ago, this reads as "the AI is broken."
+
+**Spec:**
+
+- On a `401`-derived `Invalid API key` error, render the error **with a
+  prominent `Clear saved key` button**, not just red text. The existing Clear
+  control (`page.tsx:5340-5347`) is a small link beside the input and is not
+  discoverable at the moment of failure.
+- Clearing the key **re-runs the probe**, since the reason for skipping it has
+  gone. If try-it is available, the panel drops straight into state 3 and the
+  user can continue without a key at all.
+- The clear action removes both `localStorage` and `sessionStorage` entries and
+  resets `rememberKey`, matching the existing handler.
 
 **State 5 panel** — the deliverable:
 
@@ -230,14 +298,20 @@ them and see "Free messages used up" without having sent ten messages
 individually.
 
 Not fixed here — per-account quota needs an authenticated identity on a route
-that is deliberately anonymous. Two mitigations to weigh:
+that is deliberately anonymous.
 
-- Raise `TRYIT_QUOTA` for the UAT window (a one-constant change), accepting the
-  spend.
-- Say it plainly in the exhausted copy: *"Free messages are shared per network."*
+**Decided in v2** (Codex R1: *"Raise UAT quota if try-it is enabled; otherwise
+the per-network quota will create false bug reports"*):
 
-Recommendation: **do both**, and log it as backlog rather than pretending the
-quota model is right.
+- **Raise `TRYIT_QUOTA`** (`route.ts:12`) for the UAT window — conditional on
+  try-it actually being configured, since the constant is inert otherwise.
+  **Open: the number.** 10 → 50 is my suggestion; it is a one-constant change and
+  the spend is bounded by `TRYIT_MAX_TOKENS = 2048` per message.
+- **Say it plainly** in the exhausted copy: *"Free messages are shared across
+  everyone on your network."* Without this line, two testers in one room file two
+  bug reports about a quota neither of them spent.
+
+Both, and the per-account model stays backlog rather than being pretended at.
 
 ---
 
@@ -274,29 +348,53 @@ New `tests/agent-capabilities.test.ts`:
 New cases in a client test (jsdom + RTL, per the existing harness pattern in
 `tests/setlist-bpm.test.tsx`):
 
-7. State 5 renders the instructional panel and an **enabled, visible** key input.
-8. State 5 leaves the send control **disabled**; typing does not enable it.
-9. Entering a key in state 5 enables send and suppresses the panel.
-10. State 3 renders the remaining-count line on first paint with no send.
+7. `unconfigured` and `error` are returned as **distinct values** (§5), not
+   collapsed at the API layer.
 
-Target: **~10 new tests**. Delta reported on the build PR.
+**Shared-state regression (v2, the point of the §4 extraction):**
+
+8. With Redis unavailable, a probe followed by a send observes **the same**
+   fallback counter — remaining decrements by exactly 1, not 0 and not 2. This
+   test fails if either route re-declares its own `fallbackQuota`.
+
+New cases in a client test (jsdom + RTL, per the existing harness pattern in
+`tests/setlist-bpm.test.tsx`):
+
+9. State 5 renders the instructional panel and an **enabled, visible** key input.
+10. State 5 leaves the send control **disabled**; typing does not enable it.
+11. Entering a key in state 5 enables send and suppresses the panel.
+12. State 3 renders the remaining-count line on first paint with no send.
+13. **State 7 (§5.1):** with a saved key, an `Invalid API key` response renders a
+    `Clear saved key` action; clearing it re-probes and, when try-it is
+    available, lands in state 3 with send enabled.
+
+Target: **~13 new tests**. Delta reported on the build PR.
 
 ---
 
-## 10. Open questions for Codex
+## 10. Codex R1 — disposition
 
-1. §4 — extract `lib/agent-key.ts` shared by probe and send, or accept duplicated
-   resolution? Refactoring a working route has its own risk; I lean extract.
-2. §5 state 6 — is treating probe failure as "unconfigured" right? It pushes a
-   user toward entering their own key during what may be a transient blip. The
-   alternative (allow send, let it fail) is the status quo we are removing.
-3. §6.1 — does exposing `source: 'redis' | 'env'` on an `ADMIN_SECRET`-gated
-   endpoint leak anything useful to an attacker who already holds the secret?
-   I believe not, but it is a deliberate widening.
-4. §7 — raise `TRYIT_QUOTA` for UAT, and to what? Or leave it and just be honest
-   in the copy?
-5. Should the AI tab be **hidden** for testers when try-it is unconfigured rather
-   than showing an instructional dead end? Hiding is friendlier and less
-   confusing; it also buries a real feature and makes "where did the AI go?"
-   a support question. I lean toward showing (as specced), but it is a genuine
-   fork.
+No blockers. All findings accepted:
+
+| Finding | Disposition |
+|---|---|
+| **High** — extract `lib/agent-key.ts`, don't duplicate resolution | **Accepted**, and promoted from open question to decision (§4). The module-local `fallbackQuota` argument is the decisive one; test 8 pins it. |
+| **Medium** — stale BYOA key masks working try-it | **Accepted.** New §5.1 + state 7 + test 13. This was a genuine miss in v1. |
+| **Medium** — keep probe `error` distinct from `unconfigured` | **Accepted** (§5). User-facing copy converges; the data does not. |
+| Raise UAT quota | **Accepted** (§7), number still open. |
+| Don't hide the AI tab | **Accepted** — spec unchanged. |
+| `source: redis\|env\|none` behind admin auth is fine | Confirmed (§6). |
+
+## 11. Open questions for Codex R2
+
+1. §7 — what number for `TRYIT_QUOTA`? I suggest 50 for the UAT window. Bounded
+   by `TRYIT_MAX_TOKENS = 2048` per message, but it is Graham's spend.
+2. §5.1 — after clearing a bad key, should the panel *auto-retry the failed
+   message*, or just re-enable send? Auto-retry is friendlier and risks
+   double-sending if the original request actually landed.
+3. §4 — the extraction moves quota state out of a route that is currently
+   working and in production. Worth a same-PR test that the send path's
+   behaviour is byte-identical before/after, or is test 8 enough?
+4. §5 — the privacy copy corrected in R1 ("we pass it straight to Anthropic and
+   never save it"): does that read as reassuring or as raising a doubt the user
+   didn't have? It is accurate; I am less sure it is well-placed.
