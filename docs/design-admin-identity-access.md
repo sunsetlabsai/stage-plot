@@ -1,7 +1,7 @@
 # Design — Admin identity, invite gate, tester deletion, and profiles read scope
 
-Status: **DESIGN — Codex R1 folded, awaiting R2**
-Version: **v2.0** (v1.0 = pre-Codex)
+Status: **DESIGN — Codex R2 folded, awaiting R3**
+Version: **v3.0** (v1 = pre-Codex, v2 = R1)
 Scope: admin authn/authz, signup gating, tester deletion, `profiles` RLS
 Driver: handing ShowRunr to outside UAT testers
 
@@ -17,6 +17,15 @@ Driver: handing ShowRunr to outside UAT testers
 | §3.6 audit moved **into scope** | Codex R1 non-blocking 5 |
 | §8 profileless/direct-API regression tests | Codex R1 non-blocking 4 |
 | §9 migration `004` resolved — it never existed | Graham asked; verified |
+
+**v3 changelog:**
+
+| Change | Source |
+|---|---|
+| §4.2 — `activate-invites` **removed** from the `requireAppUser` list; gated on eligibility instead, and also re-run after profile creation. v2 would have broken legitimate onboarding. | Codex R2 **blocking** |
+| §3.1 / §3.6 / §5 — the three `auth.users` references this design **itself introduced** are now `ON DELETE SET NULL`; audit gains `actor_email` + target snapshots | Codex R2 high |
+| §6.2 — deletion counts distinguish **attempted vs succeeded** storage removals | Codex R2 condition on hard delete |
+| §3.3 — seed **both** Graham accounts if both should be admin; no runtime bootstrap | Codex R2 answer |
 
 ---
 
@@ -81,7 +90,7 @@ with one anon-key request.** RLS has no column-level grant inside a policy.
 CREATE TABLE admin_users (
   user_id    uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   granted_at timestamptz NOT NULL DEFAULT now(),
-  granted_by uuid REFERENCES auth.users(id),
+  granted_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
   note       text
 );
 ALTER TABLE admin_users ENABLE ROW LEVEL SECURITY;
@@ -166,6 +175,12 @@ FROM auth.users u LEFT JOIN profiles p ON p.id = u.id
 WHERE u.email IN ('graham.edwards@gmail.com', 'graham@salonhq.co');
 ```
 
+**If both accounts exist and both should be admin, seed both** — the `INSERT ...
+SELECT` above already accepts a list, so it is a wider `IN` clause and nothing
+more (Codex R2: *"seed both exact user IDs/emails in the migration; do not revive
+runtime bootstrap"*). The guard then asserts `count(*) = 2` rather than mere
+non-emptiness, so a typo in either address still fails loudly.
+
 If the migration's `SELECT` matches zero rows it inserts nothing **silently** —
 the exact failure mode Codex flagged. Guard it:
 
@@ -244,16 +259,25 @@ reasons for doing identity."* Agreed; promoted.
 ```sql
 -- 013_admin_users.sql (continued)
 CREATE TABLE admin_audit (
-  id       bigserial PRIMARY KEY,
-  actor_id uuid REFERENCES auth.users(id),
-  action   text NOT NULL,
-  target   text,
-  meta     jsonb,
-  at       timestamptz NOT NULL DEFAULT now()
+  id          bigserial PRIMARY KEY,
+  actor_id    uuid REFERENCES auth.users(id) ON DELETE SET NULL,
+  actor_email text NOT NULL,          -- snapshot; survives actor deletion
+  action      text NOT NULL,
+  target      text,                   -- snapshot: target email / owner_slug
+  meta        jsonb,
+  at          timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE admin_audit ENABLE ROW LEVEL SECURITY;
 -- No policies. service_role only.
 ```
+
+**Snapshots are not redundant with `actor_id`** (Codex R2 high). With
+`ON DELETE SET NULL`, deleting a former admin nulls their `actor_id` across the
+whole audit trail — and an audit log that says *"someone deleted a user"* is not
+an audit log. `actor_email` and a `target` snapshot are denormalized on purpose
+so the record survives deletion of either party. Same reasoning applies to
+`meta`: it carries the target's `owner_slug` and the deletion counts (§6.2), none
+of which are recoverable afterwards.
 
 Written on: settings change (key names only, **never values**), admin
 grant/revoke, allowlist add/remove, **tester deletion** (§6). Read-only panel on
@@ -300,23 +324,48 @@ export async function requireAppUser(): Promise<
 >
 ```
 
-Returns 403 when the signed-in user **has no `profiles` row**. Applied to every
-authenticated route — the 15 that currently do `getUser()` → 401:
-`api/profiles` (the create path keeps its own allowlist check instead),
+Returns 403 when the signed-in user **has no `profiles` row**. Applied to the
+13 data routes that currently do `getUser()` → 401:
 `api/shows`, `api/shows/update`, `api/shows/delete`, `api/songs`,
 `api/songs/update`, `api/songs/delete`, `api/charts/upload`, `api/charts/delete`,
 `api/charts/convert`, `api/charts/calibration`, `api/charts/roadmap/save`,
-`api/charts/roadmap/parse`, `api/charts/roadmap/[chartId]`,
-`api/auth/activate-invites`.
+`api/charts/roadmap/parse`, `api/charts/roadmap/[chartId]`.
 
 "Has a profile" is the right predicate rather than "is allowlisted": existing
 users predate the allowlist and must not be locked out, and profile creation is
 already gated by the allowlist, so *no profile* ⇒ *never admitted*.
 
-**(b) Stop activating invites for non-allowlisted users.**
-`POST /api/auth/activate-invites` checks the allowlist before calling
-`activate_invites` when `signup_mode = 'invite'`. Closes the collaborator
-back-channel from §4.1.
+**Two routes are deliberately excluded** — both run *before* a profile exists:
+
+- `POST /api/profiles` — the create path itself. Keeps its own allowlist check.
+- `POST /api/auth/activate-invites` — see (b). **v2 listed this under
+  `requireAppUser` and that was a blocking error**; the correction is below.
+
+**(b) Invite activation — eligibility, not profile existence.**
+
+*Fixed in v3. Codex R2 blocking, and it was right: v2 both required
+`requireAppUser` on `activate-invites` **and** required that route to run for
+brand-new testers. Those cannot both hold.* The route is called immediately after
+OTP (`app/sign-in/page.tsx:63`), before `/claim` — so a legitimate, allowlisted,
+invited tester would have had invite activation 403 on first sign-in, then claim
+a profile, and find their collaborator rows **never linked**. Silent, permanent,
+and it would have hit exactly the people we most want onboarding smoothly.
+
+The predicate for this one route is **eligibility**:
+
+> signed in **AND** ( has a profile **OR** `signup_mode = 'open'` **OR** email is
+> on the allowlist )
+
+which admits the new invited tester and still closes the §4.1 back-channel for a
+refused one.
+
+**Belt and braces: activation also runs after successful profile creation.**
+`POST /api/profiles` calls the same activation logic on success, so a tester
+whose first-sign-in activation failed for any reason — network, cold start, the
+fire-and-forget client call at `app/sign-in/page.tsx:62-63` that ignores its own
+response — still gets linked when they claim. Activation is already idempotent
+(`activate_invites` matches unlinked rows by email, `001:262-271`), so running it
+twice is safe. This removes the dependency on a client call that nobody checks.
 
 **(c) Supabase-side block.** Either the **Before User Created** auth hook or
 disabling signups in the Supabase dashboard for the UAT window. This is the only
@@ -359,7 +408,7 @@ does not retroactively admit anyone who never claimed a handle.
 -- 014_signup_allowlist.sql
 CREATE TABLE allowed_emails (
   email      text PRIMARY KEY CHECK (email = lower(btrim(email))),
-  invited_by uuid REFERENCES auth.users(id),
+  invited_by uuid REFERENCES auth.users(id) ON DELETE SET NULL,
   invited_at timestamptz NOT NULL DEFAULT now(),
   note       text
 );
@@ -408,6 +457,28 @@ ALTER TABLE shows DROP CONSTRAINT shows_owner_id_fkey,
 -- show_collaborators.user_id and charts.uploaded_by → ON DELETE SET NULL
 ```
 
+**Every `auth.users` reference in the schema must be audited, including the ones
+this design adds.** Codex R2 high: v2 repaired the *pre-existing* FKs and then
+introduced three new unqualified references of its own — `admin_users.granted_by`,
+`allowed_emails.invited_by`, `admin_audit.actor_id` — any of which would
+re-break deletion the moment the target had ever granted admin, invited a tester,
+or performed an audited action. All three are now `ON DELETE SET NULL` (§3.1,
+§3.6, §5), with snapshot columns so the audit trail survives (§3.6).
+
+Complete list after this design, as the state deletion must satisfy:
+
+| Reference | Action |
+|---|---|
+| `profiles.id`, `songs.owner_id`, `user_secrets.user_id` | CASCADE *(already correct)* |
+| `shows.owner_id`, `chart_library.owner_id` | CASCADE *(repaired here)* |
+| `show_collaborators.user_id`, `charts.uploaded_by` | SET NULL *(repaired here)* |
+| `admin_users.user_id` | CASCADE *(new)* |
+| `admin_users.granted_by`, `allowed_emails.invited_by`, `admin_audit.actor_id` | SET NULL *(new)* |
+
+A test that deletes a user who is simultaneously a show owner, a collaborator, an
+inviter, an admin grantor, and an audit actor is the only way to know this list
+is complete — test 16 in §8.
+
 **(b) Explicit ordered deletion** in the route, inside one transaction.
 
 **Recommendation: (a) for the FK repair, (b) for storage.** The cascades fix a
@@ -416,10 +487,19 @@ only way to make deletion atomic. But **Supabase Storage objects are not in
 Postgres FK graph** — chart files uploaded via `app/api/charts/upload` must be
 removed explicitly, and a cascade will silently orphan them. So:
 
-1. Enumerate the user's storage objects, delete them.
-2. `auth.admin.deleteUser(id)` — cascades handle every table.
-3. Audit row (§3.6) recording actor, target email + slug, and counts of shows,
-   songs, charts, and storage objects removed.
+1. **Count** the user's shows, songs, chart_library rows, and storage objects
+   **before** deleting anything, and hold the target's email + `owner_slug`.
+2. Enumerate the user's storage objects, delete them, **recording how many
+   actually succeeded** — not how many were attempted.
+3. `auth.admin.deleteUser(id)` — cascades handle every table.
+4. Audit row (§3.6) with actor, target email + slug snapshots, and the counts
+   from step 1 plus the storage success count from step 2.
+
+Codex R2 made hard delete conditional on *"storage deletion is count-audited"* —
+step 2's distinction between attempted and succeeded is that condition. If the
+two disagree, the audit row records both and the operation still reports success
+for the account; a partial storage failure must be visible after the fact, since
+by then it is the only remaining evidence.
 
 Storage deletion is **not transactional with the DB delete**. If step 1 partially
 succeeds and step 2 fails, files are gone and the account remains. Order chosen
@@ -506,6 +586,16 @@ Server:
 12. A refused tester holding a valid session cannot read a show they were
     previously invited to.
 
+**Codex R2 blocker — legitimate onboarding must not regress:**
+
+12a. **An allowlisted, profileless invitee signs in, activation succeeds, they
+     claim a handle, and the collaborated show appears on their dashboard.** The
+     full happy path, end to end. This is the exact flow v2 would have broken.
+12b. Activation run twice (once at sign-in, once after profile creation) links
+     each collaborator row exactly once — idempotence, since §4.2(b) now calls it
+     from both places.
+12c. Activation succeeds for a profileless user when `signup_mode='open'`.
+
 Middleware / gate:
 
 13. `/admin` signed out → `/sign-in?redirect=/admin`; signed-in non-admin → 404.
@@ -520,12 +610,20 @@ RLS:
 
 Deletion:
 
-16. Deleting a user who owns shows **succeeds** (the §6.1 FK regression).
+16. **Deleting a user who is simultaneously a show owner, a collaborator on
+    someone else's show, an `allowed_emails.invited_by`, an
+    `admin_users.granted_by`, and an `admin_audit.actor_id` succeeds.** One test
+    covering the whole §6.2 reference table — the only way to prove the list is
+    complete rather than merely long.
 17. Self-delete refused; admin-delete-admin refused; wrong confirmation email
     refused.
-18. Storage objects are removed, and an audit row records the counts.
+18. Storage objects are removed; the audit row records counts, and records
+    **attempted vs succeeded** separately when a storage delete fails.
+19. After deleting a former admin, their `admin_audit` rows survive with
+    `actor_id` null and `actor_email` intact — the audit trail is not erased by
+    the deletion it recorded.
 
-Target: **~18 new tests.** Delta reported on the build PR.
+Target: **~22 new tests.** Delta reported on the build PR.
 
 ---
 
@@ -564,22 +662,30 @@ This design claims `013` onward.
 
 ---
 
-## 11. Open questions for Codex R2
+## 10a. Codex R2 — disposition
 
-1. §4.2 — is the three-layer gate sufficient, given (c) is a Supabase dashboard
-   setting outside this repo and therefore unverifiable by CI? The app-layer
-   predicate is "has a profile"; I believe that is exactly right, but it means an
-   allowlisted-then-removed user with a profile keeps access by design.
-2. §6.2 — cascades vs ordered deletion. I chose cascades for the DB and explicit
-   deletion for storage, with a deliberately non-atomic ordering (files first).
-   Is losing files-before-account the right failure to prefer?
-3. §6.3 — should deleting a tester be **soft** (disable + retain) for the UAT
-   window instead? A `disabled_at` column would make the dangerous operation
-   reversible, at the cost of another state everything must check. I lean hard
-   delete + audit, but this is the one I'd most like argued.
+| Finding | Disposition |
+|---|---|
+| **Blocking** — `activate-invites` caught in the profile gate | **Accepted; this was a self-contradiction in v2.** §4.2(a) put the route behind `requireAppUser` while §4.2(b) required it to run for brand-new testers. Both could not hold, and the failure was silent and permanent: an allowlisted invitee's collaborator rows would never link. Now gated on **eligibility** (profile OR open-mode OR allowlisted), **and** re-run after profile creation so it no longer depends on a fire-and-forget client call. Tests 12a–12c. |
+| **High** — FK holes in the tables this design adds | **Accepted.** `admin_users.granted_by`, `allowed_emails.invited_by`, `admin_audit.actor_id` → `ON DELETE SET NULL`; audit gains `actor_email` and target snapshots so the trail survives. Sharp catch: v2 repaired the pre-existing FKs and then introduced three new ones with the same defect. §6.2 now carries the complete reference table, and test 16 exercises a user occupying every role at once. |
+| Hard delete OK **if** FK holes closed and storage count-audited | Both conditions met — §6.2 step 2 distinguishes attempted from succeeded, test 18 asserts it. |
+| Seed both accounts if both should be admin; no runtime bootstrap | **Accepted** (§3.3) — wider `IN` clause, guard asserts the expected count. |
+
+## 11. Open questions for Codex R3
+
+1. **§4.2(b)** is the new material and deserves the attack. The eligibility
+   predicate is *profile OR open-mode OR allowlisted*. Is there a sequence —
+   allowlist removed between OTP and claim, mode flipped mid-session, an invite
+   issued to an address that later gets removed — where that admits someone it
+   shouldn't, or strands someone it should admit?
+2. §4.2 — running activation from two call sites relies on `activate_invites`
+   being idempotent (`001:262-271` matches unlinked rows by email). Test 12b
+   pins it, but is the RPC genuinely safe under concurrent invocation, given
+   sign-in and claim can overlap?
+3. §6.3 — still open from R2 and unresolved: **soft delete** (`disabled_at`) for
+   the UAT window instead of hard? Reversible, at the cost of a state every query
+   must respect. You accepted hard delete conditionally; I'd still like the
+   argument if you think reversibility is worth more during UAT specifically.
 4. §3.4 — server-component `layout.tsx` gate plus optimistic middleware. Any
-   route into `/admin` that bypasses the layout? I do not believe so in App
-   Router, but it is the security-critical claim in this revision.
-5. §3.3 — the bootstrap migration is now blocked on Graham confirming which
-   account is the platform owner. Is a seeded migration still right if the answer
-   is "both accounts exist and I want both admin"?
+   route into `/admin` that bypasses the layout? Still the security-critical
+   claim, and untouched by R2.
