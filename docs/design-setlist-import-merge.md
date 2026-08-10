@@ -1,8 +1,19 @@
 # Design — Setlist Import: merge semantics + Key/BPM/Artist columns
 
-Status: **DESIGN — pre-Codex, not built**
-Version: v1.0
+Status: **DESIGN — Codex R1 folded, awaiting R2**
+Version: **v2.0** (v1.0 = pre-Codex)
 Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
+
+**v2 changelog:**
+
+| Change | Source |
+|---|---|
+| **BPM import removed from v1.** It could not persist — verified. | Codex R1 **blocker** |
+| §4 rule 5 — removal is now **opt-in**, plus a second confirmation | Codex R1 high |
+| §4 — `mergeSetlist` takes an injected `newId`, making it genuinely pure | Codex R1 medium |
+| §5 — `key` matches **exact only**; no substring | Codex R1 answer |
+| §7 — one-level **Undo import** added | Codex R1 answer |
+| §6 artist deferral confirmed correct | Codex R1 answer |
 
 ---
 
@@ -98,8 +109,15 @@ Pure function, new module `lib/setlist-import.ts`:
 export function mergeSetlist(
   existing: SetlistSong[],
   incoming: ImportedRow[],
+  opts: { newId: () => string; removeMissing: boolean },
 ): { merged: SetlistSong[]; diff: ImportDiff }
 ```
+
+`newId` is **injected**, not called from inside (Codex R1 medium): v1 described
+the function as pure while it minted `crypto.randomUUID()` internally. Tests pass
+a counter (`() => \`new-${n++}\``), which makes the no-op round-trip assertion
+(test 8, §9) an exact deep-equal instead of an id-blind comparison. Production
+passes `crypto.randomUUID`.
 
 **Rules, in order:**
 
@@ -116,8 +134,17 @@ export function mergeSetlist(
    the sheet. Sheet order sets `position`.
 4. **Unmatched incoming row** → new row, fresh `crypto.randomUUID()`, no
    `songId` (the save path resolves or creates the library song).
-5. **Unconsumed existing row** → removal candidate; surfaced in the diff, dropped
-   on apply.
+5. **Unconsumed existing row** → removal candidate; surfaced in the diff. Dropped
+   on apply **only when `removeMissing` is true — which is not the default.**
+
+   *Changed in v2 (Codex R1 high).* v1 dropped these unconditionally, on the
+   strength of the preview alone. That is the same shape as the bug this document
+   exists to fix: partial sheets are common (a band sheet covering only set one),
+   and a preview that is clicked through is not a guard. **Default off**, an
+   explicit checkbox in the preview — *"Also remove N songs not in this sheet"* —
+   and when checked with removals > 0, `Apply` requires a second confirmation
+   naming the count. Additive import is the safe path and is therefore the
+   default path.
 6. Final `position` is `index + 1` over the merged array. The sheet's own position
    column orders the *incoming* rows (§5) and is then discarded — position is
    always dense and 1-based after a merge, never sparse.
@@ -142,12 +169,23 @@ Extend the header matcher (`app/api/sheet/route.ts:35-38`), lifted into
 |---|---|---|
 | position | exact `#`, or contains `pos` | orders incoming rows only |
 | title | contains `title`, or exact `song` | **required** |
-| key | exact `key`, or contains `song key` | new |
+| key | **exact `key` or exact `song key` — no substring** | new; the headline feature |
 | lead | contains `lead` or `singer` | |
-| bpm | exact `bpm`, or contains `tempo` | new; parsed as int, invalid → undefined |
-| artist | contains `artist` | new; library-level, see §6 |
+| artist | contains `artist` | recognized, **not persisted** — see §6 |
+| bpm | exact `bpm`, or contains `tempo` | recognized, **not imported** — see §10 |
 | notes | contains `note` | must not swallow `scene note` |
 | sceneNote | contains `scene` | new |
+
+**`key` is exact-match only** (Codex R1: *"`contains('key')` is too greedy; use
+exact key / song key only unless you have real sheet examples proving
+otherwise"*). Agreed — a `Keys` column meaning the keyboard player's part is at
+least as likely in a band's working sheet as a loose spelling of the musical key,
+and mis-binding it would write instrument names into every song's key field. No
+real sheet examples were available to argue otherwise. Exact only.
+
+`artist` and `bpm` are recognized **solely so the matcher does not mis-bind
+them** to another field, and so the preview can say what it is ignoring and why.
+Neither is written.
 
 **Header matching must become precedence-ordered, not first-substring-wins.**
 The current `findIndex(h => h.includes('song'))` for title will happily bind a
@@ -160,10 +198,9 @@ The current `findIndex(h => h.includes('song'))` for title will happily bind a
 `notes` vs `sceneNote` is the live collision (`scene note` contains `note`);
 precedence + single-binding resolves it.
 
-**BPM parsing:** `Number.parseInt(cell, 10)`, reject `NaN` and anything outside
-`20..400`, else `undefined`. The existing position parse
-(`app/api/sheet/route.ts:50`) has the same latent bug — `Number('four')` yields
-`NaN` and lands in `position` — and is fixed by the same guard.
+**Position parsing:** the existing parse (`app/api/sheet/route.ts:50`) has a
+latent bug — `Number('four')` yields `NaN` and lands in `position`. Guard with
+`Number.parseInt` + `Number.isFinite`, falling back to row index.
 
 **Sheet tab (`gid`):** `app/api/sheet/route.ts:16` builds
 `/export?format=csv` with no `gid`, so import always reads the **first tab**
@@ -206,38 +243,53 @@ Importing 14 songs from your sheet
 
   9 songs matched — key/lead/notes updated, charts and tempo kept
   3 songs added
-  2 songs will be removed from this show
   Order will change
+
+  BPM column found — tempo is set with Tap Tempo and won't be imported.
 
   ▸ Details
       Matched   "Ophelia"        key: — → Bb        lead: Rachel (unchanged)
       Matched   "The Weight"     no changes
       Added     "Cripple Creek"
-      Removed   "Old Intro"      (2 charts stay in your library)
+      Not in sheet   "Old Intro"   (kept)
+
+  [ ] Also remove the 2 songs not in this sheet
 
   [ Apply import ]  [ Cancel ]
 ```
 
 Requirements:
 
-- Removal count is rendered in **red** with the explicit reassurance that charts
-  remain in the library — the sentence must be present, because "removed" reads
-  as destructive and here it is not.
+- **Removal is opt-in and unchecked by default** (§4 rule 5). Unchecked, songs
+  missing from the sheet are listed as *"Not in sheet — kept"*, in neutral type.
+- Checking the box re-renders those rows in **red** as removals, with the
+  explicit reassurance that charts remain in the library — the sentence must be
+  present, because "removed" reads as destructive and here it is not. `Apply`
+  then requires a second confirmation naming the count.
 - The details list is a `<details>` collapsible, consistent with the existing
   "How it works" pattern (`page.tsx:6158`).
 - `Cancel` restores the loader row and mutates nothing.
 - Nothing is written to `config` until `Apply import`. The merge is computed
-  client-side from the fetched rows, so preview costs no extra request.
+  client-side from the fetched rows, so preview costs no extra request — and
+  toggling the removal checkbox re-runs `mergeSetlist` with a different
+  `removeMissing`, no refetch.
 - Auto-resolve charts fires after apply, as it does today
   (`page.tsx:5768` comment).
+- **Undo.** After apply, an *"Undo import"* affordance appears alongside the
+  save indicator and persists until the next mutation or tab change. It restores
+  the pre-merge setlist held in component state — one level, in-memory, not
+  persisted across reload. Codex R1: *"Add one-level undo; this is exactly the
+  sort of operation users distrust."* Agreed, and cheap: the pre-merge array is
+  already in hand at apply time.
 
 **Help text** (`page.tsx:6161`) is rewritten to name the new columns and the
 blank-cell rule:
 
 > 1. Columns: **Title** (or Song) is required. Optional: **#**, **Key**, **Lead**,
->    **BPM**, **Notes**, **Scene Note**.
+>    **Notes**, **Scene Note**.
 > 2. Re-importing matches songs by title and keeps their charts and tempo. A blank
->    cell leaves the existing value alone.
+>    cell leaves the existing value alone, and songs missing from the sheet are
+>    kept unless you ask for them to be removed.
 > 3. Share → Anyone with the link → Viewer, then paste the URL.
 
 ---
@@ -254,7 +306,7 @@ Move to `lib/setlist-import.ts`, exported and pure:
 - `parseCsv(text): string[][]` — moved verbatim, no behavior change
 - `mapHeaders(headers): FieldIndex` — new, precedence rules from §5
 - `parseRows(rows): ImportedRow[]`
-- `mergeSetlist(existing, incoming): { merged, diff }`
+- `mergeSetlist(existing, incoming, { newId, removeMissing }): { merged, diff }`
 
 `app/api/sheet/route.ts` keeps fetch + URL parsing + error mapping and imports
 the rest. The route's response shape gains the new fields; the client's inline
@@ -273,10 +325,14 @@ newline; a single unterminated quote at EOF.
 and `Notes` bind separately; `#` binds position but `Number of takes` does not;
 missing title → error; casing and surrounding whitespace ignored.
 
-**parseRows** — non-numeric position falls back to row index; BPM `"120"` → 120,
-`"fast"` → undefined, `"5"` → undefined (out of range); blank title rows dropped.
+**mapHeaders — the v2 additions:** a `Keys` column does **not** bind to `key`
+(exact-match-only guard); a `Key` column does; `Song Key` binds to `key`, not
+title.
 
-**mergeSetlist** — the core:
+**parseRows** — non-numeric position falls back to row index; blank title rows
+dropped.
+
+**mergeSetlist** — the core. All calls pass a deterministic `newId` counter:
 
 1. Exact-title match preserves `id`, `songId`, `charts`, `bpm`.
 2. `"The Weight"` in sheet matches `"Weight"` in setlist (article stripping) —
@@ -284,10 +340,13 @@ missing title → error; casing and surrounding whitespace ignored.
 3. Blank sheet cell does not clear an existing value.
 4. Duplicate titles pair first-to-first and do not cross-assign.
 5. Reordering the sheet reorders the setlist and renumbers positions densely.
-6. A row absent from the sheet appears in `diff.removed` and is dropped.
-7. A title that normalizes to empty (`"???"`) never matches anything.
-8. Round-trip: merge(existing, exportOf(existing)) is a no-op — zero changes in
-   the diff.
+6. `removeMissing: false` (the default) **keeps** a row absent from the sheet,
+   and still reports it in `diff.missing`.
+7. `removeMissing: true` drops it and reports it in `diff.removed`.
+8. A title that normalizes to empty (`"???"`) never matches anything.
+9. Round-trip: `merge(existing, exportOf(existing))` is an exact deep-equal
+   no-op — enforceable now that ids are injected.
+10. A sheet BPM column never appears in the merged output (§10 regression).
 
 Target: **~20 new tests**, up from 0 for this feature. Test-count delta will be
 reported on the build PR.
@@ -301,12 +360,32 @@ reported on the build PR.
   effective key in `entries`, and `diffOverride`
   (`lib/overrides.ts:60-68`) computes `key_override` against the library default.
   **Mechanism EXISTS** — verified at `app/api/shows/update/route.ts:3`.
-- `bpm` is carried but not written by import; it is preserved from the existing
-  row only. The canonical BPM writer stays the tap-tempo path
-  (`page.tsx:587-607`). Importing BPM *into* the library is deferred with artist
-  (§6) — **so a BPM column is parsed and shown in the preview but only applied to
-  rows that have no existing tempo.** Flagged for Codex: this asymmetry with key
-  is deliberate but is the weakest point in the design.
+- **`bpm` is NOT imported. Changed in v2 — this was Codex R1's blocker, and it
+  was correct.**
+
+  v1 said a sheet BPM would be "applied to rows that have no existing tempo."
+  That was unimplementable as written. BPM has **no path to persistence** from
+  the setlist save at all:
+
+  | Layer | State |
+  |---|---|
+  | `lib/use-show.ts:63-66` | the `setlist` type used to build the payload does not include `bpm` — it is dropped before `entries` is constructed |
+  | `app/api/shows/update/route.ts:8-17` | `EntryInput` has no `bpm` field |
+  | `app/api/shows/update/route.ts:110-121` | song auto-create inserts `key`, `lead`, `notes` — no `bpm` |
+  | `supabase/migrations/006_songs.sql:68` | `rpc_save_show` stores no BPM |
+
+  So an imported BPM would appear in the preview, appear in client state, and
+  **vanish on the next save/reload** — a phantom write, which is worse than not
+  offering the column. Making it real means threading `bpm` through the payload
+  type, `EntryInput`, auto-create, and the RPC: a schema-and-RPC change that
+  belongs with the song-library work, not with an importer fix.
+
+  Existing `bpm` on **matched** rows is preserved by the merge (§4 rule 3) — that
+  is the whole point of merging, and it is what re-import destroys today. The
+  canonical BPM writer stays the tap-tempo path (`page.tsx:587-607`).
+
+  The preview names the omission rather than hiding it: *"BPM column found —
+  tempo is set with Tap Tempo and won't be imported."*
 - Google OAuth is not involved. Import remains public-CSV, so the sheet must stay
   link-viewable. `docs/strategy-pwa-commercial.md:49` contemplates an OAuth
   `sheets.readonly` importer as a Pro-tier feature; that supersedes this path
@@ -314,17 +393,32 @@ reported on the build PR.
 
 ---
 
-## 11. Open questions for Codex
+## 11. Codex R1 — disposition
 
-1. §10 — is "BPM applies only when the row has no existing tempo" defensible, or
-   should BPM behave exactly like key (sheet wins when the cell is non-empty)?
-   Asymmetry is a smell; the argument for it is that tap-tempo is a measured
-   value and a typed sheet value is a guess.
-2. §4 rule 5 — should removal be opt-out? A checkbox "also remove songs missing
-   from the sheet", default **on**, would let a band keep a partial sheet. Adds a
-   mode; may not earn it.
-3. §5 — is `contains('key')` too greedy? A `Keys` column meaning the keyboard
-   player's part would mis-bind. Exact-match-first mitigates but does not
-   eliminate it.
-4. Should apply be undoable (one-level "Undo import" restoring the pre-merge
-   setlist in memory)? Cheap to add, and this is the operation testers will fear.
+| Finding | Disposition |
+|---|---|
+| **Blocker** — BPM does not persist | **Accepted in full.** BPM removed from v1 import (§10). Verified all four layers independently; the finding was exactly right and v1's "weakest joint" framing understated it — it was a phantom write. |
+| **High** — removal default-on | **Accepted.** Now opt-in + second confirmation (§4 rule 5, §7). |
+| **Medium** — `mergeSetlist` mints UUIDs | **Accepted.** `newId` injected (§4). |
+| Artist deferral correct | Unchanged (§6). |
+| `contains('key')` too greedy | **Accepted.** Exact-match only (§5). |
+| Add one-level undo | **Accepted** (§7). |
+
+Nothing was declined.
+
+## 12. Open questions for Codex R2
+
+1. §10 — with BPM out, is the recognized-but-not-imported treatment right, or
+   should an unrecognized `BPM` column simply be ignored silently? I chose to
+   name it in the preview because a band that put tempo in their sheet will
+   otherwise assume it imported.
+2. §4 rule 5 — with removal now opt-in, a band whose sheet *is* the full setlist
+   has to tick a box every time to prune. Is that friction in the right place?
+   I think yes (the destructive direction should cost a click), but it inverts
+   the common case for a band that keeps one authoritative sheet.
+3. §7 — undo is in-memory and one level, lost on reload. Is that enough for the
+   operation testers fear most, or should apply write a restore point?
+4. Unchanged from R1 and still open: the merge is computed **client-side** from
+   the route's rows. That keeps preview free, but it means the merge logic is
+   only ever exercised in the browser. Should `/api/sheet` return the diff
+   instead, so the same code path is server-testable end-to-end?
