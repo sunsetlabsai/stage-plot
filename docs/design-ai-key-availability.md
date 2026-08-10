@@ -1,7 +1,7 @@
 # Design — AI key availability: capability probe + real empty state
 
-Status: **DESIGN — Codex R1 folded (no blockers), awaiting R2**
-Version: **v2.0** (v1.0 = pre-Codex)
+Status: **DESIGN — Codex R2 folded, awaiting R3**
+Version: **v3.0** (v1 = pre-Codex, v2 = R1)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 
 **v2 changelog** — Codex R1 returned **no blockers**; three refinements folded:
@@ -14,6 +14,16 @@ Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 | §7 — raise the quota for UAT (was an open question) | Codex R1 answer |
 | §5 — do **not** hide the AI tab; show the honest empty state | Codex R1 answer |
 | §6 — exposing `source` behind admin auth confirmed fine | Codex R1 answer |
+
+**v3 changelog:**
+
+| Change | Source |
+|---|---|
+| **§4.1 NEW — `readAdminConfig`, a status-aware config read.** v2's error-vs-unconfigured requirement was **unsatisfiable** through `getAdminConfig`, which swallows Redis errors. | Codex R2 **high** |
+| §4 — `quota` and all arithmetic derive from `TRYIT_QUOTA`; no literals | Codex R2 medium |
+| §5 — the false privacy sentence is fixed **in the copy block itself** | Codex R2 medium |
+| §7 — quota set to **50** for UAT | Codex R2 answer |
+| §5.1 — **no auto-retry** after clearing a bad key | Codex R2 answer |
 
 ---
 
@@ -108,18 +118,75 @@ New route: `GET /api/agent/capabilities`.
 
 ```jsonc
 {
-  "tryit": "available" | "exhausted" | "unconfigured",
-  "tryitRemaining": 7 | 0 | null,   // null when unconfigured
-  "quota": 10
+  "tryit": "available" | "exhausted" | "unconfigured" | "error",
+  "tryitRemaining": 7 | 0 | null,   // null unless tryit is available/exhausted
+  "quota": TRYIT_QUOTA             // serialized from the constant, never a literal
 }
 ```
 
-**Resolution** (mirrors `POST /api/agent/chat:90-123` exactly, minus the send):
+**`quota` is derived from `TRYIT_QUOTA` (`route.ts:12`), not written as a
+number** — Codex R2 medium. v2 hard-coded `10` in this example and in the
+`remaining = max(0, 10 - count)` arithmetic while §7 raises the constant to 50,
+so the doc contradicted itself and invited an implementer to bake in a literal
+that silently disagrees with the sender. Response, arithmetic, and tests all read
+the constant.
 
-1. `getAdminConfig('claude_tryit_key')` → falsy ⇒ `unconfigured`, remaining
-   `null`. Return immediately; do not touch the quota store.
+### 4.1 The config read must be status-aware (new in v3)
+
+**Codex R2 high, and it is correct: the v2 spec was unsatisfiable.** §5 requires
+`error` to stay distinct from `unconfigured`, while step 1 resolved state through
+`getAdminConfig('claude_tryit_key')` — which cannot express the difference:
+
+```ts
+// lib/admin-config.ts:27-39
+export async function getAdminConfig(key: string): Promise<string | null> {
+  try {
+    const redis = await getRedis();
+    if (redis) { /* ... */ }
+  } catch {
+    // Redis not configured or unavailable — fall through to env var
+  }
+  return process.env[key.toUpperCase()] || null;
+}
+```
+
+The `catch` swallows the failure and the function returns `null` — **identical**
+to a clean "no key configured". With Redis down and no `CLAUDE_TRYIT_KEY` in the
+environment (which is production's actual state — the env var is not set), a
+store outage renders as *intentionally off*. That is precisely the confusion this
+whole document exists to end, reintroduced one layer down.
+
+**New in `lib/admin-config.ts`:**
+
+```ts
+export type ConfigRead =
+  | { status: 'ok';    value: string; source: 'redis' | 'env' }
+  | { status: 'none' }                        // store reachable, nothing set
+  | { status: 'error'; reason: string };      // store unreachable, no env fallback
+
+export async function readAdminConfig(key: string): Promise<ConfigRead>
+```
+
+`getAdminConfig` stays as-is — it is called by four other routes
+(`agent/chat`, `charts/convert`, `charts/roadmap/parse`,
+`admin/backfill-chart-overlays`) and this design does not touch them.
+`readAdminConfig` is the status-aware sibling; `getAdminConfig` can be
+reimplemented as a thin wrapper over it so there is one lookup, two shapes.
+
+Note the ordering subtlety it must preserve: a Redis failure with a **valid env
+fallback** is still `ok`/`env`, not `error`. `error` means *no usable value and
+the store was unreachable*. Only that combination is ambiguous today.
+
+This read also supplies §6.1's `source` field — the same information, surfaced in
+two places. Deriving both from one call is what keeps them honest.
+
+**Resolution** (mirrors `POST /api/agent/chat:90-123` minus the send):
+
+1. `readAdminConfig('claude_tryit_key')`:
+   - `error` ⇒ `tryit: 'error'`, remaining `null`. Do not touch the quota store.
+   - `none` ⇒ `tryit: 'unconfigured'`, remaining `null`. Do not touch the store.
 2. Otherwise **peek** the quota: `GET quota:<ip>` — a plain read, no `INCR`, no
-   `EXPIRE`. `remaining = max(0, 10 - count)`.
+   `EXPIRE`. `remaining = max(0, TRYIT_QUOTA - count)`.
 3. `remaining === 0` ⇒ `exhausted`, else `available`.
 
 **Hard requirements:**
@@ -217,6 +284,13 @@ a key once, months ago, this reads as "the AI is broken."
 - Clearing the key **re-runs the probe**, since the reason for skipping it has
   gone. If try-it is available, the panel drops straight into state 3 and the
   user can continue without a key at all.
+- **The failed message is not auto-retried.** Send is re-enabled and the user
+  presses it. Codex R2: *"Do not auto-retry the failed message after clearing a
+  bad key; re-enable send and leave retry explicit."* Agreed — a `401` from
+  Anthropic means the upstream call did not bill or apply, but the request did
+  reach our proxy, and silently re-sending on a state change is the kind of
+  invisible duplicate that is miserable to debug. The composer retains the text,
+  so retry is one keystroke.
 - The clear action removes both `localStorage` and `sessionStorage` entries and
   resets `rememberKey`, matching the existing handler.
 
@@ -226,8 +300,8 @@ a key once, months ago, this reads as "the AI is broken."
   AI Show Designer needs a Claude API key
 
   Free try-it mode isn't set up on this server, so you'll need to
-  use your own Anthropic key. It's stored in this browser only and
-  is never sent to ShowRunr's servers.
+  use your own Anthropic key. It's stored in this browser only — we
+  pass it straight to Anthropic and never save it.
 
     1. Go to console.anthropic.com/settings/keys  ↗
     2. Create a key (starts with sk-ant-)
@@ -250,13 +324,19 @@ Requirements:
   disabled control explains itself.
 - The last line ("Everything else works without this") is load-bearing for UAT:
   a tester who lands on a dead AI tab must not conclude the app is broken.
-- The claim *"stored in this browser only and never sent to ShowRunr's servers"*
-  is **false as written** and must not ship in that form. The key **is** sent to
-  our server — `Authorization: Bearer` at `page.tsx:5010` — which proxies it to
-  Anthropic (`route.ts:100-102, 132-147`). It is never *persisted* server-side.
-  Correct copy: *"stored in this browser only — we pass it straight to Anthropic
-  and never save it."* Flagged rather than silently corrected because getting
-  this wrong is a trust problem, and Codex should check the final string.
+- **The privacy sentence in the block above is the shippable string.** *Fixed in
+  v3 — Codex R2 medium.* v2 left the false wording (*"never sent to ShowRunr's
+  servers"*) in the sample and put the correction only in this prose, which is
+  exactly the arrangement where an implementer copies the block and ships the
+  wrong claim. The sample now carries the correct text and this note explains
+  why it matters:
+
+  The key **is** sent to our server — `Authorization: Bearer` at
+  `page.tsx:5010` — which proxies it to Anthropic (`route.ts:100-102, 132-147`).
+  It is never *persisted* server-side. "Never sent to our servers" would be a
+  false privacy claim; "we pass it straight to Anthropic and never save it" is
+  accurate. **No variant of this sentence ships without checking it against
+  those two line references.**
 
 ---
 
@@ -270,8 +350,10 @@ Requirements:
 1. **Source is invisible.** `getAllAdminConfig` (`lib/admin-config.ts:56-68`)
    returns `{ configured, masked }` — you cannot tell whether a configured key
    came from Redis or from `CLAUDE_TRYIT_KEY`. Add `source: 'redis' | 'env' |
-   'none'`. Without it, §1's three cases stay indistinguishable from the UI,
-   which is exactly the hole this whole document exists to close.
+   'none' | 'error'`, **derived from `readAdminConfig` (§4.1)** rather than
+   computed separately. Without it, §1's three cases stay indistinguishable from
+   the UI, which is exactly the hole this whole document exists to close — and
+   the `'error'` member is what §4.1 makes expressible for the first time.
 2. **Redis-down reads as key-missing.** `getAdminConfig` swallows Redis errors
    and falls through to env (`:35-37`), so a Redis outage with no env var renders
    as a clean "not configured". Meanwhile `setAdminConfig` **throws**
@@ -305,8 +387,10 @@ the per-network quota will create false bug reports"*):
 
 - **Raise `TRYIT_QUOTA`** (`route.ts:12`) for the UAT window — conditional on
   try-it actually being configured, since the constant is inert otherwise.
-  **Open: the number.** 10 → 50 is my suggestion; it is a one-constant change and
-  the spend is bounded by `TRYIT_MAX_TOKENS = 2048` per message.
+  **Set to 50** for the UAT window (Codex R2: *"use 50 for UAT"*). One-constant
+  change; spend bounded by `TRYIT_MAX_TOKENS = 2048` per message. Everything that
+  reads the quota — probe response, arithmetic, tests — derives from the constant
+  (§4), so this is genuinely a one-line change.
 - **Say it plainly** in the exhausted copy: *"Free messages are shared across
   everyone on your network."* Without this line, two testers in one room file two
   bug reports about a quota neither of them spent.
@@ -337,13 +421,28 @@ Both, and the per-account model stays backlog rather than being pretended at.
 
 New `tests/agent-capabilities.test.ts`:
 
-1. `unconfigured` when `getAdminConfig` returns null — and **the quota store is
-   never touched** (assert on the mock).
+1. `unconfigured` when `readAdminConfig` returns `{ status: 'none' }` — and
+   **the quota store is never touched** (assert on the mock).
 2. `available` with remaining reflecting an existing count.
-3. `exhausted` at count ≥ 10.
+3. `exhausted` at `count ≥ TRYIT_QUOTA` — **read from the constant**, so raising
+   it to 50 (§7) does not silently invalidate the test.
 4. Probe response contains no substring of the key, under any state.
 5. Peek does not increment: probe twice, count unchanged.
 6. Redis unreachable → in-memory fallback path returns a usable answer, not a 500.
+
+**§4.1 status-aware read (new in v3):**
+
+6a. Redis unreachable **and** no `CLAUDE_TRYIT_KEY` ⇒ `readAdminConfig` returns
+    `{ status: 'error' }` and the probe reports `tryit: 'error'` — **not**
+    `unconfigured`. This is the regression that v2's spec could not have passed.
+6b. Redis unreachable **but** `CLAUDE_TRYIT_KEY` set ⇒ `{ status: 'ok', source:
+    'env' }`, probe reports `available`. A store outage with a working fallback
+    is not an error.
+6c. `__DISABLED__` sentinel in Redis ⇒ `{ status: 'none' }`, not `ok` — the env
+    var stays suppressed, matching `getAdminConfig`'s existing behavior
+    (`lib/admin-config.ts:32`).
+6d. `quota` in the response equals `TRYIT_QUOTA`; no literal appears in the
+    assertion.
 
 New cases in a client test (jsdom + RTL, per the existing harness pattern in
 `tests/setlist-bpm.test.tsx`):
@@ -385,16 +484,33 @@ No blockers. All findings accepted:
 | Don't hide the AI tab | **Accepted** — spec unchanged. |
 | `source: redis\|env\|none` behind admin auth is fine | Confirmed (§6). |
 
-## 11. Open questions for Codex R2
+## 10a. Codex R2 — disposition
 
-1. §7 — what number for `TRYIT_QUOTA`? I suggest 50 for the UAT window. Bounded
-   by `TRYIT_MAX_TOKENS = 2048` per message, but it is Graham's spend.
-2. §5.1 — after clearing a bad key, should the panel *auto-retry the failed
-   message*, or just re-enable send? Auto-retry is friendlier and risks
-   double-sending if the original request actually landed.
-3. §4 — the extraction moves quota state out of a route that is currently
-   working and in production. Worth a same-PR test that the send path's
-   behaviour is byte-identical before/after, or is test 8 enough?
-4. §5 — the privacy copy corrected in R1 ("we pass it straight to Anthropic and
-   never save it"): does that read as reassuring or as raising a doubt the user
-   didn't have? It is accurate; I am less sure it is well-placed.
+| Finding | Disposition |
+|---|---|
+| **High** — `error` vs `unconfigured` unsatisfiable via `getAdminConfig` | **Accepted.** You caught a spec that contradicted itself: §5 demanded a distinction the resolution step could not produce, because the helper's `catch` returns `null` identically to "nothing set". New §4.1 adds `readAdminConfig` returning a discriminated status. Tests 6a–6c. |
+| **Medium** — quota literal vs the raise to 50 | **Accepted.** Response, arithmetic and tests all derive from `TRYIT_QUOTA`. |
+| **Medium** — false privacy sentence still in the copy block | **Accepted.** Fixed in the sample itself, which was the right place — leaving it correct-in-prose-only is how the wrong string ships. |
+| Use 50 for UAT | **Accepted** (§7). |
+| No auto-retry after clearing a bad key | **Accepted** (§5.1). |
+
+Nothing declined. Note the §4.1 work also supplies §6.1's `source` field,
+including an `'error'` member that was not previously expressible — one lookup
+now feeds both surfaces, which is what stops them drifting.
+
+## 11. Open questions for Codex R3
+
+1. **§4.1** — `getAdminConfig` is reimplemented as a thin wrapper over
+   `readAdminConfig` so there is one lookup with two shapes. That touches a
+   helper used by four other routes (`agent/chat`, `charts/convert`,
+   `charts/roadmap/parse`, `admin/backfill-chart-overlays`). Is the wrapper worth
+   it versus two independent functions with duplicated Redis handling? I lean
+   wrapper, but it widens the blast radius of this PR beyond the AI tab.
+2. §4.1 — is `{ status: 'ok', source: 'env' }` the right answer when Redis is
+   down but the env var works? It hides a real outage behind a working fallback.
+   My reasoning: `error` should mean *no usable value*, and `/admin` still shows
+   the store as unreachable via `isKvConnected()` (§6.2). But it does mean the
+   probe reports healthy during a partial outage.
+3. §4 — the extraction moves quota state out of a route that is live in
+   production. Is test 8 enough, or do you want an explicit before/after
+   equivalence test on the send path in the same PR?
