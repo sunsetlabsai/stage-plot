@@ -1,7 +1,9 @@
-# Design — Setlist Import: merge semantics + Key/BPM/Artist columns
+# Design — Setlist Import: merge semantics + Key / Scene Note columns
 
-Status: **DESIGN — Codex R1 folded, awaiting R2**
-Version: **v2.0** (v1.0 = pre-Codex)
+*(BPM and Artist are recognized but **deliberately not imported** — §6, §10.)*
+
+Status: **DESIGN — Codex R2 folded, awaiting R3**
+Version: **v3.0** (v1 = pre-Codex, v2 = R1)
 Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
 
 **v2 changelog:**
@@ -14,6 +16,13 @@ Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
 | §5 — `key` matches **exact only**; no substring | Codex R1 answer |
 | §7 — one-level **Undo import** added | Codex R1 answer |
 | §6 artist deferral confirmed correct | Codex R1 answer |
+
+**v3 changelog:**
+
+| Change | Source |
+|---|---|
+| §4 rule 5a NEW — **kept-missing row ordering** is now a stated invariant. It was undefined. | Codex R2 **high** |
+| Title and §1b no longer promise tempo import | Codex R2 low |
 
 ---
 
@@ -58,9 +67,14 @@ The loss is real but recoverable; `songId` and `key` are not.
 
 **1b. The parser reads four columns.** `app/api/sheet/route.ts:35-38` recognizes
 `pos`/`#`, `title`/`song`, `lead`/`singer`, `note`. The data model already carries
-`key`, `bpm`, `sceneNote` (`lib/types.ts:156-168`) and the library `Song` carries
-`artist` (`lib/types.ts:175`). A band whose sheet is their working setlist cannot
-get key or tempo in without hand-typing every row.
+`key` and `sceneNote` (`lib/types.ts:156-168`). A band whose sheet is their
+working setlist cannot get **key** in without hand-typing every row — and key is
+the whole ask.
+
+`bpm` (`lib/types.ts:165`) and the library `Song.artist` (`lib/types.ts:175`)
+also exist in the model, but **neither can be persisted from this path** and
+neither is imported. See §6 (artist) and §10 (bpm) — both are recognized only so
+the header matcher cannot mis-bind them. Nothing in this document imports tempo.
 
 ---
 
@@ -132,7 +146,7 @@ passes `crypto.randomUUID`.
 3. **Matched row** → carry forward `id`, `songId`, `charts`, and every field the
    sheet did not supply. Overwrite only fields present as a **non-empty cell** in
    the sheet. Sheet order sets `position`.
-4. **Unmatched incoming row** → new row, fresh `crypto.randomUUID()`, no
+4. **Unmatched incoming row** → new row, fresh id from the injected `newId`, no
    `songId` (the save path resolves or creates the library song).
 5. **Unconsumed existing row** → removal candidate; surfaced in the diff. Dropped
    on apply **only when `removeMissing` is true — which is not the default.**
@@ -145,9 +159,46 @@ passes `crypto.randomUUID`.
    and when checked with removals > 0, `Apply` requires a second confirmation
    naming the count. Additive import is the safe path and is therefore the
    default path.
-6. Final `position` is `index + 1` over the merged array. The sheet's own position
-   column orders the *incoming* rows (§5) and is then discarded — position is
-   always dense and 1-based after a merge, never sparse.
+5a. **Ordering when rows are kept (`removeMissing: false`).** *New in v3 —
+   Codex R2 high. v2 said missing rows are kept and that positions are dense over
+   the merged array, but never said **where** the kept rows go. Undefined
+   behavior in the default path.*
+
+   The naive reading — incoming rows in sheet order, kept rows appended — is
+   badly wrong for the common case. A tester who imports a one-row sheet to fix
+   one song's key would see that song jump to position 1 and the entire rest of
+   the show shuffle down. That is a silent reorder of a live setlist, which is
+   the same class of surprise as the data loss this document exists to remove.
+
+   **Invariant: kept-missing rows hold their existing index. Incoming rows fill
+   the remaining slots, in sheet order.**
+
+   ```
+   existing: [A, B, C, D, E]
+   sheet:    [C']                 → [A, B, C', D, E]   C' keeps slot 2
+   sheet:    [C', A']             → [C', B, A', D, E]  subset reorders in place
+   sheet:    [C', NEW]            → [A, B, C', NEW, E] ...
+   sheet:    [E',D',C',B',A']     → [E', D', C', B', A']  full sheet ⇒ sheet order
+   ```
+
+   Two properties worth stating because they make this safe to implement:
+
+   - **Slots are always in range.** With `removeMissing: false` the merged length
+     is `existing.length + added.length ≥ existing.length`, so every retained
+     existing index is a valid slot. No clamping, no edge case.
+   - **A full sheet degenerates to pure sheet order.** When nothing is missing
+     there are no held slots, so the rule collapses to v2's behavior and the
+     "sheet is authoritative" case is unchanged.
+
+   With `removeMissing: true` there are no kept rows and sheet order is the
+   order, exactly as v2 specified.
+
+   The preview (§7) renders the **final** order, not the sheet order, so what is
+   shown is what is applied.
+6. Final `position` is `index + 1` over the merged array, after rule 5a has
+   placed everything. The sheet's own position column orders the *incoming* rows
+   (§5) and is then discarded — position is always dense and 1-based after a
+   merge, never sparse.
 
 **Empty cell ≠ clear.** A blank `Lead` cell leaves the existing lead intact; it
 does not blank it. Clearing a field is done in the app, not by deleting a cell.
@@ -343,6 +394,12 @@ dropped.
 6. `removeMissing: false` (the default) **keeps** a row absent from the sheet,
    and still reports it in `diff.missing`.
 7. `removeMissing: true` drops it and reports it in `diff.removed`.
+7a. **Partial-sheet ordering (§4 rule 5a):** existing `[A,B,C,D,E]`, sheet `[C']`
+    → `[A,B,C',D,E]`, i.e. C' holds index 2 and **nothing else moves**.
+7b. Subset reorder: sheet `[C',A']` → `[C',B,A',D,E]`.
+7c. Partial sheet with an addition: sheet `[C',NEW]` → the new row takes the
+    next free slot, not position 1.
+7d. Full sheet degenerates to pure sheet order (no held slots).
 8. A title that normalizes to empty (`"???"`) never matches anything.
 9. Round-trip: `merge(existing, exportOf(existing))` is an exact deep-equal
    no-op — enforceable now that ids are injected.
@@ -406,19 +463,31 @@ reported on the build PR.
 
 Nothing was declined.
 
-## 12. Open questions for Codex R2
+## 11a. Codex R2 — disposition
 
-1. §10 — with BPM out, is the recognized-but-not-imported treatment right, or
-   should an unrecognized `BPM` column simply be ignored silently? I chose to
-   name it in the preview because a band that put tempo in their sheet will
-   otherwise assume it imported.
-2. §4 rule 5 — with removal now opt-in, a band whose sheet *is* the full setlist
-   has to tick a box every time to prune. Is that friction in the right place?
-   I think yes (the destructive direction should cost a click), but it inverts
-   the common case for a band that keeps one authoritative sheet.
-3. §7 — undo is in-memory and one level, lost on reload. Is that enough for the
-   operation testers fear most, or should apply write a restore point?
-4. Unchanged from R1 and still open: the merge is computed **client-side** from
-   the route's rows. That keeps preview free, but it means the merge logic is
-   only ever exercised in the browser. Should `/api/sheet` return the diff
-   instead, so the same code path is server-testable end-to-end?
+| Finding | Disposition |
+|---|---|
+| **High** — kept-missing row ordering underspecified | **Accepted.** New §4 rule 5a states the invariant: kept rows hold their index, incoming rows fill remaining slots in sheet order. Your partial-sheet scenario is exactly the failure I'd have shipped. Tests 7a–7d. |
+| **Low** — stale wording promises tempo import | **Accepted.** Title is now "Key / Scene Note columns", §1b says nothing in the doc imports tempo. |
+| Naming the ignored BPM column in preview is right | Confirmed, unchanged. |
+| One-level in-memory undo is enough for v1 | Confirmed — and the ordering fix was your stated condition for that, now done. |
+
+Of the two invariants you offered I took the second ("missing rows retain their
+existing relative positions"), tightened to an exact rule rather than
+"as much as possible" — see 5a for why slots are always in range, which is what
+makes the exact form implementable.
+
+## 12. Open questions for Codex R3
+
+1. **§4 rule 5a** is new and is the load-bearing addition in v3. Does the
+   slot-holding invariant hold up against a case I haven't listed — particularly
+   duplicate titles interacting with held slots (rule 2's first-unconsumed
+   pairing plus 5a's index retention)? That intersection is the part I'd attack.
+2. §4 rule 5 — with removal opt-in, a band whose sheet *is* the full setlist must
+   tick a box every time to prune. Right place for the friction? I think yes,
+   but it inverts the common case for a band with one authoritative sheet.
+3. Carried from R1, still open: the merge runs **client-side** from the route's
+   rows, so the logic is only ever exercised in a browser. Should `/api/sheet`
+   return the diff instead, making it server-testable end-to-end? Rule 5a makes
+   this more pressing — the ordering invariant is now the most intricate part of
+   the feature and deserves the stronger test surface.
