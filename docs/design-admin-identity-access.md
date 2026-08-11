@@ -1,8 +1,8 @@
 # Design — Admin identity, invite gate, tester deletion, and profiles read scope
 
-Status: **DESIGN — Codex R6 folded. Design-complete; no R7 planned (Graham).**
-Version: **v9.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
-v4 = R3, v5 = R4, v6 = Graham ruling, v7 = R5, v8 = invariant registry)
+Status: **DESIGN COMPLETE — Codex R6 folded, all decisions ruled. CLEARED TO BUILD.**
+Version: **v10.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
+v4 = R3, v5 = R4, v6 = Graham ruling, v7 = R5, v8 = invariant registry, v9 = R6)
 Scope: admin authn/authz, signup gating, tester deletion, `profiles` RLS
 Driver: handing ShowRunr to outside UAT testers
 
@@ -87,6 +87,16 @@ placeholder UUIDs).
 | **§4.2(a) corrected — `requireAppUser` is an app-layer gate, not an authorization boundary.** The browser holds the anon key; RLS decides. Same overclaim as R1 blocker 1, made one layer deeper. | follows from §4.2.5 |
 | §0.2 — **invariant 10**: RLS is the boundary, app-layer gates are not | follows from §4.2.5 |
 | §8 — tests 12o (non-eligible user blocked **at RLS**, via direct PostgREST) and 12p (residue is real and bounded). ~43 → ~45. | Codex R6 |
+
+**v10 changelog** — Graham ruled all five §11 decisions; **cleared to build**:
+
+| Change | Source |
+|---|---|
+| §11.1 — **CI guard on migration numbering** added. Invariant 8's mechanical backstop; it has drifted twice on attention alone. | Graham, decision 2 |
+| §11.2 — `/admin` **surfaces** stranded testers. **Corrects v9's predicate**: `profiles` has no email column and profile existence is irrelevant — stranded ≡ unlinked collaborator row whose email matches an `auth.users` row. Tests 12q–12r. | Graham, decision 3 |
+| **§11.3 — hard delete confirmed, and "soft" reframed.** Deletion (cruft removal) and **inactivation** (a subscription lifecycle state — failed/declined payment, access revoked, data retained) are **two different features**, not two implementations of one. Inactivation belongs in `design-payments.md`. | Graham, decision 4 |
+| §11.3 — records the constraint the future inactivation design will need: **disabling access must be enforced at the RLS layer**, not in route handlers (§4.2.5) | follows from R6 |
+| §6.2.1 hard audit dependency confirmed, no break-glass | Graham, decision 1 |
 
 ## 0.1 Migrations this design claims
 
@@ -1214,6 +1224,16 @@ Server:
      invited to via the same direct path. Asserts the accepted residue is real
      and bounded, so nobody later "fixes" it and silently breaks pre-claim
      access (§4.2b).
+
+**§11.2 — stranded-tester panel (new in v10, Graham decision 3):**
+
+12q. The panel lists an unlinked collaborator row whose email **has** an
+     `auth.users` account; does **not** list a linked row; and does **not** list
+     an unlinked row whose email has **no** account — that is an uninvited
+     stranger, not a stranded tester. The three-way distinction is the whole
+     correctness of the query.
+12r. The panel's **Re-link** action links the rows and writes an `admin_audit`
+     row (§3.6).
 12f. The backfill's collision path: two rows on one show differing only by case
      dedupe to the one with a non-null `user_id`, and the migration **fails
      loudly** rather than dropping a row if that rule is ambiguous.
@@ -1266,9 +1286,9 @@ Deletion:
     a single `succeeded` row via the column default — the §3.6 change must not
     force every existing call site into two phases.
 
-Target: **~45 new tests** (v3 said ~22; 12d–12f and 20–24 added in v4, 12e-i/ii
-in v5, 12g–12i in v6, 12i-a and 12j–12n in v7, 12o–12p in v9). Delta reported on
-the build PR.
+Target: **~47 new tests** (v3 said ~22; 12d–12f and 20–24 added in v4, 12e-i/ii
+in v5, 12g–12i in v6, 12i-a and 12j–12n in v7, 12o–12p in v9, 12q–12r in v10).
+Delta reported on the build PR.
 
 ---
 
@@ -1359,20 +1379,85 @@ specific enough to be a rule rather than an observation, and §4.2.4 states it:
 whether the user can get out of it. An error return is not a fix if it strands
 the caller.*
 
-## 11. Decisions for Graham before build
+## 11. Decisions — RULED by Graham, 2026-08-11
 
-**Design review is closed at R6.** These are not review questions — several sat
-across three or four rounds as "open questions for Codex" when they were always
-direction calls, which is a large part of why this document took six rounds.
-Each carries a **default**, so silence ships the default and none of them blocks
-the build.
+**Design review closed at R6; all five decisions are settled. This document is
+cleared to build.**
 
-| # | Decision | Default if you say nothing |
+| # | Decision | Ruling |
 |---|---|---|
-| 1 | §6.2.1 makes `admin_audit` a hard dependency of deletion — no audit, no delete. Break-glass path? | **Ship as specified.** Right failure direction for an irreversible op; a break-glass path is the thing that gets used at 2am and skips the record |
-| 2 | §0.1's allocation table is enforced by attention, which failed twice (v4's duplicate `016`, v9's stale row). CI check on migration filename uniqueness/contiguity? | **Skip for now.** Ten lines of CI, but at `012` the table plus invariant 8 is proportionate. Revisit if it drifts a third time |
-| 3 | Should `/admin` **surface** stranded testers (collaborator rows with `user_id IS NULL` whose email matches a profile), rather than relying on someone remembering to press "Re-link invites"? | **Do it.** ~20 lines, and it converts a lever nobody will think to pull into something visible. The failure is invisible to the tester by construction |
-| 4 | §6.3 — **soft delete** (`disabled_at`) for the UAT window instead of hard? Four rounds of conditional acceptance | **Ship hard delete.** Every condition is met and §6.2.1 records failures. But this is the one I'd most understand you reversing |
-| 5 | The eligibility predicate under **sequences** — allowlist removed between OTP and claim, mode flipped mid-session. Three rounds confirmed the shape, none probed the race; §4.2.4 moved activation earlier, changing the window | **Ship, and treat the first chunk's tests as where this gets probed.** It is a build-time question now, not a design one |
+| 1 | `admin_audit` as a hard dependency of deletion — break-glass path? | **No break-glass. Ship §6.2.1 as specified.** The audit insert and the deletion hit the same database on the same connection, so "audit broken but deletion would have succeeded" is a very narrow window — and a break-glass flag is what gets used at 2am and skips the record |
+| 2 | CI check on migration filename uniqueness/contiguity? | **Add it** — §11.1. Numbering has drifted twice; this build writes five migration files, which is exactly when the check pays |
+| 3 | `/admin` **surfaces** stranded testers rather than relying on the manual lever? | **Do it** — §11.2. Also **corrects the predicate**, which was wrong in v9 (see §11.2) |
+| 4 | Soft delete (`disabled_at`) instead of hard? | **Hard delete.** See §11.3 — Graham reframed what "soft" is actually for, and it is not this |
+| 5 | Eligibility predicate under sequences | **Build-time question.** Probed in the first chunk's tests |
 
-Item 3 is the only one I'd actively push for; the rest are fine as they stand.
+### 11.1 Migration numbering guard (decision 2)
+
+Ten lines in the existing GitHub Actions workflow, asserting that
+`supabase/migrations/*.sql` numeric prefixes are **unique** and **contiguous**
+from `001` — with `004` as the one documented exception (§9).
+
+Invariant 8 and §0.1 stay; this is their mechanical backstop, and per invariant 8
+itself, a rule enforced only by attention is a rule that drifts. It has drifted
+twice already (v4's duplicate `016`, v9's stale `017` row). The check catches the
+*file*-level instance of that class at the moment the five new migrations are
+written.
+
+### 11.2 Surfacing stranded testers (decision 3)
+
+**The predicate in v9 was wrong** — recorded because it is the same imprecision
+this document keeps producing. v9 said *"collaborator rows whose email matches a
+`profiles` owner."* `profiles` holds **no email column** (`005`), and profile
+existence is **irrelevant** to being stranded: a tester who signed in but never
+claimed a handle can be stranded exactly as easily as one who did.
+
+> **Stranded ≡ a `show_collaborators` row with `user_id IS NULL` whose email
+> matches an existing `auth.users` row**, compared canonically (invariant 6).
+
+`/admin` already calls `listUsers({ page: 1, perPage: 1000 })`
+(`app/api/admin/owners/route.ts:46-49`), so this is a join over data the page is
+already holding — no new fetch. A panel lists each stranded pairing (tester email
+→ show → role) with the per-row **Re-link invites** action from §4.2.4.
+
+Inherits the known truncation at 1000 users (§10) — irrelevant at UAT scale, but
+it means the panel is "stranded testers among the first 1000," not "all." Say so
+in the UI rather than implying completeness.
+
+Tests **12q** (a stranded pairing appears; a linked one does not; an unlinked row
+whose email has **no** account does not — that is an uninvited stranger, not a
+stranded tester) and **12r** (the panel's re-link action links the rows and
+writes the §3.6 audit row).
+
+### 11.3 Why hard delete — and what "soft" is actually for
+
+**Graham, 2026-08-11:** *"I am asking for hard. As for 'soft,' I think that's for
+future discussion re: subscription service — a member goes inactive through
+failure or decision not to pay. That's OK. We don't want to delete them, just
+inactivate them and disable access. That's the only 'soft' method I'd consider.
+Otherwise, the deletion is indeed intended mainly to get rid of cruft."*
+
+**I had framed these as two implementations of one feature. They are two
+different features**, and the reframing is worth recording because it dissolves
+the question rather than answering it:
+
+| | Purpose | Trigger | Actor | Data |
+|---|---|---|---|---|
+| **Deletion** (§6, built here) | remove cruft | an account that shouldn't exist | admin, deliberate | destroyed |
+| **Inactivation** (future, **not** here) | revoke access, keep the member | failed or declined payment | billing lifecycle, automatic | **retained** |
+
+Deletion with an undo — the `disabled_at` I proposed — serves neither. It carries
+the distributed cost of inactivation (every read path must respect a flag) while
+delivering only reversible cruft-removal, which nobody asked for.
+
+**Where inactivation belongs:** `docs/design-payments.md`, alongside the
+subscription model it is a state of. **Not** in this document, and not in §6.
+
+**One thing that design will need, recorded now while it is fresh:** disabling
+access has to work at the **RLS layer**, not the app layer. §4.2.5 established
+that the browser holds the anon key and reaches PostgREST directly, and that the
+collaborator policies authorize on `user_id` alone. An `is_active` check enforced
+only in route handlers would leave an inactive member's data readable — and
+`"Editor update"` (`001:118`) **writable** — straight from the browser. That is
+the single most important constraint on the future inactivation design, and it is
+only visible from this document's R6 work.
