@@ -144,12 +144,43 @@ export function sheetCsvUrl(url: string): string | null {
   const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
   if (!match) return null;
 
-  // gid appears in the fragment (#gid=0) far more often than the query, because
-  // that is what the browser address bar shows when you switch tabs.
-  const gid = url.match(/[#&?]gid=(\d+)/)?.[1];
-
   const base = `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv`;
-  return gid ? `${base}&gid=${gid}` : base;
+  const gid = extractGid(url);
+  return gid === null ? base : `${base}&gid=${gid}`;
+}
+
+/**
+ * Pull a tab id out of a Sheets URL, requiring the WHOLE parameter value to be
+ * digits.
+ *
+ * The first version matched `/[#&?]gid=(\d+)/`, which has no end boundary, so
+ * `#gid=123abc` yielded `123` — the same numeric-prefix bug Codex found in the
+ * `#`-column parser, written by me an hour later in a different file (Codex,
+ * chunk 2). Parsing the parameters properly is what removes the class rather
+ * than patching the one regex.
+ *
+ * gid lives in the fragment (`#gid=0`) far more often than the query, because
+ * that is what the address bar shows when you switch tabs — so the fragment
+ * wins when both are present.
+ */
+function extractGid(url: string): string | null {
+  let parsed: URL;
+  try {
+    // A pasted address-bar URL always has a scheme, but tolerate one without.
+    parsed = new URL(/^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`);
+  } catch {
+    return null;
+  }
+
+  const candidates = [
+    new URLSearchParams(parsed.hash.replace(/^#/, '')).get('gid'),
+    parsed.searchParams.get('gid'),
+  ];
+
+  for (const value of candidates) {
+    if (value !== null && /^\d+$/.test(value)) return value;
+  }
+  return null;
 }
 
 // ── Header mapping ───────────────────────────────────────────────────────────

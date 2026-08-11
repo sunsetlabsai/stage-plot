@@ -50,6 +50,38 @@ describe('sheetCsvUrl', () => {
     expect(sheetCsvUrl(`${SHEET}#gid=abc`)).not.toContain('gid=abc');
   });
 
+  // Codex, chunk 2. The first regex had no end boundary, so `#gid=123abc`
+  // captured `123` — the same numeric-prefix bug as the `#`-column parser, in a
+  // different file. These pin the WHOLE value, not a prefix.
+  it.each(['123abc', '1e9', '12.5', '-3', '1 2', ''])(
+    'rejects a gid of %o entirely rather than taking its numeric prefix',
+    (gid) => {
+      expect(sheetCsvUrl(`${SHEET}#gid=${gid}`)).toBe(
+        'https://docs.google.com/spreadsheets/d/abc123/export?format=csv',
+      );
+    },
+  );
+
+  it('keeps gid=0 — the first tab is a real tab, and 0 is a real id', () => {
+    expect(sheetCsvUrl(`${SHEET}#gid=0`)).toContain('&gid=0');
+  });
+
+  it('finds gid among other fragment parameters', () => {
+    expect(sheetCsvUrl(`${SHEET}#gid=1836&range=A1:B9`)).toContain('&gid=1836');
+  });
+
+  it('prefers the fragment gid over a query gid', () => {
+    // The address bar shows the fragment, so it reflects the tab the user was
+    // actually looking at.
+    expect(sheetCsvUrl(`${SHEET}?gid=11#gid=22`)).toContain('&gid=22');
+  });
+
+  it('handles a URL pasted without a scheme', () => {
+    expect(sheetCsvUrl('docs.google.com/spreadsheets/d/abc123/edit#gid=7')).toContain(
+      '&gid=7',
+    );
+  });
+
   it('returns null for a URL that is not a Google Sheet', () => {
     expect(sheetCsvUrl('https://example.com/foo')).toBeNull();
   });
