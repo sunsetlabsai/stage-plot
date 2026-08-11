@@ -1,7 +1,7 @@
 # Design — AI key availability: capability probe + real empty state
 
-Status: **DESIGN — Codex R5 folded (no findings), awaiting R6**
-Version: **v6.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4)
+Status: **DESIGN — Codex R5 folded, NO FINDINGS. Design-complete; no R6 planned.**
+Version: **v7.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 
 **v2 changelog** — Codex R1 returned **no blockers**; three refinements folded:
@@ -48,6 +48,35 @@ Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 |---|---|
 | §5.2's **broader pre-stream restoration** and **transcript removal** are now settled spec, not proposals. Open since R4. | Codex R5 answer |
 | §11 Q1 and Q2 closed | Codex R5 answer |
+
+---
+
+## 0. Invariants this design establishes
+
+*(New in v7 — **additive only, no spec change.** Codex R5 returned no findings;
+nothing below alters the approved design. The list exists so the build can be
+cross-checked against it per chunk, and so any future edit is walked against the
+rules rather than re-read.)*
+
+1. **The UI never claims a capability it has not verified with the server.**
+   The defect this document exists to fix. (§2, §5)
+2. **`unconfigured` and `error` stay distinct in data**, even where the
+   user-facing copy converges. (§4.1, §5)
+3. **`error` means no usable value *and* the store was unreachable.** A working
+   env fallback is `ok`/`env`, never `error`. (§4.1)
+4. **A user-facing "everything is fine" during a partial outage requires
+   `/admin` to report the outage independently.** The two are one requirement,
+   not two gaps. (§6.1)
+5. **No user message is lost on a pre-stream failure, and no message is ever
+   silently re-sent.** Both halves, always together. (§5.2)
+6. **Quota values derive from `TRYIT_QUOTA`.** No literals in response,
+   arithmetic, or tests. (§4)
+7. **The probe never returns any substring of a key**, in any state. (§4, §9)
+
+**The rule: every addition is walked against all seven before a version ships**,
+and each claim must name the mechanism that enforces it. Invariants 2, 3 and 5
+each became a Codex finding *because the mechanism was unnamed or unenforceable*
+while the prose was correct.
 
 ---
 
