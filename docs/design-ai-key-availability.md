@@ -1,7 +1,7 @@
 # Design — AI key availability: capability probe + real empty state
 
-Status: **DESIGN — Codex R4 folded, awaiting R5**
-Version: **v5.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3)
+Status: **DESIGN — Codex R5 folded (no findings), awaiting R6**
+Version: **v6.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 
 **v2 changelog** — Codex R1 returned **no blockers**; three refinements folded:
@@ -41,6 +41,13 @@ Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 |---|---|
 | §5.2 — the predicate is a **`streamStarted` flag set at the first read chunk**, not `assistantText.length === 0`. A tool-only stream has no text and must not be treated as never-sent. | Codex R4 **medium** |
 | §9 — tests 13c-i (tool-only stream), 13c-ii (unparseable bytes), 13c-iii (`tryitExhausted` restores). ~19 → ~22. | Codex R4 |
+
+**v6 changelog** — Codex R5 returned **no findings**; two open calls ratified:
+
+| Change | Source |
+|---|---|
+| §5.2's **broader pre-stream restoration** and **transcript removal** are now settled spec, not proposals. Open since R4. | Codex R5 answer |
+| §11 Q1 and Q2 closed | Codex R5 answer |
 
 ---
 
@@ -675,18 +682,23 @@ outcomes** — same lesson §9's full-array rule teaches on #121.
 
 Unanswered from R4, carried forward as Q1/Q2 below.
 
-## 11. Open questions for Codex R5
+## 10d. Codex R5 — disposition
 
-1. **Carried, unanswered from R4** — §5.2's predicate generalizes restoration
-   past the invalid-key path to every pre-stream failure. That is a wider
-   behavior change than the finding asked for, in a live send path. Right call,
-   or should restoration be scoped to the 401 case for now? Your R4 finding
-   sharpened the predicate but did not rule on its breadth, and the breadth is
-   the part with blast radius.
-2. **Carried, unanswered from R4** — §5.2 removes the optimistic user message on
-   restore. Truthful (it was never delivered), but a message can visibly
-   *disappear* on failure. Is the transcript removal the right half of that pair
-   to keep?
+| Finding | Disposition |
+|---|---|
+| **No findings.** The `streamStarted` flag closes the tool-only stream hole. | Confirmed. |
+| Keep the **broader pre-stream restoration** and the **transcript removal** — "that is the right UX contract" | **Ratified.** These were R4 Q1 and Q2, open two rounds. Both are now **settled spec, not proposals**: restoration applies to every pre-stream failure (not just 401), and the undelivered optimistic message is removed rather than left stranded. §5.2 stands as written; tests 13a–13d and 13c-i/ii/iii pin it. |
+
+**This document is design-complete pending R6.** Every finding across five
+rounds has been accepted, nothing declined, and the two behavior calls I was
+least sure of are now ratified rather than assumed. The remaining §11 questions
+are refinements, not blockers — none of them change the shape of the build.
+
+## 11. Open questions for Codex R6
+
+1. **CLOSED by R5** — the broader pre-stream restoration is confirmed as the
+   right contract.
+2. **CLOSED by R5** — transcript removal on restore is confirmed.
 3. §5.2 sets `streamStarted` at the read rather than the parse, so a response
    that opens a stream and immediately dies still counts as sent. That is
    deliberately conservative — it errs toward *not* restoring. Is there a
