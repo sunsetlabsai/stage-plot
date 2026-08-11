@@ -1,7 +1,7 @@
 # Design — Admin identity, invite gate, tester deletion, and profiles read scope
 
-Status: **DESIGN — Codex R2 folded, awaiting R3**
-Version: **v3.1** (v1 = pre-Codex, v2 = R1, v3 = R2)
+Status: **DESIGN — Codex R3 folded, awaiting R4**
+Version: **v4.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner)
 Scope: admin authn/authz, signup gating, tester deletion, `profiles` RLS
 Driver: handing ShowRunr to outside UAT testers
 
@@ -32,6 +32,16 @@ owner is **`graham.edwards@gmail.com`**, seeded as the sole bootstrap admin.
 Raised two consequences of that choice which need checking before the migration
 runs (profile existence vs the `/claim` redirect; the stale `seed_profiles.sql`
 placeholder UUIDs).
+
+**v4 changelog:**
+
+| Change | Source |
+|---|---|
+| **§6.2.1 NEW — the audit row now comes BEFORE the destruction.** v3 wrote it after `deleteUser`, so the storage-gone/account-remains path it named itself produced no audit row at all. Two-phase `attempted` → `succeeded`/`failed`. | Codex R3 **high** |
+| §3.6 — `admin_audit` gains `status` + `ended_at`, defaulted so single-phase call sites are unchanged | follows from §6.2.1 |
+| **§4.2.1 NEW — `activate_invites` still compares raw emails** against a normalized allowlist. Migration `016`: backfill + canonical CHECK + normalized comparison. | Codex R3 medium |
+| §8 — tests 12d–12f (canonicalization) and 20–24 (failed-delete auditing). ~22 → ~30. | Codex R3 |
+| §3.4 `app/admin/layout.tsx` boundary confirmed; hard delete confirmed for UAT given failed-attempt auditing | Codex R3 answers |
 
 ---
 
@@ -292,12 +302,25 @@ CREATE TABLE admin_audit (
   actor_email text NOT NULL,          -- snapshot; survives actor deletion
   action      text NOT NULL,
   target      text,                   -- snapshot: target email / owner_slug
+  status      text NOT NULL DEFAULT 'succeeded'
+              CHECK (status IN ('attempted', 'succeeded', 'failed')),
   meta        jsonb,
-  at          timestamptz NOT NULL DEFAULT now()
+  at          timestamptz NOT NULL DEFAULT now(),
+  ended_at    timestamptz             -- set when a two-phase action resolves
 );
 ALTER TABLE admin_audit ENABLE ROW LEVEL SECURITY;
 -- No policies. service_role only.
 ```
+
+**`status` is new in v4 (Codex R3 high).** Most audited actions are a single
+non-destructive write and land as `succeeded` in one insert — the default keeps
+those call sites unchanged. **Destructive actions are two-phase**: an
+`attempted` row *before* the destruction, resolved to `succeeded` or `failed`
+after (§6.2). Without it, the audit trail records only the operations that
+worked, which is precisely backwards — a failed destructive operation is the one
+you most need a record of, because it is the one that leaves inconsistent state
+behind. `/admin`'s audit panel must render `attempted` and `failed` rows
+distinctly, not filter them out.
 
 **Snapshots are not redundant with `actor_id`** (Codex R2 high). With
 `ON DELETE SET NULL`, deleting a former admin nulls their `actor_id` across the
@@ -387,6 +410,9 @@ The predicate for this one route is **eligibility**:
 which admits the new invited tester and still closes the §4.1 back-channel for a
 refused one.
 
+**But eligibility is not the only thing that has to match — the email does too.**
+See §4.2.1; the v3 fix admits the right person and can still link nothing.
+
 **Belt and braces: activation also runs after successful profile creation.**
 `POST /api/profiles` calls the same activation logic on success, so a tester
 whose first-sign-in activation failed for any reason — network, cold start, the
@@ -409,6 +435,62 @@ private testing. <email> isn't on the tester list — ask Graham to add you."*
 session, can call APIs, and get a 403 from every one. They are invisible in
 `/admin`, which lists `profiles`. Acceptable for a UAT window; (c) is the real
 fix.
+
+### 4.2.1 Activation still compares raw emails (new in v4)
+
+**Codex R3 medium, verified.** The eligibility fix in §4.2(b) is correct and
+insufficient. The allowlist path canonicalizes to `lower(btrim(email))` (§5,
+enforced by a DB `CHECK`), but the RPC that actually does the linking does not:
+
+```sql
+-- 001_initial_schema.sql:261
+where email = p_email
+  and user_id is null;
+```
+
+So an invitee can pass every gate this design adds — allowlisted, eligible,
+signed in — and still have **zero collaborator rows linked**, because
+`show_collaborators.email` holds `'Test@Example.com '` and `p_email` is
+`'test@example.com'`. Same silent, permanent orphaning as the R2 blocker, one
+comparison further down. The gate lets them in and the link never happens.
+
+**The asymmetry matters for where to fix it.** `p_email` comes from
+`auth.users.email`, which GoTrue already stores lowercased — so the drift is
+essentially all on the *stored invite* side. And that side has **no application
+write path at all**: `show_collaborators` is only ever read in this repo
+(4 call sites, all `select`), so every invite row is hand-inserted in the
+Supabase console. Hand-typed is exactly where casing and trailing spaces come
+from, and there is no app layer that could have normalized them.
+
+**Spec — migration `016_normalize_collaborator_email.sql`:**
+
+1. **Backfill:** `UPDATE show_collaborators SET email = lower(btrim(email))
+   WHERE email <> lower(btrim(email));`. Run before the constraint, or the
+   constraint cannot validate. Note the `unique(show_id, email)` at `001:42`:
+   if two rows on one show differ only by case, the update collides — dedupe
+   first, keeping the row with a non-null `user_id`, else the earliest
+   `invited_at`. Unlikely at UAT scale; a migration that fails loudly on it is
+   correct, one that silently drops a row is not.
+2. **Constrain:** `ALTER TABLE show_collaborators ADD CONSTRAINT
+   show_collaborators_email_canonical CHECK (email = lower(btrim(email)));` —
+   the same shape as `allowed_emails` (§5). A hand-insert of `'Test@Example.com'`
+   now **fails at insert time in the console**, where the operator sees it,
+   rather than succeeding and never linking.
+3. **Normalize the comparison anyway:** `CREATE OR REPLACE FUNCTION
+   activate_invites` with `where lower(btrim(email)) = lower(btrim(p_email))`.
+   Belt and braces — the CHECK makes the left side canonical, this makes the
+   RPC correct even against rows that predate it or arrive by some path we
+   haven't thought of. It costs a function replace and removes the whole class.
+   The replacement must carry `security definer` and `language plpgsql`
+   forward verbatim (`001:263-271`) — dropping `security definer` would leave
+   the update subject to RLS and silently link nothing, which is the same
+   failure this fixes wearing a different hat.
+
+The index consequence is worth a line: the `unique(show_id, email)` index still
+serves the lookup, because after step 2 the stored side is canonical and
+`lower(btrim(email))` on it is a no-op — but the RPC's expression form will not
+use that index. At UAT row counts this is irrelevant; naming it here so nobody
+"optimizes" step 3 away later without knowing why it exists.
 
 ### 4.3 Mode switch
 
@@ -517,22 +599,54 @@ removed explicitly, and a cascade will silently orphan them. So:
 
 1. **Count** the user's shows, songs, chart_library rows, and storage objects
    **before** deleting anything, and hold the target's email + `owner_slug`.
-2. Enumerate the user's storage objects, delete them, **recording how many
+2. **Write the `attempted` audit row** (§3.6) — actor, target snapshots, and the
+   step-1 counts — and keep its `id`. **If this insert fails, abort here and
+   destroy nothing.** No audit, no destruction.
+3. Enumerate the user's storage objects, delete them, **recording how many
    actually succeeded** — not how many were attempted.
-3. `auth.admin.deleteUser(id)` — cascades handle every table.
-4. Audit row (§3.6) with actor, target email + slug snapshots, and the counts
-   from step 1 plus the storage success count from step 2.
+4. `auth.admin.deleteUser(id)` — cascades handle every table.
+5. **In a `finally`**, resolve the audit row: `UPDATE admin_audit SET status =
+   'succeeded' | 'failed', ended_at = now(), meta = meta || {storage_attempted,
+   storage_deleted, error}` for the id from step 2. This runs on the failure path
+   too — that is the entire point.
 
-Codex R2 made hard delete conditional on *"storage deletion is count-audited"* —
-step 2's distinction between attempted and succeeded is that condition. If the
-two disagree, the audit row records both and the operation still reports success
-for the account; a partial storage failure must be visible after the fact, since
-by then it is the only remaining evidence.
+### 6.2.1 Why the audit row comes first (new in v4)
 
-Storage deletion is **not transactional with the DB delete**. If step 1 partially
-succeeds and step 2 fails, files are gone and the account remains. Order chosen
-deliberately: orphaned *account* is recoverable, orphaned *files* are invisible
-and bill forever. Say this in the doc rather than pretending it is atomic.
+**Codex R3 high, and it exposed a hole I had described and then not closed.** v3
+wrote the audit row as step 4, *after* the DB deletion — so the failure mode v3
+itself named two paragraphs later (storage gone, account remains) produced
+**no audit row at all**. The one outcome where the record is the only surviving
+evidence was the one outcome that recorded nothing. I documented the risk and
+then ordered the steps as if I hadn't.
+
+Three properties this ordering buys:
+
+- **Nothing destructive happens unaudited.** Step 2 is a precondition, not a
+  postscript. An operator can always answer "did anyone try to delete this
+  account?" — including when the answer is "yes, and it broke."
+- **Partial storage loss is attributable.** `storage_attempted` vs
+  `storage_deleted` land in `meta` on both the success and failure paths. Codex
+  R2's condition for hard delete was *"storage deletion is count-audited"*; with
+  the write ordered last that condition silently didn't hold on the path that
+  needed it. Now it does.
+- **`attempted` rows that never resolve are themselves a signal.** A row left at
+  `attempted` means the route died between step 3 and step 5 — process kill,
+  timeout, deploy mid-request. That is a state worth being able to see, and it
+  is only visible because the row exists before the work.
+
+Codex's R3 answer — *"hard delete is still acceptable for UAT if failed attempts
+are audited, not only successful deletes"* — is exactly this, and it is now the
+gating condition on §6.3 shipping.
+
+Storage deletion is still **not transactional with the DB delete**. If step 3
+partially succeeds and step 4 fails, files are gone and the account remains
+(**and the audit row says so**, at `failed` with both counts — which is the
+change from v3, where this path was invisible). Order chosen deliberately:
+orphaned *account* is recoverable, orphaned *files* are invisible and bill
+forever. Say this in the doc rather than pretending it is atomic.
+
+*(v3 also misnumbered this paragraph's own steps — it said "step 1 partially
+succeeds and step 2 fails" when it meant the storage and account steps. Fixed.)*
 
 ### 6.3 Endpoint and UX
 
@@ -624,6 +738,20 @@ Server:
      from both places.
 12c. Activation succeeds for a profileless user when `signup_mode='open'`.
 
+**Codex R3 medium — email canonicalization (§4.2.1):**
+
+12d. **A collaborator row invited as `' Test@Example.COM '` links to a user whose
+     `auth.users.email` is `test@example.com`.** The case Codex named, and the
+     one 12a would not have caught, because 12a uses a clean address on both
+     sides. Run it against the post-migration RPC.
+12e. The `016` backfill normalizes a mixed-case row **and** the
+     `show_collaborators_email_canonical` CHECK then rejects a fresh
+     non-canonical insert — proving both halves landed, since either alone
+     leaves the hole open.
+12f. The backfill's collision path: two rows on one show differing only by case
+     dedupe to the one with a non-null `user_id`, and the migration **fails
+     loudly** rather than dropping a row if that rule is ambiguous.
+
 Middleware / gate:
 
 13. `/admin` signed out → `/sign-in?redirect=/admin`; signed-in non-admin → 404.
@@ -653,7 +781,27 @@ Deletion:
     `actor_id` null and `actor_email` intact — the audit trail is not erased by
     the deletion it recorded.
 
-Target: **~22 new tests.** Delta reported on the build PR.
+**Codex R3 high — failed deletes must be audited (§6.2.1):**
+
+20. **`auth.admin.deleteUser` throws after storage deletion has run: an
+    `admin_audit` row exists with `status='failed'`, both storage counts, and
+    the error.** The v3 ordering produced *no row at all* here — this is the
+    regression guard for the whole finding, and it must assert on the row's
+    presence and status, not merely that the endpoint returned an error.
+21. The `attempted` row is written **before** any storage call: with the storage
+    client mocked to throw on first use, the audit row still exists. Ordering
+    asserted directly, since it is the entire fix.
+22. **If the `attempted` insert fails, nothing is destroyed** — storage delete
+    and `deleteUser` are never called, and the endpoint 500s. "No audit, no
+    destruction" as an assertion rather than a sentence.
+23. A successful delete leaves exactly **one** audit row, resolved to
+    `succeeded` with `ended_at` set — the two-phase write must not double-log.
+24. Non-destructive audited actions (settings change, allowlist add) still write
+    a single `succeeded` row via the column default — the §3.6 change must not
+    force every existing call site into two phases.
+
+Target: **~30 new tests** (v3 said ~22; 12d–12f and 20–24 are the v4
+additions). Delta reported on the build PR.
 
 ---
 
@@ -698,24 +846,51 @@ This design claims `013` onward.
 |---|---|
 | **Blocking** — `activate-invites` caught in the profile gate | **Accepted; this was a self-contradiction in v2.** §4.2(a) put the route behind `requireAppUser` while §4.2(b) required it to run for brand-new testers. Both could not hold, and the failure was silent and permanent: an allowlisted invitee's collaborator rows would never link. Now gated on **eligibility** (profile OR open-mode OR allowlisted), **and** re-run after profile creation so it no longer depends on a fire-and-forget client call. Tests 12a–12c. |
 | **High** — FK holes in the tables this design adds | **Accepted.** `admin_users.granted_by`, `allowed_emails.invited_by`, `admin_audit.actor_id` → `ON DELETE SET NULL`; audit gains `actor_email` and target snapshots so the trail survives. Sharp catch: v2 repaired the pre-existing FKs and then introduced three new ones with the same defect. §6.2 now carries the complete reference table, and test 16 exercises a user occupying every role at once. |
-| Hard delete OK **if** FK holes closed and storage count-audited | Both conditions met — §6.2 step 2 distinguishes attempted from succeeded, test 18 asserts it. |
+| Hard delete OK **if** FK holes closed and storage count-audited | Both conditions met — §6.2 step 3 distinguishes attempted from succeeded, test 18 asserts it. *(v4: R3 showed the count-audit didn't actually hold on the failure path, because the audit write came last. §6.2.1.)* |
 | Seed both accounts if both should be admin; no runtime bootstrap | **Accepted** (§3.3) — wider `IN` clause, guard asserts the expected count. |
 
-## 11. Open questions for Codex R3
+## 10b. Codex R3 — disposition
 
-1. **§4.2(b)** is the new material and deserves the attack. The eligibility
-   predicate is *profile OR open-mode OR allowlisted*. Is there a sequence —
-   allowlist removed between OTP and claim, mode flipped mid-session, an invite
-   issued to an address that later gets removed — where that admits someone it
-   shouldn't, or strands someone it should admit?
-2. §4.2 — running activation from two call sites relies on `activate_invites`
-   being idempotent (`001:262-271` matches unlinked rows by email). Test 12b
-   pins it, but is the RPC genuinely safe under concurrent invocation, given
-   sign-in and claim can overlap?
-3. §6.3 — still open from R2 and unresolved: **soft delete** (`disabled_at`) for
-   the UAT window instead of hard? Reversible, at the cost of a state every query
-   must respect. You accepted hard delete conditionally; I'd still like the
-   argument if you think reversibility is worth more during UAT specifically.
-4. §3.4 — server-component `layout.tsx` gate plus optimistic middleware. Any
-   route into `/admin` that bypasses the layout? Still the security-critical
-   claim, and untouched by R2.
+| Finding | Disposition |
+|---|---|
+| **High** — failed hard-deletes can be unaudited after destructive storage work | **Accepted, and it is the sharpest kind of miss: v3 named this exact failure mode in prose and then ordered the steps as if it hadn't.** The audit row was step 4, after `deleteUser` — so the one path where the record is the only surviving evidence produced no record. New **§6.2.1**: `attempted` row written *before* any destruction (abort if that insert fails), resolved to `succeeded`/`failed` in a `finally` with `storage_attempted`/`storage_deleted`/`error`. §3.6 gains `status` + `ended_at`, defaulting so non-destructive call sites are unchanged. Tests 20–24. |
+| **Medium** — activation is still exact-email against a normalized allowlist | **Accepted.** New **§4.2.1**. The R2 eligibility fix admits the right invitee and then links nothing when the hand-typed invite row differs by case or whitespace — same silent orphaning, one comparison further down. Migration `016`: backfill, canonical `CHECK` matching `allowed_emails`, and a normalized comparison in `activate_invites`. Worth noting the aggravating factor: `show_collaborators` has **no app write path at all** (4 read call sites, zero inserts), so every invite is hand-typed in the console — the least normalized source possible. Tests 12d–12f. |
+| Hard delete acceptable for UAT **if failed attempts are audited** | Condition now met by §6.2.1 and gating on §6.3 shipping — that is the point of the two-phase row. |
+| `app/admin/layout.tsx` is the right App Router boundary; API routes stay on `requireAdmin` | Confirmed — §3.4 and §3.2 unchanged. **Q4 closed.** |
+
+Nothing declined. Three rounds, three docs, and Codex has found something real in
+every one. Both R3 findings here are the same shape as R2's blocker: a rule
+stated correctly in one place and violated by the mechanism in another. The
+running lesson in [[project_showrunr_uat_readiness]] needs sharpening — it is not
+only *"check whether a later section makes an earlier requirement
+unsatisfiable"*, it is **"check whether the ordering of my own steps satisfies
+the risk I just described."** §6.2 described the orphaned-files window and then
+ordered the audit write outside it.
+
+## 11. Open questions for Codex R4
+
+1. **§6.2.1's abort-if-audit-fails rule** makes `admin_audit` a hard dependency
+   of deletion: if the audit insert is down, nobody can delete a tester. I
+   believe that is the right failure direction for a destructive, irreversible
+   operation — but it does mean a table this design introduces can block an
+   operation Graham may need urgently. Is there a case for a break-glass path,
+   or is refusing to proceed correct?
+2. **§4.2.1 step 2** adds a `CHECK` that will make a non-canonical hand-insert
+   *fail* in the Supabase console. That is deliberate — fail loud at insert
+   rather than silently never link — but it changes the ergonomics of the only
+   way invites are currently created, and the operator is Graham. Is
+   fail-at-insert right, or should the migration add a `BEFORE INSERT` trigger
+   that normalizes instead, so hand-typed invites just work?
+3. §4.2 — carried from R3 Q2, unanswered: running activation from two call sites
+   relies on `activate_invites` being idempotent. Test 12b pins the sequential
+   case, but is the RPC safe under **concurrent** invocation, given sign-in and
+   claim can overlap? §4.2.1's rewrite is the natural moment to add locking if
+   it is needed.
+4. §6.3 — still open from R2 and R3: **soft delete** (`disabled_at`) for the UAT
+   window instead of hard? You have now twice accepted hard delete
+   conditionally, and both conditions are met — but §6.2.1 exists because the
+   irreversible path keeps growing failure modes that need recording. If that
+   trend is itself the argument for reversibility, this is the round to say so.
+5. Carried from R3 Q1, still unattacked: the eligibility predicate under
+   *sequences* — allowlist removed between OTP and claim, mode flipped
+   mid-session. R3 confirmed the shape but not the race.
