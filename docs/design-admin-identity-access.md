@@ -1,8 +1,8 @@
 # Design — Admin identity, invite gate, tester deletion, and profiles read scope
 
-Status: **DESIGN — Codex R4 folded + Graham ruling, awaiting R5**
-Version: **v6.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
-v4 = R3, v5 = R4)
+Status: **DESIGN — Codex R5 folded, awaiting R6**
+Version: **v7.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
+v4 = R3, v5 = R4, v6 = Graham ruling)
 Scope: admin authn/authz, signup gating, tester deletion, `profiles` RLS
 Driver: handing ShowRunr to outside UAT testers
 
@@ -61,6 +61,15 @@ placeholder UUIDs).
 | **§4.2.3 NEW — the activation route reports success it never verified.** It discards the RPC error and returns `activated: true` unconditionally; the client ignores the response too. Fixed at the app layer. | found while answering |
 | §8 — tests 12g (route 500s on RPC error), 12h (concurrent activation is a no-op), 12i (`authenticated` still cannot EXECUTE after `017`). ~33 → ~36. | Graham ruling |
 | Return-count improvement and the `handleVerifyOtp` spinner bug → **backlog, with reasons recorded** | Graham ruling |
+
+**v7 changelog:**
+
+| Change | Source |
+|---|---|
+| **§4.2.4 NEW — activation must run BEFORE the profile insert.** v6 ran it after, so an activation failure left a profile with unlinked invites and the retry hit `409 Profile already exists`. Worse than it reads: `/claim` renders "Already claimed" and never shows the form, so route-level idempotence would fix an endpoint nobody can reach. | Codex R5 **high** |
+| §4.2.4 — `/admin` **"Re-link invites"** action, audited. The window is open in production now, and the ordering fix only protects future claims. | follows from the finding |
+| §4.2.1 step 3 — `017` **re-issues** the revoke rather than relying on `CREATE OR REPLACE` preserving it. Preservation keeps a good state *and* a bad one; live grant drift is invisible to the repo. | Codex R5 medium |
+| §8 — tests 12i-a (drift converged) and 12j–12n (ordering, retry, `409` branch, admin recovery). ~36 → ~43. | Codex R5 |
 
 ---
 
@@ -572,6 +581,26 @@ from, and there is no app layer that could have normalized them.
 
    **`CREATE OR REPLACE` is load-bearing, not stylistic — see §4.2.2.**
 
+   **And re-issue the revoke anyway, immediately after the replace** *(new in v6
+   — Codex R5 medium)*:
+
+   ```sql
+   REVOKE EXECUTE ON FUNCTION activate_invites(uuid, text)
+     FROM public, anon, authenticated;
+   ```
+
+   Codex's point is exact and I had missed it: `CREATE OR REPLACE` **preserves**
+   the grant state, which preserves a *good* state — and equally preserves a
+   **bad** one. `001:273`'s revoke is what the schema says; it is not necessarily
+   what the live database has, since anyone can `GRANT` from the Supabase SQL
+   editor and nothing in the repo would show it. Preservation is not enforcement.
+
+   Re-issuing costs one idempotent statement, converges live drift, and — the
+   part I value most — **puts the security requirement inside the migration that
+   touches the function**, where the next person to edit it will see it. §4.2.2's
+   trap is documented in prose; this makes it executable. The row-count/DROP
+   change stays deferred either way.
+
 The index consequence is worth a line: the `unique(show_id, email)` index still
 serves the lookup, because after step 2 the stored side is canonical and
 `lower(btrim(email))` on it is a no-op — but the RPC's expression form will not
@@ -631,8 +660,13 @@ This is the third instance in this document of a repair introducing the defect
 class it was repairing (R2's FK holes, R4's duplicate `016`, now this).
 
 **Graham's ruling (2026-08-11): keep `017` to the WHERE clause, fix the lie in
-the route instead.** Scope stays `CREATE OR REPLACE`, grants untouched, zero new
-privilege surface.
+the route instead.** Scope stays `CREATE OR REPLACE`, no return-type change, zero
+new privilege surface.
+
+*Refined by Codex R5:* `017` also **re-issues** the revoke rather than relying on
+preservation — see §4.2.1 step 3. That does not widen the ruling's scope (still
+no DROP, still no signature change); it converges any live grant drift and puts
+the requirement in the file that touches the function.
 
 ### 4.2.3 The activation route reports success it did not verify
 
@@ -651,9 +685,83 @@ both ends — which is how the R2 blocker would have stayed hidden in production
 even after being fixed.
 
 **Spec:** destructure and check `{ error }`; on error return `500` and log. The
-`POST /api/profiles` call site (§4.2's belt-and-braces re-run) does the same.
-This is the whole of the route change — no row count, no return-type change, no
-DROP. Test 12g.
+`POST /api/profiles` call site (§4.2's belt-and-braces re-run) does the same —
+**but see §4.2.4, because where that call sits in the route decides whether the
+tester can ever recover.** No row count, no return-type change, no DROP.
+Test 12g.
+
+### 4.2.4 Activation must run BEFORE the profile insert (new in v6)
+
+**Codex R5 high, and my own §4.2.3 fix is what made it reachable.** v5 said
+activation runs *after* successful profile creation. Trace the failure:
+
+1. `POST /api/profiles` inserts the profile. **Committed.**
+2. Activation runs and fails.
+3. §4.2.3 says return `500`.
+4. The tester retries — and `app/api/profiles/route.ts:41-49` checks for an
+   existing profile **first** and returns `409 Profile already exists` before
+   any post-create work.
+
+Result: a tester with a profile, unlinked collaborator rows, and **no path back
+through the route.** Silent and permanent, which is the exact class of the R2
+blocker — reintroduced by the error handling I added one section earlier. Before
+§4.2.3 the route swallowed the error and returned `201`; the state was equally
+broken but at least not presented as a retryable failure.
+
+**It is worse than the route makes it look, and this decides the fix.** Codex
+offered two options — make the route idempotent for the same user, *or* run
+activation before the insert. Only the second one actually helps, because the
+tester never reaches the `409` branch:
+
+- `/claim` is in `PROFILE_CHECK_EXEMPT` (`middleware.ts:20`), so a profiled user
+  *can* load the page —
+- but `app/claim/page.tsx:21-38` fetches `GET /api/profiles` on mount, and on
+  `200` sets `alreadyClaimed` and renders the **"Already claimed"** panel
+  (`:88-95`). The form never renders. There is nothing to re-submit.
+
+So route-level idempotence would fix an endpoint nobody can reach. The ordering
+fix is the real one.
+
+**Spec — `POST /api/profiles`, in order:**
+
+1. authn (`:15-19`)
+2. slug validation (`:21-38`)
+3. eligibility check — allowlist / `signup_mode` (§4.2)
+4. **activation** — idempotent, and §4.2(b) already established that *eligibility*,
+   not profile existence, is its predicate. On error: `500`, **before any
+   profile row exists.**
+5. profile insert (`:51-59`)
+6. `201`
+
+Every failure is now recoverable by retrying the claim form:
+
+| Failure | State | Recovery |
+|---|---|---|
+| activation fails | no profile, no links | retry: form still renders (no profile), activation re-runs |
+| activation ok, insert fails | links done, no profile | retry: activation no-ops (idempotent), insert retried |
+| handle taken (`23505`) | links done, no profile | tester picks another handle; links already correct |
+
+Linking invites for a user who then never claims a handle is harmless — they are
+a valid `auth.users` row and the links are correct whenever they return.
+
+**Also keep the `409` branch honest.** Re-run activation there before returning,
+as cheap defence for the two-tab case and for anyone stranded by *today's* code.
+It is two lines and it is not the load-bearing fix.
+
+**Recovery for the already-stranded.** The window is open in production right
+now: sign-in activation swallows its error (§4.2.3), so a tester whose
+activation failed has unlinked rows and no self-service path — the ordering fix
+protects future claims, not past ones. `/admin` gains a per-owner **"Re-link
+invites"** action calling the same idempotent RPC, audited via §3.6 like every
+other admin action. Small, in scope for a document that already builds per-user
+admin actions (§6.3), and it is the only operational lever for a failure the
+tester cannot see and cannot report precisely.
+
+**This is the fourth instance in this document of a repair introducing the
+defect class it repaired** — R2's FK holes, R4's duplicate `016`, R5's grant
+trap, now this. The pattern is specific enough to act on: *after adding an error
+path, ask what state the system is in when it fires, and whether the user can
+get out of it.* An error return is not a fix if it strands the caller.
 
 **Deliberately deferred to backlog, with the reason recorded so it isn't
 rediscovered as a good idea:**
@@ -945,9 +1053,34 @@ Server:
      rewrites the single UPDATE into a read-then-write, the test fails rather
      than the reasoning silently expiring.
 12i. **`authenticated` cannot EXECUTE `activate_invites`** after `017` runs.
-     `017` uses `CREATE OR REPLACE` so grants are preserved — this asserts that
-     they *were*, and fails loudly if the migration is ever rewritten as
-     `DROP` + `CREATE` without re-issuing `001:273`'s revoke (§4.2.2).
+     `017` both preserves the grant state (`CREATE OR REPLACE`) **and re-issues
+     the revoke**, so this asserts the end state regardless of which mechanism
+     delivered it — and fails loudly if the migration is ever rewritten as
+     `DROP` + `CREATE` with the revoke dropped (§4.2.2).
+12i-a. **Grant drift is converged, not merely preserved** (Codex R5 medium).
+     `GRANT EXECUTE ... TO authenticated` *before* running `017`, then run it:
+     the grant is gone afterwards. This is the case `CREATE OR REPLACE` alone
+     would silently carry forward, and the reason the explicit revoke earns its
+     line.
+
+**§4.2.4 — activation ordering (new in v6, Codex R5 high):**
+
+12j. **Activation failure leaves no profile behind.** With the RPC mocked to
+     fail, `POST /api/profiles` returns 500 **and `profiles` has no row** for
+     that user — the ordering assertion, and the whole finding in one test.
+12k. **The retry succeeds.** After 12j, a second `POST /api/profiles` with the
+     RPC healthy creates the profile *and* links the collaborator rows. Pins
+     that the tester is not stranded — which is what the R5 finding was actually
+     about, more than the ordering itself.
+12l. Activation succeeds, **insert** fails (`23505`, handle taken): the
+     collaborator rows are still linked, and a retry with a different handle
+     succeeds without double-linking.
+12m. The `409 Profile already exists` branch re-runs activation before
+     returning. Defence for the two-tab case; asserted so it is not dropped as
+     dead code by someone who notices `/claim` rarely reaches it.
+12n. **`/admin` "Re-link invites"** links a stranded user's rows and writes an
+     `admin_audit` row (§3.6). The recovery lever for testers already broken by
+     today's swallowed error.
 12f. The backfill's collision path: two rows on one show differing only by case
      dedupe to the one with a non-null `user_id`, and the migration **fails
      loudly** rather than dropping a row if that rule is ambiguous.
@@ -1000,8 +1133,8 @@ Deletion:
     a single `succeeded` row via the column default — the §3.6 change must not
     force every existing call site into two phases.
 
-Target: **~36 new tests** (v3 said ~22; 12d–12f and 20–24 added in v4, 12e-i/ii
-in v5, 12g–12i in v6). Delta reported on the build PR.
+Target: **~43 new tests** (v3 said ~22; 12d–12f and 20–24 added in v4, 12e-i/ii
+in v5, 12g–12i in v6, 12i-a and 12j–12n in v7). Delta reported on the build PR.
 
 ---
 
@@ -1077,35 +1210,42 @@ ordered the audit write outside it.
 Nothing declined, in any round. Four rounds, three docs, and Codex has found
 something real in every single one.
 
-## 11. Open questions for Codex R5
+## 10d. Codex R5 — disposition
 
-1. **Carried, unanswered from R4** — §6.2.1's abort-if-audit-fails rule makes
-   `admin_audit` a hard dependency of deletion: if the audit insert is down,
-   nobody can delete a tester. I believe that is the right failure direction for
-   a destructive, irreversible operation, but it means a table this design
-   introduces can block an operation Graham may need urgently. Break-glass path,
-   or is refusing to proceed correct?
-2. **New, from the §0.1 work** — the allocation table is a convention enforced by
-   nothing but attention, which is what just failed. Is there a cheap mechanical
-   guard worth specifying (a CI check that migration filenames are unique and
-   contiguous), or is that over-engineering for a repo at `012`?
-3. **CLOSED — Graham ruled 2026-08-11.** The `activate_invites` concurrency
-   question is resolved in **§4.2.2**: no locking, because a single UPDATE at
-   READ COMMITTED re-evaluates its predicate after a lock wait and the duplicate
-   updates zero rows. `017` stays `CREATE OR REPLACE` (grants preserved); the
-   route's unconditional `activated: true` is fixed at the app layer instead
-   (§4.2.3). **What I'd like R5 to attack is the finding underneath it:** the
-   `DROP FUNCTION` grant-reset trap at §4.2.2. Is test 12i (assert `authenticated`
-   cannot EXECUTE after `017`) sufficient to keep that closed, given the trap only
-   springs on a *future* edit that looks like an improvement? A test that passes
-   today and would fail after a well-intentioned refactor is the best I could
-   come up with; a schema-level guard would be better if one exists.
-4. §6.3 — still open from R2, R3, and R4: **soft delete** (`disabled_at`) for the
-   UAT window instead of hard? You have now three times accepted hard delete
-   conditionally — but §6.2.1 exists because the irreversible path keeps growing
-   failure modes that need recording. If that trend is itself the argument for
-   reversibility, this is the round to say so.
-5. Carried from R3 Q1 and R4, still unattacked: the eligibility predicate under
+| Finding | Disposition |
+|---|---|
+| **High** — profile created, activation fails, retry can never activate | **Accepted, and it is my §4.2.3 that made it reachable.** Adding a `500` on activation error turned a silently-broken state into a *retryable-looking* one that the route then refuses at `:41-49`. New **§4.2.4** moves activation **before** the insert, so no failure leaves a profile without links. Of your two options I took only the ordering one, because the other doesn't help: `/claim` fetches `GET /api/profiles` on mount and renders **"Already claimed"** (`app/claim/page.tsx:21-38, 88-95`) — the form never appears, so route-level idempotence would fix an endpoint the tester cannot reach. I kept the `409`-branch re-run anyway as cheap defence (test 12m), and added an `/admin` **"Re-link invites"** action, because the ordering fix protects future claims and the window is **open in production right now**. Tests 12j–12n. |
+| **Medium** — `017` should re-issue the revoke, not merely preserve it | **Accepted, and the distinction is the point.** `CREATE OR REPLACE` preserves the grant state — which preserves a *bad* one just as faithfully as a good one, and live drift from the Supabase SQL editor is invisible to the repo. Preservation is not enforcement. `017` now re-issues `REVOKE EXECUTE ... FROM public, anon, authenticated` explicitly: idempotent, converges drift, and puts the security requirement in the file that touches the function rather than only in §4.2.2's prose. Test 12i-a grants EXECUTE first and asserts `017` removes it. |
+
+Nothing declined, in six rounds. **This round's high finding is the fourth time
+in this document that a repair has introduced the defect class it repaired** —
+R2's FK holes, R4's duplicate `016`, R5's grant trap, now R5's ordering. That is
+specific enough to be a rule rather than an observation, and §4.2.4 states it:
+*after adding an error path, ask what state the system is in when it fires, and
+whether the user can get out of it. An error return is not a fix if it strands
+the caller.*
+
+## 11. Open questions for Codex R6
+
+1. **Carried, unanswered from R4 and R5** — §6.2.1's abort-if-audit-fails rule
+   makes `admin_audit` a hard dependency of deletion. Right failure direction for
+   an irreversible operation, or does Graham need a break-glass path?
+2. **Carried from R5** — §0.1's allocation table is a convention enforced by
+   nothing but attention, which is exactly what failed in v4. Cheap mechanical
+   guard (CI check on migration filename uniqueness/contiguity), or
+   over-engineering at `012`?
+3. **New — the recovery lever is now the weakest link.** §4.2.4 closes the
+   *future* hole, but testers stranded by today's swallowed error depend entirely
+   on `/admin` "Re-link invites", which nobody will think to press: the failure
+   is invisible to the tester (their dashboard is simply missing a show) and they
+   cannot report it precisely. Should `/admin` instead **surface** the condition —
+   list users holding `show_collaborators` rows with `user_id IS NULL` whose email
+   matches a `profiles` owner — so it is discovered rather than remembered? That
+   query is cheap and it turns a lever into an alert.
+4. §6.3 — open since R2: **soft delete** for the UAT window? Four rounds of
+   conditionally accepting hard delete, and §6.2.1 exists because the
+   irreversible path keeps accumulating failure modes that need recording.
+5. Carried from R3 and R4, still unattacked: the eligibility predicate under
    *sequences* — allowlist removed between OTP and claim, mode flipped
-   mid-session. Two rounds have confirmed the shape and neither has probed the
-   race.
+   mid-session. Three rounds have confirmed the shape; none has probed the race.
+   §4.2.4 moves activation earlier in the request, which changes the window.
