@@ -2,8 +2,8 @@
 
 *(BPM and Artist are recognized but **deliberately not imported** — §6, §10.)*
 
-Status: **DESIGN — Codex R3 folded, awaiting R4**
-Version: **v4.0** (v1 = pre-Codex, v2 = R1, v3 = R2)
+Status: **DESIGN — Codex R4 folded, awaiting R5**
+Version: **v5.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3)
 Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
 
 **v2 changelog:**
@@ -32,6 +32,13 @@ Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
 | §4 rule 5a — the interleave consequence (incoming rows fill slots, not sheet intent) now stated explicitly | follows from the fix |
 | §9 — ordering tests assert the **full merged array + dense positions**, not spot-checks. 7e/7f/7g added. | Codex R3 |
 | Q2 (removal friction) and Q3 (client-side merge) **closed** by Codex's R3 answers | Codex R3 answers |
+
+**v5 changelog:**
+
+| Change | Source |
+|---|---|
+| §4 — **"sheet order" is now defined**: `parseRows` owns a stable sort by resolved position, `mergeSetlist` never re-sorts. The `#` column was promised to order incoming rows with no mechanism named, so ignoring it entirely passed the spec and the suite. | Codex R4 **medium** |
+| §9 — tests 3a–3e pin position ordering, identity when no `#` column, stability on duplicate/partial values | Codex R4 |
 
 ---
 
@@ -142,16 +149,45 @@ a counter (`() => \`new-${n++}\``), which makes the no-op round-trip assertion
 (test 8, §9) an exact deep-equal instead of an id-blind comparison. Production
 passes `crypto.randomUUID`.
 
+**"Sheet order" is defined, and `parseRows` owns it** *(new in v4 — Codex R4
+medium)*. The doc says in three places that the `#` column "orders incoming rows"
+(§4 rule 6, §5) and never said **who does the sorting**. "Walk incoming in sheet
+order" reads equally well as physical row order, so an implementation that
+ignores numeric `#` values entirely satisfies every word of v3 — and every v3
+test, since they all reorder rows physically.
+
+> **Sheet order ≡ the order `parseRows` returns.** `parseRows` resolves each row
+> to an effective position — the parsed `#` value when it is a finite number,
+> otherwise the row's physical index (§5's existing fallback) — and returns rows
+> **stably sorted** by it. `mergeSetlist` consumes that array as given and never
+> re-sorts.
+
+Three consequences worth pinning, all tested (§9):
+
+- A sheet with `#` values that disagree with physical order is sorted by `#`.
+  That is the whole point of recognizing the column.
+- A sheet with **no** `#` column degenerates to identity: every row resolves to
+  its own index, so a stable sort is a no-op. The common case is unchanged.
+- **Duplicate or partial `#` values fall back gracefully** rather than throwing.
+  Two rows claiming `1` keep their physical order relative to each other
+  (stability); a sheet where only some rows have a number interleaves numbered
+  rows against unnumbered rows' indices. Neither is a great sheet, and neither
+  should lose a song. `NaN` is already guarded at §5.
+
+Locating the sort in `parseRows` also keeps `mergeSetlist` a pure function of the
+order it is handed, which is what makes rule 5a testable in isolation.
+
 **Rules, in order:**
 
 1. Build `byKey: Map<string, SetlistSong[]>` over `existing`, keyed by
    `normalizeSongKeySafe(title)`. Rows whose title normalizes to `null` (blank,
    punctuation-only) go in an unmatchable bucket and are treated as
    removal candidates.
-2. Walk `incoming` **in sheet order**. For each row, take the *first unconsumed*
-   existing row with the same normalized key and mark it consumed. Consumption
-   is what makes duplicate titles behave: two `"Intro"` rows in the sheet pair
-   with the two `"Intro"` rows in the setlist, first-to-first.
+2. Walk `incoming` **in sheet order as defined above** — i.e. the order
+   `parseRows` returned, already position-sorted. For each row, take the *first
+   unconsumed* existing row with the same normalized key and mark it consumed.
+   Consumption is what makes duplicate titles behave: two `"Intro"` rows in the
+   sheet pair with the two `"Intro"` rows in the setlist, first-to-first.
 3. **Matched row** → carry forward `id`, `songId`, `charts`, and every field the
    sheet did not supply. Overwrite only fields present as a **non-empty cell** in
    the sheet. Sheet order sets `position`.
@@ -265,7 +301,7 @@ Extend the header matcher (`app/api/sheet/route.ts:35-38`), lifted into
 
 | Field | Header matches | Notes |
 |---|---|---|
-| position | exact `#`, or contains `pos` | orders incoming rows only |
+| position | exact `#`, or contains `pos` | orders incoming rows only — **sorted by `parseRows`**, §4 |
 | title | contains `title`, or exact `song` | **required** |
 | key | **exact `key` or exact `song key` — no substring** | new; the headline feature |
 | lead | contains `lead` or `singer` | |
@@ -430,6 +466,25 @@ title.
 **parseRows** — non-numeric position falls back to row index; blank title rows
 dropped.
 
+**parseRows ordering — new in v4 (Codex R4 medium).** The `#` column is promised
+to order incoming rows; nothing tested that it does:
+
+3a. **Physical rows `[B(#=2), A(#=1)]` parse to `[A, B]`.** The direct assertion
+    that numeric positions are honored — an implementation that ignores the
+    column passes every other test in this file.
+3b. End to end through the merge: existing `[X, Y]`, sheet physically
+    `[Y'(#=2), X'(#=1)]` → exactly `[X', Y']`, not `[Y', X']`. Pins that the
+    order `parseRows` establishes is the order `mergeSetlist` consumes, which is
+    the seam where an implementation can quietly re-sort or not sort at all.
+3c. **No `#` column ⇒ identity.** Physical order is preserved exactly; the sort
+    is a no-op. Guards against a fix that sorts by an undefined field and
+    scrambles the common case.
+3d. Duplicate `#` values (two rows both `1`) keep physical order between them —
+    stability asserted, not incidental.
+3e. Partial `#` values (some rows numbered, some not) drop no rows. Assert the
+    full output set, since the risk here is a song vanishing, not a song
+    misplaced.
+
 **mergeSetlist** — the core. All calls pass a deterministic `newId` counter:
 
 1. Exact-title match preserves `id`, `songId`, `charts`, `bpm`.
@@ -476,8 +531,8 @@ not have caught it.
    no-op — enforceable now that ids are injected.
 10. A sheet BPM column never appears in the merged output (§10 regression).
 
-Target: **~24 new tests**, up from 0 for this feature (v3 said ~20; 7e–7g are the
-v4 additions). Test-count delta will be reported on the build PR.
+Target: **~29 new tests**, up from 0 for this feature (v3 said ~20; 7e–7g and
+3a–3e are the v4 additions). Test-count delta will be reported on the build PR.
 
 ---
 
@@ -566,7 +621,18 @@ table, v2's ordering gap). The standing lesson in
 invariant, re-derive every worked example from it rather than reading them back
 for plausibility.** I had read that block twice and seen what I meant.
 
-## 12. Open questions for Codex R4
+## 11c. Codex R4 — disposition
+
+| Finding | Disposition |
+|---|---|
+| **Medium** — position-column ordering promised but not tested | **Accepted, and the gap was upstream of the tests.** The doc asserted three times that `#` "orders incoming rows" and never named who sorts; "walk incoming in sheet order" reads equally well as physical order, so an implementation that ignores numeric `#` entirely satisfied every word *and* every test — all the v3 ordering tests reorder rows physically. §4 now **defines sheet order as the order `parseRows` returns** and gives `parseRows` the stable position-sort; `mergeSetlist` consumes it and never re-sorts. Tests 3a–3e, including your `[B(#=2), A(#=1)] → [A,B]` case (3a) and the same case through the merge (3b). |
+
+Nothing declined. Worth noting the pattern: **all four rounds on this document
+found a claim that was true in prose and unenforced in mechanism** — BPM
+persistence (R1), kept-row ordering (R2), the worked example (R3), and now the
+sort owner (R4). The tests kept passing because they tested what I meant.
+
+## 12. Open questions for Codex R5
 
 1. **§4 rule 5a's interleave consequence** is now stated rather than implied: an
    incoming row listed earlier in the sheet can land later than one listed after
@@ -574,8 +640,16 @@ for plausibility.** I had read that block twice and seen what I meant.
    "kept rows don't move" and not fixable without breaking the invariant that
    makes this safe — but if there is a rule that preserves both intents for the
    partial-sheet case, this is where it would go.
-2. §9 now asserts full arrays everywhere. Is there an ordering case in that set
-   that *passes* under a wrong implementation — i.e. is the suite's coverage of
-   rule 5a actually discriminating, or does 7f's property test carry it?
-3. Q2 (removal friction) and Q3 (client-side merge) are **closed** by your R3
-   answers. Nothing carried forward.
+2. **R4 Q2 answered itself.** I asked whether any ordering case in §9 *passes
+   under a wrong implementation*; your position-column finding is exactly that,
+   in the one dimension I hadn't thought to check. So the standing question,
+   sharpened: with `parseRows` now owning the sort and 3a–3e pinning it, is
+   there **another** promised behavior in this doc whose only enforcement is
+   that I meant it? §5's "empty cell ≠ clear" and §6's artist non-persistence
+   are the two I'd audit next; both are stated as rules and neither has a
+   dedicated negative test.
+3. §4's stable-sort fallbacks (duplicate `#`, partial `#`) are my call, not a
+   requirement anyone stated. Never losing a row is the priority I optimized
+   for; rejecting a malformed sheet outright is the alternative. Right trade for
+   a band's hand-maintained Google Sheet?
+4. R3's Q2 (removal friction) and Q3 (client-side merge) remain **closed**.
