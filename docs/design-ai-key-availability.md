@@ -1,7 +1,7 @@
 # Design — AI key availability: capability probe + real empty state
 
-Status: **DESIGN — Codex R3 folded, awaiting R4**
-Version: **v4.0** (v1 = pre-Codex, v2 = R1, v3 = R2)
+Status: **DESIGN — Codex R4 folded, awaiting R5**
+Version: **v5.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 
 **v2 changelog** — Codex R1 returned **no blockers**; three refinements folded:
@@ -34,6 +34,13 @@ Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 | §6.1 — `source: 'env'` and the KV-unreachable banner are now a **coupled requirement**, not two gaps | Codex R3 answer |
 | §9 — behavioral send-path test (14), paired-outage test (15), message-preservation tests (13a–13d) | Codex R3 answer |
 | Q1 (wrapper), Q2 (`ok`/`env`), Q3 (equivalence test) all **closed** | Codex R3 answers |
+
+**v5 changelog:**
+
+| Change | Source |
+|---|---|
+| §5.2 — the predicate is a **`streamStarted` flag set at the first read chunk**, not `assistantText.length === 0`. A tool-only stream has no text and must not be treated as never-sent. | Codex R4 **medium** |
+| §9 — tests 13c-i (tool-only stream), 13c-ii (unparseable bytes), 13c-iii (`tryitExhausted` restores). ~19 → ~22. | Codex R4 |
 
 ---
 
@@ -336,17 +343,41 @@ the message worth retrying: the long one.
 
 **Spec — restore on pre-stream failure:**
 
-- When a send fails **before any assistant content has been received**, restore
+- When a send fails **before the response stream has started**, restore
   `userText` to the composer **and remove the optimistic user message** from the
   transcript. Nothing was delivered, so the transcript should not claim
   otherwise, and a restored composer plus a duplicated transcript entry would be
   the worst of both.
-- The predicate is **"no bytes streamed"**, not "status was 401". A failure
-  after partial assistant text means the upstream call did happen and may have
-  billed; that message stays in the transcript, unrestored, and the user decides.
-  Scoping the fix to the invalid-key path only would leave every other pre-flight
-  failure (offline, 500, aborted) eating the text just as silently — same defect,
-  one branch over.
+- The predicate is **stream-started**, not "status was 401". A failure after the
+  stream began means the upstream call did happen and may have billed; that
+  message stays in the transcript, unrestored, and the user decides. Scoping the
+  fix to the invalid-key path only would leave every other pre-flight failure
+  (offline, 500, aborted) eating the text just as silently — same defect, one
+  branch over.
+
+**The predicate is a flag, not a text-length check** *(tightened in v5 — Codex
+R4 medium)*. v4 wrote it as "no bytes streamed", which an implementer can
+plausibly render as `assistantText.length === 0` — and that is **wrong**, because
+the stream can carry tool-use events with no text at all. `content_block_start`
+with `type: 'tool_use'`, then `input_json_delta` (`page.tsx:5060-5079`) produce a
+fully-started stream and an empty `assistantText`. A tool-only turn that fails
+mid-flight would be treated as never-sent, restoring a message the model had
+already begun acting on.
+
+> **Spec:** `let streamStarted = false`, set to `true` on the **first
+> `reader.read()` that yields a chunk** — at `buffer += decoder.decode(value)`
+> (`page.tsx:5046-5048`), *before* any SSE parsing. Restoration is gated on
+> `!streamStarted` and on nothing else.
+
+Set at the read, not at the parse, so it is also true for a stream that starts
+and then emits only unparseable lines — the request happened either way, which
+is the only thing the flag is asserting.
+
+The load-bearing case still works: an invalid key is a **non-`ok` response**, so
+`sendMessage` throws at `page.tsx:5026-5030` before `res.body.getReader()` is
+ever called. `streamStarted` is `false`, the message is restored. Same for
+`tryitExhausted` (`:5028`) — a tester who runs out of free messages keeps their
+text while they paste a key, which is the exact moment losing it would hurt most.
 - Retry stays **explicit** either way. Restoring the composer re-arms the
   existing Send control; it does not re-send. This satisfies Codex R2's
   no-auto-retry rule and R3's don't-lose-the-message rule at the same time,
@@ -556,6 +587,18 @@ New cases in a client test (jsdom + RTL, per the existing harness pattern in
      message stays in the transcript and the composer stays empty. Guards
      against a fix that reads "always restore" and quietly resurrects text the
      user already spent tokens on.
+13c-i. **A failure after a TOOL-ONLY stream is not restored either** — Codex R4
+     medium. Feed `content_block_start` (`type: 'tool_use'`) and
+     `input_json_delta` events, **no `text_delta`**, then fail. `assistantText`
+     is `''` and the message must still stay put. This is the test that
+     separates a correct `streamStarted` flag from
+     `assistantText.length === 0`; 13c alone passes under both.
+13c-ii. A failure after bytes arrive that parse to **nothing usable** (garbage
+     SSE, a lone `\n`) is also not restored. Pins that the flag is set at the
+     read, not at the parse.
+13c-iii. `tryitExhausted` (a non-`ok` response) **is** restored — the stream
+     never started. Quota exhaustion is the moment a tester most needs their
+     text kept while they go find a key.
 13d. Restoring does **not** re-send: after 13a the request mock is called
      exactly once until the user presses Send. This is Codex R2's no-auto-retry
      rule, now asserted rather than asserted-about.
@@ -572,7 +615,8 @@ New cases in a client test (jsdom + RTL, per the existing harness pattern in
     `/admin` reports the store unreachable and disables save. Both at once, in
     one test, because the risk is that only one of them ships.
 
-Target: **~19 new tests** (v3 said ~13; 13a–13d, 14, 15 are the v4 additions).
+Target: **~22 new tests** (v3 said ~13; 13a–13d, 14, 15 in v4; 13c-i/ii/iii in
+v5).
 Delta reported on the build PR.
 
 ---
@@ -618,18 +662,36 @@ Nothing declined. The high finding is worth naming plainly: this doc exists
 because the app reported a state it had not actually checked, and v3's retry
 claim was the same bug one level up, in the spec.
 
-## 11. Open questions for Codex R4
+## 10c. Codex R4 — disposition
 
-1. **§5.2's predicate is "no bytes streamed"**, which generalizes the fix past
-   the invalid-key path to every pre-flight failure. That is a wider behavior
-   change than the finding asked for, in a live send path. Right call, or should
-   restoration be scoped to the 401 case and the rest left alone for now?
-2. §5.2 removes the optimistic user message on restore. That is truthful — it
-   was never delivered — but it means a message can visibly *disappear* from the
-   transcript on failure. I think a vanishing message plus a refilled composer
-   reads as "not sent"; the alternative reading is that the user loses their
-   place. Is the transcript removal the right half of that pair to keep?
-3. §9 test 15 asserts the probe reports `available` while `/admin` reports the
-   store unreachable, in one test. Is there a third surface that also needs to
-   disagree honestly during a partial outage — the send path's own error copy,
-   for instance?
+| Finding | Disposition |
+|---|---|
+| **Medium** — "no bytes streamed" is not pinned for tool-only streams | **Accepted.** You caught the gap between what I meant and what an implementer would write: "no bytes streamed" renders naturally as `assistantText.length === 0`, and a tool-use stream carries `content_block_start`/`input_json_delta` with **no text at all** (`page.tsx:5060-5079`). That turn would have been treated as never-sent and its message restored, after the model had already begun acting. §5.2 now specifies a `streamStarted` flag set at the **first `reader.read()` chunk**, before parsing — so it is also true for a stream that emits only unparseable lines. Tests 13c-i (tool-only), 13c-ii (garbage SSE), 13c-iii (`tryitExhausted` still restores). |
+
+Nothing declined. Note what 13c alone would have done: it passes under both the
+correct flag and the broken length check, which is exactly why the finding
+matters. **The suite has to distinguish the two implementations, not just the two
+outcomes** — same lesson §9's full-array rule teaches on #121.
+
+Unanswered from R4, carried forward as Q1/Q2 below.
+
+## 11. Open questions for Codex R5
+
+1. **Carried, unanswered from R4** — §5.2's predicate generalizes restoration
+   past the invalid-key path to every pre-stream failure. That is a wider
+   behavior change than the finding asked for, in a live send path. Right call,
+   or should restoration be scoped to the 401 case for now? Your R4 finding
+   sharpened the predicate but did not rule on its breadth, and the breadth is
+   the part with blast radius.
+2. **Carried, unanswered from R4** — §5.2 removes the optimistic user message on
+   restore. Truthful (it was never delivered), but a message can visibly
+   *disappear* on failure. Is the transcript removal the right half of that pair
+   to keep?
+3. §5.2 sets `streamStarted` at the read rather than the parse, so a response
+   that opens a stream and immediately dies still counts as sent. That is
+   deliberately conservative — it errs toward *not* restoring. Is there a
+   failure shape common enough (proxy opens the stream, upstream 500s before any
+   real event) that erring the other way would serve testers better?
+4. §9 test 15 asserts the probe reports `available` while `/admin` reports the
+   store unreachable. Is there a third surface that also needs to disagree
+   honestly during a partial outage — the send path's own error copy?
