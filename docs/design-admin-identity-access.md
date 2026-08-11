@@ -1,7 +1,8 @@
 # Design — Admin identity, invite gate, tester deletion, and profiles read scope
 
-Status: **DESIGN — Codex R3 folded, awaiting R4**
-Version: **v4.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner)
+Status: **DESIGN — Codex R4 folded, awaiting R5**
+Version: **v5.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
+v4 = R3)
 Scope: admin authn/authz, signup gating, tester deletion, `profiles` RLS
 Driver: handing ShowRunr to outside UAT testers
 
@@ -39,9 +40,47 @@ placeholder UUIDs).
 |---|---|
 | **§6.2.1 NEW — the audit row now comes BEFORE the destruction.** v3 wrote it after `deleteUser`, so the storage-gone/account-remains path it named itself produced no audit row at all. Two-phase `attempted` → `succeeded`/`failed`. | Codex R3 **high** |
 | §3.6 — `admin_audit` gains `status` + `ended_at`, defaulted so single-phase call sites are unchanged | follows from §6.2.1 |
-| **§4.2.1 NEW — `activate_invites` still compares raw emails** against a normalized allowlist. Migration `016`: backfill + canonical CHECK + normalized comparison. | Codex R3 medium |
+| **§4.2.1 NEW — `activate_invites` still compares raw emails** against a normalized allowlist. Migration `016` *(renumbered to `017` in v5)*: backfill + canonical CHECK + normalized comparison. | Codex R3 medium |
 | §8 — tests 12d–12f (canonicalization) and 20–24 (failed-delete auditing). ~22 → ~30. | Codex R3 |
 | §3.4 `app/admin/layout.tsx` boundary confirmed; hard delete confirmed for UAT given failed-attempt auditing | Codex R3 answers |
+
+**v5 changelog:**
+
+| Change | Source |
+|---|---|
+| **Duplicate migration `016`** — §4.2.1 and §7 both claimed it. Mine → `017`, plus **§0.1 NEW**, an allocation table for `013`–`017` so the next addition can't collide. | Codex R4 **high** |
+| §4.2.1 step 2 — canonicalizing **trigger AND `CHECK`**, not either/or. Ergonomics and enforcement were not the trade I thought. | Codex R4 answer |
+| §8 — tests 12e-i (trigger normalizes), 12e-ii (CHECK still rejects with the trigger dropped). ~30 → ~33. | Codex R4 answer |
+
+---
+
+## 0.1 Migrations this design claims
+
+*(New in v5 — Codex R4 high. v4 allocated `016` in **two** sections, §4.2.1 and
+§7. With this repo's numbered convention that is a live implementation hazard:
+two files, one version, one of them silently masking or colliding with the
+other. The doc had grown migrations section by section with no single place to
+see what was taken — so the fix is the table, not just the renumber.)*
+
+Repo currently ends at `012_song_bpm.sql`; `004` never existed (§9).
+
+| Migration | Section | Contents |
+|---|---|---|
+| `013_admin_users.sql` | §3.1, §3.3, §3.6 | `admin_users`, `admin_audit` (incl. `status` + `ended_at`), bootstrap seed |
+| `014_signup_allowlist.sql` | §5 | `allowed_emails` + canonical `CHECK` |
+| `015_fk_cascades.sql` | §6.2 | the FK repair — every `auth.users` reference in the table at §6.2 |
+| `016_profiles_read_scope.sql` | §7 | drop `"Public read"`, add `"Self read"` |
+| `017_normalize_collaborator_email.sql` | §4.2.1 | backfill + canonicalizing trigger + `CHECK` on `show_collaborators` |
+
+**Any new migration added to this document takes the next free number here and
+is added to this table in the same edit.**
+
+The only hard ordering constraints are *within* files — `017`'s backfill must
+precede its own `CHECK` (§4.2.1), and `013`'s table creation precedes its seed.
+Across files they are independent, so the numbering is sequence, not dependency.
+One deploy-level constraint sits outside the numbering: `016` must ship in the
+**same deploy** as the `app/api/shows/route.ts` service-role switch (§7), or the
+collaborator dashboard breaks between them.
 
 ---
 
@@ -462,7 +501,10 @@ write path at all**: `show_collaborators` is only ever read in this repo
 Supabase console. Hand-typed is exactly where casing and trailing spaces come
 from, and there is no app layer that could have normalized them.
 
-**Spec — migration `016_normalize_collaborator_email.sql`:**
+**Spec — migration `017_normalize_collaborator_email.sql`:**
+
+*(v5: was `016`, which §7 had already claimed. See the allocation table in §0.1
+— that collision is exactly what it now exists to prevent.)*
 
 1. **Backfill:** `UPDATE show_collaborators SET email = lower(btrim(email))
    WHERE email <> lower(btrim(email));`. Run before the constraint, or the
@@ -471,11 +513,42 @@ from, and there is no app layer that could have normalized them.
    first, keeping the row with a non-null `user_id`, else the earliest
    `invited_at`. Unlikely at UAT scale; a migration that fails loudly on it is
    correct, one that silently drops a row is not.
-2. **Constrain:** `ALTER TABLE show_collaborators ADD CONSTRAINT
-   show_collaborators_email_canonical CHECK (email = lower(btrim(email)));` —
-   the same shape as `allowed_emails` (§5). A hand-insert of `'Test@Example.com'`
-   now **fails at insert time in the console**, where the operator sees it,
-   rather than succeeding and never linking.
+2. **Normalize on write, then constrain — both, not either** (Codex R4 answer,
+   and it is better than the choice I posed):
+
+   ```sql
+   CREATE FUNCTION canonicalize_collaborator_email() RETURNS trigger AS $$
+   begin
+     new.email := lower(btrim(new.email));
+     return new;
+   end;
+   $$ LANGUAGE plpgsql;
+
+   CREATE TRIGGER show_collaborators_canonical_email
+     BEFORE INSERT OR UPDATE ON show_collaborators
+     FOR EACH ROW EXECUTE FUNCTION canonicalize_collaborator_email();
+
+   ALTER TABLE show_collaborators ADD CONSTRAINT
+     show_collaborators_email_canonical CHECK (email = lower(btrim(email)));
+   ```
+
+   I had framed this as trigger **or** CHECK and asked which. Codex's answer —
+   *"trigger + CHECK, not either/or"* — dissolves the trade I thought I was
+   making. The trigger makes routine console entry just work, which is the
+   ergonomics half; the CHECK still enforces the invariant **if the trigger is
+   ever dropped, disabled, or bypassed**, which is the correctness half. Neither
+   substitutes for the other, and the cost of both is one function and one
+   constraint.
+
+   The remaining hazard is the migration's own ordering: with the trigger in
+   place the CHECK can never fire on normal writes, so **the constraint is only
+   validated against the backfilled table at migration time** (step 1). If step 1
+   is skipped, `ADD CONSTRAINT` fails loudly on the existing rows — which is the
+   correct outcome, and test 12e pins it.
+
+   Note the trigger fires on `UPDATE` too, so `activate_invites`' own writes
+   (`set user_id = ..., accepted_at = ...`) pass through it harmlessly — it
+   rewrites `email` to a value it already equals.
 3. **Normalize the comparison anyway:** `CREATE OR REPLACE FUNCTION
    activate_invites` with `where lower(btrim(email)) = lower(btrim(p_email))`.
    Belt and braces — the CHECK makes the left side canonical, this makes the
@@ -557,7 +630,7 @@ also plain references — nullable, so they block deletion too until cleared.
 
 ### 6.2 Two ways forward
 
-**(a) Add the missing cascades** in migration `015`:
+**(a) Add the missing cascades** in migration `015_fk_cascades.sql` (§0.1):
 
 ```sql
 ALTER TABLE shows DROP CONSTRAINT shows_owner_id_fkey,
@@ -744,10 +817,16 @@ Server:
      `auth.users.email` is `test@example.com`.** The case Codex named, and the
      one 12a would not have caught, because 12a uses a clean address on both
      sides. Run it against the post-migration RPC.
-12e. The `016` backfill normalizes a mixed-case row **and** the
-     `show_collaborators_email_canonical` CHECK then rejects a fresh
-     non-canonical insert — proving both halves landed, since either alone
-     leaves the hole open.
+12e. The `017` backfill normalizes a mixed-case row, and `ADD CONSTRAINT`
+     **fails loudly** if run against un-backfilled rows — the migration's
+     internal ordering asserted, not assumed.
+12e-i. **Trigger:** inserting `' Test@Example.COM '` into `show_collaborators`
+     **succeeds and stores `test@example.com`**. Routine console entry just
+     works (Codex R4 answer).
+12e-ii. **CHECK survives trigger removal:** with the trigger dropped, the same
+     insert is **rejected**. This is the half that would silently rot if only
+     the trigger existed, and the reason both ship — asserting the trigger's
+     effect alone would pass with no constraint at all.
 12f. The backfill's collision path: two rows on one show differing only by case
      dedupe to the one with a non-null `user_id`, and the migration **fails
      loudly** rather than dropping a row if that rule is ambiguous.
@@ -800,8 +879,8 @@ Deletion:
     a single `succeeded` row via the column default — the §3.6 change must not
     force every existing call site into two phases.
 
-Target: **~30 new tests** (v3 said ~22; 12d–12f and 20–24 are the v4
-additions). Delta reported on the build PR.
+Target: **~33 new tests** (v3 said ~22; 12d–12f and 20–24 added in v4, 12e-i/ii
+in v5). Delta reported on the build PR.
 
 ---
 
@@ -854,7 +933,7 @@ This design claims `013` onward.
 | Finding | Disposition |
 |---|---|
 | **High** — failed hard-deletes can be unaudited after destructive storage work | **Accepted, and it is the sharpest kind of miss: v3 named this exact failure mode in prose and then ordered the steps as if it hadn't.** The audit row was step 4, after `deleteUser` — so the one path where the record is the only surviving evidence produced no record. New **§6.2.1**: `attempted` row written *before* any destruction (abort if that insert fails), resolved to `succeeded`/`failed` in a `finally` with `storage_attempted`/`storage_deleted`/`error`. §3.6 gains `status` + `ended_at`, defaulting so non-destructive call sites are unchanged. Tests 20–24. |
-| **Medium** — activation is still exact-email against a normalized allowlist | **Accepted.** New **§4.2.1**. The R2 eligibility fix admits the right invitee and then links nothing when the hand-typed invite row differs by case or whitespace — same silent orphaning, one comparison further down. Migration `016`: backfill, canonical `CHECK` matching `allowed_emails`, and a normalized comparison in `activate_invites`. Worth noting the aggravating factor: `show_collaborators` has **no app write path at all** (4 read call sites, zero inserts), so every invite is hand-typed in the console — the least normalized source possible. Tests 12d–12f. |
+| **Medium** — activation is still exact-email against a normalized allowlist | **Accepted.** New **§4.2.1**. The R2 eligibility fix admits the right invitee and then links nothing when the hand-typed invite row differs by case or whitespace — same silent orphaning, one comparison further down. Migration `016` — **renumbered `017` in v5, see §0.1** — backfill, canonical `CHECK` matching `allowed_emails`, and a normalized comparison in `activate_invites`. Worth noting the aggravating factor: `show_collaborators` has **no app write path at all** (4 read call sites, zero inserts), so every invite is hand-typed in the console — the least normalized source possible. Tests 12d–12f. |
 | Hard delete acceptable for UAT **if failed attempts are audited** | Condition now met by §6.2.1 and gating on §6.3 shipping — that is the point of the two-phase row. |
 | `app/admin/layout.tsx` is the right App Router boundary; API routes stay on `requireAdmin` | Confirmed — §3.4 and §3.2 unchanged. **Q4 closed.** |
 
@@ -867,30 +946,41 @@ unsatisfiable"*, it is **"check whether the ordering of my own steps satisfies
 the risk I just described."** §6.2 described the orphaned-files window and then
 ordered the audit write outside it.
 
-## 11. Open questions for Codex R4
+## 10c. Codex R4 — disposition
 
-1. **§6.2.1's abort-if-audit-fails rule** makes `admin_audit` a hard dependency
-   of deletion: if the audit insert is down, nobody can delete a tester. I
-   believe that is the right failure direction for a destructive, irreversible
-   operation — but it does mean a table this design introduces can block an
-   operation Graham may need urgently. Is there a case for a break-glass path,
+| Finding | Disposition |
+|---|---|
+| **High** — duplicate migration version `016` | **Accepted.** §4.2.1's new migration and §7's `profiles` read-scope change both claimed `016`. Mine renumbers to **`017`**. But the renumber alone would leave the next section to make the same mistake, so v5 adds **§0.1: an allocation table** covering `013`–`017` with section, contents, and the rule that any new migration takes the next free number *in the same edit*. The doc had grown migrations section by section with nowhere to see what was taken — that was the actual defect, and it is the fourth time in this document a fact was true locally and unenforced globally. |
+| Use **trigger + CHECK**, not either/or | **Accepted, and it is a better answer than the question I asked.** I posed it as a trade — ergonomics (trigger) versus enforcement (CHECK) — and it isn't one. §4.2.1 step 2 now ships a `BEFORE INSERT OR UPDATE` canonicalizing trigger *and* the `CHECK`: routine console entry just works, and the invariant still holds if the trigger is dropped or bypassed. Test **12e-ii** drops the trigger and asserts the CHECK still rejects, since testing the trigger's effect alone would pass with no constraint at all. |
+
+Nothing declined, in any round. Four rounds, three docs, and Codex has found
+something real in every single one.
+
+## 11. Open questions for Codex R5
+
+1. **Carried, unanswered from R4** — §6.2.1's abort-if-audit-fails rule makes
+   `admin_audit` a hard dependency of deletion: if the audit insert is down,
+   nobody can delete a tester. I believe that is the right failure direction for
+   a destructive, irreversible operation, but it means a table this design
+   introduces can block an operation Graham may need urgently. Break-glass path,
    or is refusing to proceed correct?
-2. **§4.2.1 step 2** adds a `CHECK` that will make a non-canonical hand-insert
-   *fail* in the Supabase console. That is deliberate — fail loud at insert
-   rather than silently never link — but it changes the ergonomics of the only
-   way invites are currently created, and the operator is Graham. Is
-   fail-at-insert right, or should the migration add a `BEFORE INSERT` trigger
-   that normalizes instead, so hand-typed invites just work?
-3. §4.2 — carried from R3 Q2, unanswered: running activation from two call sites
-   relies on `activate_invites` being idempotent. Test 12b pins the sequential
-   case, but is the RPC safe under **concurrent** invocation, given sign-in and
-   claim can overlap? §4.2.1's rewrite is the natural moment to add locking if
-   it is needed.
-4. §6.3 — still open from R2 and R3: **soft delete** (`disabled_at`) for the UAT
-   window instead of hard? You have now twice accepted hard delete
-   conditionally, and both conditions are met — but §6.2.1 exists because the
-   irreversible path keeps growing failure modes that need recording. If that
-   trend is itself the argument for reversibility, this is the round to say so.
-5. Carried from R3 Q1, still unattacked: the eligibility predicate under
+2. **New, from the §0.1 work** — the allocation table is a convention enforced by
+   nothing but attention, which is what just failed. Is there a cheap mechanical
+   guard worth specifying (a CI check that migration filenames are unique and
+   contiguous), or is that over-engineering for a repo at `012`?
+3. §4.2 — carried from R3 Q2 and R4 Q3, still unanswered: running activation from
+   two call sites relies on `activate_invites` being idempotent. Test 12b pins
+   the sequential case, but is the RPC safe under **concurrent** invocation,
+   given sign-in and claim can overlap? `017` rewrites that function anyway, so
+   it is the cheap moment to add locking if it is needed — **this is the one I'd
+   most like answered before build**, since it is the last unexamined seam in the
+   onboarding path and the fix is nearly free while the file is already open.
+4. §6.3 — still open from R2, R3, and R4: **soft delete** (`disabled_at`) for the
+   UAT window instead of hard? You have now three times accepted hard delete
+   conditionally — but §6.2.1 exists because the irreversible path keeps growing
+   failure modes that need recording. If that trend is itself the argument for
+   reversibility, this is the round to say so.
+5. Carried from R3 Q1 and R4, still unattacked: the eligibility predicate under
    *sequences* — allowlist removed between OTP and claim, mode flipped
-   mid-session. R3 confirmed the shape but not the race.
+   mid-session. Two rounds have confirmed the shape and neither has probed the
+   race.
