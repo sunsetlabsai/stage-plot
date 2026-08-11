@@ -1,7 +1,7 @@
 # Design — AI key availability: capability probe + real empty state
 
-Status: **DESIGN — Codex R2 folded, awaiting R3**
-Version: **v3.0** (v1 = pre-Codex, v2 = R1)
+Status: **DESIGN — Codex R3 folded, awaiting R4**
+Version: **v4.0** (v1 = pre-Codex, v2 = R1, v3 = R2)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 
 **v2 changelog** — Codex R1 returned **no blockers**; three refinements folded:
@@ -24,6 +24,16 @@ Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 | §5 — the false privacy sentence is fixed **in the copy block itself** | Codex R2 medium |
 | §7 — quota set to **50** for UAT | Codex R2 answer |
 | §5.1 — **no auto-retry** after clearing a bad key | Codex R2 answer |
+
+**v4 changelog:**
+
+| Change | Source |
+|---|---|
+| **§5.2 NEW — the failed message is lost today.** `sendMessage` clears the composer before the fetch; v3's "retry is one keystroke" was false. Restore text + drop the undelivered transcript entry on any pre-stream failure. | Codex R3 **high** |
+| §4 — the `agent-key.ts` bullet now names **`readAdminConfig`**, not `getAdminConfig` | Codex R3 low |
+| §6.1 — `source: 'env'` and the KV-unreachable banner are now a **coupled requirement**, not two gaps | Codex R3 answer |
+| §9 — behavioral send-path test (14), paired-outage test (15), message-preservation tests (13a–13d) | Codex R3 answer |
+| Q1 (wrapper), Q2 (`ok`/`env`), Q3 (equivalence test) all **closed** | Codex R3 answers |
 
 ---
 
@@ -225,12 +235,23 @@ export async function resolveKeyMode(
 
 - the `fallbackQuota` map — **one instance**, imported by both routes
 - `consumeTryitQuota` / `peekTryitQuota` (`consume: true | false`)
-- the `getAdminConfig('claude_tryit_key')` lookup
+- the **`readAdminConfig('claude_tryit_key')`** lookup — status-aware, per §4.1.
+  *Corrected in v4 (Codex R3 low): v3 still named `getAdminConfig` here while
+  §4.1's entire fix was to stop resolving state through it. An implementer
+  reading §4 in isolation would have rebuilt the exact ambiguity §4.1 exists to
+  remove.* `resolveKeyMode` therefore branches on the `ConfigRead` **status**,
+  and propagates `none` vs `error` outward rather than flattening both to "no
+  key" — the distinction §5 depends on is made here or not at all.
 - the BYOA-wins precedence currently at `route.ts:100-123`
 
 `app/api/agent/chat/route.ts` and the new capabilities route both call it and
 neither owns quota state. This is a refactor of a working route; it is justified
 by the drift it forecloses, not by tidiness.
+
+**Codex R3 confirmed the wrapper is worth it.** The safety condition attached to
+it is that the send path is verified **behaviorally, not by byte-for-byte
+equivalence** with today's inline code — §9 test 14. Byte-equivalence would just
+freeze the current shape, including the parts §4.1 is deliberately changing.
 
 **Rate limiting:** the probe is unauthenticated and hits Redis. Reuse
 `checkRateLimit(ip, 'agent-capabilities')` from `lib/admin-rate-limit.ts:11-21`.
@@ -289,8 +310,53 @@ a key once, months ago, this reads as "the AI is broken."
   bad key; re-enable send and leave retry explicit."* Agreed — a `401` from
   Anthropic means the upstream call did not bill or apply, but the request did
   reach our proxy, and silently re-sending on a state change is the kind of
-  invisible duplicate that is miserable to debug. The composer retains the text,
-  so retry is one keystroke.
+  invisible duplicate that is miserable to debug. Retry must therefore be one
+  keystroke, which is §5.2 — and today it is not.
+
+### 5.2 "The composer retains the text" is false today (new in v4)
+
+**Codex R3 high, verified.** v3 asserted retry was one keystroke because the
+composer still held the message. It does not. `sendMessage` clears the input
+*before* the request and no path puts it back:
+
+```ts
+// app/[owner]/[show]/page.tsx:4994-4999
+async function sendMessage(text?: string) {
+  const userText = text ?? input.trim();
+  if (!userText || streaming) return;
+  setInput('');              // ← cleared here, before any fetch
+  setError('');
+```
+
+and the failure path is only `catch (e) { setError(...) }` (`:5094-5096`). So
+after an invalid-key failure the tester is left with their message stranded in
+the transcript, an error under it, and **an empty composer** — the "one
+keystroke" is actually retyping the whole prompt. That lands hardest on exactly
+the message worth retrying: the long one.
+
+**Spec — restore on pre-stream failure:**
+
+- When a send fails **before any assistant content has been received**, restore
+  `userText` to the composer **and remove the optimistic user message** from the
+  transcript. Nothing was delivered, so the transcript should not claim
+  otherwise, and a restored composer plus a duplicated transcript entry would be
+  the worst of both.
+- The predicate is **"no bytes streamed"**, not "status was 401". A failure
+  after partial assistant text means the upstream call did happen and may have
+  billed; that message stays in the transcript, unrestored, and the user decides.
+  Scoping the fix to the invalid-key path only would leave every other pre-flight
+  failure (offline, 500, aborted) eating the text just as silently — same defect,
+  one branch over.
+- Retry stays **explicit** either way. Restoring the composer re-arms the
+  existing Send control; it does not re-send. This satisfies Codex R2's
+  no-auto-retry rule and R3's don't-lose-the-message rule at the same time,
+  which is the combination v3 claimed and did not have.
+
+Codex offered "or render an explicit retry action from the failed user message"
+as the alternative. Rejected, narrowly: it adds a per-message affordance and a
+new message state to a transcript that has neither, and it leaves the
+already-cleared composer as a second thing to reason about. Restoring the input
+uses only state that exists.
 - The clear action removes both `localStorage` and `sessionStorage` entries and
   resets `rememberKey`, matching the existing handler.
 
@@ -354,6 +420,15 @@ Requirements:
    computed separately. Without it, §1's three cases stay indistinguishable from
    the UI, which is exactly the hole this whole document exists to close — and
    the `'error'` member is what §4.1 makes expressible for the first time.
+
+   **This is load-bearing for §4.1's env-fallback rule, not cosmetic** (Codex R3
+   answer). A Redis outage with a working `CLAUDE_TRYIT_KEY` resolves to
+   `ok`/`env`, which is right for the *user* — try-it works, so say so — but it
+   means the outage is invisible to everyone unless `/admin` reports it
+   independently. So gap 1 (`source: 'env'`) and gap 2 (the `isKvConnected()`
+   banner) are a **pair**: shipping the fallback without both would trade a
+   user-facing lie for an operator-facing one. Test 6b asserts the user side;
+   test 15 asserts the admin side of the same outage.
 2. **Redis-down reads as key-missing.** `getAdminConfig` swallows Redis errors
    and falls through to env (`:35-37`), so a Redis outage with no env var renders
    as a clean "not configured". Meanwhile `setAdminConfig` **throws**
@@ -467,7 +542,38 @@ New cases in a client test (jsdom + RTL, per the existing harness pattern in
     `Clear saved key` action; clearing it re-probes and, when try-it is
     available, lands in state 3 with send enabled.
 
-Target: **~13 new tests**. Delta reported on the build PR.
+**§5.2 message preservation (new in v4) — Codex R3 high:**
+
+13a. An invalid-key failure **restores the message text to the composer** and
+     removes the optimistic user message from the transcript. Assert on the
+     composer's value, not on the absence of an error — the v3 spec would have
+     passed an error-rendering assertion while still losing the text.
+13b. The same holds for a **non-401 pre-stream failure** (network throw, 500):
+     restored composer, no stranded transcript entry. This is the general rule
+     of §5.2, and the reason the predicate is "no bytes streamed" rather than
+     "status 401".
+13c. A failure **after** partial assistant text is **not** restored — the
+     message stays in the transcript and the composer stays empty. Guards
+     against a fix that reads "always restore" and quietly resurrects text the
+     user already spent tokens on.
+13d. Restoring does **not** re-send: after 13a the request mock is called
+     exactly once until the user presses Send. This is Codex R2's no-auto-retry
+     rule, now asserted rather than asserted-about.
+
+**§4 wrapper — behavioral, not byte-equivalent (Codex R3 answer):**
+
+14. `resolveKeyMode` preserves the send path's observable behavior: BYOA key
+    wins over try-it; a try-it send with quota remaining decrements once; an
+    exhausted quota 429s. Assert the outcomes, **not** that the extracted code
+    matches `route.ts:100-123` line for line — §4.1 deliberately changes the
+    config read inside it.
+15. **Admin side of the §6 pair:** with the store unreachable and
+    `CLAUDE_TRYIT_KEY` set, the probe reports `available` (test 6b) **while**
+    `/admin` reports the store unreachable and disables save. Both at once, in
+    one test, because the risk is that only one of them ships.
+
+Target: **~19 new tests** (v3 said ~13; 13a–13d, 14, 15 are the v4 additions).
+Delta reported on the build PR.
 
 ---
 
@@ -498,19 +604,32 @@ Nothing declined. Note the §4.1 work also supplies §6.1's `source` field,
 including an `'error'` member that was not previously expressible — one lookup
 now feeds both surfaces, which is what stops them drifting.
 
-## 11. Open questions for Codex R3
+## 10b. Codex R3 — disposition
 
-1. **§4.1** — `getAdminConfig` is reimplemented as a thin wrapper over
-   `readAdminConfig` so there is one lookup with two shapes. That touches a
-   helper used by four other routes (`agent/chat`, `charts/convert`,
-   `charts/roadmap/parse`, `admin/backfill-chart-overlays`). Is the wrapper worth
-   it versus two independent functions with duplicated Redis handling? I lean
-   wrapper, but it widens the blast radius of this PR beyond the AI tab.
-2. §4.1 — is `{ status: 'ok', source: 'env' }` the right answer when Redis is
-   down but the env var works? It hides a real outage behind a working fallback.
-   My reasoning: `error` should mean *no usable value*, and `/admin` still shows
-   the store as unreachable via `isKvConnected()` (§6.2). But it does mean the
-   probe reports healthy during a partial outage.
-3. §4 — the extraction moves quota state out of a route that is live in
-   production. Is test 8 enough, or do you want an explicit before/after
-   equivalence test on the send path in the same PR?
+| Finding | Disposition |
+|---|---|
+| **High** — "no auto-retry" loses the failed message | **Accepted, and it was a real defect in my own claim.** v3 justified explicit retry by saying the composer retains the text; `page.tsx:4998` clears it before the fetch and nothing restores it. I asserted a property of code I had read, without checking it — the same failure mode as this document's own §1. New **§5.2**: restore the text and drop the optimistic transcript entry on any **pre-stream** failure, retry still explicit. Tests 13a–13d. |
+| **Low** — §4 still names `getAdminConfig` | **Accepted.** That bullet was the one place an implementer could rebuild the exact ambiguity §4.1 removes. Now `readAdminConfig`, and `resolveKeyMode` propagates `none` vs `error` rather than flattening. |
+| Wrapper over `readAdminConfig` is worth it | Confirmed — §4.1 stands. **Q1 closed.** |
+| `ok`/`env` during a store outage is right, **if** `/admin` shows KV unreachable separately | Confirmed, and now written as a **coupled requirement** rather than two independent gaps: §6.1 states the pairing, test 15 asserts both halves in one test. **Q2 closed.** |
+| Behavioral send-path test, not byte-for-byte equivalence | **Accepted** — test 14 asserts outcomes (BYOA precedence, single decrement, 429 at quota). Byte-equivalence would have frozen the very code §4.1 changes. **Q3 closed.** |
+
+Nothing declined. The high finding is worth naming plainly: this doc exists
+because the app reported a state it had not actually checked, and v3's retry
+claim was the same bug one level up, in the spec.
+
+## 11. Open questions for Codex R4
+
+1. **§5.2's predicate is "no bytes streamed"**, which generalizes the fix past
+   the invalid-key path to every pre-flight failure. That is a wider behavior
+   change than the finding asked for, in a live send path. Right call, or should
+   restoration be scoped to the 401 case and the rest left alone for now?
+2. §5.2 removes the optimistic user message on restore. That is truthful — it
+   was never delivered — but it means a message can visibly *disappear* from the
+   transcript on failure. I think a vanishing message plus a refilled composer
+   reads as "not sent"; the alternative reading is that the user loses their
+   place. Is the transcript removal the right half of that pair to keep?
+3. §9 test 15 asserts the probe reports `available` while `/admin` reports the
+   store unreachable, in one test. Is there a third surface that also needs to
+   disagree honestly during a partial outage — the send path's own error copy,
+   for instance?
