@@ -2,8 +2,8 @@
 
 *(BPM and Artist are recognized but **deliberately not imported** — §6, §10.)*
 
-Status: **DESIGN — Codex R2 folded, awaiting R3**
-Version: **v3.0** (v1 = pre-Codex, v2 = R1)
+Status: **DESIGN — Codex R3 folded, awaiting R4**
+Version: **v4.0** (v1 = pre-Codex, v2 = R1, v3 = R2)
 Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
 
 **v2 changelog:**
@@ -23,6 +23,15 @@ Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
 |---|---|
 | §4 rule 5a NEW — **kept-missing row ordering** is now a stated invariant. It was undefined. | Codex R2 **high** |
 | Title and §1b no longer promise tempo import | Codex R2 low |
+
+**v4 changelog:**
+
+| Change | Source |
+|---|---|
+| §4 rule 5a — the `[C',NEW]` **example contradicted its own invariant** (dropped a kept row). Corrected, derived step by step, plus the slot-count identity that makes it checkable. | Codex R3 **blocking** |
+| §4 rule 5a — the interleave consequence (incoming rows fill slots, not sheet intent) now stated explicitly | follows from the fix |
+| §9 — ordering tests assert the **full merged array + dense positions**, not spot-checks. 7e/7f/7g added. | Codex R3 |
+| Q2 (removal friction) and Q3 (client-side merge) **closed** by Codex's R3 answers | Codex R3 answers |
 
 ---
 
@@ -175,20 +184,58 @@ passes `crypto.randomUUID`.
 
    ```
    existing: [A, B, C, D, E]
-   sheet:    [C']                 → [A, B, C', D, E]   C' keeps slot 2
-   sheet:    [C', A']             → [C', B, A', D, E]  subset reorders in place
-   sheet:    [C', NEW]            → [A, B, C', NEW, E] ...
-   sheet:    [E',D',C',B',A']     → [E', D', C', B', A']  full sheet ⇒ sheet order
+   sheet:    [C']              → [A, B, C', D, E]        C' keeps slot 2
+   sheet:    [C', A']          → [C', B, A', D, E]       subset reorders in place
+   sheet:    [C', NEW]         → [A, B, C', D, E, NEW]   kept A,B,D,E hold 0,1,3,4
+   sheet:    [NEW, C']         → [A, B, NEW, D, E, C']   free slots 2,5, sheet order
+   sheet:    [E',D',C',B',A']  → [E', D', C', B', A']    full sheet ⇒ sheet order
    ```
 
-   Two properties worth stating because they make this safe to implement:
+   *Corrected in v4 — Codex R3 blocking. v3's third line read
+   `[A, B, C', NEW, E]`, which is length 5 against 6 rows: it silently dropped
+   `D` and moved `E`. The invariant one paragraph above it was right; the example
+   under it was not, and an implementer building to the example would have
+   shipped exactly the shuffle-and-drop this rule exists to prevent. That is the
+   second time in this document a worked example has been the thing that was
+   wrong while the prose was right — see §11b.*
 
+   The derivation for that row, in full, because it is the case that was wrong:
+
+   ```
+   existing [A,B,C,D,E], sheet [C',NEW], removeMissing: false
+     C' matches C (consumed)     → incoming, needs a slot
+     NEW matches nothing         → incoming, needs a slot
+     A,B,D,E unconsumed          → kept, hold indices 0,1,3,4
+     merged length = 5 existing + 1 added = 6
+     free slots  = {2, 5}
+     incoming in sheet order     → C'→2, NEW→5
+     result [A, B, C', D, E, NEW], positions 1..6
+   ```
+
+   Three properties worth stating because they make this safe to implement:
+
+   - **The slots always fit exactly.** Free slots number
+     `merged.length − kept = (existing + added) − (existing − matched)
+     = added + matched = incoming.length`. There is never a spare slot and never
+     an incoming row without one, so the fill needs no fallback branch. Any
+     implementation that can leave a hole has a bug, and a hole is assertable in
+     test.
    - **Slots are always in range.** With `removeMissing: false` the merged length
      is `existing.length + added.length ≥ existing.length`, so every retained
      existing index is a valid slot. No clamping, no edge case.
    - **A full sheet degenerates to pure sheet order.** When nothing is missing
      there are no held slots, so the rule collapses to v2's behavior and the
      "sheet is authoritative" case is unchanged.
+
+   **The consequence to state out loud** (`[NEW, C']` above): kept rows and
+   incoming rows each preserve their own relative order, but the two sequences
+   are *interleaved by slot availability*, not merged by sheet intent. So an
+   incoming row listed **before** another in the sheet can land **after** it,
+   when the earlier free slot falls earlier in the setlist. This is the price of
+   "nothing you didn't mention moves," and it is the right trade for the partial
+   sheet this rule is for — but it means a band using the sheet to *reorder*
+   should send the whole setlist, not a fragment. §7's preview renders the final
+   order, so the effect is visible before Apply rather than discovered after.
 
    With `removeMissing: true` there are no kept rows and sheet order is the
    order, exactly as v2 specified.
@@ -394,19 +441,43 @@ dropped.
 6. `removeMissing: false` (the default) **keeps** a row absent from the sheet,
    and still reports it in `diff.missing`.
 7. `removeMissing: true` drops it and reports it in `diff.removed`.
+**Ordering tests pin the FULL output array, exactly** — Codex R3, and it is the
+condition attached to keeping the merge client-side (§12). Not "the new row is
+not at position 1", not a length check, not a spot-check of one index: each of
+7a–7e deep-equals the complete merged title sequence **and** asserts
+`positions === [1..n]`. The v3 blocker was a worked example that disagreed with
+its own rule; a test that asserts less than the whole array is a test that would
+not have caught it.
+
 7a. **Partial-sheet ordering (§4 rule 5a):** existing `[A,B,C,D,E]`, sheet `[C']`
-    → `[A,B,C',D,E]`, i.e. C' holds index 2 and **nothing else moves**.
-7b. Subset reorder: sheet `[C',A']` → `[C',B,A',D,E]`.
-7c. Partial sheet with an addition: sheet `[C',NEW]` → the new row takes the
-    next free slot, not position 1.
-7d. Full sheet degenerates to pure sheet order (no held slots).
+    → exactly `[A,B,C',D,E]` — C' holds index 2 and **nothing else moves**.
+7b. Subset reorder: sheet `[C',A']` → exactly `[C',B,A',D,E]`.
+7c. Partial sheet with an addition: sheet `[C',NEW]` → exactly
+    `[A,B,C',D,E,NEW]`. Length 6: no kept row is dropped, `D` and `E` hold slots
+    3 and 4, `NEW` takes the appended slot 5. **This is the v3 blocker, frozen
+    as a regression guard** — assert the full array, not just NEW's index.
+7d. Full sheet degenerates to pure sheet order (no held slots): sheet
+    `[E',D',C',B',A']` → exactly `[E',D',C',B',A']`.
+7e. **Interleave order** — sheet `[NEW,C']` → exactly `[A,B,NEW,D,E,C']`. The
+    incoming rows fill free slots `{2,5}` in sheet order, so `C'` lands *after*
+    `NEW` despite being listed second. Pins the consequence named in §4 rule 5a
+    so it can only change deliberately.
+7f. **No holes, exact fit.** Property test over random
+    existing/sheet/overlap combinations with `removeMissing: false`: the merged
+    array contains no empty slot, its length is `existing + added`, every kept
+    row sits at its original index, and incoming rows appear in sheet order
+    among themselves. This is the §4 slot-arithmetic identity asserted directly.
+7g. **Duplicate titles × held slots** — §12 Q1's intersection, which Codex asked
+    about in R3 and did not find a break in. Existing `[Intro,A,Intro,B]`, sheet
+    `[Intro']`: first-unconsumed pairing binds `Intro'` to index 0, the second
+    `Intro` is kept at index 2 → exactly `[Intro',A,Intro,B]`.
 8. A title that normalizes to empty (`"???"`) never matches anything.
 9. Round-trip: `merge(existing, exportOf(existing))` is an exact deep-equal
    no-op — enforceable now that ids are injected.
 10. A sheet BPM column never appears in the merged output (§10 regression).
 
-Target: **~20 new tests**, up from 0 for this feature. Test-count delta will be
-reported on the build PR.
+Target: **~24 new tests**, up from 0 for this feature (v3 said ~20; 7e–7g are the
+v4 additions). Test-count delta will be reported on the build PR.
 
 ---
 
@@ -477,17 +548,34 @@ existing relative positions"), tightened to an exact rule rather than
 "as much as possible" — see 5a for why slots are always in range, which is what
 makes the exact form implementable.
 
-## 12. Open questions for Codex R3
+## 11b. Codex R3 — disposition
 
-1. **§4 rule 5a** is new and is the load-bearing addition in v3. Does the
-   slot-holding invariant hold up against a case I haven't listed — particularly
-   duplicate titles interacting with held slots (rule 2's first-unconsumed
-   pairing plus 5a's index retention)? That intersection is the part I'd attack.
-2. §4 rule 5 — with removal opt-in, a band whose sheet *is* the full setlist must
-   tick a box every time to prune. Right place for the friction? I think yes,
-   but it inverts the common case for a band with one authoritative sheet.
-3. Carried from R1, still open: the merge runs **client-side** from the route's
-   rows, so the logic is only ever exercised in a browser. Should `/api/sheet`
-   return the diff instead, making it server-testable end-to-end? Rule 5a makes
-   this more pressing — the ordering invariant is now the most intricate part of
-   the feature and deserves the stronger test surface.
+| Finding | Disposition |
+|---|---|
+| **Blocking** — the addition example contradicts the slot invariant | **Accepted in full, and it was a real one.** `[C',NEW]` under the stated rule is `[A,B,C',D,E,NEW]`; the doc printed `[A,B,C',NEW,E]`, dropping `D` and moving `E`. §4 rule 5a now carries the corrected table, a step-by-step derivation of that exact case, and the slot-count identity (`free slots ≡ incoming.length`) that makes the wrong answer arithmetically impossible to write. Test 7c freezes the full array as a regression guard. |
+| Pin the exact full output in 7c | **Accepted, and widened.** All ordering tests (7a–7e) now deep-equal the complete title sequence *and* assert dense 1..n positions, with 7f as a property test for "no holes, exact fit" and 7g for the duplicates × held-slots intersection you probed in R2. |
+| Removal opt-in is still the right friction | Confirmed — §4 rule 5 and §7 unchanged. **Q2 closed.** |
+| Keep merge client-side for now | Confirmed — §8 refactor stands (pure functions in `lib/setlist-import.ts`, node-env tests, no route change). **Q3 closed**, on the stated condition that the pure-function tests pin full slot outputs, which is now §9's explicit rule. |
+
+Nothing was declined. **Three rounds, three docs, and Codex has found something
+real in every one** — this round's was the sharpest kind: prose and example
+disagreeing, where the prose is right and the example is what an implementer
+copies. Both prior instances in this document were the same shape (v1's BPM
+table, v2's ordering gap). The standing lesson in
+[[project_showrunr_uat_readiness]] gets a corollary: **after writing an
+invariant, re-derive every worked example from it rather than reading them back
+for plausibility.** I had read that block twice and seen what I meant.
+
+## 12. Open questions for Codex R4
+
+1. **§4 rule 5a's interleave consequence** is now stated rather than implied: an
+   incoming row listed earlier in the sheet can land later than one listed after
+   it, when free slots fall that way (test 7e). I believe that is inherent to
+   "kept rows don't move" and not fixable without breaking the invariant that
+   makes this safe — but if there is a rule that preserves both intents for the
+   partial-sheet case, this is where it would go.
+2. §9 now asserts full arrays everywhere. Is there an ordering case in that set
+   that *passes* under a wrong implementation — i.e. is the suite's coverage of
+   rule 5a actually discriminating, or does 7f's property test carry it?
+3. Q2 (removal friction) and Q3 (client-side merge) are **closed** by your R3
+   answers. Nothing carried forward.
