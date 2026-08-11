@@ -1,8 +1,8 @@
 # Design — Admin identity, invite gate, tester deletion, and profiles read scope
 
-Status: **DESIGN — Codex R4 folded, awaiting R5**
-Version: **v5.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
-v4 = R3)
+Status: **DESIGN — Codex R4 folded + Graham ruling, awaiting R5**
+Version: **v6.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
+v4 = R3, v5 = R4)
 Scope: admin authn/authz, signup gating, tester deletion, `profiles` RLS
 Driver: handing ShowRunr to outside UAT testers
 
@@ -51,6 +51,16 @@ placeholder UUIDs).
 | **Duplicate migration `016`** — §4.2.1 and §7 both claimed it. Mine → `017`, plus **§0.1 NEW**, an allocation table for `013`–`017` so the next addition can't collide. | Codex R4 **high** |
 | §4.2.1 step 2 — canonicalizing **trigger AND `CHECK`**, not either/or. Ergonomics and enforcement were not the trade I thought. | Codex R4 answer |
 | §8 — tests 12e-i (trigger normalizes), 12e-ii (CHECK still rejects with the trigger dropped). ~30 → ~33. | Codex R4 answer |
+
+**v6 changelog** — Graham ruled the standing concurrency question, 2026-08-11:
+
+| Change | Source |
+|---|---|
+| **§4.2.2 NEW — no locking.** A single UPDATE at READ COMMITTED re-evaluates its predicate after a lock wait, so a concurrent duplicate updates zero rows. Idempotence falls out of the statement's shape. | Graham ruling |
+| **★ §4.2.2 — the `DROP FUNCTION` grant-reset trap.** `001:273` revokes EXECUTE from `authenticated`; `CREATE OR REPLACE` preserves that, `DROP` + `CREATE` does not. Changing the return type *requires* a DROP — so the obvious next improvement to this function would silently expose a `security definer` row-ownership primitive. `017` stays `CREATE OR REPLACE`. | found while answering |
+| **§4.2.3 NEW — the activation route reports success it never verified.** It discards the RPC error and returns `activated: true` unconditionally; the client ignores the response too. Fixed at the app layer. | found while answering |
+| §8 — tests 12g (route 500s on RPC error), 12h (concurrent activation is a no-op), 12i (`authenticated` still cannot EXECUTE after `017`). ~33 → ~36. | Graham ruling |
+| Return-count improvement and the `handleVerifyOtp` spinner bug → **backlog, with reasons recorded** | Graham ruling |
 
 ---
 
@@ -549,21 +559,115 @@ from, and there is no app layer that could have normalized them.
    Note the trigger fires on `UPDATE` too, so `activate_invites`' own writes
    (`set user_id = ..., accepted_at = ...`) pass through it harmlessly — it
    rewrites `email` to a value it already equals.
-3. **Normalize the comparison anyway:** `CREATE OR REPLACE FUNCTION
-   activate_invites` with `where lower(btrim(email)) = lower(btrim(p_email))`.
-   Belt and braces — the CHECK makes the left side canonical, this makes the
-   RPC correct even against rows that predate it or arrive by some path we
-   haven't thought of. It costs a function replace and removes the whole class.
-   The replacement must carry `security definer` and `language plpgsql`
-   forward verbatim (`001:263-271`) — dropping `security definer` would leave
-   the update subject to RLS and silently link nothing, which is the same
-   failure this fixes wearing a different hat.
+3. **Normalize the comparison anyway — via `CREATE OR REPLACE`, never
+   `DROP` + `CREATE`.** `CREATE OR REPLACE FUNCTION activate_invites` with
+   `where lower(btrim(email)) = lower(btrim(p_email))`. Belt and braces — the
+   CHECK makes the left side canonical, this makes the RPC correct even against
+   rows that predate it or arrive by some path we haven't thought of.
+
+   The replacement must carry `security definer` and `language plpgsql` forward
+   verbatim (`001:263-271`) — dropping `security definer` would leave the update
+   subject to RLS and silently link nothing, which is the same failure this
+   fixes wearing a different hat.
+
+   **`CREATE OR REPLACE` is load-bearing, not stylistic — see §4.2.2.**
 
 The index consequence is worth a line: the `unique(show_id, email)` index still
 serves the lookup, because after step 2 the stored side is canonical and
 `lower(btrim(email))` on it is a no-op — but the RPC's expression form will not
 use that index. At UAT row counts this is irrelevant; naming it here so nobody
 "optimizes" step 3 away later without knowing why it exists.
+
+### 4.2.2 Concurrency, and the grant trap behind it — Graham ruled 2026-08-11
+
+Standing question across R3/R4/R5: activation now runs from two call sites and
+relies on `activate_invites` being idempotent. Is the RPC safe under
+**concurrent** invocation? **Resolved: yes, and no locking is added.**
+
+**The overlap window is nearly nonexistent.** `handleVerifyOtp` *awaits* the
+activate-invites fetch before `router.push(redirect)`
+(`app/sign-in/page.tsx:63-65`), so call site A has finished before `/claim`
+renders, and call site B (`POST /api/profiles`) cannot fire until a human has
+typed a handle. The realistic double-fire is **the same call site twice** — a
+double-clicked claim button, or two tabs — not the two racing each other.
+
+**And that case is already safe, for a structural reason worth recording.** The
+RPC is a single UPDATE at READ COMMITTED (`001:264-269`). Two concurrent
+executions: T2 finds row R matching `user_id is null` in its snapshot, blocks on
+T1's row lock, then **re-evaluates the WHERE clause against the committed new
+row version** — `user_id` is no longer null, so R is skipped. The duplicate
+updates zero rows. Idempotence is not a property we add; it falls out of the
+statement's shape. Two corollaries: `accepted_at` is never clobbered on re-run
+(the row stops matching), and first-writer-wins means no interleaving yields a
+wrong `user_id`.
+
+Adding an advisory lock would be ceremony around a guarantee Postgres already
+gives — and Neon's pooled connections don't support advisory locks anyway
+([[feedback_neon_migrations]]), so it would have to be row-level, serializing
+the onboarding path to defend against a race that cannot occur.
+
+**★ The trap this analysis uncovered.** `001:273` is:
+
+```sql
+revoke execute on function activate_invites from public, anon, authenticated;
+```
+
+That revoke is the only thing stopping a `security definer` function — one that
+links collaborator rows to **any** `user_id` you hand it — from being callable by
+every signed-in user through PostgREST.
+
+> **`CREATE OR REPLACE` preserves grants. `DROP FUNCTION` + `CREATE` resets them
+> to the default, EXECUTE to PUBLIC.**
+
+Step 3 as specified only changes the function *body*, so `CREATE OR REPLACE`
+works and the revoke survives. But Postgres **requires** a DROP to change a
+function's **return type** — and `returns void` → `returns integer` is the
+obvious next improvement to this function (see below). Anyone making that change
+without re-issuing the revoke opens a privilege escalation in the function whose
+entire job is assigning ownership of invite rows. Recorded here because the trap
+is invisible at the call site and the fix looks like an improvement.
+
+This is the third instance in this document of a repair introducing the defect
+class it was repairing (R2's FK holes, R4's duplicate `016`, now this).
+
+**Graham's ruling (2026-08-11): keep `017` to the WHERE clause, fix the lie in
+the route instead.** Scope stays `CREATE OR REPLACE`, grants untouched, zero new
+privilege surface.
+
+### 4.2.3 The activation route reports success it did not verify
+
+Independent of the SQL, and in scope as an app-layer fix:
+
+```ts
+// app/api/auth/activate-invites/route.ts:14-19
+await admin.rpc('activate_invites', { ... });   // error discarded
+return Response.json({ activated: true });      // unconditional
+```
+
+The RPC's error is never read, so the route returns `200 { activated: true }`
+when activation **errored**. Combined with the client ignoring the response
+(`sign-in/page.tsx:63`), a total failure of invite activation is invisible on
+both ends — which is how the R2 blocker would have stayed hidden in production
+even after being fixed.
+
+**Spec:** destructure and check `{ error }`; on error return `500` and log. The
+`POST /api/profiles` call site (§4.2's belt-and-braces re-run) does the same.
+This is the whole of the route change — no row count, no return-type change, no
+DROP. Test 12g.
+
+**Deliberately deferred to backlog, with the reason recorded so it isn't
+rediscovered as a good idea:**
+
+- `activate_invites` returning the affected row count would let callers log
+  *"linked N invites"* and make idempotence assertable on the return value
+  rather than on table state. It is a genuine improvement and it is **not worth
+  the DROP** above during a UAT window. If it is ever done, the migration must
+  re-issue the `revoke` and ship a fail-closed test asserting `authenticated`
+  cannot EXECUTE it.
+- `handleVerifyOtp` (`sign-in/page.tsx:62-65`) has no `try`/`catch`: if the
+  activation fetch throws, `setLoading(false)` and `router.push` are both
+  skipped, leaving the tester on a spinner with no error. Real bug, unrelated to
+  identity — belongs in the UAT-polish batch, not this PR.
 
 ### 4.3 Mode switch
 
@@ -827,6 +931,23 @@ Server:
      insert is **rejected**. This is the half that would silently rot if only
      the trigger existed, and the reason both ship — asserting the trigger's
      effect alone would pass with no constraint at all.
+
+**§4.2.2 / §4.2.3 — concurrency and the honest route (new in v6):**
+
+12g. **The route returns 500 when the RPC errors**, not `200 { activated: true }`.
+     Mock the RPC to fail. Today's code passes *no* assertion here because it
+     never reads the error — this is the regression guard for a failure that is
+     currently invisible on both client and server.
+12h. **Concurrent activation is a no-op, not a conflict.** Two overlapping
+     `activate_invites` calls for the same user link each collaborator row
+     **exactly once**, and `accepted_at` retains the **first** call's timestamp.
+     Pins the READ COMMITTED behavior §4.2.2 relies on, so that if anyone later
+     rewrites the single UPDATE into a read-then-write, the test fails rather
+     than the reasoning silently expiring.
+12i. **`authenticated` cannot EXECUTE `activate_invites`** after `017` runs.
+     `017` uses `CREATE OR REPLACE` so grants are preserved — this asserts that
+     they *were*, and fails loudly if the migration is ever rewritten as
+     `DROP` + `CREATE` without re-issuing `001:273`'s revoke (§4.2.2).
 12f. The backfill's collision path: two rows on one show differing only by case
      dedupe to the one with a non-null `user_id`, and the migration **fails
      loudly** rather than dropping a row if that rule is ambiguous.
@@ -879,8 +1000,8 @@ Deletion:
     a single `succeeded` row via the column default — the §3.6 change must not
     force every existing call site into two phases.
 
-Target: **~33 new tests** (v3 said ~22; 12d–12f and 20–24 added in v4, 12e-i/ii
-in v5). Delta reported on the build PR.
+Target: **~36 new tests** (v3 said ~22; 12d–12f and 20–24 added in v4, 12e-i/ii
+in v5, 12g–12i in v6). Delta reported on the build PR.
 
 ---
 
@@ -968,13 +1089,17 @@ something real in every single one.
    nothing but attention, which is what just failed. Is there a cheap mechanical
    guard worth specifying (a CI check that migration filenames are unique and
    contiguous), or is that over-engineering for a repo at `012`?
-3. §4.2 — carried from R3 Q2 and R4 Q3, still unanswered: running activation from
-   two call sites relies on `activate_invites` being idempotent. Test 12b pins
-   the sequential case, but is the RPC safe under **concurrent** invocation,
-   given sign-in and claim can overlap? `017` rewrites that function anyway, so
-   it is the cheap moment to add locking if it is needed — **this is the one I'd
-   most like answered before build**, since it is the last unexamined seam in the
-   onboarding path and the fix is nearly free while the file is already open.
+3. **CLOSED — Graham ruled 2026-08-11.** The `activate_invites` concurrency
+   question is resolved in **§4.2.2**: no locking, because a single UPDATE at
+   READ COMMITTED re-evaluates its predicate after a lock wait and the duplicate
+   updates zero rows. `017` stays `CREATE OR REPLACE` (grants preserved); the
+   route's unconditional `activated: true` is fixed at the app layer instead
+   (§4.2.3). **What I'd like R5 to attack is the finding underneath it:** the
+   `DROP FUNCTION` grant-reset trap at §4.2.2. Is test 12i (assert `authenticated`
+   cannot EXECUTE after `017`) sufficient to keep that closed, given the trap only
+   springs on a *future* edit that looks like an improvement? A test that passes
+   today and would fail after a well-intentioned refactor is the best I could
+   come up with; a schema-level guard would be better if one exists.
 4. §6.3 — still open from R2, R3, and R4: **soft delete** (`disabled_at`) for the
    UAT window instead of hard? You have now three times accepted hard delete
    conditionally — but §6.2.1 exists because the irreversible path keeps growing
