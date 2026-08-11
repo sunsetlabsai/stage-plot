@@ -3,7 +3,7 @@
 *(BPM and Artist are recognized but **deliberately not imported** — §6, §10.)*
 
 Status: **DESIGN — Codex R5 folded, awaiting R6**
-Version: **v6.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4)
+Version: **v7.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5)
 Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
 
 **v2 changelog:**
@@ -47,6 +47,36 @@ Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
 | §4 — partial `#` handling replaced with an **all-or-nothing rule**: sort only when every row has a finite `#`, else physical order. v5's interleave compared 1-based `#` values against 0-based indices and had no definite order to pin. | Codex R5 |
 | §5 — the per-row index fallback is gone; a non-finite cell now makes the column incomplete | follows from the rule change |
 | §9 — 3e asserts the **exact array** for partial `#`; 3f added for one bad cell in an otherwise-numbered column. ~29 → ~30. | Codex R5 |
+
+---
+
+## 0. Invariants this design establishes
+
+*(New in v7. Every finding across five rounds on this document was a claim true
+in prose and unenforced in mechanism. This section makes the claims addressable
+so each addition can be walked against them rather than re-read for
+plausibility.)*
+
+1. **Import never destroys data the sheet did not mention.** The whole point of
+   the document. (§1a, §4 rule 5)
+2. **Matching uses `normalizeSongKeySafe`** — the identical primitive the save
+   path uses, imported, never re-implemented or approximated. (§3)
+3. **Kept-missing rows hold their existing index; incoming rows fill the
+   remaining slots in sheet order.** (§4 rule 5a)
+4. **Free slots ≡ incoming row count.** Exact fit, no holes, no fallback branch.
+   (§4 rule 5a)
+5. **An empty sheet cell never clears an existing value.** (§4)
+6. **Nothing here persists BPM or artist.** Both are recognized only so the
+   header matcher cannot mis-bind them. (§6, §10)
+7. **`mergeSetlist` is pure** — `newId` injected, never minted internally. (§4)
+8. **Sheet order ≡ the order `parseRows` returns**; `mergeSetlist` never
+   re-sorts. (§4)
+9. **Final positions are dense and 1-based** after every merge. (§4 rule 6)
+
+**The rule: every addition is walked against all nine before a version ships**,
+and each claim must name the mechanism that enforces it. Invariants 2, 3, 6 and
+8 each became a Codex finding *because the mechanism was unnamed* — the prose was
+correct every time.
 
 ---
 
