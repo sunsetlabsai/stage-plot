@@ -39,6 +39,7 @@ import type {
   RoadmapMarker,
 } from '@/lib/types';
 import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf } from '@/lib/setlist';
+import type { ImportedRow } from '@/lib/setlist-import';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -5755,14 +5756,18 @@ function ConfigTab({
         setSheetError(data.error || 'Failed to load sheet');
         return;
       }
+      // NOTE: still the destructive rebuild — every re-import mints fresh ids
+      // and drops songId/key/bpm/charts. mergeSetlist (lib/setlist-import.ts)
+      // exists to replace this and lands with the preview UI in chunk 3.
+      // Chunk 2 only moves where the rows come from; behavior is unchanged.
       updateConfig((prev) => ({
         ...prev,
-        setlist: (data as { position: number; title: string; lead: string; notes: string }[]).map((s) => ({
+        setlist: (data.songs as ImportedRow[]).map((s, i) => ({
           id: crypto.randomUUID(),
-          position: s.position,
+          position: i + 1,
           title: s.title,
-          lead: s.lead,
-          notes: s.notes,
+          lead: s.lead ?? '',
+          notes: s.notes ?? '',
         })),
       }));
       // Auto-resolve charts after setlist import (fires on next render via effect)

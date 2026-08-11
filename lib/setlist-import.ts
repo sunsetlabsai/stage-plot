@@ -124,6 +124,34 @@ export function parseCsv(text: string): string[][] {
   return rows;
 }
 
+// ── Sheet URL ────────────────────────────────────────────────────────────────
+
+/**
+ * Turn a pasted Google Sheets URL into the CSV export URL, carrying the tab
+ * (`gid`) across.
+ *
+ * `app/api/sheet/route.ts:16` builds `/export?format=csv` with no `gid`, so
+ * import always reads the FIRST tab regardless of which one the user was
+ * looking at when they copied the URL — real UAT confusion, since a band's
+ * sheet routinely has a tab per show (design §5).
+ *
+ * Pure and exported so tab handling is testable without mocking `fetch`; the
+ * route keeps the fetch and the error mapping.
+ *
+ * @returns null when the URL is not a recognizable Sheets URL.
+ */
+export function sheetCsvUrl(url: string): string | null {
+  const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (!match) return null;
+
+  // gid appears in the fragment (#gid=0) far more often than the query, because
+  // that is what the browser address bar shows when you switch tabs.
+  const gid = url.match(/[#&?]gid=(\d+)/)?.[1];
+
+  const base = `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv`;
+  return gid ? `${base}&gid=${gid}` : base;
+}
+
 // ── Header mapping ───────────────────────────────────────────────────────────
 
 /**
@@ -181,6 +209,27 @@ export function mapHeaders(headers: string[]): FieldIndex {
     );
     if (idx !== -1) {
       found[field] = idx;
+      used.add(idx);
+    }
+  }
+
+  // Pass 3 — last resort for title only: any still-unbound column containing
+  // "song".
+  //
+  // DEVIATION FROM DESIGN §5, deliberate. §5 makes `song` an EXACT alias to stop
+  // "Song Key" stealing the title column when it sits left of "Title". Taken
+  // literally that also breaks a sheet whose only title header is "Songs" —
+  // which imports fine today via `includes('song')` (route.ts:36) and would
+  // start returning 422. That is a live regression for a plausible band sheet.
+  //
+  // Running it as a THIRD pass honors §5's intent without the regression: by the
+  // time we get here, "Song Key" has already been bound to `key` in pass 1, so
+  // it is not eligible. A sheet with only "Song Key" and no title column still
+  // errors, which is the outcome §5 wanted.
+  if (found.title === undefined) {
+    const idx = norm.findIndex((h, i) => !used.has(i) && h.includes('song'));
+    if (idx !== -1) {
+      found.title = idx;
       used.add(idx);
     }
   }

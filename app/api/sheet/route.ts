@@ -1,4 +1,20 @@
 import { NextRequest } from 'next/server';
+import {
+  parseCsv,
+  mapHeaders,
+  parseRows,
+  sheetCsvUrl,
+  MissingTitleColumnError,
+} from '@/lib/setlist-import';
+
+// Reads a public Google Sheet as CSV and returns ImportedRow[].
+//
+// Parsing, header mapping and ordering live in lib/setlist-import.ts so they
+// are unit-testable without a network (design §8). This route keeps what only
+// it can do: the fetch, and mapping failures onto status codes.
+//
+// The merge itself stays client-side — the preview re-runs it when the removal
+// checkbox is toggled, with no refetch (design §7, §12 Q3 closed).
 
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get('url');
@@ -6,14 +22,10 @@ export async function GET(request: NextRequest) {
     return Response.json({ error: 'Missing ?url= parameter' }, { status: 400 });
   }
 
-  // Extract spreadsheet ID from various Google Sheets URL formats
-  const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-  if (!match) {
+  const csvUrl = sheetCsvUrl(url);
+  if (!csvUrl) {
     return Response.json({ error: 'Invalid Google Sheets URL' }, { status: 400 });
   }
-
-  const spreadsheetId = match[1];
-  const csvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv`;
 
   try {
     const res = await fetch(csvUrl);
@@ -24,83 +36,35 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const csv = await res.text();
-    const rows = parseCsv(csv);
-
+    const rows = parseCsv(await res.text());
     if (rows.length < 2) {
       return Response.json({ error: 'Sheet has no data rows' }, { status: 422 });
     }
 
-    const headers = rows[0].map((h) => h.toLowerCase().trim());
-    const posIdx = headers.findIndex((h) => h.includes('pos') || h === '#');
-    const titleIdx = headers.findIndex((h) => h.includes('title') || h.includes('song'));
-    const leadIdx = headers.findIndex((h) => h.includes('lead') || h.includes('singer'));
-    const notesIdx = headers.findIndex((h) => h.includes('note'));
-
-    if (titleIdx === -1) {
-      return Response.json(
-        { error: 'Could not find a "title" or "song" column' },
-        { status: 422 },
-      );
+    let fields;
+    try {
+      fields = mapHeaders(rows[0]);
+    } catch (e) {
+      if (e instanceof MissingTitleColumnError) {
+        return Response.json({ error: e.message }, { status: 422 });
+      }
+      throw e;
     }
 
-    const songs = rows.slice(1)
-      .filter((row) => row[titleIdx]?.trim())
-      .map((row, i) => ({
-        position: posIdx !== -1 && row[posIdx]?.trim() ? Number(row[posIdx]) : i + 1,
-        title: row[titleIdx]?.trim() ?? '',
-        lead: leadIdx !== -1 ? (row[leadIdx]?.trim() ?? '') : '',
-        notes: notesIdx !== -1 ? (row[notesIdx]?.trim() ?? '') : '',
-      }));
-
-    return Response.json(songs);
+    return Response.json({
+      songs: parseRows(rows.slice(1), fields),
+      // Which recognized-but-not-imported columns were present, so the preview
+      // can say what it is ignoring and why (design §7, §10) rather than
+      // silently dropping a column the user deliberately filled in.
+      ignored: {
+        bpm: fields.bpm !== undefined,
+        artist: fields.artist !== undefined,
+      },
+    });
   } catch (e) {
     return Response.json(
       { error: `Fetch error: ${e instanceof Error ? e.message : String(e)}` },
       { status: 502 },
     );
   }
-}
-
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let current: string[] = [];
-  let field = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field += ch;
-      }
-    } else {
-      if (ch === '"') {
-        inQuotes = true;
-      } else if (ch === ',') {
-        current.push(field);
-        field = '';
-      } else if (ch === '\n' || ch === '\r') {
-        if (ch === '\r' && text[i + 1] === '\n') i++;
-        current.push(field);
-        field = '';
-        rows.push(current);
-        current = [];
-      } else {
-        field += ch;
-      }
-    }
-  }
-  if (field || current.length) {
-    current.push(field);
-    rows.push(current);
-  }
-  return rows;
 }
