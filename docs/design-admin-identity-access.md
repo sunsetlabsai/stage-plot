@@ -1,8 +1,8 @@
 # Design — Admin identity, invite gate, tester deletion, and profiles read scope
 
-Status: **DESIGN — Codex R5 folded, awaiting R6**
-Version: **v8.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
-v4 = R3, v5 = R4, v6 = Graham ruling, v7 = R5)
+Status: **DESIGN — Codex R6 folded. Design-complete; no R7 planned (Graham).**
+Version: **v9.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
+v4 = R3, v5 = R4, v6 = Graham ruling, v7 = R5, v8 = invariant registry)
 Scope: admin authn/authz, signup gating, tester deletion, `profiles` RLS
 Driver: handing ShowRunr to outside UAT testers
 
@@ -78,6 +78,16 @@ placeholder UUIDs).
 | **§0.2 NEW — the nine invariants this design establishes**, with the rule that every addition is walked against them before a version ships. Both of this doc's self-inflicted findings were additions violating a rule stated elsewhere in it. | Graham, 2026-08-11 |
 | §6.3 — the delete-confirmation email comparison is **canonical**. Found by walking §0.2 against the existing text, not by review. | invariant 6 |
 
+**v9 changelog** — final round:
+
+| Change | Source |
+|---|---|
+| §0.1 — the `017` row now lists the **function replace + revoke**. §0.1 had drifted from §4.2.1, which is the exact failure it exists to prevent; invariant 8 tightened to "the row lists everything the file does". | Codex R6 **medium** |
+| **§4.2.5 NEW — "links done, no profile" grants DB-level collaborator access.** v7 called it harmless without checking. Accepted as residue with the exposed set stated precisely; the refused tester is closed by §4.2(b), not by `requireAppUser`. | Codex R6 **medium** |
+| **§4.2(a) corrected — `requireAppUser` is an app-layer gate, not an authorization boundary.** The browser holds the anon key; RLS decides. Same overclaim as R1 blocker 1, made one layer deeper. | follows from §4.2.5 |
+| §0.2 — **invariant 10**: RLS is the boundary, app-layer gates are not | follows from §4.2.5 |
+| §8 — tests 12o (non-eligible user blocked **at RLS**, via direct PostgREST) and 12p (residue is real and bounded). ~43 → ~45. | Codex R6 |
+
 ## 0.1 Migrations this design claims
 
 *(New in v5 — Codex R4 high. v4 allocated `016` in **two** sections, §4.2.1 and
@@ -94,10 +104,17 @@ Repo currently ends at `012_song_bpm.sql`; `004` never existed (§9).
 | `014_signup_allowlist.sql` | §5 | `allowed_emails` + canonical `CHECK` |
 | `015_fk_cascades.sql` | §6.2 | the FK repair — every `auth.users` reference in the table at §6.2 |
 | `016_profiles_read_scope.sql` | §7 | drop `"Public read"`, add `"Self read"` |
-| `017_normalize_collaborator_email.sql` | §4.2.1 | backfill + canonicalizing trigger + `CHECK` on `show_collaborators` |
+| `017_normalize_collaborator_email.sql` | §4.2.1 | backfill + canonicalizing trigger + `CHECK` on `show_collaborators`; **`CREATE OR REPLACE FUNCTION activate_invites` (normalized comparison, `security definer` carried forward) + explicit `REVOKE EXECUTE ... FROM public, anon, authenticated`** |
 
 **Any new migration added to this document takes the next free number here and
 is added to this table in the same edit.**
+
+*The `017` row was stale in v7 and Codex R6 caught it: the security-critical
+function replace and revoke had been added to §4.2.1 without updating this table.
+**§0.1 drifted from a section, which is the exact failure §0.1 exists to
+prevent.** Invariant 8 now reads explicitly as "the row lists everything the
+file does," not just "the file has a number" — a table that records only the
+name of a migration is a table nobody needs to keep accurate.*
 
 The only hard ordering constraints are *within* files — `017`'s backfill must
 precede its own `CHECK` (§4.2.1), and `013`'s table creation precedes its seed.
@@ -130,12 +147,17 @@ checked rather than remembered.)*
    (§4.2.1, §5)
 7. **Admin identity lives in a service-role-only table**, never as a column on a
    row its subject can write. (§3.1)
-8. **Every migration takes the next free number from §0.1**, and joins that table
-   in the same edit.
+8. **Every migration takes the next free number from §0.1**, and that row lists
+   **everything the file does** — not just its name. (R6 caught §0.1 itself
+   drifting from §4.2.1.)
 9. **A function replacement carries its `security definer` and re-issues its
    grants.** Preservation is not enforcement. (§4.2.1, §4.2.2)
+10. **RLS is the authorization boundary; app-layer gates are not.** The browser
+    holds the anon key and can reach PostgREST directly, so any claim that a
+    route check "keeps someone out" must be justified at the RLS layer or
+    restated. (§4.2a, §4.2.5)
 
-**The rule: every addition to this document is checked against all nine before a
+**The rule: every addition to this document is checked against all ten before a
 version is pushed** — not by re-reading the doc, but by walking this list against
 the diff. Adding an invariant here is part of adding the section that establishes
 it.
@@ -483,6 +505,17 @@ Returns 403 when the signed-in user **has no `profiles` row**. Applied to the
 users predate the allowlist and must not be locked out, and profile creation is
 already gated by the allowlist, so *no profile* ⇒ *never admitted*.
 
+**But `requireAppUser` is an app-layer gate, not an authorization boundary**
+*(corrected in v9 — Codex R6)*. The browser holds
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` (`lib/supabase-browser.ts:9`) and can call
+PostgREST directly, where **RLS** decides — and the collaborator policies
+authorize on `user_id` alone, with no reference to `profiles` (§4.2.5). So this
+list narrows the app surface and nothing more. **The thing that actually keeps a
+refused tester out is §4.2(b)'s eligibility gate on activation**, because a user
+with no linked `show_collaborators` rows has nothing for RLS to grant. Stated
+here because v1 made exactly this overclaim about `POST /api/profiles` (R1
+blocker 1) and I fixed it one layer too shallow.
+
 **Two routes are deliberately excluded** — both run *before* a profile exists:
 
 - `POST /api/profiles` — the create path itself. Keeps its own allowlist check.
@@ -780,8 +813,55 @@ Every failure is now recoverable by retrying the claim form:
 | activation ok, insert fails | links done, no profile | retry: activation no-ops (idempotent), insert retried |
 | handle taken (`23505`) | links done, no profile | tester picks another handle; links already correct |
 
-Linking invites for a user who then never claims a handle is harmless — they are
-a valid `auth.users` row and the links are correct whenever they return.
+### 4.2.5 "Links done, no profile" grants DB access — accepted residue, stated
+
+*v7 called this state "harmless" in one line. **Codex R6 was right to refuse
+that**, and chasing it corrected something bigger than the state itself.*
+
+`lib/supabase-browser.ts:9` ships `NEXT_PUBLIC_SUPABASE_ANON_KEY` to the browser,
+so any signed-in user can call PostgREST directly, bypassing every Next.js route.
+And the collaborator policies authorize on `user_id` **alone**:
+
+```sql
+-- 001:100  "Collaborator read" on shows
+using (exists (select 1 from show_collaborators
+               where show_id = shows.id and user_id = auth.uid()))
+```
+
+Same shape at `001:118` (**`"Editor update"` — a write**, not just a read) and
+`001:158` (`"Chart read"`). **No policy anywhere mentions `profiles`.**
+
+**So §4.2(a)'s `requireAppUser` is an app-layer gate, not an authorization
+boundary — and I have now made that overclaim twice.** R1 blocker 1 was v1
+asserting that gating `POST /api/profiles` meant a refused tester "cannot reach
+any show"; I fixed the *API* layer and never checked the layer below it. The
+correction belongs in §4.2(a) itself: **RLS is the boundary. `requireAppUser`
+narrows the app surface; it cannot narrow PostgREST.**
+
+**The residue, precisely.** Who can hold links without a profile?
+
+| Who | Links? | Verdict |
+|---|---|---|
+| Eligible invitee, hasn't claimed yet | yes | **Intended.** They read the show they were invited to. This is the normal pre-claim state, not an edge case — activation deliberately precedes `/claim` (§4.2b, the R2 blocker fix) |
+| Eligible invitee whose handle insert failed | yes | Same state as above, reached differently. §4.2.4's ordering did not create it |
+| **Refused tester** (invite mode, not allowlisted) | **no** | Eligibility gate blocks activation, so no rows are ever linked — §4.2(b) is what closes this, and it closes it at the only layer that matters |
+
+**Accepted as residue**, because the exposed set is exactly the people we intend
+to have access, reaching the show they were explicitly invited to. What was wrong
+was calling it harmless without checking — the reasoning had never been done, and
+"harmless" was an assumption wearing the clothes of a conclusion.
+
+**Test 12o** pins the boundary rather than the residue: a **non-eligible** user
+who was previously invited gets **no linked rows**, and therefore a direct
+PostgREST read of that show with the anon key returns **zero rows**. That is the
+assertion that matters, and it exercises RLS directly rather than through a route
+— because a route test would prove nothing about the layer the finding is about.
+
+**Deliberately not done:** adding `and exists (select 1 from profiles where id =
+auth.uid())` to the three collaborator policies. It would make the app and DB
+layers agree, but it would also break legitimate pre-claim access, which §4.2(b)
+exists to guarantee. Recorded as the option, with the reason it was declined, so
+it isn't rediscovered as an obvious tightening.
 
 **Also keep the `409` branch honest.** Re-run activation there before returning,
 as cheap defence for the two-tab case and for anyone stranded by *today's* code.
@@ -1125,6 +1205,15 @@ Server:
 12n. **`/admin` "Re-link invites"** links a stranded user's rows and writes an
      `admin_audit` row (§3.6). The recovery lever for testers already broken by
      today's swallowed error.
+12o. **The boundary is RLS, not the route** (Codex R6, §4.2.5). A non-eligible
+     user who was previously invited gets **no linked rows**, and a **direct
+     PostgREST read with the anon key** — not a route call — returns **zero
+     rows** for that show. Must exercise RLS directly; a route-level test proves
+     nothing about the layer this finding is about.
+12p. The **eligible, profileless** invitee **can** read the show they were
+     invited to via the same direct path. Asserts the accepted residue is real
+     and bounded, so nobody later "fixes" it and silently breaks pre-claim
+     access (§4.2b).
 12f. The backfill's collision path: two rows on one show differing only by case
      dedupe to the one with a non-null `user_id`, and the migration **fails
      loudly** rather than dropping a row if that rule is ambiguous.
@@ -1177,8 +1266,9 @@ Deletion:
     a single `succeeded` row via the column default — the §3.6 change must not
     force every existing call site into two phases.
 
-Target: **~43 new tests** (v3 said ~22; 12d–12f and 20–24 added in v4, 12e-i/ii
-in v5, 12g–12i in v6, 12i-a and 12j–12n in v7). Delta reported on the build PR.
+Target: **~45 new tests** (v3 said ~22; 12d–12f and 20–24 added in v4, 12e-i/ii
+in v5, 12g–12i in v6, 12i-a and 12j–12n in v7, 12o–12p in v9). Delta reported on
+the build PR.
 
 ---
 
@@ -1269,27 +1359,20 @@ specific enough to be a rule rather than an observation, and §4.2.4 states it:
 whether the user can get out of it. An error return is not a fix if it strands
 the caller.*
 
-## 11. Open questions for Codex R6
+## 11. Decisions for Graham before build
 
-1. **Carried, unanswered from R4 and R5** — §6.2.1's abort-if-audit-fails rule
-   makes `admin_audit` a hard dependency of deletion. Right failure direction for
-   an irreversible operation, or does Graham need a break-glass path?
-2. **Carried from R5** — §0.1's allocation table is a convention enforced by
-   nothing but attention, which is exactly what failed in v4. Cheap mechanical
-   guard (CI check on migration filename uniqueness/contiguity), or
-   over-engineering at `012`?
-3. **New — the recovery lever is now the weakest link.** §4.2.4 closes the
-   *future* hole, but testers stranded by today's swallowed error depend entirely
-   on `/admin` "Re-link invites", which nobody will think to press: the failure
-   is invisible to the tester (their dashboard is simply missing a show) and they
-   cannot report it precisely. Should `/admin` instead **surface** the condition —
-   list users holding `show_collaborators` rows with `user_id IS NULL` whose email
-   matches a `profiles` owner — so it is discovered rather than remembered? That
-   query is cheap and it turns a lever into an alert.
-4. §6.3 — open since R2: **soft delete** for the UAT window? Four rounds of
-   conditionally accepting hard delete, and §6.2.1 exists because the
-   irreversible path keeps accumulating failure modes that need recording.
-5. Carried from R3 and R4, still unattacked: the eligibility predicate under
-   *sequences* — allowlist removed between OTP and claim, mode flipped
-   mid-session. Three rounds have confirmed the shape; none has probed the race.
-   §4.2.4 moves activation earlier in the request, which changes the window.
+**Design review is closed at R6.** These are not review questions — several sat
+across three or four rounds as "open questions for Codex" when they were always
+direction calls, which is a large part of why this document took six rounds.
+Each carries a **default**, so silence ships the default and none of them blocks
+the build.
+
+| # | Decision | Default if you say nothing |
+|---|---|---|
+| 1 | §6.2.1 makes `admin_audit` a hard dependency of deletion — no audit, no delete. Break-glass path? | **Ship as specified.** Right failure direction for an irreversible op; a break-glass path is the thing that gets used at 2am and skips the record |
+| 2 | §0.1's allocation table is enforced by attention, which failed twice (v4's duplicate `016`, v9's stale row). CI check on migration filename uniqueness/contiguity? | **Skip for now.** Ten lines of CI, but at `012` the table plus invariant 8 is proportionate. Revisit if it drifts a third time |
+| 3 | Should `/admin` **surface** stranded testers (collaborator rows with `user_id IS NULL` whose email matches a profile), rather than relying on someone remembering to press "Re-link invites"? | **Do it.** ~20 lines, and it converts a lever nobody will think to pull into something visible. The failure is invisible to the tester by construction |
+| 4 | §6.3 — **soft delete** (`disabled_at`) for the UAT window instead of hard? Four rounds of conditional acceptance | **Ship hard delete.** Every condition is met and §6.2.1 records failures. But this is the one I'd most understand you reversing |
+| 5 | The eligibility predicate under **sequences** — allowlist removed between OTP and claim, mode flipped mid-session. Three rounds confirmed the shape, none probed the race; §4.2.4 moved activation earlier, changing the window | **Ship, and treat the first chunk's tests as where this gets probed.** It is a build-time question now, not a design one |
+
+Item 3 is the only one I'd actively push for; the rest are fine as they stand.
