@@ -2,8 +2,9 @@
 
 *(BPM and Artist are recognized but **deliberately not imported** — §6, §10.)*
 
-Status: **DESIGN — Codex R5 folded, awaiting R6**
-Version: **v7.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5)
+Status: **DESIGN — Codex R6 folded, NO SUBSTANTIVE FINDINGS. Design-complete.**
+Version: **v8.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5,
+v7 = invariant registry)
 Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
 
 **v2 changelog:**
@@ -694,7 +695,7 @@ found a claim that was true in prose and unenforced in mechanism** — BPM
 persistence (R1), kept-row ordering (R2), the worked example (R3), and now the
 sort owner (R4). The tests kept passing because they tested what I meant.
 
-## 11d. Codex R4 — disposition
+## 11d. Codex R5 — disposition
 
 | Finding | Disposition |
 |---|---|
