@@ -1,8 +1,8 @@
 # Design — Admin identity, invite gate, tester deletion, and profiles read scope
 
 Status: **DESIGN — Codex R5 folded, awaiting R6**
-Version: **v7.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
-v4 = R3, v5 = R4, v6 = Graham ruling)
+Version: **v8.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v3.1 = platform owner,
+v4 = R3, v5 = R4, v6 = Graham ruling, v7 = R5)
 Scope: admin authn/authz, signup gating, tester deletion, `profiles` RLS
 Driver: handing ShowRunr to outside UAT testers
 
@@ -71,7 +71,12 @@ placeholder UUIDs).
 | §4.2.1 step 3 — `017` **re-issues** the revoke rather than relying on `CREATE OR REPLACE` preserving it. Preservation keeps a good state *and* a bad one; live grant drift is invisible to the repo. | Codex R5 medium |
 | §8 — tests 12i-a (drift converged) and 12j–12n (ordering, retry, `409` branch, admin recovery). ~36 → ~43. | Codex R5 |
 
----
+**v8 changelog** — process change, not a review round:
+
+| Change | Source |
+|---|---|
+| **§0.2 NEW — the nine invariants this design establishes**, with the rule that every addition is walked against them before a version ships. Both of this doc's self-inflicted findings were additions violating a rule stated elsewhere in it. | Graham, 2026-08-11 |
+| §6.3 — the delete-confirmation email comparison is **canonical**. Found by walking §0.2 against the existing text, not by review. | invariant 6 |
 
 ## 0.1 Migrations this design claims
 
@@ -100,6 +105,40 @@ Across files they are independent, so the numbering is sequence, not dependency.
 One deploy-level constraint sits outside the numbering: `016` must ship in the
 **same deploy** as the `app/api/shows/route.ts` service-role switch (§7), or the
 collaborator dashboard breaks between them.
+
+---
+
+## 0.2 Invariants this design establishes
+
+*(New in v8. Two of this document's findings — R2's FK holes and R5's activation
+ordering — were **additions of mine that violated a rule stated elsewhere in this
+same document.** Re-reading the doc doesn't catch that, because new material
+reads correctly in isolation; the defect only appears when it is checked
+**against** the rule. This section makes the rules addressable so they can be
+checked rather than remembered.)*
+
+1. **Every `auth.users` reference has an explicit `ON DELETE` action** — including
+   the ones this design itself adds. (§6.2)
+2. **No destructive operation runs unaudited, and the audit row precedes the
+   destruction.** No audit ⇒ no destruction. (§6.2.1)
+3. **Eligibility — not profile existence — gates invite activation.** (§4.2b)
+4. **No reachable state has a tester holding a profile with unlinked invite
+   rows.** (§4.2.4)
+5. **Every failure path leaves a state the tester or an admin can recover
+   from.** An error return is not a fix if it strands the caller. (§4.2.4)
+6. **Emails are canonical (`lower(btrim())`) at rest and at every comparison.**
+   (§4.2.1, §5)
+7. **Admin identity lives in a service-role-only table**, never as a column on a
+   row its subject can write. (§3.1)
+8. **Every migration takes the next free number from §0.1**, and joins that table
+   in the same edit.
+9. **A function replacement carries its `security definer` and re-issues its
+   grants.** Preservation is not enforcement. (§4.2.1, §4.2.2)
+
+**The rule: every addition to this document is checked against all nine before a
+version is pushed** — not by re-reading the doc, but by walking this list against
+the diff. Adding an invariant here is part of adding the section that establishes
+it.
 
 ---
 
@@ -942,7 +981,12 @@ succeeds and step 2 fails" when it meant the storage and account steps. Fixed.)*
   first. Prevents a one-click lockout of the platform.
 - Requires a confirmation body echoing the target's email — the same shape as a
   "type the name to confirm" dialog, enforced server-side rather than trusting
-  the client.
+  the client. **The comparison is canonical** (`lower(btrim())` on both sides),
+  per invariant 6. *Found in v8 by walking §0.2 against the existing doc, not by
+  review:* this is an email compared against another email, and every other such
+  comparison in the design was canonicalized while this one was not. The failure
+  is safe-direction — a case mismatch refuses a legitimate delete rather than
+  permitting a wrong one — but it would read as "the delete button is broken."
 
 UI: a `Delete` action per row in the existing owners table
 (`app/admin/page.tsx:206-252`), opening a modal that names what will be destroyed
