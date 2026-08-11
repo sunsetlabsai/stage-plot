@@ -230,15 +230,21 @@ export function parseRows(dataRows: string[][], fields: FieldIndex): ImportedRow
     if (sceneNote) row.sceneNote = sceneNote;
     if (artist) row.artist = artist;
 
+    // WHOLE-CELL integer parse, not a prefix parse.
+    //
     // Number('four') is NaN and used to land straight in `position`
-    // (app/api/sheet/route.ts:50). Guard, and treat non-finite as "absent",
-    // which makes the whole column incomplete.
+    // (app/api/sheet/route.ts:50) — but guarding with `parseInt` alone is not
+    // enough, because parseInt reads a numeric PREFIX and discards the rest:
+    // '1a' → 1, '2.5' → 2, '03 - encore' → 3. A column of entirely malformed
+    // cells would then look complete and trigger sorting, which is exactly the
+    // "one bad cell makes the column incomplete" rule not being enforced by the
+    // mechanism that claims to enforce it (Codex, chunk 1).
+    //
+    // /^\d+$/ also rejects negatives and decimals, neither of which is a
+    // meaningful setlist position.
     let pos: number | null = null;
     const rawPos = cell(raw, fields.position);
-    if (rawPos) {
-      const n = Number.parseInt(rawPos, 10);
-      if (Number.isFinite(n)) pos = n;
-    }
+    if (rawPos && /^\d+$/.test(rawPos)) pos = Number(rawPos);
 
     decorated.push({ row, order: decorated.length, pos });
   });

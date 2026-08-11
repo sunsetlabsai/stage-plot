@@ -194,6 +194,39 @@ describe('parseRows', () => {
     );
     expect(out.map((r) => r.title)).toEqual(['B', 'A', 'C']);
   });
+
+  // Codex, chunk 1 review. parseInt reads a numeric PREFIX and discards the
+  // rest, so the guard accepted cells that are not positions at all.
+  it.each([
+    ['1a', '2a'],
+    ['2.5', '1.5'],
+    ['03 - encore', '01 - opener'],
+  ])('3f-i. prefix-numeric cells (%s) do NOT count as a position', (b, a) => {
+    const out = parseRows([[b, 'B'], [a, 'A']], { title: 1, position: 0 });
+    // Physical order, because the column is incomplete — NOT sorted to [A, B].
+    expect(out.map((r) => r.title)).toEqual(['B', 'A']);
+  });
+
+  it('3f-ii. a single prefix-numeric cell spoils an otherwise valid column', () => {
+    const out = parseRows(
+      [['2', 'B'], ['1a', 'A'], ['3', 'C']],
+      { title: 1, position: 0 },
+    );
+    expect(out.map((r) => r.title)).toEqual(['B', 'A', 'C']);
+  });
+
+  it('3f-iii. zero-padded integers are still valid positions', () => {
+    const out = parseRows(
+      [['007', 'B'], ['002', 'A']],
+      { title: 1, position: 0 },
+    );
+    expect(out.map((r) => r.title)).toEqual(['A', 'B']);
+  });
+
+  it('3f-iv. negatives and decimals are not positions', () => {
+    const out = parseRows([['-1', 'B'], ['2', 'A']], { title: 1, position: 0 });
+    expect(out.map((r) => r.title)).toEqual(['B', 'A']);
+  });
 });
 
 // ── mergeSetlist ─────────────────────────────────────────────────────────────
