@@ -1,74 +1,17 @@
 import { NextRequest } from 'next/server';
-import { createClient } from 'redis';
 import { SYSTEM_PROMPT, TOOLS } from '@/lib/agent';
-import { getAdminConfig } from '@/lib/admin-config';
 import { parseContentLength } from '@/lib/http-headers';
+import { resolveKeyMode, getClientIp } from '@/lib/agent-key';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MAX_BODY_SIZE = 100_000; // 100KB
-const TRYIT_MODEL = 'claude-sonnet-4-6';
-const BYOA_MODEL = 'claude-sonnet-4-6';
-const TRYIT_MAX_TOKENS = 2048;
-const BYOA_MAX_TOKENS = 4096;
-const TRYIT_QUOTA = 10;
-const QUOTA_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
-// In-memory fallback when Redis is unavailable
-const fallbackQuota = new Map<string, { count: number; resetAt: number }>();
-
-function getClientIp(request: NextRequest): string {
-  return request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
-}
-
-function consumeFallbackQuota(ip: string): { allowed: boolean; remaining: number } {
-  const now = Date.now();
-  const ttl = QUOTA_TTL_SECONDS * 1000;
-  let entry = fallbackQuota.get(ip);
-  if (!entry || now > entry.resetAt) {
-    entry = { count: 0, resetAt: now + ttl };
-    fallbackQuota.set(ip, entry);
-  }
-  if (entry.count >= TRYIT_QUOTA) {
-    return { allowed: false, remaining: 0 };
-  }
-  entry.count++;
-  return { allowed: true, remaining: Math.max(0, TRYIT_QUOTA - entry.count) };
-}
-
-async function consumeTryitQuota(ip: string): Promise<{ allowed: boolean; remaining: number }> {
-  const url = process.env.REDIS_URL;
-  if (!url) return consumeFallbackQuota(ip);
-
-  let client;
-  try {
-    client = createClient({ url });
-    await client.connect();
-
-    const key = `quota:${ip}`;
-    const count = await client.incr(key);
-
-    // Always set TTL — idempotent, ensures TTL is present even if a
-    // prior EXPIRE failed. Isolated so EXPIRE failure doesn't discard
-    // the successful INCR result.
-    try {
-      await client.expire(key, QUOTA_TTL_SECONDS);
-    } catch {
-      // TTL not set — key persists without expiry. Acceptable: worst
-      // case is this IP's quota never resets, which is conservative.
-    }
-
-    await client.disconnect();
-
-    if (count > TRYIT_QUOTA) {
-      return { allowed: false, remaining: 0 };
-    }
-    return { allowed: true, remaining: Math.max(0, TRYIT_QUOTA - count) };
-  } catch {
-    try { await client?.disconnect(); } catch { /* ignore */ }
-    // Redis unavailable — fall back to in-memory
-    return consumeFallbackQuota(ip);
-  }
-}
+// Quota accounting, the fallback map, model/token constants and the BYOA-wins
+// precedence all live in lib/agent-key.ts so this route and the capabilities probe
+// resolve capability through ONE implementation (design §4). Nothing about the
+// observable send behavior changes here — §9 test 14 asserts that behaviorally
+// rather than by byte-equivalence, because §4.1 deliberately changes the config
+// read inside it.
 
 export async function POST(request: NextRequest) {
   // Size check. A malformed Content-Length is refused rather than coerced: the old
@@ -101,38 +44,36 @@ export async function POST(request: NextRequest) {
 
   // Determine auth mode
   const clientKey = request.headers.get('authorization')?.replace('Bearer ', '');
-  const serverKey = await getAdminConfig('claude_tryit_key');
-  const ip = getClientIp(request);
+  const ip = getClientIp(request.headers);
+  const resolved = await resolveKeyMode(clientKey, ip, { consume: true });
 
-  let apiKey: string;
-  let model: string;
-  let maxTokens: number;
-  let tryitRemaining: number | null = null;
-
-  if (clientKey) {
-    // BYOA mode
-    apiKey = clientKey;
-    model = BYOA_MODEL;
-    maxTokens = BYOA_MAX_TOKENS;
-  } else if (serverKey) {
-    // Try-it mode — every request costs quota, no bypass vectors
-    const quota = await consumeTryitQuota(ip);
-    if (!quota.allowed) {
-      return Response.json(
-        { error: 'Free messages used up. Enter your own Claude API key to continue.', tryitExhausted: true },
-        { status: 429, headers: { 'X-Tryit-Remaining': '0' } },
-      );
-    }
-    tryitRemaining = quota.remaining;
-    apiKey = serverKey;
-    model = TRYIT_MODEL;
-    maxTokens = TRYIT_MAX_TOKENS;
-  } else {
+  if (resolved.mode === 'exhausted') {
     return Response.json(
-      { error: 'No API key provided and try-it mode is not available.' },
+      {
+        error: 'Free messages used up. Enter your own Claude API key to continue.',
+        tryitExhausted: true,
+      },
+      { status: 429, headers: { 'X-Tryit-Remaining': '0' } },
+    );
+  }
+
+  // `unconfigured` and `error` converge on the same 401 for the sender — the
+  // capabilities probe is what tells them apart for the UI (§5 states 5 and 6).
+  // The reason is carried so the distinction survives in logs.
+  if (resolved.mode === 'unconfigured' || resolved.mode === 'error') {
+    return Response.json(
+      {
+        error: 'No API key provided and try-it mode is not available.',
+        reason: resolved.mode,
+      },
       { status: 401 },
     );
   }
+
+  const apiKey = resolved.apiKey;
+  const model = resolved.model;
+  const maxTokens = resolved.maxTokens;
+  const tryitRemaining = resolved.mode === 'tryit' ? resolved.remaining : null;
 
   // Build system prompt with current config context
   const systemWithConfig = body.currentConfig

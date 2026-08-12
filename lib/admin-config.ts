@@ -21,21 +21,76 @@ async function getRedis(): Promise<RedisClientType | null> {
 }
 
 /**
- * Read an admin config value. Redis first, env var fallback.
- * Returns null if unconfigured or explicitly disabled.
+ * The outcome of a config read, with the store's reachability preserved.
+ *
+ * `getAdminConfig` returns `null` for BOTH "nothing is set" and "the store was
+ * unreachable and there is no env fallback" — and that conflation is the defect
+ * design §4.1 exists to remove. In production (no `CLAUDE_TRYIT_KEY` in the
+ * environment) a Redis outage therefore renders as *intentionally off*, which is
+ * exactly the ambiguity that made "my account has no AI key" unanswerable.
  */
-export async function getAdminConfig(key: string): Promise<string | null> {
+export type ConfigRead =
+  | { status: 'ok'; value: string; source: 'redis' | 'env' }
+  /** Store reachable, nothing set (or explicitly disabled). */
+  | { status: 'none' }
+  /** Store unreachable AND no usable env fallback. */
+  | { status: 'error'; reason: string };
+
+/**
+ * Read an admin config value, preserving WHY there is no value.
+ *
+ * The ordering subtlety this must keep: a Redis failure with a valid env fallback
+ * is still `ok`/`env`, never `error`. `error` means *no usable value and the store
+ * was unreachable* — only that combination is ambiguous. (Design §0 invariant 3.)
+ */
+export async function readAdminConfig(key: string): Promise<ConfigRead> {
+  let storeReachable = true;
+  let reason = '';
+
   try {
     const redis = await getRedis();
     if (redis) {
       const value = await redis.get(`admin:${key}`);
-      if (value === DISABLED_SENTINEL) return null;
-      if (value) return value;
+      // The sentinel is a deliberate "off", and it suppresses the env fallback —
+      // matching getAdminConfig's long-standing behavior. An operator who once
+      // cleared the field in the UI must clear this key before CLAUDE_TRYIT_KEY
+      // can take effect (design §6 gap 3 — the trap worth documenting).
+      if (value === DISABLED_SENTINEL) return { status: 'none' };
+      if (value) return { status: 'ok', value, source: 'redis' };
+    } else {
+      // No REDIS_URL configured at all. That is not an outage — env is the
+      // intended source in that deployment, so it must not read as `error`.
+      // Truthiness, not `=== undefined`, to match getRedis's own `if (!url)`:
+      // REDIS_URL='' means unconfigured, and would otherwise report an outage.
+      storeReachable = !process.env.REDIS_URL;
+      if (!storeReachable) reason = 'Redis connection unavailable';
     }
-  } catch {
-    // Redis not configured or unavailable — fall through to env var
+  } catch (e) {
+    storeReachable = false;
+    reason = e instanceof Error ? e.message : 'Redis read failed';
   }
-  return process.env[key.toUpperCase()] || null;
+
+  const envValue = process.env[key.toUpperCase()];
+  if (envValue) return { status: 'ok', value: envValue, source: 'env' };
+
+  return storeReachable
+    ? { status: 'none' }
+    : { status: 'error', reason: reason || 'Key store unreachable' };
+}
+
+/**
+ * Read an admin config value. Redis first, env var fallback.
+ * Returns null if unconfigured or explicitly disabled.
+ *
+ * A thin wrapper over readAdminConfig — one lookup, two shapes (design §4.1).
+ * Four other routes call this (agent/chat, charts/convert, charts/roadmap/parse,
+ * admin/backfill-chart-overlays) and their behavior is unchanged: every non-`ok`
+ * status still collapses to null here. Callers that need the distinction use
+ * readAdminConfig directly.
+ */
+export async function getAdminConfig(key: string): Promise<string | null> {
+  const read = await readAdminConfig(key);
+  return read.status === 'ok' ? read.value : null;
 }
 
 /**
