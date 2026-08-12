@@ -2,10 +2,34 @@
 
 *(BPM and Artist are recognized but **deliberately not imported** — §6, §10.)*
 
-Status: **DESIGN — Codex R6 folded, NO SUBSTANTIVE FINDINGS. Design-complete.**
-Version: **v8.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5,
-v7 = invariant registry)
+Status: **BUILT AND SHIPPED.** Chunks 1–3 merged as #124 `a4f4a4d`, #125
+`acf23ae`, #127 `2d9f629`. Codex clean on all three.
+Version: **v9.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5,
+v7 = invariant registry, v8 = R6, **v9 = deviations found during the build**)
 Scope: Google Sheet setlist import (`/api/sheet` + the Config-tab loader)
+
+**v9 — what the build changed about this design.** Two things, both in §7. The
+design merged before its build finished, so these landed in code first and are
+folded back here:
+
+| Change | Why |
+|---|---|
+| Details list shows **changed fields only** | §7's mock printed `lead: Rachel (unchanged)`, which `FieldChange[]` cannot express |
+| A **zero-row sheet is refused**, not previewed | Otherwise the preview offers to remove the entire setlist off a malformed sheet |
+
+**Known gap, not built:** the Page-level undo lifecycle (arm on apply / expire on
+user mutation / preserve across automatic writes / clear on tab nav) has **no test
+coverage** — it is Page state and Page needs `useParams` + Supabase + fetch to
+render. Codex flagged it as residual risk on #127: *"the presentational preview
+tests are good, but they do not prove apply → save → undo → save behavior."*
+Proposed fix is extracting a `useImportUndo` hook so `renderHook` can drive it.
+
+**One mechanism the build added that this design did not anticipate:**
+`updateConfig(fn, { automatic: true })`. Auto-resolve-charts writes through the
+mutation chokepoint on a 1s debounce, so without an opt-out it expired the undo
+snapshot ~1s after every import — **and only for users with Drive configured**,
+which reads as nondeterministic. "The next mutation" means the next mutation the
+**user** makes.
 
 **v2 changelog:**
 
@@ -440,7 +464,7 @@ Importing 14 songs from your sheet
   BPM column found — tempo is set with Tap Tempo and won't be imported.
 
   ▸ Details
-      Matched   "Ophelia"        key: — → Bb        lead: Rachel (unchanged)
+      Matched   "Ophelia"        key: — → Bb
       Matched   "The Weight"     no changes
       Added     "Cripple Creek"
       Not in sheet   "Old Intro"   (kept)
@@ -460,6 +484,18 @@ Requirements:
   then requires a second confirmation naming the count.
 - The details list is a `<details>` collapsible, consistent with the existing
   "How it works" pattern (`page.tsx:6158`).
+- **Changed fields only** (v9, from the build). The mock above originally printed
+  `lead: Rachel (unchanged)`, but `FieldChange[]` (§4, built in chunk 1 and
+  Codex-reviewed) carries **only changed fields** — the type cannot express an
+  unchanged one. The details list shows the actual changes, or `no changes`.
+  Recorded because the mock implied data the diff shape does not carry, and the
+  mock is what an implementer copies.
+- **A sheet that parses to zero rows is refused, not previewed** (v9, from the
+  build). Every row having a blank title yields `[]`, and previewing that would
+  offer *"Also remove the N songs not in this sheet"* for the **entire setlist** —
+  an invitation to wipe the show off the back of a malformed sheet. The importer
+  errors with *"No songs found in that sheet — every row is missing a title."*
+  This case was absent from v1–v8 entirely.
 - `Cancel` restores the loader row and mutates nothing.
 - Nothing is written to `config` until `Apply import`. The merge is computed
   client-side from the fetched rows, so preview costs no extra request — and
