@@ -1,4 +1,5 @@
 import type { Chart } from './types';
+import { parseContentLength } from './http-headers';
 
 const CACHE_NAME = 'stageplot-charts-v1';
 const SW_TIMEOUT = 5000;
@@ -177,8 +178,11 @@ export async function getCacheStats(): Promise<{ count: number; bytes: number }>
     for (const req of keys) {
       const res = await cache.match(req);
       if (res) {
-        const len = res.headers.get('content-length');
-        bytes += len ? parseInt(len, 10) : 0;
+        // A missing or malformed length contributes 0 — this is a size ESTIMATE for
+        // the download manager, so skipping an unmeasurable entry is right. What it
+        // must not do is count '1e9' as 1 byte, which the old parseInt did.
+        const len = parseContentLength(res.headers.get('content-length'));
+        bytes += len.kind === 'bytes' ? len.bytes : 0;
       }
     }
     return { count: keys.length, bytes };

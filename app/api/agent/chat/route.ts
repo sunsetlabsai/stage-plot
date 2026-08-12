@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { createClient } from 'redis';
 import { SYSTEM_PROMPT, TOOLS } from '@/lib/agent';
 import { getAdminConfig } from '@/lib/admin-config';
+import { parseContentLength } from '@/lib/http-headers';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MAX_BODY_SIZE = 100_000; // 100KB
@@ -70,9 +71,15 @@ async function consumeTryitQuota(ip: string): Promise<{ allowed: boolean; remain
 }
 
 export async function POST(request: NextRequest) {
-  // Size check
-  const contentLength = parseInt(request.headers.get('content-length') || '0', 10);
-  if (contentLength > MAX_BODY_SIZE) {
+  // Size check. A malformed Content-Length is refused rather than coerced: the old
+  // parseInt read a numeric prefix, so '1e9' became 1 and slipped under the limit.
+  // Unreachable in practice (Node's HTTP parser rejects it first), which is exactly
+  // why it is safe to fail closed here.
+  const contentLength = parseContentLength(request.headers.get('content-length'));
+  if (contentLength.kind === 'invalid') {
+    return Response.json({ error: 'Malformed Content-Length' }, { status: 400 });
+  }
+  if (contentLength.kind === 'bytes' && contentLength.bytes > MAX_BODY_SIZE) {
     return Response.json({ error: 'Request too large' }, { status: 413 });
   }
 
