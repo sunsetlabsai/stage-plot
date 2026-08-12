@@ -124,6 +124,65 @@ export function parseCsv(text: string): string[][] {
   return rows;
 }
 
+// ── Sheet URL ────────────────────────────────────────────────────────────────
+
+/**
+ * Turn a pasted Google Sheets URL into the CSV export URL, carrying the tab
+ * (`gid`) across.
+ *
+ * `app/api/sheet/route.ts:16` builds `/export?format=csv` with no `gid`, so
+ * import always reads the FIRST tab regardless of which one the user was
+ * looking at when they copied the URL — real UAT confusion, since a band's
+ * sheet routinely has a tab per show (design §5).
+ *
+ * Pure and exported so tab handling is testable without mocking `fetch`; the
+ * route keeps the fetch and the error mapping.
+ *
+ * @returns null when the URL is not a recognizable Sheets URL.
+ */
+export function sheetCsvUrl(url: string): string | null {
+  const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (!match) return null;
+
+  const base = `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=csv`;
+  const gid = extractGid(url);
+  return gid === null ? base : `${base}&gid=${gid}`;
+}
+
+/**
+ * Pull a tab id out of a Sheets URL, requiring the WHOLE parameter value to be
+ * digits.
+ *
+ * The first version matched `/[#&?]gid=(\d+)/`, which has no end boundary, so
+ * `#gid=123abc` yielded `123` — the same numeric-prefix bug Codex found in the
+ * `#`-column parser, written by me an hour later in a different file (Codex,
+ * chunk 2). Parsing the parameters properly is what removes the class rather
+ * than patching the one regex.
+ *
+ * gid lives in the fragment (`#gid=0`) far more often than the query, because
+ * that is what the address bar shows when you switch tabs — so the fragment
+ * wins when both are present.
+ */
+function extractGid(url: string): string | null {
+  let parsed: URL;
+  try {
+    // A pasted address-bar URL always has a scheme, but tolerate one without.
+    parsed = new URL(/^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`);
+  } catch {
+    return null;
+  }
+
+  const candidates = [
+    new URLSearchParams(parsed.hash.replace(/^#/, '')).get('gid'),
+    parsed.searchParams.get('gid'),
+  ];
+
+  for (const value of candidates) {
+    if (value !== null && /^\d+$/.test(value)) return value;
+  }
+  return null;
+}
+
 // ── Header mapping ───────────────────────────────────────────────────────────
 
 /**
@@ -181,6 +240,27 @@ export function mapHeaders(headers: string[]): FieldIndex {
     );
     if (idx !== -1) {
       found[field] = idx;
+      used.add(idx);
+    }
+  }
+
+  // Pass 3 — last resort for title only: any still-unbound column containing
+  // "song".
+  //
+  // DEVIATION FROM DESIGN §5, deliberate. §5 makes `song` an EXACT alias to stop
+  // "Song Key" stealing the title column when it sits left of "Title". Taken
+  // literally that also breaks a sheet whose only title header is "Songs" —
+  // which imports fine today via `includes('song')` (route.ts:36) and would
+  // start returning 422. That is a live regression for a plausible band sheet.
+  //
+  // Running it as a THIRD pass honors §5's intent without the regression: by the
+  // time we get here, "Song Key" has already been bound to `key` in pass 1, so
+  // it is not eligible. A sheet with only "Song Key" and no title column still
+  // errors, which is the outcome §5 wanted.
+  if (found.title === undefined) {
+    const idx = norm.findIndex((h, i) => !used.has(i) && h.includes('song'));
+    if (idx !== -1) {
+      found.title = idx;
       used.add(idx);
     }
   }
