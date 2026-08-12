@@ -40,6 +40,8 @@ import type {
 } from '@/lib/types';
 import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
+import { mergeSetlist } from '@/lib/setlist-import';
+import SetlistImportPreview from '@/components/SetlistImportPreview';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -569,11 +571,57 @@ export default function Page() {
     };
   }, []);
 
-  const updateConfig = useCallback((fn: (prev: AppConfig) => AppConfig) => {
+  // One-level, in-memory undo for a setlist import (design §7). Null ⇒ no
+  // affordance. Not persisted: a reload drops it, which is the specified scope.
+  const [importUndo, setImportUndo] = useState<SetlistSong[] | null>(null);
+
+  const updateConfig = useCallback((
+    fn: (prev: AppConfig) => AppConfig,
+    opts?: { automatic?: boolean },
+  ) => {
     // Normalize StageSlot.id through the single mutation chokepoint so every live
     // writer (Add Row, AI ops, DnD) mints ids + de-dupes/flags links — not just
     // load/import. Idempotent and ref-stable when nothing's dirty (no edit churn).
     setConfig((prev) => ensureStageSlotIds(fn(prev)).config);
+    // §7: undo survives only until the next mutation. Because updateConfig is the
+    // single mutation chokepoint, clearing here covers every writer in the app
+    // without each one having to remember. The import apply deliberately does not
+    // route through updateConfig, so it cannot clear the snapshot it just armed.
+    //
+    // `automatic` is the exception, and it is load-bearing: auto-resolve-charts
+    // writes here on a 1s debounce after any setlist-title change, so WITHOUT this
+    // an import would arm undo and then have it silently vanish a second later —
+    // but only for users who have Drive charts configured, which is worse than
+    // never offering it. "The next mutation" means the next mutation the USER
+    // makes; an automatic write is not one.
+    if (!opts?.automatic) setImportUndo(null);
+  }, []);
+
+  // Commit an import merge and arm undo. Bypasses updateConfig on purpose — see
+  // above — so the ordering of the two setStates carries no meaning.
+  const applyImportMerge = useCallback((merged: SetlistSong[], before: SetlistSong[]) => {
+    setConfig((prev) => ensureStageSlotIds({ ...prev, setlist: merged }).config);
+    setImportUndo(before);
+  }, []);
+
+  // No side effect inside a state updater: React may invoke an updater twice in
+  // StrictMode, so the snapshot is read from scope and each setState is called once.
+  const undoImport = useCallback(() => {
+    if (!importUndo) return;
+    setConfig((prev) => ensureStageSlotIds({ ...prev, setlist: importUndo }).config);
+    setImportUndo(null);
+  }, [importUndo]);
+
+  // §7: undo also expires on a tab change — the other half of "until the next
+  // mutation or tab change" (the mutation half is updateConfig).
+  //
+  // Deliberately an ACTION, not an effect on [tab]: the print flow switches to Mix
+  // and restores the previous tab behind the user's back, and an effect would let
+  // that invisible round-trip silently eat the affordance. Only user-initiated
+  // navigation goes through here. (It also satisfies react-hooks/set-state-in-effect.)
+  const goToTab = useCallback((next: typeof tab) => {
+    setImportUndo(null);
+    setTab(next);
   }, []);
 
   // Canonical-BPM writer (lib/bpm-writer): optimistic patch, per-song serialized
@@ -678,7 +726,7 @@ export default function Page() {
             </Link>
           )}
           <button
-            onClick={() => setTab('perform')}
+            onClick={() => goToTab('perform')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
               tab === 'perform'
                 ? 'border-b-2 border-black text-black'
@@ -688,7 +736,7 @@ export default function Page() {
             Perform
           </button>
           <button
-            onClick={() => setTab('mix')}
+            onClick={() => goToTab('mix')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
               tab === 'mix'
                 ? 'border-b-2 border-black text-black'
@@ -699,7 +747,7 @@ export default function Page() {
           </button>
           {!isReadOnly && (
           <button
-            onClick={() => setTab('config')}
+            onClick={() => goToTab('config')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
               tab === 'config'
                 ? 'border-b-2 border-black text-black'
@@ -711,7 +759,7 @@ export default function Page() {
           )}
           {!isReadOnly && (
           <button
-            onClick={() => setTab('ai')}
+            onClick={() => goToTab('ai')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
               tab === 'ai'
                 ? 'border-b-2 border-black text-black'
@@ -746,6 +794,16 @@ export default function Page() {
               </svg>
             )}
           </button>
+          {/* Undo import — one level, in-memory, alongside the save status (§7).
+              Cleared by the next mutation (updateConfig) or a tab change. */}
+          {importUndo && (isOwner || isEditor) && (
+            <button
+              onClick={undoImport}
+              className="text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors"
+            >
+              Undo import
+            </button>
+          )}
           {/* Save status */}
           {(isOwner || isEditor) && (
             <span role="status" aria-live="polite" title={showContext.saveError ?? undefined} className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 max-w-[16rem] truncate ${
@@ -782,7 +840,7 @@ export default function Page() {
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
       {tab === 'config' && (
-        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
+        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} onImportApply={applyImportMerge} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
       )}
       {tab === 'ai' && (
         <div className="p-4 md:p-8">
@@ -5578,6 +5636,7 @@ function ConfigTab({
   config,
   updateConfig,
   onBpmChange,
+  onImportApply,
   googleToken,
   googleError,
   onDisconnectGoogle,
@@ -5587,9 +5646,14 @@ function ConfigTab({
   isEditor,
 }: {
   config: AppConfig;
-  updateConfig: (fn: (prev: AppConfig) => AppConfig) => void;
+  // `automatic` marks a write that is a consequence of another change rather than a
+  // user edit — it does not expire import-undo. See Page's updateConfig.
+  updateConfig: (fn: (prev: AppConfig) => AppConfig, opts?: { automatic?: boolean }) => void;
   // Session-lifetime canonical-BPM writer, owned by Page (survives tab remounts).
   onBpmChange: (songId: string, bpm: number | null) => void;
+  // Commits an import merge AND arms one-level undo, in Page so the affordance
+  // survives this tab's remount (design §7). Deliberately not updateConfig.
+  onImportApply: (merged: SetlistSong[], before: SetlistSong[]) => void;
   googleToken: GoogleToken | null;
   googleError?: string;
   onDisconnectGoogle: () => void;
@@ -5601,6 +5665,13 @@ function ConfigTab({
   const [sheetUrl, setSheetUrl] = useState('');
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetError, setSheetError] = useState('');
+  // Fetched sheet rows awaiting the user's Apply. Non-null ⇒ the preview panel
+  // replaces the loader row (§7). Nothing here has touched config.
+  const [importRows, setImportRows] = useState<{
+    rows: ImportedRow[];
+    ignored: { bpm: boolean; artist: boolean };
+  } | null>(null);
+  const [importRemoveMissing, setImportRemoveMissing] = useState(false);
   const [driveSetupLoading, setDriveSetupLoading] = useState(false);
   const [driveError, setDriveError] = useState('');
   const [folderIdInput, setFolderIdInput] = useState(config.chartsRootFolderId ?? '');
@@ -5647,6 +5718,8 @@ function ConfigTab({
       }
       const data = await res.json() as { results: { idx: number; charts: Chart[] }[] };
       if (version !== resolveVersionRef.current) return;
+      // `automatic`: this write is a debounced consequence of a setlist change, not
+      // a user edit, so it must not expire the import-undo affordance (§7).
       updateConfig((p) => {
         const newSetlist = [...p.setlist];
         for (const r of data.results) {
@@ -5655,7 +5728,7 @@ function ConfigTab({
           }
         }
         return { ...p, setlist: newSetlist };
-      });
+      }, { automatic: true });
     } catch {
       if (version === resolveVersionRef.current) {
         setChartsError('Network error resolving charts');
@@ -5682,10 +5755,14 @@ function ConfigTab({
       resolveVersionRef.current++;
       const hasCharts = config.setlist.some((s) => s.charts);
       if (hasCharts) {
+        // `automatic` for the same reason as the resolve write below: this is an
+        // effect-driven consequence, and this effect re-runs on every setlist
+        // change — so on a local (non-Supabase) show it would otherwise expire
+        // import-undo the moment the merge landed.
         updateConfig((p) => ({
           ...p,
           setlist: p.setlist.map((s) => ({ ...s, charts: undefined })),
-        }));
+        }), { automatic: true });
       }
       prevSignatureRef.current = resolveSignature;
       return;
@@ -5745,7 +5822,11 @@ function ConfigTab({
     }
   };
 
-  const handleLoadSheet = async () => {
+  // Chunk 3 (design §7): fetch and PREVIEW. Nothing reaches config until Apply —
+  // this handler's whole job is to put rows in state so the merge can be computed
+  // and shown. It replaces the destructive rebuild that dropped id/songId/key/
+  // bpm/charts on every re-import.
+  const handlePreviewImport = async () => {
     if (!sheetUrl.trim()) return;
     setSheetLoading(true);
     setSheetError('');
@@ -5756,26 +5837,55 @@ function ConfigTab({
         setSheetError(data.error || 'Failed to load sheet');
         return;
       }
-      // NOTE: still the destructive rebuild — every re-import mints fresh ids
-      // and drops songId/key/bpm/charts. mergeSetlist (lib/setlist-import.ts)
-      // exists to replace this and lands with the preview UI in chunk 3.
-      // Chunk 2 only moves where the rows come from; behavior is unchanged.
-      updateConfig((prev) => ({
-        ...prev,
-        setlist: (data.songs as ImportedRow[]).map((s, i) => ({
-          id: crypto.randomUUID(),
-          position: i + 1,
-          title: s.title,
-          lead: s.lead ?? '',
-          notes: s.notes ?? '',
-        })),
-      }));
-      // Auto-resolve charts after setlist import (fires on next render via effect)
+      // A sheet whose every row has a blank title parses to zero rows. Previewing
+      // that would offer "Also remove the N songs not in this sheet" for the WHOLE
+      // setlist — an invitation to wipe the show off the back of a malformed sheet.
+      // Not in the design; refusing is plainly better than previewing it.
+      const rows = data.songs as ImportedRow[];
+      if (rows.length === 0) {
+        setSheetError('No songs found in that sheet — every row is missing a title.');
+        return;
+      }
+      setImportRemoveMissing(false); // §7: removal is opt-in on EVERY preview
+      setImportRows({
+        rows,
+        ignored: {
+          bpm: Boolean(data.ignored?.bpm),
+          artist: Boolean(data.ignored?.artist),
+        },
+      });
     } catch {
       setSheetError('Network error');
     } finally {
       setSheetLoading(false);
     }
+  };
+
+  // The merge is computed client-side, so toggling the removal checkbox re-runs it
+  // with no refetch (§7, §12 Q3). `newId` is injected per mergeSetlist's purity
+  // contract (§0 rule 7); recomputation minting fresh ids is harmless because
+  // nothing is persisted until Apply, which commits exactly this `merged` array.
+  const importResult = useMemo(() => {
+    if (!importRows) return null;
+    return mergeSetlist(config.setlist, importRows.rows, {
+      newId: () => crypto.randomUUID(),
+      removeMissing: importRemoveMissing,
+    });
+  }, [importRows, config.setlist, importRemoveMissing]);
+
+  const dismissImport = () => {
+    setImportRows(null);
+    setImportRemoveMissing(false);
+  };
+
+  const applyImport = () => {
+    if (!importResult) return;
+    // Page owns the undo snapshot: it must outlive this tab (ConfigTab remounts on
+    // every tab switch) and it must not be cleared by the very mutation that
+    // creates it, which is why it does NOT go through updateConfig.
+    onImportApply(importResult.merged, config.setlist);
+    dismissImport();
+    // Auto-resolve charts fires on the next render via the existing effect.
   };
 
   return (
@@ -6163,28 +6273,40 @@ function ConfigTab({
           <details className="mb-4 text-sm">
             <summary className="cursor-pointer text-xs font-bold text-gray-400 uppercase hover:text-gray-600">How it works</summary>
             <ol className="mt-2 ml-4 list-decimal space-y-1 text-gray-600">
-              <li>Create a Google Sheet with columns: <strong>#</strong> (or Position), <strong>Title</strong> (or Song), <strong>Lead</strong> (or Singer), and optionally <strong>Notes</strong>.</li>
-              <li>Make the sheet publicly viewable: <em>Share &rarr; Anyone with the link &rarr; Viewer</em>.</li>
-              <li>Copy the sheet URL and paste it below.</li>
+              <li>Columns: <strong>Title</strong> (or Song) is required. Optional: <strong>#</strong>, <strong>Key</strong>, <strong>Lead</strong>, <strong>Notes</strong>, <strong>Scene Note</strong>.</li>
+              <li>Re-importing matches songs by title and keeps their charts and tempo. A blank cell leaves the existing value alone, and songs missing from the sheet are kept unless you ask for them to be removed.</li>
+              <li>Make the sheet publicly viewable: <em>Share &rarr; Anyone with the link &rarr; Viewer</em>, then paste the URL.</li>
             </ol>
           </details>
 
-          {/* Google Sheet loader */}
-          <div className="flex flex-col sm:flex-row gap-2 mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
-            <input
-              className={`${inputCls} flex-1`}
-              placeholder="Google Sheet URL..."
-              value={sheetUrl}
-              onChange={(e) => setSheetUrl(e.target.value)}
+          {/* Google Sheet loader — replaced by the preview panel until dismissed (§7) */}
+          {importRows && importResult ? (
+            <SetlistImportPreview
+              rowCount={importRows.rows.length}
+              diff={importResult.diff}
+              ignored={importRows.ignored}
+              removeMissing={importRemoveMissing}
+              onToggleRemoveMissing={setImportRemoveMissing}
+              onApply={applyImport}
+              onCancel={dismissImport}
             />
-            <button
-              className="px-4 py-1.5 text-xs font-bold bg-green-600 text-white rounded hover:bg-green-700 transition-colors disabled:opacity-50 whitespace-nowrap"
-              onClick={handleLoadSheet}
-              disabled={sheetLoading}
-            >
-              {sheetLoading ? 'Loading...' : 'Load from Google Sheet'}
-            </button>
-          </div>
+          ) : (
+            <div className="flex flex-col sm:flex-row gap-2 mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+              <input
+                className={`${inputCls} flex-1`}
+                placeholder="Google Sheet URL..."
+                value={sheetUrl}
+                onChange={(e) => setSheetUrl(e.target.value)}
+              />
+              <button
+                className="px-4 py-1.5 text-xs font-bold bg-green-600 text-white rounded hover:bg-green-700 transition-colors disabled:opacity-50 whitespace-nowrap"
+                onClick={handlePreviewImport}
+                disabled={sheetLoading}
+              >
+                {sheetLoading ? 'Loading...' : 'Preview import'}
+              </button>
+            </div>
+          )}
           {sheetError && (
             <p className="text-xs text-red-600 mb-3">{sheetError}</p>
           )}
