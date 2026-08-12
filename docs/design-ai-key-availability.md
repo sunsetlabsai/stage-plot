@@ -1,7 +1,8 @@
 # Design — AI key availability: capability probe + real empty state
 
-Status: **DESIGN — Codex R5 folded, NO FINDINGS. Design-complete; no R6 planned.**
-Version: **v7.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5)
+Status: **DESIGN COMPLETE — review closed at R6, no R7. IN BUILD (chunk 1 shipped, `f97d79f`).**
+Version: **v8.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5, v7 = invariant
+registry, v8 = review-closure bookkeeping)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 
 **v2 changelog** — Codex R1 returned **no blockers**; three refinements folded:
@@ -48,6 +49,17 @@ Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 |---|---|
 | §5.2's **broader pre-stream restoration** and **transcript removal** are now settled spec, not proposals. Open since R4. | Codex R5 answer |
 | §11 Q1 and Q2 closed | Codex R5 answer |
+
+**v8 changelog** — **no spec change.** Bookkeeping so the doc stops claiming a review
+round that is not coming. Graham closed design review at R6 (2026-08-11) with no R7, and
+this doc merges to main mid-build so the code citations in `lib/agent-key.ts` and
+`tests/agent-key.test.ts` resolve:
+
+| Change | Source |
+|---|---|
+| Status line — was "no R6 planned" while §11 was titled *Open questions for Codex R6*. Now states review is closed and the build is in flight. | v7 shipped stale |
+| §11 Q3 and Q4 given explicit dispositions instead of sitting undisposed. **Q4 is answered by what chunk 1 actually built**; **Q3 is carried to chunk 4 as a call for Graham**, default = ship as specified. | Graham closed review |
+| §12 NEW — build deviations, empty at merge time. Chunk 1 introduced none; later chunks append here rather than leaving main's doc stale (the failure this doc's merge ordering was chosen to accept, with this section as the mechanism). | Merge-order decision 2026-08-12 |
 
 ---
 
@@ -723,16 +735,51 @@ rounds has been accepted, nothing declined, and the two behavior calls I was
 least sure of are now ratified rather than assumed. The remaining §11 questions
 are refinements, not blockers — none of them change the shape of the build.
 
-## 11. Open questions for Codex R6
+## 11. Questions raised for Codex R6 — ALL DISPOSED (v8)
+
+**Review closed at R6, no R7.** None of these is open against the design; 3 is the
+only one that still needs a human call, and it is scoped to chunk 4.
 
 1. **CLOSED by R5** — the broader pre-stream restoration is confirmed as the
    right contract.
 2. **CLOSED by R5** — transcript removal on restore is confirmed.
-3. §5.2 sets `streamStarted` at the read rather than the parse, so a response
+3. **CARRIED TO CHUNK 4 as a call for Graham. Default = ship as specified.**
+   §5.2 sets `streamStarted` at the read rather than the parse, so a response
    that opens a stream and immediately dies still counts as sent. That is
-   deliberately conservative — it errs toward *not* restoring. Is there a
-   failure shape common enough (proxy opens the stream, upstream 500s before any
-   real event) that erring the other way would serve testers better?
-4. §9 test 15 asserts the probe reports `available` while `/admin` reports the
-   store unreachable. Is there a third surface that also needs to disagree
-   honestly during a partial outage — the send path's own error copy?
+   deliberately conservative — it errs toward *not* restoring, on the grounds
+   that an upstream call which happened may have billed.
+
+   The question was whether the proxy-opens-then-upstream-500 shape is common
+   enough to flip it. **It is not answerable from the spec, and it should not be
+   guessed at, because there is a third option neither R4 nor R5 considered:**
+   `/api/agent/chat` is *our own* route, so a pre-stream upstream failure is a
+   state we can signal explicitly rather than infer from byte timing. If the
+   route emitted a terminal error frame before any `content_block`, the client
+   would not have to guess whether anything was delivered.
+
+   **That is a spec change, not a build detail**, so it is a Graham call at
+   chunk 4 — not a Codex question and not mine. Absent a ruling, chunk 4 builds
+   §5.2 exactly as written and the conservative branch stands.
+4. **ANSWERED by chunk 1 — now a chunk-3 requirement, not an open question.**
+   The 401 from `/api/agent/chat` carries `reason: 'unconfigured' | 'error'` as
+   of chunk 1 (`f97d79f`), which is precisely the distinction the send path
+   needed in order to disagree honestly during a partial outage. So yes, the
+   send path is the third surface, and the mechanism already exists: **§5's
+   states 2–6 must render different copy for `error` than for `unconfigured`,
+   and chunk 3 owns it.** Nothing consumes `reason` before chunk 3, so the field
+   is currently inert — which is the shape to watch for, not a gap in the spec.
+
+---
+
+## 12. Build deviations (folded back post-merge)
+
+This doc merged to main **during** the build, by decision on 2026-08-12: the
+alternative left `lib/agent-key.ts` and `tests/agent-key.test.ts` on main citing
+a path that did not resolve. The accepted cost is that the doc can drift from
+what gets built. **This section is the mechanism that repays it** — every chunk
+that deviates from the spec above appends here in the same PR as the deviation,
+so main's copy of the design is never silently wrong.
+
+| Chunk | Deviation | Why |
+|---|---|---|
+| 1 | **None.** | Two additions beyond the spec, neither contradicting it: `REDIS_URL` absent and `REDIS_URL=''` both resolve to `none` (matching `getRedis`'s own `if (!url)` truthiness check) rather than being reported as an outage. |
