@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # `edited` matters: a PR retargeted onto main (common when unstacking a chunk)
+  # fires only `edited`, which is NOT in the default type set — without it a
+  # retargeted PR reports no CI run at all and its checks panel still looks green.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
     branches: [main]
   push:
     branches: [main]
@@ -24,6 +28,11 @@ jobs:
 
       - name: Type check
         run: npx tsc --noEmit
+
+      # NOTE: `npm test` is deliberately NOT a step yet. Adding it turned CI red
+      # on a pre-existing flake in tests/use-conductor-session.test.tsx — the
+      # suite has never run in CI, so the flake was invisible. See PR #126
+      # discussion; the test step lands once that is fixed.
 
       - name: Build
         run: npm run build
