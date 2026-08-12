@@ -492,6 +492,27 @@ async function activateAt(over: Partial<Parameters<typeof useConductorSession>[0
   return { clock, ...rh };
 }
 
+/**
+ * Activate the hook, THEN install fake timers — the same ordering activateAt uses,
+ * and the ordering the relay tests below must follow for a real reason.
+ *
+ * Activation awaits `programHash`, which awaits `crypto.subtle.digest` — a PLATFORM
+ * promise that fake timers do not drive. The previous shape here was
+ * `vi.useFakeTimers()` up front followed by a single
+ * `await vi.runOnlyPendingTimersAsync()`, which only ever satisfied
+ * `expect(active).toBe(true)` because that flush happens to yield enough microtask
+ * turns for the digest ON A FAST MACHINE. On a 2-core CI runner it loses the race,
+ * nondeterministically, in whichever test got unlucky.
+ *
+ * `waitFor` on real timers can actually wait for the digest. Fake timers are then
+ * installed unchanged, so everything after this line — notably
+ * `advanceTimersByTime` over the reconnect backoff — behaves exactly as before.
+ */
+async function activateThenFakeTimers(result: { current: { active: boolean } }) {
+  await waitFor(() => expect(result.current.active).toBe(true));
+  vi.useFakeTimers();
+}
+
 describe('useConductorSession — static-BPM motion driver (5b chunk 2)', () => {
   it('rung is manual until the clock is turned on; static-bpm once it is (with a stated tempo)', async () => {
     const { result } = await activateAt();
@@ -938,13 +959,9 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
   });
 
   it('a socket drop resets to connecting and reconnects with a fresh hello (failure matrix row 1)', async () => {
-    vi.useFakeTimers();
     const h = relayHarness();
     const { result } = renderHook(() => useConductorSession(args({ relay: h.relay })));
-    await act(async () => {
-      await vi.runOnlyPendingTimersAsync(); // flush the async programHash resolve
-    });
-    expect(result.current.active).toBe(true);
+    await activateThenFakeTimers(result);
     const first = h.sock();
     act(() => first.open());
     act(() => first.push({ type: 'joined', epoch: 0, hasWriter: false, activeSession: null, writerLabel: null }));
@@ -969,13 +986,9 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
   });
 
   it('a follower that self-drove while offline is crushed back onto the writer on rejoin (Codex R1 HIGH)', async () => {
-    vi.useFakeTimers();
     const h = relayHarness();
     const { result } = renderHook(() => useConductorSession(args({ relay: h.relay })));
-    await act(async () => {
-      await vi.runOnlyPendingTimersAsync(); // flush the async programHash resolve
-    });
-    expect(result.current.active).toBe(true);
+    await activateThenFakeTimers(result);
     const first = h.sock();
 
     // Converge as a follower on the peer MD's session (writer two bars in).
@@ -1069,7 +1082,6 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
   });
 
   it('create-mode: creates, adopts the relay-minted room, and rejoins it across a plain drop (D4)', async () => {
-    vi.useFakeTimers();
     const h = relayHarness();
     const relay = {
       url: h.relay.url,
@@ -1079,10 +1091,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
       socketFactory: h.relay.socketFactory,
     };
     const { result } = renderHook(() => useConductorSession(args({ relay })));
-    await act(async () => {
-      await vi.runOnlyPendingTimersAsync(); // flush the async programHash resolve
-    });
-    expect(result.current.active).toBe(true);
+    await activateThenFakeTimers(result);
     const first = h.sock();
 
     // First hello CREATES: no room/code — the relay mints, showRef rides along.
@@ -1117,7 +1126,6 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
   });
 
   it('create-mode: a 4004 close clears the adopted room and the next connect re-creates (fresh code)', async () => {
-    vi.useFakeTimers();
     const h = relayHarness();
     const relay = {
       url: h.relay.url,
@@ -1127,10 +1135,7 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
       socketFactory: h.relay.socketFactory,
     };
     const { result } = renderHook(() => useConductorSession(args({ relay })));
-    await act(async () => {
-      await vi.runOnlyPendingTimersAsync();
-    });
-    expect(result.current.active).toBe(true);
+    await activateThenFakeTimers(result);
     const first = h.sock();
     act(() => first.open());
     act(() =>
@@ -1164,13 +1169,9 @@ describe('useConductorSession — relay binding (3b chunk 4)', () => {
   });
 
   it('join-mode: a 4004 close is terminal — roomGone flips and NO retry dials (the code never comes back)', async () => {
-    vi.useFakeTimers();
     const h = relayHarness();
     const { result } = renderHook(() => useConductorSession(args({ relay: h.relay })));
-    await act(async () => {
-      await vi.runOnlyPendingTimersAsync();
-    });
-    expect(result.current.active).toBe(true);
+    await activateThenFakeTimers(result);
     expect(result.current.relay.roomGone).toBe(false);
     const first = h.sock();
     act(() => first.open());

@@ -29,10 +29,8 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
-      # NOTE: `npm test` is deliberately NOT a step yet. Adding it turned CI red
-      # on a pre-existing flake in tests/use-conductor-session.test.tsx — the
-      # suite has never run in CI, so the flake was invisible. See PR #126
-      # discussion; the test step lands once that is fixed.
+      - name: Test
+        run: npm test
 
       - name: Build
         run: npm run build
