@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { createClient } from 'redis';
 import { SYSTEM_PROMPT, TOOLS } from '@/lib/agent';
 import { getAdminConfig } from '@/lib/admin-config';
+import { parseContentLength } from '@/lib/http-headers';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MAX_BODY_SIZE = 100_000; // 100KB
@@ -70,9 +71,20 @@ async function consumeTryitQuota(ip: string): Promise<{ allowed: boolean; remain
 }
 
 export async function POST(request: NextRequest) {
-  // Size check
-  const contentLength = parseInt(request.headers.get('content-length') || '0', 10);
-  if (contentLength > MAX_BODY_SIZE) {
+  // Size check. A malformed Content-Length is refused rather than coerced: the old
+  // parseInt read a numeric prefix, so '1e9' became 1 and slipped under the limit.
+  //
+  // Reachability, measured (Codex, raw local Node HTTP probe): prefix-malformed
+  // values are rejected by Node's parser before they get here, but an all-digit
+  // unsafe integer like 9007199254740992 DOES arrive. So this 400 is a real, live
+  // branch — and for that one case it replaces what parseInt would have made a 413.
+  // Accepted deliberately: it still fails closed, and any such value is ~11 orders
+  // of magnitude past MAX_BODY_SIZE, so no honest client is being turned away.
+  const contentLength = parseContentLength(request.headers.get('content-length'));
+  if (contentLength.kind === 'invalid') {
+    return Response.json({ error: 'Malformed Content-Length' }, { status: 400 });
+  }
+  if (contentLength.kind === 'bytes' && contentLength.bytes > MAX_BODY_SIZE) {
     return Response.json({ error: 'Request too large' }, { status: 413 });
   }
 
