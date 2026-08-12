@@ -123,6 +123,22 @@ describe('POST /api/agent/chat — try-it', () => {
     expect(proxiedBody().max_tokens).toBe(TRYIT_MAX_TOKENS);
   });
 
+  // Codex R1 residual note on #131: the SUCCESS-path header was unasserted, so a
+  // regression dropping it would not have failed anything. The client reads this to
+  // show its remaining count, and losing it degrades silently — the exact class of
+  // "works until someone looks" defect this design exists to remove.
+  it('reports the remaining count on a successful try-it send', async () => {
+    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    const { TRYIT_QUOTA } = await import('../lib/agent-key');
+    const res = await post();
+    expect(res.headers.get('X-Tryit-Remaining')).toBe(String(TRYIT_QUOTA - 1));
+  });
+
+  it('omits the remaining header on a BYOA send, which has no quota', async () => {
+    const res = await post({ authorization: 'Bearer sk-ant-mine' });
+    expect(res.headers.get('X-Tryit-Remaining')).toBeNull();
+  });
+
   it('429s with tryitExhausted once the allowance is spent', async () => {
     redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
     const { TRYIT_QUOTA } = await import('../lib/agent-key');
