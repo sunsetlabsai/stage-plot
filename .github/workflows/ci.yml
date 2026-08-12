@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # `edited` matters: a PR retargeted onto main (common when unstacking a chunk)
+  # fires only `edited`, which is NOT in the default type set — without it a
+  # retargeted PR reports no CI run at all and its checks panel still looks green.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
     branches: [main]
   push:
     branches: [main]
@@ -24,6 +28,9 @@ jobs:
 
       - name: Type check
         run: npx tsc --noEmit
+
+      - name: Test
+        run: npm test
 
       - name: Build
         run: npm run build
