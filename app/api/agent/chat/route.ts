@@ -73,8 +73,13 @@ async function consumeTryitQuota(ip: string): Promise<{ allowed: boolean; remain
 export async function POST(request: NextRequest) {
   // Size check. A malformed Content-Length is refused rather than coerced: the old
   // parseInt read a numeric prefix, so '1e9' became 1 and slipped under the limit.
-  // Unreachable in practice (Node's HTTP parser rejects it first), which is exactly
-  // why it is safe to fail closed here.
+  //
+  // Reachability, measured (Codex, raw local Node HTTP probe): prefix-malformed
+  // values are rejected by Node's parser before they get here, but an all-digit
+  // unsafe integer like 9007199254740992 DOES arrive. So this 400 is a real, live
+  // branch — and for that one case it replaces what parseInt would have made a 413.
+  // Accepted deliberately: it still fails closed, and any such value is ~11 orders
+  // of magnitude past MAX_BODY_SIZE, so no honest client is being turned away.
   const contentLength = parseContentLength(request.headers.get('content-length'));
   if (contentLength.kind === 'invalid') {
     return Response.json({ error: 'Malformed Content-Length' }, { status: 400 });

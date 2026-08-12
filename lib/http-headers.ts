@@ -6,9 +6,13 @@
 // `#` column and the sheet `gid`), and the same reason it was hard to see — a
 // malformed value doesn't throw or return NaN, it returns a plausible small number.
 //
-// It is not a live vulnerability: Node's HTTP parser rejects a malformed
-// Content-Length before a route ever sees it. The point is to remove the pattern,
-// so the next reader of these lines doesn't copy it somewhere it DOES matter.
+// It is not a live vulnerability, but the reason is narrower than it first looks,
+// and Codex measured it rather than assuming: Node's HTTP parser rejects
+// PREFIX-malformed values (`1e9`, `12abc`) before a route ever sees them — but an
+// all-digit value too large to be an exact integer (`9007199254740992`) DOES reach
+// userland. So `invalid` is reachable in production, just not via the prefix cases.
+// The point is still to remove the pattern, so the next reader of these lines
+// doesn't copy it somewhere it DOES matter.
 
 export type ContentLength =
   /** No `Content-Length` header. Legitimate — e.g. a chunked body. */
