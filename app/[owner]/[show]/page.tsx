@@ -42,6 +42,9 @@ import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputI
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
+import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
+import { resolveAvailability, canSendMessage, effectiveProbe, type FetchedProbe } from '@/lib/agent-availability';
+import type { Capabilities } from '@/lib/agent-key';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -4995,9 +4998,39 @@ function AgentChat({
   const [error, setError] = useState('');
   const [tryitRemaining, setTryitRemaining] = useState<number | null>(null);
   const [tryitExhausted, setTryitExhausted] = useState(false);
+  const [fetchedProbe, setFetchedProbe] = useState<FetchedProbe>('loading');
   const chatEndRef = useRef<HTMLDivElement>(null);
   const configRef = useRef(config);
   useEffect(() => { configRef.current = config; }, [config]);
+
+  // §5: no probe when a BYOA key is already saved — /api/agent/chat prefers
+  // Authorization unconditionally, so try-it state cannot affect what a send does.
+  // `skipped` is derived, not stored, so clearing the key returns this to `loading`
+  // and the effect below fetches. See effectiveProbe.
+  const probe = effectiveProbe(apiKey, fetchedProbe);
+
+  // Deliberately not aborted on unmount: the response only calls setState, React
+  // no-ops a set on an unmounted component, and an AbortController here would need
+  // to survive the tab remounting to be worth anything.
+  useEffect(() => {
+    if (apiKey) return;
+    let live = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/agent/capabilities');
+        // A 429 is NOT one of the four states, and rendering it as one would report a
+        // rate limit as an outage (see the route). Leave the probe pending so the next
+        // mount asks again, rather than committing to a state we did not measure.
+        if (res.status === 429) return;
+        if (!res.ok) throw new Error(`probe failed: ${res.status}`);
+        const body = (await res.json()) as Capabilities;
+        if (live) setFetchedProbe(body);
+      } catch {
+        if (live) setFetchedProbe('error');
+      }
+    })();
+    return () => { live = false; };
+  }, [apiKey]);
 
   // Persist key when rememberKey changes
   useEffect(() => {
@@ -5354,8 +5387,19 @@ function AgentChat({
   }
 
   const hasPendingTools = messages.some((m) => m.toolCalls?.some((tc) => tc.status === 'pending'));
-  const canSend = !streaming && !hasPendingTools && (!!apiKey || (!tryitExhausted));
-  const needsKey = !apiKey && tryitExhausted;
+
+  // Replaces `!!apiKey || !tryitExhausted` (§5). That predicate was true whenever no
+  // key was set and no 429 had arrived — and only a 429 set tryitExhausted, so with
+  // try-it UNCONFIGURED (a 401) the composer stayed enabled forever, inviting sends
+  // the app already knew would fail. The rules now live in one tested function.
+  const availability = resolveAvailability({
+    apiKey,
+    probe,
+    sendRemaining: tryitRemaining,
+    sendExhausted: tryitExhausted,
+  });
+  const canSend = canSendMessage({ availability, streaming, hasPendingTools });
+  const needsKey = availability.showKeyField && !apiKey;
 
   const toolNameLabels: Record<string, string> = {
     update_stage_plot: 'Stage Plot',
@@ -5372,44 +5416,24 @@ function AgentChat({
         Describe your band in plain English. The AI builds your stage plot, input list, and monitors.
       </p>
 
-      {/* API Key input */}
-      {!apiKey && !tryitExhausted && tryitRemaining === null && (
-        <p className="text-xs text-gray-500">
-          Try it free — or <button onClick={() => setShowKey(true)} className="underline">enter your own API key</button> for unlimited use.
-          {' '}<a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer" className="text-gray-400 underline">(get a key)</a>
-        </p>
-      )}
-
-      {tryitRemaining !== null && !apiKey && (
-        <p className="text-xs text-gray-500">
-          {tryitRemaining} free message{tryitRemaining !== 1 ? 's' : ''} remaining.
-          <button onClick={() => setShowKey(true)} className="underline ml-1">Add your own key</button> for unlimited use.
-        </p>
-      )}
-
-      {(needsKey || apiKey || showKey) && (
-        <div className="flex items-center gap-2">
-          <input
-            type="password"
-            className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-black bg-white font-mono"
-            placeholder="sk-ant-..."
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
-          {apiKey && (
-            <button
-              onClick={() => { setApiKey(''); localStorage.removeItem('showrunr-claude-key'); sessionStorage.removeItem('showrunr-claude-key'); }}
-              className="px-2 py-2 text-xs text-red-500 hover:text-red-700"
-            >
-              Clear
-            </button>
-          )}
-          <label className="flex items-center gap-1 text-xs text-gray-500 whitespace-nowrap">
-            <input type="checkbox" checked={rememberKey} onChange={(e) => setRememberKey(e.target.checked)} />
-            Remember
-          </label>
-        </div>
-      )}
+      {/* Availability lead copy + the key field. The old "Try it free" line rendered
+          under `!apiKey && !tryitExhausted && tryitRemaining === null` — which is
+          exactly the UNCONFIGURED state, so the tab advertised a free trial that was
+          not set up. That claim is gone; the panel only says what the probe measured. */}
+      <AgentAvailabilityPanel
+        availability={availability}
+        apiKey={apiKey}
+        rememberKey={rememberKey}
+        showKey={showKey}
+        onApiKeyChange={setApiKey}
+        onRememberChange={setRememberKey}
+        onRevealKey={() => setShowKey(true)}
+        onClearKey={() => {
+          setApiKey('');
+          localStorage.removeItem('showrunr-claude-key');
+          sessionStorage.removeItem('showrunr-claude-key');
+        }}
+      />
 
       {/* Chat messages */}
       {(messages.length > 0 || streaming) && <div className="border border-gray-200 rounded-lg p-3 max-h-[calc(100vh-280px)] overflow-y-auto space-y-3 text-sm bg-white">
