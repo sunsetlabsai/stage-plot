@@ -143,3 +143,45 @@ export async function resolveKeyMode(
 export function getClientIp(headers: Headers): string {
   return headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
 }
+
+/**
+ * The `GET /api/agent/capabilities` response body (§4).
+ *
+ * Declared here rather than in the route because §5's `AgentChat` consumes the same
+ * shape — the probe and its only reader resolve the contract through ONE definition,
+ * for the same drift reason `fallbackQuota` lives here.
+ */
+export type Capabilities = {
+  tryit: 'available' | 'exhausted' | 'unconfigured' | 'error';
+  /** null unless tryit is available or exhausted — §4 forbids inventing a count. */
+  tryitRemaining: number | null;
+  /** Always serialized from TRYIT_QUOTA, never a literal (§4, Codex R2 medium). */
+  quota: number;
+};
+
+/**
+ * Project a resolved KeyMode onto the probe's wire shape.
+ *
+ * Returns `null` for `byoa`, which the probe can never produce because it passes no
+ * client key. That is a programming error rather than a state to report, and the
+ * route fails loud on it — reporting a try-it state we did not measure would be the
+ * exact class of lie this design exists to remove (§0 invariant 2).
+ *
+ * Note the key itself is not in the return type at all: there is no path from here to
+ * a response containing the key, its length or its prefix (§4 hard requirement, §9
+ * test 4). The enum is the whole payload.
+ */
+export function capabilitiesFrom(resolved: KeyMode): Capabilities | null {
+  switch (resolved.mode) {
+    case 'byoa':
+      return null;
+    case 'error':
+      return { tryit: 'error', tryitRemaining: null, quota: TRYIT_QUOTA };
+    case 'unconfigured':
+      return { tryit: 'unconfigured', tryitRemaining: null, quota: TRYIT_QUOTA };
+    case 'exhausted':
+      return { tryit: 'exhausted', tryitRemaining: 0, quota: TRYIT_QUOTA };
+    case 'tryit':
+      return { tryit: 'available', tryitRemaining: resolved.remaining, quota: TRYIT_QUOTA };
+  }
+}
