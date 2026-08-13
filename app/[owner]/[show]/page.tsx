@@ -42,6 +42,7 @@ import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputI
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
+import { readKey, initialRemember, persistKey, BYOA_KEY } from '@/lib/byoa-key-storage';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -4982,11 +4983,11 @@ function AgentChat({
 }) {
   const [apiKey, setApiKey] = useState(() => {
     if (typeof window === 'undefined') return '';
-    return localStorage.getItem('showrunr-claude-key') || sessionStorage.getItem('showrunr-claude-key') || '';
+    return readKey(localStorage, sessionStorage);
   });
   const [rememberKey, setRememberKey] = useState(() => {
     if (typeof window === 'undefined') return false;
-    return !!localStorage.getItem('showrunr-claude-key');
+    return initialRemember(localStorage, sessionStorage);
   });
   const [showKey, setShowKey] = useState(false);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
@@ -4999,14 +5000,10 @@ function AgentChat({
   const configRef = useRef(config);
   useEffect(() => { configRef.current = config; }, [config]);
 
-  // Persist key when rememberKey changes
+  // Persist the key to whichever store the Remember choice selects. Unchecked
+  // means session-scoped, NOT discarded — see lib/byoa-key-storage.
   useEffect(() => {
-    if (rememberKey && apiKey) {
-      localStorage.setItem('showrunr-claude-key', apiKey);
-    } else {
-      localStorage.removeItem('showrunr-claude-key');
-      sessionStorage.removeItem('showrunr-claude-key');
-    }
+    persistKey(localStorage, sessionStorage, apiKey, rememberKey);
   }, [rememberKey, apiKey]);
 
   // Auto-scroll chat
@@ -5398,7 +5395,7 @@ function AgentChat({
           />
           {apiKey && (
             <button
-              onClick={() => { setApiKey(''); localStorage.removeItem('showrunr-claude-key'); sessionStorage.removeItem('showrunr-claude-key'); }}
+              onClick={() => { setApiKey(''); localStorage.removeItem(BYOA_KEY); sessionStorage.removeItem(BYOA_KEY); }}
               className="px-2 py-2 text-xs text-red-500 hover:text-red-700"
             >
               Clear
