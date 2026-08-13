@@ -266,3 +266,53 @@ describe('effectiveProbe — `skipped` is derived, never stored', () => {
     expect(effectiveProbe('', measured)).toBe(measured);
   });
 });
+
+describe('probe 429 — Codex R1 medium: state 2 was a dead end', () => {
+  it('is state 6 and OFFERS THE KEY FIELD, never state 2', () => {
+    // The defect: a 429 recorded nothing, the probe stayed 'loading', and state 2
+    // hides the key field. A venue that tripped the shared-IP probe limit was left
+    // on "Checking AI availability…" with no way to paste its own key.
+    const a = resolve({ probe: 'rateLimited' });
+
+    expect(a.state).toBe(6);
+    expect(a.state).not.toBe(2);
+    expect(a.showKeyField).toBe(true);
+    expect(a.allowsSend).toBe(false);
+  });
+
+  it('says "not yet" rather than reusing the failed-probe lead', () => {
+    // The route sends `rateLimited` specifically so this chunk can tell "ask again
+    // shortly" apart from "the key store is unreachable". Collapsing them would
+    // throw away a distinction chunk 2 built on purpose.
+    const limited = resolve({ probe: 'rateLimited' });
+    const failed = resolve({ probe: 'error' });
+
+    expect(limited.lead).toBe('rateLimited');
+    expect(failed.lead).toBe('checkFailed');
+    expect(limited.lead).not.toBe(failed.lead);
+
+    // Same affordances though — the user's way forward is identical.
+    expect(limited.showKeyField).toBe(failed.showKeyField);
+    expect(limited.allowsSend).toBe(failed.allowsSend);
+    expect(limited.state).toBe(failed.state);
+  });
+
+  it('never claims a remaining count it did not measure', () => {
+    expect(resolve({ probe: 'rateLimited' }).remaining).toBe(null);
+  });
+
+  it('blocks the composer, and a BYOA key still unblocks it', () => {
+    expect(
+      canSendMessage({
+        availability: resolve({ probe: 'rateLimited' }),
+        streaming: false,
+        hasPendingTools: false,
+      }),
+    ).toBe(false);
+
+    // The escape hatch actually works: paste a key and state 1 takes over.
+    const withKey = resolve({ probe: 'rateLimited', apiKey: 'sk-ant-mine' });
+    expect(withKey.state).toBe(1);
+    expect(canSendMessage({ availability: withKey, streaming: false, hasPendingTools: false })).toBe(true);
+  });
+});

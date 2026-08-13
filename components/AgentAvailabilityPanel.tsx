@@ -64,14 +64,18 @@ export function AgentAvailabilityPanel({
         </div>
       )}
 
-      {(lead === 'unconfigured' || lead === 'checkFailed') && (
+      {(lead === 'unconfigured' || lead === 'checkFailed' || lead === 'rateLimited') && (
         <div className="text-xs text-gray-500 space-y-1">
           {/* States 5 and 6 are the same instruction with different leads. The user
-              needs the same thing either way; only our confidence about why differs. */}
+              needs the same thing either way; only our confidence about why differs.
+              The 429 lead is the one case where waiting is a real option, so it says so
+              rather than implying something is broken. */}
           <p className="text-gray-700">
             {lead === 'unconfigured'
               ? 'Free messages aren’t available on this deployment.'
-              : 'Couldn’t check AI availability.'}
+              : lead === 'rateLimited'
+                ? 'Couldn’t check AI availability just yet — too many checks from your network. Try again shortly.'
+                : 'Couldn’t check AI availability.'}
           </p>
           <p>
             Paste your own Claude API key below to use the AI Show Designer.{' '}

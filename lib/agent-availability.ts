@@ -17,7 +17,19 @@ import type { Capabilities } from './agent-key';
  * introduce. It also gives chunk 4 the signal it needs: clearing a stale key has to
  * start a probe that was never run, and `'skipped'` is what tells it so.
  */
-export type Probe = 'skipped' | 'loading' | 'error' | Capabilities;
+/**
+ * `'rateLimited'` is the probe's 429. The route sets `rateLimited: true` explicitly
+ * "so chunk 3 can distinguish 'ask again shortly' from 'the key store is unreachable'"
+ * — a contract chunk 2 built for this chunk to honour.
+ *
+ * Codex R1 medium: chunk 3 originally returned early on a 429 without recording
+ * anything, which left the probe at `'loading'` forever. That renders state 2 — no
+ * error, no key field, composer disabled — so a user behind a shared IP that trips the
+ * 60/min probe limit could not even paste their own key until the tab remounted. An
+ * error path that strands the caller is not a fix; that is the third instance of this
+ * exact class in this project.
+ */
+export type Probe = 'skipped' | 'loading' | 'rateLimited' | 'error' | Capabilities;
 
 /** What the probe fetch itself can return. `skipped` is not fetchable — see below. */
 export type FetchedProbe = Exclude<Probe, 'skipped'>;
@@ -49,7 +61,13 @@ export type Lead =
   /** State 5 — try-it is intentionally off. The state with no design before this. */
   | 'unconfigured'
   /** State 6 — we could not find out. Reads as 5 with a softer lead (§5). */
-  | 'checkFailed';
+  | 'checkFailed'
+  /**
+   * State 6 via a 429 — we could not find out *yet*. Same affordances as
+   * `checkFailed`, different copy: this one is worth asking about again, and saying
+   * so is the whole reason the route bothers to send `rateLimited`.
+   */
+  | 'rateLimited';
 
 export type Availability = {
   state: 1 | 2 | 3 | 4 | 5 | 6;
@@ -103,6 +121,13 @@ export function resolveAvailability(args: {
     // State 2: disabled composer, no error, and crucially no "try it free" claim —
     // we do not yet know whether it is free, and guessing is the defect (§1).
     return { state: 2, allowsSend: false, showKeyField: false, remaining: null, lead: 'checking' };
+  }
+
+  if (probe === 'rateLimited') {
+    // State 6, but never state 2: the key field MUST be offered. Rate limiting is
+    // keyed on the forwarded IP, so a whole venue trips it together — exactly the
+    // population that needs to fall back to its own key.
+    return { state: 6, allowsSend: false, showKeyField: true, remaining: null, lead: 'rateLimited' };
   }
 
   if (probe === 'error') {

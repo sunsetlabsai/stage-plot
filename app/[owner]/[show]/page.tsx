@@ -5018,10 +5018,16 @@ function AgentChat({
     (async () => {
       try {
         const res = await fetch('/api/agent/capabilities');
-        // A 429 is NOT one of the four states, and rendering it as one would report a
-        // rate limit as an outage (see the route). Leave the probe pending so the next
-        // mount asks again, rather than committing to a state we did not measure.
-        if (res.status === 429) return;
+        // A 429 is NOT one of the four states, so it gets its own probe value rather
+        // than being collapsed into one (see the route, which sends `rateLimited` for
+        // exactly this). Recording it matters: returning early here left the probe at
+        // `loading` forever, which renders state 2 — composer disabled and NO key
+        // field — so a venue that trips the shared-IP probe limit could not paste its
+        // own key at all. Codex R1 medium.
+        if (res.status === 429) {
+          if (live) setFetchedProbe('rateLimited');
+          return;
+        }
         if (!res.ok) throw new Error(`probe failed: ${res.status}`);
         const body = (await res.json()) as Capabilities;
         if (live) setFetchedProbe(body);

@@ -190,3 +190,38 @@ describe('AgentAvailabilityPanel — state 1, BYOA key present', () => {
     expect(onClearKey).toHaveBeenCalled();
   });
 });
+
+describe('AgentAvailabilityPanel — rate-limited probe (Codex R1 medium)', () => {
+  it('renders the key field, so a rate-limited venue is not stranded', () => {
+    renderPanel('rateLimited');
+
+    // The regression this pins: state 2 rendered "Checking AI availability…" and
+    // hid the input entirely, leaving no way out until the tab remounted.
+    expect(screen.getByLabelText('Claude API key')).toBeInTheDocument();
+    expect(screen.queryByText(/checking ai availability…/i)).toBeNull();
+  });
+
+  it('tells the user to try again rather than implying an outage', () => {
+    renderPanel('rateLimited');
+
+    expect(screen.getByText(/try again shortly/i)).toBeInTheDocument();
+  });
+
+  it('reads differently from a failed probe', () => {
+    renderPanel('rateLimited');
+    const limited = screen.getByText(/couldn’t check ai availability/i).textContent;
+    cleanup();
+
+    renderPanel('error');
+    const failed = screen.getByText(/couldn’t check ai availability/i).textContent;
+
+    expect(limited).not.toBe(failed);
+  });
+
+  it('never advertises free messages it could not measure', () => {
+    renderPanel('rateLimited');
+
+    expect(screen.queryByText(/try it free/i)).toBeNull();
+    expect(screen.queryByText(/messages remaining/i)).toBeNull();
+  });
+});
