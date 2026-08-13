@@ -17,7 +17,22 @@ const redis = {
   store: new Map<string, string>(),
   incrCalls: 0,
   expireCalls: 0,
+  /**
+   * Every key passed to GET. Codex R1 non-blocking, and correct: asserting the quota
+   * key was not created/INCRed/EXPIREd could not detect a wasted READ, because a GET
+   * creates nothing. "Never touches the quota store" has to include reads.
+   */
+  getKeys: [] as string[],
+  /**
+   * Keys whose GET throws, with connect still succeeding. Needed because
+   * `connectThrows` makes a quota-read assertion VACUOUS — nothing can record a read
+   * that dies at connect, so the test would pass whether or not the code read quota.
+   */
+  getThrowsFor: new Set<string>(),
 };
+
+/** Quota keys read this test — the assertion Codex's note asked for. */
+const quotaReads = () => redis.getKeys.filter((k) => k.startsWith('quota:'));
 
 vi.mock('redis', () => ({
   createClient: () => ({
@@ -25,7 +40,11 @@ vi.mock('redis', () => ({
     connect: async () => {
       if (redis.connectThrows) throw new Error('ECONNREFUSED');
     },
-    get: async (k: string) => redis.store.get(k) ?? null,
+    get: async (k: string) => {
+      redis.getKeys.push(k);
+      if (redis.getThrowsFor.has(k)) throw new Error(`read failed: ${k}`);
+      return redis.store.get(k) ?? null;
+    },
     set: async (k: string, v: string) => {
       redis.store.set(k, v);
     },
@@ -52,6 +71,8 @@ beforeEach(() => {
   redis.store.clear();
   redis.incrCalls = 0;
   redis.expireCalls = 0;
+  redis.getKeys = [];
+  redis.getThrowsFor.clear();
   process.env.REDIS_URL = 'redis://test';
   delete process.env.CLAUDE_TRYIT_KEY;
   vi.resetModules();
@@ -112,10 +133,36 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
       quota: TRYIT_QUOTA,
     });
     // The assertion that matters: with no key there is nothing to meter, so the
-    // quota key must not be read, written or expired.
+    // quota key must not be READ, written or expired. The read half is the one the
+    // other three cannot cover — a GET creates no key, so §4's "do not touch the
+    // store" would have passed while the route round-tripped to Redis for nothing.
+    expect(quotaReads()).toEqual([]);
     expect(redis.store.has(`quota:${IP}`)).toBe(false);
     expect(redis.incrCalls).toBe(0);
     expect(redis.expireCalls).toBe(0);
+  });
+
+  it('does not read the quota store on error either', async () => {
+    // Same rule one branch over: §4 says do not touch the store for BOTH none and
+    // error. Deliberately NOT using connectThrows — with connect broken, no read can
+    // be recorded at all, so the assertion would hold vacuously and pass against a
+    // route that read quota first. Here the store is reachable and only the CONFIG
+    // read fails, which is the one arrangement where a wasted quota read is visible.
+    redis.getThrowsFor.add('admin:claude_tryit_key');
+
+    expect((await (await probe()).json()).tryit).toBe('error');
+    expect(quotaReads()).toEqual([]);
+    expect(redis.incrCalls).toBe(0);
+  });
+
+  it('DOES read the quota store once a key resolves, proving the assertion has teeth', async () => {
+    // Without this, the two tests above would also pass against a route that never
+    // consulted the quota store at all.
+    keyInStore();
+
+    await probe();
+
+    expect(quotaReads()).toEqual([`quota:${IP}`]);
   });
 
   it('reports available with remaining reflecting an existing count (test 2)', async () => {
