@@ -2,8 +2,9 @@
 
 Status: **IN BUILD (chunks 1–2 shipped; chunk 3 = PR #135). §5.2 REOPENED at v9 by
 Graham's Q3 ruling — chunk 4 must not be built to the v8 text.**
-Version: **v9.0** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5, v7 = invariant
-registry, v8 = review-closure bookkeeping, v9 = Q3 ruled: prompt cache + mid-stream error)
+Version: **v9.1** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5, v7 = invariant
+registry, v8 = review-closure bookkeeping, v9 = Q3 ruled: prompt cache + mid-stream error,
+v9.1 = Codex R1 on #137 folded + scope split)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
 
 **v9 changelog** — §11 Q3 was reserved for Graham and he ruled on 2026-08-14.
@@ -18,6 +19,18 @@ chunk 4 rather than in §12 after it:
 | §5.2a.1 — **Q3's option C (terminal error frame from our route) WITHDRAWN.** Two assumptions behind it were false in code: pre-stream failures already fail closed at `route.ts:102`, and `route.ts:121` is a body passthrough so a frame would need a `TransformStream`. | Corrected against code |
 | §0 invariant 5 strengthened from "no message lost on a **pre-stream** failure" to "on **any** failure", now that a mechanism exists to enforce it. | Follows from §5.2a |
 | §9 — tests 13e–13k. | Follows from §5.2a |
+
+**v9.1 changelog** — Codex R1 on PR #137 returned **NO-GO**; both findings folded,
+plus a scope split Graham called:
+
+| Change | Source |
+|---|---|
+| **§5.2a.2b NEW — a `failed` turn is excluded from `buildApiMessages`**, and its tool calls are **discarded, not left pending.** v9.0 said "keep partial content" and nothing about API history, so a failed half-turn would have been replayed to Claude as a completed turn. | Codex R1 **medium** |
+| §5.2a.2b — the collision that finding exposed: a tool call completing *before* the error left `hasPendingTools` true, **locking the composer** behind approve/reject for a turn the model never finished. This document's own defect class, introduced by its own fix. | Found folding the above |
+| §5.2a.6 — stale §5.1 clear-action bullet corrected and returned to §5.1. It claimed the handler "resets `rememberKey`"; it does not (`page.tsx:5398`), and post-#133 that has no meaning. | Codex R1 **low** |
+| §5.2a.5 — clarified that "the prior turn is not mutated" describes *editing*, and is not a claim that failed turns are canonical context. | Codex R1 low |
+| **§5.2a.0 NEW — §5.2a is THREE work items**, not one: chunk 4 (cache + restore), a separate PR (mid-stream error), and edit-and-resend **deferred past UAT**. | **Graham**, on scope growth |
+| §9 — tests 13l, 13m. ~29 → ~31. | Follows from §5.2a.2b |
 
 **v2 changelog** — Codex R1 returned **no blockers**; three refinements folded:
 
@@ -468,6 +481,30 @@ neither round considered. See §5.2a.)*
 > with success too, we want the original text for reference to see if the
 > response aligns."
 
+#### 5.2a.0 Scope — this section is THREE work items, not one
+
+**Graham's call, 2026-08-14, after §5.2a as first drafted grew chunk 4 from two
+concerns to five.** Recorded here because scope growth inside a UAT-readiness
+pass is the thing most worth catching early, and it accreted across a
+conversation without anyone naming it.
+
+| # | Work item | Ships as | Why here |
+|---|---|---|---|
+| 1 | §5.1 stale-key recovery + §5.2a.3 prompt cache + §5.2a.4 auto-restore | **chunk 4** | The original ask. Directly stops a tester losing typed work. |
+| 2 | §5.2a.2 mid-stream error + §5.2a.2b failed-turn history rule | **its own PR** | A live defect, independent of the cache, and testable alone. |
+| 3 | §5.2a.5 edit-and-resend | **deferred past UAT** | Real feature, largest new UI surface here, and a nice-to-have rather than a rough edge. |
+
+Item 3 is **specified but not scheduled** — it is written down so the decision
+does not have to be re-derived, not because it is next.
+
+**Why the split is safe:** item 1 depends on nothing in items 2 or 3. Item 2's
+history rule (§5.2a.2b) only matters once failed turns can exist, which is item 2
+itself. Item 3 reads the cache item 1 builds, so it must not land first.
+
+**Why this is better than what I originally proposed.** The old §5.2 was ~2
+concerns; my first v9 draft made chunk 4 five. Nothing in the growth was
+individually wrong, which is exactly how it went unnoticed.
+
 **Why this is a better frame than the question it answers.** §11 Q3 asked
 whether `streamStarted` should be set at the read or the parse — that is, how to
 *guess* whether a partially-delivered turn is safe to restore. Every answer
@@ -525,6 +562,52 @@ probe value, the probe 429, now this). It is also the cheap form of what Q3's
 option C wanted: **the explicit signal already exists in the stream — we were
 discarding it.** No route change required.
 
+##### 5.2a.2b What a failed turn means to the *model* (Codex R1 medium on #137)
+
+**The gap:** v9 as first written said "keep whatever partial content arrived" and
+"the prior turn is not mutated or truncated", and said nothing about API history.
+`buildApiMessages` (`page.tsx:5015`) replays **every** assistant message as
+canonical context, so a failed half-turn would be handed to Claude on the next
+send as though it had completed normally. The model would then continue from
+something it never actually said.
+
+> **Spec:** a mid-stream error marks the assistant turn **`failed: true`**.
+> A `failed` turn is **excluded from `buildApiMessages` entirely** — both its
+> assistant blocks and any `tool_result` derived from them. It remains in the
+> transcript, visibly marked, because the user should see what arrived.
+
+Excluding rather than truncating, for two reasons:
+
+1. **A truncated turn is not honest context.** Sending half a sentence as a
+   completed assistant message invites the model to treat it as deliberate.
+2. **A replayed `tool_use` without its `tool_result` is a malformed request.**
+   `buildApiMessages:5024-5028` emits `tool_use` blocks, and the paired
+   `tool_result` is only emitted when a call has left `pending`
+   (`:5032`). Keeping a failed turn in history would produce exactly that
+   dangling pair.
+
+**And the collision this exposed, which v9 would otherwise have shipped:** tool
+calls are pushed at `content_block_stop` with status `'pending'`
+(`page.tsx:5134`). A stream that completes a tool block and *then* errors leaves
+a pending call in the transcript — and `hasPendingTools` (`:5353`) feeds
+`canSend` (`:5354`), so **the composer locks with "Apply or reject pending
+changes first"** for changes the model never finished proposing. That is this
+document's own defect class, introduced by its own fix.
+
+> **Spec:** a `failed` turn's tool calls are **discarded, not left pending.**
+> The turn proposed nothing complete, so there is nothing to approve. This keeps
+> `hasPendingTools` false and the composer usable.
+
+*Accepted tradeoff, stated:* a tool call that did complete before the error is
+thrown away rather than offered. That loses a possibly-valid proposal. It is the
+right trade — the alternative gates the user behind an approve/reject decision
+about a turn that failed, and applying half a plan is worse than re-asking.
+
+**Verified, so it is not claimed as a defect:** `canSend` already blocks sending
+while tools are pending, so there is **no pre-existing dangling-`tool_use` bug**
+to fix here. The hazard is created only by keeping a failed turn, which is why
+the rule above exists.
+
 #### 5.2a.3 The cache
 
 **Substrate: `sessionStorage`** (Graham's call, 2026-08-14). Survives a reload or
@@ -565,7 +648,7 @@ non-issue, and it is recorded here so nobody re-derives it as a surprise.
 | Failure shape | Delivered? | Composer | Transcript |
 |---|---|---|---|
 | Non-`ok` response (invalid key, quota exhausted, 500, offline) | No — `route.ts:102` fails closed before streaming | **Auto-restore** | Optimistic message removed |
-| Stream opened, then `error` event mid-flight | Yes, partially — billed | Not auto-restored | Partial content **kept**, error shown under it (§5.2a.2) |
+| Stream opened, then `error` event mid-flight | Yes, partially — billed | Not auto-restored | Partial content **kept and marked `failed`**, error shown under it. Excluded from API history, tool calls discarded (§5.2a.2b) |
 | Stream completed normally | Yes | Cleared, as today | User message stays |
 
 Auto-restore remains gated on `!streamStarted`, set at the **first
@@ -586,7 +669,10 @@ composer history recall.
   presses Send. This is the same no-auto-retry rule as everywhere else in §5.2.
 - **The prior turn is not mutated or truncated.** Editing loads text; it does not
   rewrite history or delete the response that followed. A resend appends a new
-  turn. *(Deliberately narrower than ChatGPT/Claude, which fork the conversation
+  turn. *(This is about what **editing** does. It is not a claim that every turn
+  is canonical context — a `failed` turn is excluded from API history per
+  §5.2a.2b. Codex R1 low on #137 read these two together and was right to: the
+  original wording implied a failed turn stayed canonical.)* *(Deliberately narrower than ChatGPT/Claude, which fork the conversation
   — forking implies a branch model the transcript does not have. Out of scope,
   §8.)*
 - This is what serves Graham's success-case need: the transcript already
@@ -606,8 +692,13 @@ the cache makes the stronger claim enforceable.
 
 Per §0's own rule, the mechanism is named because the prose alone is what turned
 invariants 2, 3 and 5 into findings the first time.
-- The clear action removes both `localStorage` and `sessionStorage` entries and
-  resets `rememberKey`, matching the existing handler.
+*(A stale §5.1 bullet stood here through v8 and was left stranded under §5.2a by
+v9's insertion — Codex R1 low on #137. It claimed the clear action "resets
+`rememberKey`, matching the existing handler". **Both halves were false.** The
+handler removes both store entries and does **not** touch `rememberKey`
+(`page.tsx:5398`), and since #133 `rememberKey` defaults to checked, so
+"resetting" it has no defined meaning. Corrected and returned to §5.1, where it
+belongs.)*
 
 **State 5 panel** — the deliverable:
 
@@ -855,6 +946,18 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
      message populates the composer with that text and the request mock is
      **not** called; the prior turn and its response are unchanged. Pins both
      halves of §5.2a.5 — no implicit resend, no history mutation.
+13l. **A `failed` turn is excluded from `buildApiMessages`** — Codex R1 medium on
+     #137. After a mid-stream error, the next send's request body contains
+     neither the partial assistant text nor any `tool_use` block from it, while
+     the transcript still displays it. Assert the **full** message array, not
+     just "the partial text is absent": a plausible-wrong fix drops the text and
+     leaves the `tool_use`, which is the malformed-request case.
+13m. **A `failed` turn does not lock the composer.** After a mid-stream error
+     that arrives *after* a `content_block_stop` for a tool call, `canSend` is
+     true and the composer is not showing "Apply or reject pending changes
+     first". Pins §5.2a.2b's discard rule. Without it the fix strands the user
+     behind an approve/reject gate for a turn that failed — the exact class this
+     document keeps re-learning.
 
 **§4 wrapper — behavioral, not byte-equivalent (Codex R3 answer):**
 
@@ -868,8 +971,9 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
     `/admin` reports the store unreachable and disables save. Both at once, in
     one test, because the risk is that only one of them ships.
 
-Target: **~29 new tests** (v3 said ~13; 13a–13d, 14, 15 in v4; 13c-i/ii/iii in
-v5; 13e–13k in v9).
+Target: **~31 new tests** (v3 said ~13; 13a–13d, 14, 15 in v4; 13c-i/ii/iii in
+v5; 13e–13m in v9). **Split across three work items — see §5.2a.0**, so no
+single PR carries all of them.
 Delta reported on the build PR — measured on both refs immediately before the
 PR body is written, never quoted from notes.
 
