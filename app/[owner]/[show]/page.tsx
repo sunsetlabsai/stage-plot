@@ -46,6 +46,8 @@ import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
 import { resolveAvailability, canSendMessage, effectiveProbe, probeCapabilities, type FetchedProbe } from '@/lib/agent-availability';
 import { rememberPrompt } from '@/lib/prompt-cache';
 import { shouldRestoreComposer, rollbackOptimisticSend, isSavedKeyRejected } from '@/lib/send-recovery';
+import { newStreamState, splitSseData, parseSseEvent, reduceStreamEvent, finalizeTurn } from '@/lib/agent-stream';
+import { buildApiMessages, hasPendingTools as transcriptHasPendingTools } from '@/lib/agent-history';
 // No BYOA_KEY here any more: the page no longer touches either store directly,
 // so the storage-key name is now entirely `lib/byoa-key-storage`'s business.
 // (#133 centralized the literal; this removes the last caller that needed it.)
@@ -4979,6 +4981,11 @@ interface AgentMessage {
     input: Record<string, unknown>;
     status: 'pending' | 'applied' | 'rejected';
   }>;
+  // §5.2a.2b: the stream opened and then died. The turn stays visible — the
+  // partial content WAS delivered and billed — but it is excluded from API
+  // history, because replaying half a turn as canonical context invites the
+  // model to continue from something it never said. See lib/agent-history.ts.
+  failed?: boolean;
 }
 
 function AgentChat({
@@ -5052,40 +5059,9 @@ function AgentChat({
   }, [messages, streaming]);
 
   // Build Claude API message array from our messages (including tool results)
-  function buildApiMessages(): Array<{ role: string; content: unknown }> {
-    const apiMsgs: Array<{ role: string; content: unknown }> = [];
-    for (const msg of messages) {
-      if (msg.role === 'user') {
-        apiMsgs.push({ role: 'user', content: msg.content });
-      } else {
-        // Assistant message with possible tool calls
-        const blocks: Array<Record<string, unknown>> = [];
-        if (msg.content) blocks.push({ type: 'text', text: msg.content });
-        if (msg.toolCalls) {
-          for (const tc of msg.toolCalls) {
-            blocks.push({ type: 'tool_use', id: tc.id, name: tc.name, input: tc.input });
-          }
-        }
-        apiMsgs.push({ role: 'assistant', content: blocks.length === 1 && blocks[0].type === 'text' ? msg.content : blocks });
-
-        // Add tool results if any tools were resolved
-        if (msg.toolCalls?.some((tc) => tc.status !== 'pending')) {
-          const resultBlocks: Array<Record<string, unknown>> = [];
-          for (const tc of msg.toolCalls) {
-            if (tc.status === 'applied') {
-              resultBlocks.push({ type: 'tool_result', tool_use_id: tc.id, content: `Applied. ${tc.name} updated successfully.` });
-            } else if (tc.status === 'rejected') {
-              resultBlocks.push({ type: 'tool_result', tool_use_id: tc.id, content: 'Rejected by user.', is_error: true });
-            }
-          }
-          if (resultBlocks.length > 0) {
-            apiMsgs.push({ role: 'user', content: resultBlocks });
-          }
-        }
-      }
-    }
-    return apiMsgs;
-  }
+  // The replay rules — including §5.2a.2b's failed-turn exclusion — moved to
+  // lib/agent-history.ts. They were a closure over component state, so nothing
+  // could assert them; test 13l requires asserting the FULL message array.
 
   async function sendMessage(text?: string) {
     const userText = text ?? input.trim();
@@ -5108,13 +5084,17 @@ function AgentChat({
     // tool-only streams (Codex R4 medium).
     let streamStarted = false;
 
+    // Declared outside the try so the catch can commit whatever arrived before
+    // a transport drop. The rules live in lib/agent-stream.ts.
+    let streamState = newStreamState();
+
     const userMsg: AgentMessage = { role: 'user', content: userText };
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
     setStreaming(true);
 
     try {
-      const apiMessages = [...buildApiMessages(), { role: 'user', content: userText }];
+      const apiMessages = [...buildApiMessages(messages), { role: 'user', content: userText }];
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
@@ -5150,11 +5130,6 @@ function AgentChat({
 
       const decoder = new TextDecoder();
       let buffer = '';
-      let assistantText = '';
-      const toolCalls: AgentMessage['toolCalls'] = [];
-      let currentToolId = '';
-      let currentToolName = '';
-      let currentToolJson = '';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -5162,51 +5137,32 @@ function AgentChat({
         streamStarted = true;
         buffer += decoder.decode(value, { stream: true });
 
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        const { payloads, rest } = splitSseData(buffer);
+        buffer = rest;
 
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data === '[DONE]') continue;
-
-          try {
-            const event = JSON.parse(data);
-
-            if (event.type === 'content_block_start') {
-              if (event.content_block?.type === 'tool_use') {
-                currentToolId = event.content_block.id;
-                currentToolName = event.content_block.name;
-                currentToolJson = '';
-              }
-            } else if (event.type === 'content_block_delta') {
-              if (event.delta?.type === 'text_delta') {
-                assistantText += event.delta.text;
-                // Live update the assistant message
-                setMessages([...newMessages, { role: 'assistant', content: assistantText, toolCalls: toolCalls.length > 0 ? [...toolCalls] : undefined }]);
-              } else if (event.delta?.type === 'input_json_delta') {
-                currentToolJson += event.delta.partial_json;
-              }
-            } else if (event.type === 'content_block_stop') {
-              if (currentToolId) {
-                try {
-                  const input = JSON.parse(currentToolJson);
-                  toolCalls.push({ id: currentToolId, name: currentToolName, input, status: 'pending' });
-                } catch {
-                  // Malformed tool JSON — skip
-                }
-                currentToolId = '';
-                currentToolName = '';
-                currentToolJson = '';
-              }
-            }
-          } catch {
-            // Skip unparseable SSE lines
+        for (const payload of payloads) {
+          const event = parseSseEvent(payload);
+          if (!event) continue;
+          const next = reduceStreamEvent(streamState, event);
+          const textGrew = next.text !== streamState.text;
+          streamState = next;
+          // Live update while text arrives — unchanged behaviour, now driven by
+          // the reduced state rather than by local accumulators.
+          if (textGrew) {
+            setMessages([...newMessages, {
+              role: 'assistant',
+              content: streamState.text,
+              toolCalls: streamState.toolCalls.length > 0 ? [...streamState.toolCalls] : undefined,
+            }]);
           }
         }
       }
 
-      setMessages([...newMessages, { role: 'assistant', content: assistantText, toolCalls: toolCalls.length > 0 ? toolCalls : undefined }]);
+      // §5.2a.2: an `error` event is surfaced rather than swallowed. The partial
+      // content is kept and marked — it was delivered and billed — and the
+      // composer is NOT restored (§5.2a.4 row 2).
+      if (streamState.failed && streamState.errorMessage) setError(streamState.errorMessage);
+      setMessages([...newMessages, finalizeTurn(streamState)]);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error');
       // §5.2a.4: nothing was delivered, so put the text back and drop the
@@ -5216,6 +5172,14 @@ function AgentChat({
       if (shouldRestoreComposer(streamStarted)) {
         setInput(userText);
         setMessages((prev) => rollbackOptimisticSend(prev, userText));
+      } else {
+        // The stream opened and then the connection died — no `error` frame,
+        // because nothing was alive to send one. Beyond §5.2a.2's letter, but
+        // the identical hazard: partial text already live in the transcript
+        // would replay as canonical context, and a tool call that completed
+        // before the drop would sit `pending` and lock the composer. Same
+        // disposal, so the two cannot diverge.
+        setMessages([...newMessages, finalizeTurn({ ...streamState, failed: true })]);
       }
     } finally {
       setStreaming(false);
@@ -5473,7 +5437,11 @@ function AgentChat({
     setKeyRejected(false);
   }
 
-  const hasPendingTools = messages.some((m) => m.toolCalls?.some((tc) => tc.status === 'pending'));
+  // §5.2a.2b / test 13m: a failed turn must NOT lock the composer. That holds
+  // through the data — finalizeTurn discards a failed turn's tool calls — not
+  // through a special case here. Extracted alongside buildApiMessages so the
+  // pair can be asserted together.
+  const hasPendingTools = transcriptHasPendingTools(messages);
 
   // Replaces `!!apiKey || !tryitExhausted` (§5). That predicate was true whenever no
   // key was set and no 429 had arrived — and only a 429 set tryitExhausted, so with
@@ -5530,6 +5498,18 @@ function AgentChat({
               <div className="space-y-2">
                 {msg.content && (
                   <div className="bg-gray-100 rounded-lg px-3 py-2 whitespace-pre-wrap">{msg.content}</div>
+                )}
+                {/* §5.2a.2: the turn stays visible and is visibly marked. Saying
+                    so matters — without it a half-answer is indistinguishable
+                    from Claude choosing to stop, which is the defect this
+                    section exists to fix. The second line is not decoration:
+                    the turn really is excluded from what Claude sees next, and
+                    a user who re-asks deserves to know why it has no memory of
+                    it. */}
+                {msg.failed && (
+                  <p className="text-xs text-red-600">
+                    This response was interrupted. It won&apos;t be sent back to Claude as context — ask again to continue.
+                  </p>
                 )}
                 {msg.toolCalls?.map((tc, tcIdx) => (
                   <div key={tc.id} className="border border-gray-300 rounded-lg p-3 bg-gray-50">
