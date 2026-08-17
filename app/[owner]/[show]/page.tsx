@@ -5428,6 +5428,17 @@ function AgentChat({
     // flight. Safe because `effectiveProbe` only derives `skipped` from
     // `loading` while a key is held, and we have just cleared it.
     setFetchedProbe('loading');
+    // Codex R1 medium: resetting the probe is not enough. `sendRemaining` and
+    // `sendExhausted` OUTRANK the probe in `resolveAvailability` — deliberately,
+    // so spending the last free message updates the panel without a remount —
+    // which means a stale exhausted-or-zero left over from an earlier send
+    // silently overrides the fresh probe and lands the user in state 4 with the
+    // composer disabled. §5.1 promises the opposite: clearing re-probes and, if
+    // try-it is available, drops into state 3. The probe is the newer
+    // measurement here, so everything derived from older sends has to go with
+    // the key. Third instance of this document's own class in one chunk.
+    setTryitRemaining(null);
+    setTryitExhausted(false);
     localStorage.removeItem(BYOA_KEY);
     sessionStorage.removeItem(BYOA_KEY);
   }

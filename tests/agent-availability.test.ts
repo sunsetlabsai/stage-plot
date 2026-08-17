@@ -380,3 +380,50 @@ describe('probeCapabilities — status → FetchedProbe (#136)', () => {
     expect(await probeCapabilities(async () => broken)).toBe('error');
   });
 });
+
+// Codex R1 medium on #140 — §5.1's clear-and-re-probe contract.
+//
+// The page's `handleClearKey` resets the probe to `loading`, but the probe is
+// not the only input: send-derived quota state outranks it. These pin WHY the
+// clear path must reset that state too. They assert the precedence rule, not the
+// handler — the handler lives inside AgentChat and is unreachable from any
+// harness here (the seam declared in the PR).
+describe('clearing a rejected key — stale send state must not outrank a fresh probe', () => {
+  const freshProbe = caps({ tryit: 'available', tryitRemaining: 7 });
+
+  it('a stale exhausted flag overrides a probe that says try-it works', () => {
+    // The hazard, stated as a fact about the rules: this is exactly what the
+    // user would see after clearing a rejected key if the page kept the flag —
+    // state 4, composer disabled, on a fresh measurement that said otherwise.
+    const stale = resolve({ probe: freshProbe, sendExhausted: true });
+
+    expect(stale.state).toBe(4);
+    expect(stale.allowsSend).toBe(false);
+  });
+
+  it('a stale zero remaining does the same', () => {
+    const stale = resolve({ probe: freshProbe, sendRemaining: 0 });
+
+    expect(stale.state).toBe(4);
+    expect(stale.allowsSend).toBe(false);
+  });
+
+  it('cleared to the reset values, the fresh probe is authoritative again', () => {
+    // §5.1: "clearing re-runs the probe; if try-it is available the panel drops
+    // straight into state 3 and the user continues with no key at all."
+    const cleared = resolve({ probe: freshProbe, sendRemaining: null, sendExhausted: false });
+
+    expect(cleared.state).toBe(3);
+    expect(cleared.allowsSend).toBe(true);
+    expect(cleared.remaining).toBe(7);
+  });
+
+  it('the precedence itself is correct and stays — it is not the bug', () => {
+    // Spending the last free message must still update the panel without a
+    // remount. The fix is to clear the stale value at the clear, NOT to demote
+    // send state below the probe.
+    const justSpent = resolve({ probe: caps({ tryitRemaining: 5 }), sendExhausted: true });
+
+    expect(justSpent.state).toBe(4);
+  });
+});
