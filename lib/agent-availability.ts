@@ -176,3 +176,39 @@ export function canSendMessage(args: {
 }): boolean {
   return args.availability.allowsSend && !args.streaming && !args.hasPendingTools;
 }
+
+/**
+ * Run the capability probe and map the response to a `FetchedProbe`.
+ *
+ * Extracted from the page effect in chunk 4 to close issue #136. Codex R2 on
+ * chunk 3 logged the gap: `resolveAvailability` and the panel were well covered,
+ * but the three lines that PRODUCE `'rateLimited'` were not, and a wrong branch
+ * there would pass the whole suite while reintroducing the dead end chunk 3
+ * exists to fix (probe stuck at `'loading'` ⇒ state 2 ⇒ composer disabled and
+ * the key field hidden).
+ *
+ * `fetchFn` is injected for the same reason the storage modules inject their
+ * store: `AgentChat` needs `useParams` + Supabase + a real page to render, so
+ * the mapping could not otherwise be driven at all. With this it is exercised in
+ * the node environment against a stub, leaving only `setFetchedProbe` wiring
+ * uncovered.
+ *
+ * Never throws — every failure resolves to `'error'`, because a probe that
+ * rejects would leave the caller's state at `'loading'` forever, which is the
+ * precise defect this function's own 429 branch exists to prevent.
+ */
+export async function probeCapabilities(
+  fetchFn: typeof fetch = fetch,
+): Promise<FetchedProbe> {
+  try {
+    const res = await fetchFn('/api/agent/capabilities');
+    // A 429 is NOT one of the four measured states. The route sends
+    // `rateLimited: true` for exactly this, so it gets its own probe value
+    // rather than being collapsed into one it did not measure.
+    if (res.status === 429) return 'rateLimited';
+    if (!res.ok) return 'error';
+    return (await res.json()) as Capabilities;
+  } catch {
+    return 'error';
+  }
+}

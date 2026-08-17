@@ -3,6 +3,7 @@ import {
   resolveAvailability,
   canSendMessage,
   effectiveProbe,
+  probeCapabilities,
   type Probe,
 } from '../lib/agent-availability';
 import { TRYIT_QUOTA, type Capabilities } from '../lib/agent-key';
@@ -314,5 +315,68 @@ describe('probe 429 — Codex R1 medium: state 2 was a dead end', () => {
     const withKey = resolve({ probe: 'rateLimited', apiKey: 'sk-ant-mine' });
     expect(withKey.state).toBe(1);
     expect(canSendMessage({ availability: withKey, streaming: false, hasPendingTools: false })).toBe(true);
+  });
+});
+
+// Design docs/design-ai-key-availability.md §4 + issue #136, chunk 4.
+//
+// Codex R2 on chunk 3 logged the gap these close: `resolveAvailability` and the
+// panel were well covered, but the three lines that PRODUCE a `FetchedProbe`
+// lived in a page effect no harness can drive. A wrong branch there passes the
+// whole suite while reintroducing the dead end chunk 3 exists to fix — probe
+// stuck non-resolving ⇒ state 2 ⇒ composer disabled AND key field hidden.
+describe('probeCapabilities — status → FetchedProbe (#136)', () => {
+  const res = (status: number, body: unknown = {}): Response =>
+    ({
+      status,
+      ok: status >= 200 && status < 300,
+      json: async () => body,
+    }) as Response;
+
+  it('returns the measured capabilities on 200', async () => {
+    const body = caps();
+    expect(await probeCapabilities(async () => res(200, body))).toEqual(body);
+  });
+
+  it('asks the capabilities route', async () => {
+    const calls: string[] = [];
+    await probeCapabilities(async (url) => {
+      calls.push(String(url));
+      return res(200, caps());
+    });
+    expect(calls).toEqual(['/api/agent/capabilities']);
+  });
+
+  it('maps 429 to rateLimited, NOT to error', async () => {
+    // The distinction the route sends `rateLimited: true` for. Collapsing it
+    // into `error` renders "the key store is unreachable" at a venue whose
+    // shared IP merely tripped the 60/min probe limit.
+    expect(await probeCapabilities(async () => res(429, { rateLimited: true }))).toBe('rateLimited');
+  });
+
+  it('maps a non-ok status to error', async () => {
+    expect(await probeCapabilities(async () => res(500))).toBe('error');
+  });
+
+  it('resolves to error rather than rejecting when the fetch throws', async () => {
+    // Offline. A rejection here would leave the caller's probe at 'loading'
+    // forever — the exact strand this function's 429 branch exists to prevent —
+    // because the page does `.then(setFetchedProbe)` with no catch of its own.
+    await expect(
+      probeCapabilities(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    ).resolves.toBe('error');
+  });
+
+  it('resolves to error when a 200 body is not JSON', async () => {
+    const broken = {
+      status: 200,
+      ok: true,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON');
+      },
+    } as unknown as Response;
+    expect(await probeCapabilities(async () => broken)).toBe('error');
   });
 });
