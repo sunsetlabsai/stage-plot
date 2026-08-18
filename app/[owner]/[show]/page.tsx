@@ -46,7 +46,10 @@ import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
 import { resolveAvailability, canSendMessage, effectiveProbe, probeCapabilities, type FetchedProbe } from '@/lib/agent-availability';
 import { rememberPrompt } from '@/lib/prompt-cache';
 import { shouldRestoreComposer, rollbackOptimisticSend, isSavedKeyRejected } from '@/lib/send-recovery';
-import { readKey, initialRemember, persistKey, BYOA_KEY } from '@/lib/byoa-key-storage';
+// No BYOA_KEY here any more: the page no longer touches either store directly,
+// so the storage-key name is now entirely `lib/byoa-key-storage`'s business.
+// (#133 centralized the literal; this removes the last caller that needed it.)
+import { readKey, initialRemember, persistKey } from '@/lib/byoa-key-storage';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -5419,34 +5422,53 @@ function AgentChat({
   // prominent recovery button, so the two can never drift. Emptying `apiKey`
   // re-runs the probe via the effect above — that IS the "re-probe on clear"
   // requirement; there is no second trigger to keep in sync.
+  // ── The ONE path into "we no longer hold a key" ────────────────────────────
+  //
+  // Codex R1 and R2 on #140 were the same defect at two call sites: this
+  // function reset the state derived from the key, and the key field's own
+  // onChange did not — so a user who DELETED the rejected key by hand instead
+  // of pressing Clear kept a stale `tryitExhausted`/`tryitRemaining`, which
+  // overrides a fresh probe and pins them in state 4 with the composer
+  // disabled. Patching the second handler would leave a third to find, so the
+  // handler below routes into this one instead.
+  //
+  // Storage is not touched here on purpose. The persist effect above calls
+  // `persistKey(local, session, apiKey, remember)`, and an empty key removes
+  // the entry from BOTH stores (lib/byoa-key-storage.ts, pinned by
+  // tests/byoa-key-storage.test.ts). The explicit removeItem calls that used to
+  // sit here were a second storage path that could drift from the first —
+  // the same class as the finding itself.
   function handleClearKey() {
     setApiKey('');
+    // A rejection describes a key we no longer hold.
     setKeyRejected(false);
-    // Back to state 2 (`checking`) while the re-probe runs. Without this the
-    // panel would render whatever a PREVIOUS probe found — plausibly `error`
-    // from before the key was pasted — as if it described the request now in
-    // flight. Safe because `effectiveProbe` only derives `skipped` from
-    // `loading` while a key is held, and we have just cleared it.
+    // Back to state 2 (`checking`) while the probe re-runs, rather than showing
+    // whatever a PREVIOUS probe found — plausibly `error` from before the key
+    // was pasted — as though it described the request now in flight. Safe
+    // because `effectiveProbe` derives `skipped` from `loading` only while a
+    // key is held.
     setFetchedProbe('loading');
-    // Codex R1 medium: resetting the probe is not enough. `sendRemaining` and
-    // `sendExhausted` OUTRANK the probe in `resolveAvailability` — deliberately,
-    // so spending the last free message updates the panel without a remount —
-    // which means a stale exhausted-or-zero left over from an earlier send
-    // silently overrides the fresh probe and lands the user in state 4 with the
-    // composer disabled. §5.1 promises the opposite: clearing re-probes and, if
-    // try-it is available, drops into state 3. The probe is the newer
-    // measurement here, so everything derived from older sends has to go with
-    // the key. Third instance of this document's own class in one chunk.
+    // The load-bearing pair (Codex R1). `sendRemaining`/`sendExhausted` OUTRANK
+    // the probe in `resolveAvailability` — deliberately, so spending the last
+    // free message updates the panel without a remount — so a stale
+    // exhausted-or-zero from an earlier send silently beats the fresh probe.
+    // §5.1 promises the opposite: clearing re-probes and, when try-it is
+    // available, lands in state 3. The probe is the newer measurement, so
+    // everything derived from older sends goes with the key.
     setTryitRemaining(null);
     setTryitExhausted(false);
-    localStorage.removeItem(BYOA_KEY);
-    sessionStorage.removeItem(BYOA_KEY);
   }
 
-  // A rejection describes the key that was rejected. Typing a different one
-  // makes it stale, and a stale "your key was rejected" banner over a key the
-  // user just fixed is its own small lie.
   function handleApiKeyChange(next: string) {
+    // Emptying the field IS clearing the key — same operation, so the same
+    // reset, via the same function (Codex R2 medium).
+    if (!next) {
+      handleClearKey();
+      return;
+    }
+    // A rejection describes the key that was rejected. Typing a different one
+    // makes it stale, and a stale "that key was rejected" banner over a key the
+    // user just fixed is its own small lie.
     setApiKey(next);
     setKeyRejected(false);
   }
