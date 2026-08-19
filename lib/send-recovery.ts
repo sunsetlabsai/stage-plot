@@ -35,19 +35,46 @@ export interface OptimisticMessage {
 /**
  * Restore only when nothing was delivered.
  *
- * `streamStarted` is set at the FIRST `reader.read()` chunk, before any SSE
- * parsing — not at the parse, and emphatically not `assistantText.length === 0`
- * (Codex R4 medium: a tool-only stream carries `content_block_start` /
- * `input_json_delta` with no text at all, and treating that as never-sent would
- * restore a message the model had already begun acting on).
+ * **The criterion is what reached the transcript, not when the first byte
+ * arrived.** Chunk 4 keyed this on `streamStarted` (set at the first
+ * `reader.read()`), which was right for chunk 4's scope — every failure that
+ * could reach it was a non-`ok` response, so "bytes arrived" and "content
+ * arrived" could not disagree. Item 2 makes them disagree: a stream can now
+ * open, emit `message_start`, and die before any text or tool block completes.
+ * Under the byte rule that committed an assistant turn whose entire content was
+ * the red "This response was interrupted" line, and left the composer empty.
  *
- * Chunk 4 scope: every failure reaching this point is a non-`ok` response,
- * because `route.ts` tests `anthropicRes.ok` BEFORE it streams and the client
- * throws before `getReader()`. The mid-stream-error case — where a stream opens
- * and then dies — is §5.2a.2, a separate work item (§5.2a.0 item 2).
+ * **Why that was worth changing rather than tolerating** (Codex R1 on item 2
+ * called it a UX preference and declined to block; Graham ruled to fold it):
+ * the justification for not restoring was that the text is recoverable from the
+ * §5.2a.3 prompt cache — and `readPrompts` currently has no production caller,
+ * so during UAT the cache cannot hand anything back. The text does remain
+ * visible in the transcript, so this was never data loss; it was a
+ * select-copy-paste where one click will do.
+ *
+ * **Codex R4's medium still holds and is why `completedToolCalls` exists.** A
+ * tool-only turn carries `content_block_start` / `input_json_delta` and no text
+ * at all; `assistantText.length === 0` alone would restore a message the model
+ * had already begun acting on. Counting completed tool calls draws the line the
+ * bare boolean could not: tool-only-and-completed is delivered, nothing-at-all
+ * is not.
+ *
+ * **A tool block still in flight counts as NOT delivered, deliberately.** It
+ * never becomes a completed call, and `finalizeTurn` discards even *completed*
+ * tool calls on a failed turn (§5.2a.2b) — so nothing from it survives into the
+ * transcript. Treating it as delivered would strand the caller for the sake of
+ * a proposal no one will ever see.
+ *
+ * `streamStarted` is gone as a parameter because it is now strictly implied: no
+ * bytes read means no events reduced, which means `newStreamState()` — empty
+ * text, no tool calls. Keeping it would have been a second source of truth for
+ * one question.
  */
-export function shouldRestoreComposer(streamStarted: boolean): boolean {
-  return !streamStarted;
+export function shouldRestoreComposer(arrived: {
+  text: string;
+  completedToolCalls: number;
+}): boolean {
+  return arrived.text.length === 0 && arrived.completedToolCalls === 0;
 }
 
 /**

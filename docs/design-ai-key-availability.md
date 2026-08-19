@@ -418,8 +418,11 @@ the transcript, an error under it, and **an empty composer** — the "one
 keystroke" is actually retyping the whole prompt. That lands hardest on exactly
 the message worth retrying: the long one.
 
-**Spec — restore on pre-stream failure** *(v4–v8; superseded by §5.2a in v9,
-retained because the reasoning below still holds and v9 builds on it)*:
+**Spec — restore on pre-stream failure** *(v4–v8; superseded by §5.2a in v9, and
+its `streamStarted` mechanism superseded again by item 2's R1 fold — see §5.2a.4
+and §12. Retained because the pre-stream reasoning below still holds and v9 built
+on it; **the flag it names no longer exists in the code**, so read the mechanism
+here as history and §5.2a.4 as current.)*:
 
 - When a send fails **before the response stream has started**, restore
   `userText` to the composer **and remove the optimistic user message** from the
@@ -526,7 +529,10 @@ were used to justify is **not being built**.
 1. **A pre-stream upstream failure already fails closed.** `route.ts:102` tests
    `anthropicRes.ok` **before** any streaming and returns a JSON 401/502. The
    client throws at `page.tsx:5082`, before `res.body?.getReader()` at `:5089`.
-   No bytes flow, `streamStarted` stays `false`, the message restores. **The
+   No bytes flow, so nothing reaches the transcript and the message restores.
+   *(Written when this was `streamStarted` staying `false`; after item 2's R1
+   fold the flag is gone and the predicate reads the stream state directly. The
+   conclusion is unchanged — an empty state restores either way.)* **The
    "proxy opens, then upstream dies" shape Q3 was written about is already
    handled** for every failure that happens before Anthropic's response headers.
 2. **A terminal error frame from our own route is not cheap.** `route.ts:121` is
@@ -648,13 +654,40 @@ non-issue, and it is recorded here so nobody re-derives it as a surprise.
 | Failure shape | Delivered? | Composer | Transcript |
 |---|---|---|---|
 | Non-`ok` response (invalid key, quota exhausted, 500, offline) | No — `route.ts:102` fails closed before streaming | **Auto-restore** | Optimistic message removed |
-| Stream opened, then `error` event mid-flight | Yes, partially — billed | Not auto-restored | Partial content **kept and marked `failed`**, error shown under it. Excluded from API history, tool calls discarded (§5.2a.2b) |
-| Stream completed normally | Yes | Cleared, as today | User message stays |
+| Stream opened, then failed (`error` event **or** transport drop), **with text or a completed tool call** | Yes, partially — billed | Not auto-restored | Partial content **kept and marked `failed`**, error shown under it. Excluded from API history, tool calls discarded (§5.2a.2b) |
+| Stream opened, then failed, **nothing delivered** — no text and no completed tool call | No — nothing reached the transcript | **Auto-restore** | Optimistic message removed |
+| Stream completed normally (including a legitimately empty answer) | Yes | Cleared, as today | User message stays |
 
-Auto-restore remains gated on `!streamStarted`, set at the **first
-`reader.read()` chunk** before parsing (`page.tsx:5103`) — unchanged from v5, and
-still correct for the tool-only-stream reason Codex R4 gave. What changed is that
-this flag is no longer the last line of defence for the user's words.
+**Auto-restore is gated on what reached the transcript, not on byte timing**
+(item 2, Codex R1 fold — see §12). The predicate is
+`shouldRestoreComposer({ text, completedToolCalls })`, fed by `arrivedFrom(state)`
+in `lib/agent-stream.ts`, and it is applied to **both** failure paths — the
+`error` frame at the end of the read loop and the transport drop in the `catch` —
+so the two cannot diverge.
+
+**The `streamStarted` flag is gone.** It was set at the first `reader.read()`
+chunk before parsing, and it was correct for chunk 4's scope, where every failure
+that could reach the predicate was a non-`ok` response and so "bytes arrived" and
+"content arrived" could not disagree. Item 2 makes them disagree: a stream can
+open, emit `message_start`, and die before any text or completed tool block.
+Under the byte rule that committed an assistant turn whose entire content was the
+"This response was interrupted" line and left the composer empty — this
+document's own stranding class. The flag is also strictly implied by the new
+predicate (no bytes read ⇒ `newStreamState()` ⇒ empty text, no tool calls), so
+keeping it would be a second source of truth for one question.
+
+**Codex R4's tool-only-stream reason still binds, and is why the predicate counts
+completed tool calls rather than testing `text === ''` alone.** A tool-only turn
+carries `content_block_start` / `input_json_delta` and no text at all; it *is*
+delivered and must not be restored. An in-flight tool block that never reached
+`content_block_stop` counts as **not** delivered — it never becomes a completed
+call, and `finalizeTurn` discards even completed calls on a failed turn, so
+nothing from it survives.
+
+**The empty-turn guard:** the `error`-frame branch additionally requires
+`streamState.failed` before restoring, because a legitimately empty **successful**
+turn satisfies the same "nothing delivered" predicate and must fall through to
+`finalizeTurn` rather than refilling the composer.
 
 #### 5.2a.5 Recall: edit and resend from the transcript
 
@@ -897,14 +930,28 @@ New cases in a client test (jsdom + RTL, per the existing harness pattern in
      against a fix that reads "always restore" and quietly resurrects text the
      user already spent tokens on.
 13c-i. **A failure after a TOOL-ONLY stream is not restored either** — Codex R4
-     medium. Feed `content_block_start` (`type: 'tool_use'`) and
-     `input_json_delta` events, **no `text_delta`**, then fail. `assistantText`
-     is `''` and the message must still stay put. This is the test that
-     separates a correct `streamStarted` flag from
-     `assistantText.length === 0`; 13c alone passes under both.
-13c-ii. A failure after bytes arrive that parse to **nothing usable** (garbage
-     SSE, a lone `\n`) is also not restored. Pins that the flag is set at the
-     read, not at the parse.
+     medium, still binding. Feed `content_block_start` (`type: 'tool_use'`) and
+     `input_json_delta` events through `content_block_stop`, **no `text_delta`**,
+     then fail. The assistant text is `''`, a tool call **completed**, and the
+     message must still stay put. This is the test that separates a correct
+     `completedToolCalls` count from `text === ''` alone; 13c passes under both.
+13c-ii. **REVERSED by item 2 (Codex R1 fold).** A failure after bytes arrive that
+     parse to **nothing usable** (garbage SSE, a lone `\n`, or a stream that
+     opened and died after `message_start`) **IS restored**, because nothing
+     reached the transcript. This deliberately overturns the v9 rule, which
+     pinned the old `streamStarted` flag as being set at the read rather than at
+     the parse — that flag no longer exists. Committing an assistant turn whose
+     only content is the "interrupted" line, with an empty composer, is the
+     stranding §5.2a.4 now forbids.
+13c-ii-a. **An in-flight tool block does not count as delivered.** Feed
+     `content_block_start` (`type: 'tool_use'`) and `input_json_delta` with **no
+     `content_block_stop`**, then fail: no completed call, nothing survives
+     `finalizeTurn`, so the composer **is** restored. Separates "the model began
+     emitting a tool call" from "a tool call reached the transcript".
+13c-ii-b. **An empty SUCCESSFUL turn is not restored.** A stream that completes
+     normally with no text and no tool calls satisfies the same
+     nothing-delivered predicate; only `failed` turns may restore. Pins the
+     guard that stops a legitimate empty answer from refilling the composer.
 13c-iii. `tryitExhausted` (a non-`ok` response) **is** restored — the stream
      never started. Quota exhaustion is the moment a tester most needs their
      text kept while they go find a key.
@@ -939,9 +986,14 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
      fix from today's behavior** — today the loop ends silently and commits the
      partial text with no error, so an assertion on the text alone passes
      against the unfixed code.
-13j. A mid-stream `error` **does not** restore the composer and **does not**
-     remove the transcript entry — it was delivered and billed (§5.2a.4 row 2).
-     Guards against a fix that treats every error identically.
+13j. A mid-stream `error` **after text or a completed tool call** does not
+     restore the composer and does not remove the transcript entry — that was
+     delivered and billed (§5.2a.4 row 2). Guards against a fix that treats every
+     error identically. **Qualified by item 2's R1 fold:** the same `error` frame
+     with *nothing* delivered takes §5.2a.4 row 3 and **does** restore, so this
+     test must feed text (or a completed tool block) before the error rather than
+     asserting the rule unconditionally — otherwise it pins behaviour the spec no
+     longer asks for.
 13k. **Edit-and-resend loads the composer and stops.** Activating edit on a user
      message populates the composer with that text and the request mock is
      **not** called; the prior turn and its response are unchanged. Pins both
@@ -1111,3 +1163,10 @@ so main's copy of the design is never silently wrong.
 | 4 | **`keyRejected` is cleared at the top of every send, alongside `setError('')`.** | Found in my own sweep, not by review: the flag describes one response. Left standing it renders "That key was rejected — clear it" under the *next* failure, so a 502 or an offline send would talk a tester into deleting a working credential. |
 | 4 | **The prompt cache is write-only in this chunk** — nothing reads it in product code until §5.2a.5 (item 3, deferred past UAT). | Anticipated by §5.2a.0 ("item 3 reads the cache item 1 builds, so it must not land first"). Recorded so the dead-looking `readPrompts` export is not mistaken for an oversight. Its value today is that no text is lost; its interface arrives with item 3. |
 | 4 | **Emptying the key field routes into `handleClearKey`, and clearing resets `tryitRemaining` / `tryitExhausted` as well as the probe** — Codex R1 *and* R2 medium on #140, which were the same defect at two call sites. R1 fixed the button; R2 found that deleting the key by hand in the input reached none of it. There is now one function, and the explicit `removeItem` calls were deleted because the persist effect already clears both stores on an empty key (`tests/byoa-key-storage.test.ts` pins it) — a second storage path is the same drift risk. | Resetting the probe was not enough. Send-derived quota state deliberately OUTRANKS the probe in `resolveAvailability` (so spending the last free message updates the panel without a remount), which means a stale exhausted-or-zero from an earlier send silently overrode the fresh probe and landed the user in state 4 with the composer disabled — the precise opposite of §5.1's promise that clearing drops you into state 3. The precedence rule is right and stays; what had to go was the older measurement. Instances three and four of this document's own class inside one chunk — and the two I did not find myself. The lesson worth keeping is not "reset the quota state": it is that **when you reset one input to a resolver, you enumerate every input it has and ask which are older than the event you are reacting to**, and then you check every path that can trigger that event, not the one you happen to be editing. |
+| item 2 | **The SSE parse loop's event→state rules moved to `lib/agent-stream.ts`, and `buildApiMessages`/`hasPendingTools` to `lib/agent-history.ts`.** Not requested by the spec. | §9's tests 13i, 13j, 13l and 13m are all written against a loop declared inside a 6700-line client component, so as written **none of them could be run at all**. 13l in particular demands asserting the *full* message array, which requires reaching the function. Same move chunk 4 made for the restore predicate and #136 made for the probe: the rules go where a test can hold them, and the page keeps the read loop and the `setState` calls. |
+| item 2 | **A mid-stream transport drop is treated as a failed turn too**, not only an Anthropic `error` frame. §5.2a.2 specifies the frame. | Found by sweeping the class rather than the instance. A connection that dies mid-stream emits no frame — there is nothing alive to send one — yet it strands the caller identically: partial text already live in the transcript replays as canonical context, and a tool call that completed before the drop sits `pending` and locks the composer behind approve/reject. Same disposal for both, so the two paths cannot drift. |
+| item 2 | **The failed turn carries a visible line in the transcript**: "This response was interrupted. It won't be sent back to Claude as context — ask again to continue." §5.2a.2 says "visibly marked" without saying what the mark says. | The second clause is not decoration. The turn genuinely is excluded from API history, so a user who re-asks will find Claude has no memory of it — telling them why is the difference between a quirk and a bug report. |
+| item 2 | **The `error` event shape was verified against Anthropic's streaming documentation** (`event: error` / `{"type":"error","error":{"type":...,"message":...}}`), not inferred. | This project has one recorded instance of me inventing a third-party API and having it survive a review round. The shape §5.2a.2 specified turned out to be correct; that was worth confirming rather than assuming. |
+| item 2 | **An unrecognised event type stays non-fatal**, and has its own test. | The defect being fixed *is* an unhandled event falling through silently, so the tempting overcorrection is to treat anything unknown as a failure. Anthropic's versioning policy says new event types will appear and clients must tolerate them — a stream carrying a new block type must not render as an interrupted turn. |
+| item 2 (R1 fold) | **§5.2a.4's restore rule now keys on what reached the transcript, not on byte timing.** `shouldRestoreComposer(streamStarted)` becomes `shouldRestoreComposer({ text, completedToolCalls })`, fed by a new `arrivedFrom(state)` in `lib/agent-stream.ts`; the `streamStarted` flag is deleted. **This REVERSES a chunk-4 behaviour that a prior round pinned** (old test 13c-ii: "a started stream that produced only unparseable bytes is not restored"). | Chunk 4's byte rule was correct for chunk 4's scope — every failure that could reach it was a non-`ok` response, so "bytes arrived" and "content arrived" could not disagree. Item 2 makes them disagree: a stream can open, emit `message_start`, and die before any text or completed tool call. The byte rule then committed an assistant turn whose entire content was the red "interrupted" line and left the composer empty, stranding the user in exactly this document's recurring class. Codex R1 on item 2 raised it as a product preference and explicitly declined to block; **Graham ruled to fold it.** Codex R4's medium is preserved by counting completed tool calls, which is the distinction the bare boolean could not express: a tool-only turn that completed a call is delivered, a stream that produced nothing is not. An in-flight tool block counts as NOT delivered — it never completes, and `finalizeTurn` discards even completed calls on a failed turn, so nothing from it survives. Applied to BOTH failure paths (the `error` frame and the transport drop) so they cannot diverge; the `error`-frame branch is additionally guarded on `failed`, because a legitimately empty SUCCESSFUL turn satisfies the same predicate and must not refill the composer. |
+| item 2 (R1 fold) | **§5.2a.3's prompt cache ships WRITE-ONLY for the UAT window, and no reasoning may treat it as a live safety net.** `readPrompts` is exported and tested but has zero production callers; `page.tsx` imports only `rememberPrompt`. Its consumer is item 3 (edit-and-resend), deferred past UAT per §5.2a.0. | Recorded because the argument for *not* restoring the composer rested on the cache being able to hand the text back, and it cannot yet. The text is still visible in the transcript, so this was never data loss — but "the cache protects the user" is false until item 3 lands, and a design that quietly depends on an unbuilt consumer is how a stated justification outlives the mechanism behind it. |
