@@ -1,6 +1,8 @@
 # Design: Core-Path UAT Blockers (Tier 1)
 
-**Status:** Proposed v1 — awaiting Graham's approval, then Codex R1.
+**Status:** Proposed v2 — Codex R1 folded (2 High + 1 Medium), plus three gaps
+found by my own sweep of the class R1's second finding named. Awaiting Graham's
+approval and Codex R2.
 **Date:** 2026-08-19
 **Source:** `docs/uat-readiness-gaps.md` (PR #142). Graham ruled **all six Tier-1
 items** in scope, and ruled that **pre-existing production data does not need
@@ -57,6 +59,16 @@ background retry loop would be a new mechanism with its own failure modes.
 **What the user sees:** the pill turns red and stays red until a save succeeds.
 The `title` attribute already surfaces the full text (`page.tsx:821`).
 
+**★ Coverage boundary, stated so it is not assumed wider than it is.** This fixes
+the path where `showId` is set and the `fetch` fails. It does **not** cover the
+offline-fallback path (gap #10, Tier 2): `page.tsx:419-432` restores from
+localStorage without setting `showId`, so `page.tsx:566`'s `if (showId)` is false
+and `saveConfig` is never called at all — meaning no save is attempted and this
+new error never fires. **A tester in that state still gets silence**, from a
+different mechanism, and I1 is only partly satisfied until #10 is fixed.
+Recorded rather than quietly implied, because "we fixed the silent save" would
+otherwise read as covering both.
+
 **Not in scope:** the 2s debounce losing edits on tab close (gap #19, Tier 3).
 Fixing it means a `visibilitychange` flush, which is its own change.
 
@@ -69,9 +81,24 @@ branch — `chart.mimeType` is written at `page.tsx:473` and never read again.
 
 **Spec, three parts:**
 1. `ACCEPT = '.pdf'`.
-2. `/api/charts/upload` rejects any non-PDF with **400** and a message naming the
-   reason. The picker is a hint, not a boundary — a drag-drop or a direct call
-   must hit the same rule.
+2. `/api/charts/upload` **sniffs the leading bytes** and rejects anything that is
+   not a PDF with **400** and a message naming the reason.
+   **Use `sniffPdf(bytes)` — it already exists** (`lib/chart-converter.ts:17`).
+
+   > **Codex R1 High, folded.** v1 of this section specified a *MIME* guard.
+   > That does not satisfy I3: `file.type` is caller-controlled and can be empty
+   > or spoofed, so a direct caller could upload PNG bytes labelled
+   > `application/pdf` and strand the viewer exactly as today. The distinction
+   > matters because the picker (`ACCEPT`) is a **hint**, the route is the
+   > **boundary**, and a boundary that trusts caller-supplied metadata is not a
+   > boundary. `sniffPdf`'s own comment already states the rule — *"Classify by
+   > the leading bytes of the FETCHED object, never the claimed MIME/extension
+   > (which can be wrong or spoofed)"* — so this repo had written the rule down
+   > and I specified something weaker anyway. Same class as every "true in prose,
+   > unenforced in mechanism" finding in this project's history.
+
+   The rejection must happen **before storage**, so a spoofed upload never
+   produces a row that the viewer will later fail on.
 3. **Use the dead `mimeType` field** rather than deleting it: when a chart's
    `mimeType` is present and is not `application/pdf`, `ChartNavigator` renders
    *"This chart is an image. Images can't be displayed in the viewer — replace it
@@ -109,6 +136,16 @@ That distinction is load-bearing and is the reason this is not a one-line change
 
 **What the user sees:** a linked title renders as text with a small "Rename in
 Library" link; an unresolved row still takes typing, as it must.
+
+**★ The parallel path, found in the same sweep and NOT fixed here.** The AI's
+`update_setlist` can also set `title` on a row that already carries a `songId`,
+and `route.ts:191` overwrites it identically — so the AI path keeps the silent
+no-op that §1.3 removes from the UI. It is not fixed in this document because the
+honest fix is the same product question Graham already ruled on (renames belong
+in the library), and the AI has no library-rename tool. **Recorded as a known
+limitation** so it is not later rediscovered as a regression introduced by this
+work. Candidate follow-ups, not scheduled: teach `summarizeApplyImpact` to report
+"N title changes will be ignored", or give the agent a rename tool.
 
 ---
 
@@ -191,20 +228,72 @@ does not allocate on no-op mutations.
 input id-minting runs on top of any cleared `slotId`s — its own comment says the
 ordering is deliberate. Calling it per-mutation preserves that ordering.
 
+**★ `updateConfig` is NOT the only site, and v1 of this section was wrong to name
+only it.** Found by sweeping for the class Codex R1's second finding named
+(*guarded one path, left another that triggers the same event*) rather than only
+folding the finding. `grep 'setConfig('` returns five sites:
+
+| Site | Today | Disposition |
+|---|---|---|
+| `page.tsx:595` `updateConfig` | `ensureStageSlotIds` only | → `withStableIds` |
+| `page.tsx:613` `applyImportMerge` | `ensureStageSlotIds` only | → `withStableIds` |
+| `page.tsx:621` `undoImport` | `ensureStageSlotIds` only | → `withStableIds` |
+| `page.tsx:426` offline cache restore | already `withStableIds` | unchanged |
+| `page.tsx:484` fetch load | `cfg` already normalized at `:461` | unchanged — **verified, not assumed** |
+
+`applyImportMerge` and `undoImport` **deliberately bypass `updateConfig`** (their
+comments say so, and the reason — no side effect inside a state updater — is
+still valid). But they call `ensureStageSlotIds` alone, so **setlist rows arriving
+from a CSV/sheet import get no `id`**, and `page.tsx:4548`, `:4580`, `:4622`
+dereference `s.id!`. That is the identical broken-keys/dead-drag defect as the AI
+path, on the import path, and fixing only `updateConfig` would have shipped it.
+
+The fix does not change the bypass — it swaps the normalizer at all three sites.
+
 ### 2.4 Make residual loss loud (the backstop for §2.1)
 
 **Spec:** a pure function
 
 ```
 summarizeApplyImpact(current: AppConfig, toolName: string, toolInput: unknown)
-  → { inputsUnlinked: number; monitorNeedsCleared: number; rowsRemoved: number }
+  → {
+      inputsUnlinked: number;          // inputs whose slotId will dangle
+      monitorNeedsCleared: number;     // non-empty `needs` about to be blanked
+      rowsRemoved: number;             // rows present now, absent after
+      mixesRemoved: number;            // live mix numbers about to disappear
+      performersOrphanedByMix: number; // slots whose `mix` will dangle as a result
+    }
 ```
 
 computed **before** applying, and rendered on the approve card as a plain warning
 when any count is non-zero:
 
-> ⚠ Applying this will unlink 12 inputs from their performers and clear 3 monitor
-> "needs" entries.
+> ⚠ Applying this will unlink 12 inputs from their performers, clear 3 monitor
+> "needs" entries, and leave 4 performers pointing at a mix that no longer exists.
+
+> **Codex R1 High, folded.** v1 counted only unlinked inputs, cleared needs, and
+> removed rows — **and therefore left the AI path unguarded against the very
+> defect §3 exists to fix.** An approved `update_monitors` can remove or renumber
+> a live mix and orphan every performer whose `stagePlot[].mix` points at it,
+> silently, while §3's prompts cover only the *manual* delete and renumber. That
+> is this project's most-repeated defect class verbatim: **I fixed one call site
+> and left the other path that triggers the same event.** The AI-key work hit it
+> twice in one chunk (R1 fixed the button, R2 found the input field). It is the
+> reason `renumberMix` is one funnel in §3.3, and the same discipline has to
+> reach the apply path.
+
+**`validateMonitors` runs on the AI `update_monitors` apply path too** — not only
+on manual edit/add/renumber (§3.3). A model can emit duplicate or non-positive
+mix numbers as easily as a user can type them, and today's `[1, 2, 5]` example in
+§3.3 comes *from* an AI-produced list. A failing plan is refused with the reason
+shown on the card, and nothing is applied.
+
+**State-and-recovery for that refusal** (required of every error path in this
+project — an error return is not a fix if it strands the caller): the config is
+**unchanged**, the proposal **stays in the transcript**, and the card shows why
+it was refused plus what to do — *"This plan would create two Mix 3 rows. Ask
+again, or renumber the existing mix first."* The user is never left with a
+half-applied plan or a card they cannot act on. No auto-retry.
 
 **Why this is the load-bearing piece:** §2.1 depends on model behaviour, which we
 do not control. This converts a silent destruction into an informed choice, which
@@ -306,7 +395,10 @@ the plausible-wrong one.** Every rule below gets its mutation.
 **Chunk 1**
 1. A rejected `fetch` sets `saveError`; the pill renders red, not "Saved".
 2. A subsequent successful save clears it.
-3. Upload route rejects `image/png` with 400; accepts `application/pdf`.
+3. Upload route **sniffs bytes**: PNG bytes are rejected 400 **even when the
+   claimed MIME is `application/pdf`** (the distinguishing case — a MIME-only
+   guard passes this and is the implementation Codex R1 rejected), and a real PDF
+   with an empty/missing `type` is **accepted**.
 4. `ChartNavigator` renders the image-specific message for a non-PDF `mimeType`,
    and the generic load error for a PDF that genuinely fails.
 5. Title is read-only **iff** `songId` is present — both directions, since the
@@ -316,13 +408,32 @@ the plausible-wrong one.** Every rule below gets its mutation.
 6. `update_stage_plot` on a config with existing inputs leaves `inputs`
    byte-identical.
 7. …and on a config with empty inputs/monitors, still cascades.
+7a. **Codex R1 medium, folded — the case that catches the plausible-wrong
+    implementation:** `inputs` empty but `monitors` non-empty with typed `needs`.
+    Assert `monitors` stays **byte-identical**. An implementation that gates the
+    whole cascade on `inputs.length === 0` alone passes tests 6 and 7 and still
+    blanks every monitor's `needs` — which is half the original bug. The rule is
+    "either has content", and only this case distinguishes it.
+7b. The mirror: `monitors` empty but `inputs` non-empty ⇒ `inputs` untouched.
 8. A slot echoing its `id` keeps it; a slot without one is minted a new one.
 9. An input echoing `slotId` keeps its link across an apply.
 10. `updateConfig` mints ids for setlist/inputs/monitors, not just slots —
     asserted on the AI-apply path specifically, since that is the broken one.
+10a. **The same assertion on `applyImportMerge`**: setlist rows arriving from a
+    CSV/sheet import carry ids afterwards. This is a *different call site* with
+    the same defect (§2.3), and a fix applied only to `updateConfig` passes
+    test 10 and fails this one.
 11. `summarizeApplyImpact` counts unlinked inputs, cleared needs, and removed
     rows. **Distinguishing test:** an apply that changes nothing reports zeroes
     (a plausible-wrong implementation reports the whole array length).
+11a. It also counts `mixesRemoved` and `performersOrphanedByMix` — an
+    `update_monitors` dropping a live mix that three slots point at reports
+    `mixesRemoved: 1, performersOrphanedByMix: 3`. Without this the AI path has
+    no surface for the defect §3 exists to fix.
+11b. **`validateMonitors` runs on the AI apply path:** an `update_monitors`
+    carrying duplicate or non-positive mix numbers is refused, **the config is
+    unchanged** (assert byte-identical, not merely "an error was shown"), and the
+    proposal survives in the transcript so the user can act.
 
 **Chunk 3**
 12. `renumberMix(3 → 5)` remaps every `slot.mix === 3` and leaves others alone.
