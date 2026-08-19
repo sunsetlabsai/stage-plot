@@ -1,8 +1,8 @@
 # Design: Core-Path UAT Blockers (Tier 1)
 
-**Status:** Proposed v2 — Codex R1 folded (2 High + 1 Medium), plus three gaps
-found by my own sweep of the class R1's second finding named. Awaiting Graham's
-approval and Codex R2.
+**Status:** Proposed v4 — Codex R1 (2 High + 1 Medium) and R2 (1 High + 1 Medium)
+folded, plus four gaps found by my own sweeps. Awaiting Graham's approval and
+Codex R3.
 **Date:** 2026-08-19
 **Source:** `docs/uat-readiness-gaps.md` (PR #142). Graham ruled **all six Tier-1
 items** in scope, and ruled that **pre-existing production data does not need
@@ -24,7 +24,7 @@ mechanism that enforces it and whether that mechanism exists today.
 |---|---|---|
 | I1 | The UI never reports success for an operation that did not succeed. | `use-show.ts` catch sets `saveError` (§1.1); apply-impact warning (§2.4) |
 | I2 | A field that cannot persist is not presented as editable. | Title becomes read-only when `songId` is present (§1.3) |
-| I3 | A file the viewer cannot render is refused at upload, not accepted and broken later. | `ACCEPT` + route-side mime guard (§1.2) |
+| I3 | A file the viewer cannot render is refused at upload, not accepted and broken later. | `ACCEPT` hint + route-side **byte sniff** (`sniffPdf`), and the accepted type is **normalized on write** so the viewer never adjudicates on a caller's claim (§1.2 parts 2, 2b) |
 | I4 | No user-entered data is destroyed by an AI apply without the user being told first. | Identity in tool schemas (§2.1) + cascade removal (§2.2) + apply-impact warning (§2.4) |
 | I5 | Every row that any view keys by `id` has one, at all times, regardless of how it was created. | `withStableIds` in `updateConfig` (§2.3) |
 | I6 | A reference is never rewritten underneath the thing that points at it. | Mix identity is immutable; `renumberMix` remaps atomically (§3) |
@@ -107,10 +107,32 @@ branch — `chart.mimeType` is written at `page.tsx:473` and never read again.
 
    The rejection must happen **before storage**, so a spoofed upload never
    produces a row that the viewer will later fail on.
+
+   **★ 2b. A successful sniff NORMALIZES the persisted type.** On accept, the
+   route writes `application/pdf` to `chart_library.mime_type` **and** to the
+   storage object's `contentType` — **the sniff is the authority, so what we
+   persist is what the sniff determined, never what the caller claimed.**
+
+   > **Codex R2 High, folded — and I introduced this contradiction myself**, in
+   > the very commit that added the "PDF is accepted regardless of browser MIME"
+   > guarantee. Without normalization those two clauses fight: a genuine PDF
+   > uploaded with `type: image/png` (a wrong-but-not-malicious browser/OS guess,
+   > which is exactly the case the guarantee exists for) passes the byte sniff,
+   > is stored carrying `image/png`, and is then **blocked by part 3's
+   > image-specific message** — the guarantee delivering the failure it promised
+   > to prevent. I asserted "more permissive" without tracing the value through
+   > storage to the viewer. Same class as every other "true in prose, unenforced
+   > through the mechanism" finding here.
+
 3. **Use the dead `mimeType` field** rather than deleting it: when a chart's
    `mimeType` is present and is not `application/pdf`, `ChartNavigator` renders
    *"This chart is an image. Images can't be displayed in the viewer — replace it
    with a PDF."* instead of the generic "Couldn't load this chart."
+
+   **With 2b, this branch is reachable only for LEGACY rows** — anything stored
+   after this change carries `application/pdf` by construction. That is the
+   correct scope: part 3 exists for rows that predate the guard, and normalization
+   is what stops it from misfiring on newly-accepted PDFs.
 
 Part 3 is not redundant with parts 1–2. Legacy rows exist (Graham's own shows),
 and the honest message costs three lines and turns a dead field into the thing
@@ -309,8 +331,43 @@ is I4's actual requirement — the invariant is "without the user being told
 first," not "never." It is also a pure function over two plain objects, so unlike
 the apply path itself it is fully testable in this repo's harness.
 
-**Not** a block: the user can still approve. No new refusal path, so no new
-stranding.
+**The impact warning is not a block** — it informs, and the user can still
+approve.
+
+**But this section DOES introduce one refusal path, and the card state after it
+is specified rather than left to the implementer** (Codex R2 medium: an earlier
+draft still claimed "no new refusal path", which stopped being true the moment
+`validateMonitors` moved onto the AI apply path).
+
+When `validateMonitors` refuses an `update_monitors` plan:
+- the tool call resolves to a **new `'refused'` status** — *not* `'rejected'`
+  (see below), with the reason shown on the card;
+- **Apply is gone, not merely disabled** — a disabled Apply invites re-clicking
+  something that can never succeed;
+- the config is **unchanged**, and the proposal text stays in the transcript;
+- recovery is to ask again, or renumber the existing mix first, and the card says
+  so. **No auto-retry.**
+
+**★ Why a new status rather than reusing `'rejected'` — verified in code, after I
+asserted the opposite.** A draft of this section claimed the refused turn would
+be excluded from API history. **That is false.** `lib/agent-history.ts:73` sends
+every `rejected` tool call back to Claude as a `tool_result` reading
+**`'Rejected by user.'`** with `is_error: true`. Reusing that status would tell
+Claude *the user declined this change* when the truth is *the app refused it as
+malformed* — so on the next turn Claude has no idea the mix numbers collided and
+every reason to believe the user simply didn't want it. **A lie to the model is a
+silent failure with extra steps**, and it is the same class this whole document
+exists to remove.
+
+`'refused'` therefore emits its own tool_result naming the actual cause —
+*"Refused: this plan would create two Mix 3 rows."* — which is both honest and
+the only version that lets the model correct itself.
+
+**Consequence to check at build time:** `hasPendingTools` feeds `canSend`
+(`lib/agent-history.ts`), so `'refused'` must count as **resolved**, exactly like
+`applied` and `rejected`. If it does not, a refused plan locks the composer
+behind an approve/reject decision the user can never make — this project's
+signature defect, which is precisely how it would reappear here.
 
 ---
 
@@ -407,6 +464,11 @@ the plausible-wrong one.** Every rule below gets its mutation.
    claimed MIME is `application/pdf`** (the distinguishing case — a MIME-only
    guard passes this and is the implementation Codex R1 rejected), and a real PDF
    with an empty/missing `type` is **accepted**.
+3a. **A real PDF uploaded as `image/png` is accepted AND persisted with
+   `mime_type: 'application/pdf'`** (§1.2 part 2b). Assert the stored value, not
+   just the 200 — an implementation that sniffs correctly and then stores the
+   caller's claim passes test 3 and strands the file behind the viewer's
+   image-specific message, which is the contradiction Codex R2 caught.
 4. `ChartNavigator` renders the image-specific message for a non-PDF `mimeType`,
    and the generic load error for a PDF that genuinely fails.
 5. Title is read-only **iff** `songId` is present — both directions, since the
@@ -442,6 +504,14 @@ the plausible-wrong one.** Every rule below gets its mutation.
     carrying duplicate or non-positive mix numbers is refused, **the config is
     unchanged** (assert byte-identical, not merely "an error was shown"), and the
     proposal survives in the transcript so the user can act.
+11c. **A `'refused'` tool call reports the REASON to Claude, not "Rejected by
+    user."** Assert the `tool_result` content names the validation failure. The
+    plausible-wrong implementation reuses `'rejected'`, passes a naive "an error
+    was reported" assertion, and silently lies to the model.
+11d. **`'refused'` counts as resolved in `hasPendingTools`**, so `canSend` is not
+    gated. Distinguishing test: a transcript whose only unapplied tool call is
+    `refused` must leave the composer enabled — treating it as pending is the
+    composer-lock defect this project has hit repeatedly.
 
 **Chunk 3**
 12. `renumberMix(3 → 5)` remaps every `slot.mix === 3` and leaves others alone.
