@@ -79,8 +79,16 @@ Fixing it means a `visibilitychange` flush, which is its own change.
 (`app/api/charts/upload/route.ts:36-58`), and the in-show viewer has no image
 branch — `chart.mimeType` is written at `page.tsx:473` and never read again.
 
+> **★ To be unmistakable: PDF is, and remains, the supported chart format.**
+> Graham flagged that ~95%+ of real charts are PDFs. Nothing here narrows PDF
+> support — this section *narrows to* PDF. **PDF is the only format the viewer
+> has ever rendered**; `.png/.jpg` are accepted by the picker today and then fail
+> for every performer, which is the bug. After this change a PDF is accepted
+> whether or not the browser supplies a correct MIME type (test 3), which is
+> strictly *more* permissive for real PDFs than a MIME check would be.
+
 **Spec, three parts:**
-1. `ACCEPT = '.pdf'`.
+1. `ACCEPT = '.pdf'` — images leave the picker; PDF stays.
 2. `/api/charts/upload` **sniffs the leading bytes** and rejects anything that is
    not a PDF with **400** and a message naming the reason.
    **Use `sniffPdf(bytes)` — it already exists** (`lib/chart-converter.ts:17`).
