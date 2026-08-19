@@ -418,8 +418,11 @@ the transcript, an error under it, and **an empty composer** — the "one
 keystroke" is actually retyping the whole prompt. That lands hardest on exactly
 the message worth retrying: the long one.
 
-**Spec — restore on pre-stream failure** *(v4–v8; superseded by §5.2a in v9,
-retained because the reasoning below still holds and v9 builds on it)*:
+**Spec — restore on pre-stream failure** *(v4–v8; superseded by §5.2a in v9, and
+its `streamStarted` mechanism superseded again by item 2's R1 fold — see §5.2a.4
+and §12. Retained because the pre-stream reasoning below still holds and v9 built
+on it; **the flag it names no longer exists in the code**, so read the mechanism
+here as history and §5.2a.4 as current.)*:
 
 - When a send fails **before the response stream has started**, restore
   `userText` to the composer **and remove the optimistic user message** from the
@@ -526,7 +529,10 @@ were used to justify is **not being built**.
 1. **A pre-stream upstream failure already fails closed.** `route.ts:102` tests
    `anthropicRes.ok` **before** any streaming and returns a JSON 401/502. The
    client throws at `page.tsx:5082`, before `res.body?.getReader()` at `:5089`.
-   No bytes flow, `streamStarted` stays `false`, the message restores. **The
+   No bytes flow, so nothing reaches the transcript and the message restores.
+   *(Written when this was `streamStarted` staying `false`; after item 2's R1
+   fold the flag is gone and the predicate reads the stream state directly. The
+   conclusion is unchanged — an empty state restores either way.)* **The
    "proxy opens, then upstream dies" shape Q3 was written about is already
    handled** for every failure that happens before Anthropic's response headers.
 2. **A terminal error frame from our own route is not cheap.** `route.ts:121` is
@@ -648,13 +654,40 @@ non-issue, and it is recorded here so nobody re-derives it as a surprise.
 | Failure shape | Delivered? | Composer | Transcript |
 |---|---|---|---|
 | Non-`ok` response (invalid key, quota exhausted, 500, offline) | No — `route.ts:102` fails closed before streaming | **Auto-restore** | Optimistic message removed |
-| Stream opened, then `error` event mid-flight | Yes, partially — billed | Not auto-restored | Partial content **kept and marked `failed`**, error shown under it. Excluded from API history, tool calls discarded (§5.2a.2b) |
-| Stream completed normally | Yes | Cleared, as today | User message stays |
+| Stream opened, then failed (`error` event **or** transport drop), **with text or a completed tool call** | Yes, partially — billed | Not auto-restored | Partial content **kept and marked `failed`**, error shown under it. Excluded from API history, tool calls discarded (§5.2a.2b) |
+| Stream opened, then failed, **nothing delivered** — no text and no completed tool call | No — nothing reached the transcript | **Auto-restore** | Optimistic message removed |
+| Stream completed normally (including a legitimately empty answer) | Yes | Cleared, as today | User message stays |
 
-Auto-restore remains gated on `!streamStarted`, set at the **first
-`reader.read()` chunk** before parsing (`page.tsx:5103`) — unchanged from v5, and
-still correct for the tool-only-stream reason Codex R4 gave. What changed is that
-this flag is no longer the last line of defence for the user's words.
+**Auto-restore is gated on what reached the transcript, not on byte timing**
+(item 2, Codex R1 fold — see §12). The predicate is
+`shouldRestoreComposer({ text, completedToolCalls })`, fed by `arrivedFrom(state)`
+in `lib/agent-stream.ts`, and it is applied to **both** failure paths — the
+`error` frame at the end of the read loop and the transport drop in the `catch` —
+so the two cannot diverge.
+
+**The `streamStarted` flag is gone.** It was set at the first `reader.read()`
+chunk before parsing, and it was correct for chunk 4's scope, where every failure
+that could reach the predicate was a non-`ok` response and so "bytes arrived" and
+"content arrived" could not disagree. Item 2 makes them disagree: a stream can
+open, emit `message_start`, and die before any text or completed tool block.
+Under the byte rule that committed an assistant turn whose entire content was the
+"This response was interrupted" line and left the composer empty — this
+document's own stranding class. The flag is also strictly implied by the new
+predicate (no bytes read ⇒ `newStreamState()` ⇒ empty text, no tool calls), so
+keeping it would be a second source of truth for one question.
+
+**Codex R4's tool-only-stream reason still binds, and is why the predicate counts
+completed tool calls rather than testing `text === ''` alone.** A tool-only turn
+carries `content_block_start` / `input_json_delta` and no text at all; it *is*
+delivered and must not be restored. An in-flight tool block that never reached
+`content_block_stop` counts as **not** delivered — it never becomes a completed
+call, and `finalizeTurn` discards even completed calls on a failed turn, so
+nothing from it survives.
+
+**The empty-turn guard:** the `error`-frame branch additionally requires
+`streamState.failed` before restoring, because a legitimately empty **successful**
+turn satisfies the same "nothing delivered" predicate and must fall through to
+`finalizeTurn` rather than refilling the composer.
 
 #### 5.2a.5 Recall: edit and resend from the transcript
 
@@ -897,14 +930,28 @@ New cases in a client test (jsdom + RTL, per the existing harness pattern in
      against a fix that reads "always restore" and quietly resurrects text the
      user already spent tokens on.
 13c-i. **A failure after a TOOL-ONLY stream is not restored either** — Codex R4
-     medium. Feed `content_block_start` (`type: 'tool_use'`) and
-     `input_json_delta` events, **no `text_delta`**, then fail. `assistantText`
-     is `''` and the message must still stay put. This is the test that
-     separates a correct `streamStarted` flag from
-     `assistantText.length === 0`; 13c alone passes under both.
-13c-ii. A failure after bytes arrive that parse to **nothing usable** (garbage
-     SSE, a lone `\n`) is also not restored. Pins that the flag is set at the
-     read, not at the parse.
+     medium, still binding. Feed `content_block_start` (`type: 'tool_use'`) and
+     `input_json_delta` events through `content_block_stop`, **no `text_delta`**,
+     then fail. The assistant text is `''`, a tool call **completed**, and the
+     message must still stay put. This is the test that separates a correct
+     `completedToolCalls` count from `text === ''` alone; 13c passes under both.
+13c-ii. **REVERSED by item 2 (Codex R1 fold).** A failure after bytes arrive that
+     parse to **nothing usable** (garbage SSE, a lone `\n`, or a stream that
+     opened and died after `message_start`) **IS restored**, because nothing
+     reached the transcript. This deliberately overturns the v9 rule, which
+     pinned the old `streamStarted` flag as being set at the read rather than at
+     the parse — that flag no longer exists. Committing an assistant turn whose
+     only content is the "interrupted" line, with an empty composer, is the
+     stranding §5.2a.4 now forbids.
+13c-ii-a. **An in-flight tool block does not count as delivered.** Feed
+     `content_block_start` (`type: 'tool_use'`) and `input_json_delta` with **no
+     `content_block_stop`**, then fail: no completed call, nothing survives
+     `finalizeTurn`, so the composer **is** restored. Separates "the model began
+     emitting a tool call" from "a tool call reached the transcript".
+13c-ii-b. **An empty SUCCESSFUL turn is not restored.** A stream that completes
+     normally with no text and no tool calls satisfies the same
+     nothing-delivered predicate; only `failed` turns may restore. Pins the
+     guard that stops a legitimate empty answer from refilling the composer.
 13c-iii. `tryitExhausted` (a non-`ok` response) **is** restored — the stream
      never started. Quota exhaustion is the moment a tester most needs their
      text kept while they go find a key.
@@ -939,9 +986,14 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
      fix from today's behavior** — today the loop ends silently and commits the
      partial text with no error, so an assertion on the text alone passes
      against the unfixed code.
-13j. A mid-stream `error` **does not** restore the composer and **does not**
-     remove the transcript entry — it was delivered and billed (§5.2a.4 row 2).
-     Guards against a fix that treats every error identically.
+13j. A mid-stream `error` **after text or a completed tool call** does not
+     restore the composer and does not remove the transcript entry — that was
+     delivered and billed (§5.2a.4 row 2). Guards against a fix that treats every
+     error identically. **Qualified by item 2's R1 fold:** the same `error` frame
+     with *nothing* delivered takes §5.2a.4 row 3 and **does** restore, so this
+     test must feed text (or a completed tool block) before the error rather than
+     asserting the rule unconditionally — otherwise it pins behaviour the spec no
+     longer asks for.
 13k. **Edit-and-resend loads the composer and stops.** Activating edit on a user
      message populates the composer with that text and the request mock is
      **not** called; the prior turn and its response are unchanged. Pins both

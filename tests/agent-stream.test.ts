@@ -232,6 +232,19 @@ describe('arrivedFrom — the restore decision has one source of truth', () => {
     expect(shouldRestoreComposer(arrivedFrom(state))).toBe(true);
   });
 
+  it('13c-ii-b — an empty SUCCESSFUL turn reports failed:false, which is the guard input', () => {
+    // The page restores only on `streamState.failed && shouldRestoreComposer(...)`.
+    // A legitimately empty successful answer satisfies the predicate, so the
+    // `failed` half is the only thing stopping it refilling the composer.
+    const state = runStream([`data: ${JSON.stringify({ type: 'message_start', message: {} })}\n`]);
+
+    expect(state.failed).toBe(false);
+    expect(shouldRestoreComposer(arrivedFrom(state))).toBe(true);
+    // ⚠ HALF THE RULE. This pins the predicate and the flag; the `&&` that
+    // combines them lives in page.tsx and no harness here can drive it. Declared
+    // untested seam, not an assertion that the wiring is right.
+  });
+
   it('a failed turn that delivered text is NOT restored — the text is kept and marked', () => {
     const state: StreamState = { ...newStreamState(), text: 'half an ans', failed: true };
     expect(shouldRestoreComposer(arrivedFrom(state))).toBe(false);
