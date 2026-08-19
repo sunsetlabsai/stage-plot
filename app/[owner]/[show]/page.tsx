@@ -43,9 +43,13 @@ import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
 import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
-import { resolveAvailability, canSendMessage, effectiveProbe, type FetchedProbe } from '@/lib/agent-availability';
-import type { Capabilities } from '@/lib/agent-key';
-import { readKey, initialRemember, persistKey, BYOA_KEY } from '@/lib/byoa-key-storage';
+import { resolveAvailability, canSendMessage, effectiveProbe, probeCapabilities, type FetchedProbe } from '@/lib/agent-availability';
+import { rememberPrompt } from '@/lib/prompt-cache';
+import { shouldRestoreComposer, rollbackOptimisticSend, isSavedKeyRejected } from '@/lib/send-recovery';
+// No BYOA_KEY here any more: the page no longer touches either store directly,
+// so the storage-key name is now entirely `lib/byoa-key-storage`'s business.
+// (#133 centralized the literal; this removes the last caller that needed it.)
+import { readKey, initialRemember, persistKey } from '@/lib/byoa-key-storage';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -849,7 +853,7 @@ export default function Page() {
       {tab === 'ai' && (
         <div className="p-4 md:p-8">
           <div className="max-w-4xl mx-auto">
-            <AgentChat config={config} updateConfig={updateConfig} />
+            <AgentChat config={config} updateConfig={updateConfig} owner={owner} slug={slug} />
           </div>
         </div>
       )}
@@ -4980,9 +4984,15 @@ interface AgentMessage {
 function AgentChat({
   config,
   updateConfig,
+  owner,
+  slug,
 }: {
   config: AppConfig;
   updateConfig: (fn: (prev: AppConfig) => AppConfig) => void;
+  // §5.2a.3: the prompt cache is keyed per show, so one show's prompts never
+  // surface in another. Same identity the sibling tabs already receive.
+  owner: string;
+  slug: string;
 }) {
   const [apiKey, setApiKey] = useState(() => {
     if (typeof window === 'undefined') return '';
@@ -5000,6 +5010,11 @@ function AgentChat({
   const [tryitRemaining, setTryitRemaining] = useState<number | null>(null);
   const [tryitExhausted, setTryitExhausted] = useState(false);
   const [fetchedProbe, setFetchedProbe] = useState<FetchedProbe>('loading');
+  // §5.1: a saved key that has been revoked, rotated or mistyped. Detected as
+  // "a 401 while we are holding a key" rather than by matching the error string
+  // — the route's other 401 is the no-key case, which by definition cannot fire
+  // while `apiKey` is set, so the two cannot collide.
+  const [keyRejected, setKeyRejected] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const configRef = useRef(config);
   useEffect(() => { configRef.current = config; }, [config]);
@@ -5013,29 +5028,15 @@ function AgentChat({
   // Deliberately not aborted on unmount: the response only calls setState, React
   // no-ops a set on an unmounted component, and an AbortController here would need
   // to survive the tab remounting to be worth anything.
+  // The status→probe mapping moved to `probeCapabilities` (issue #136): it was
+  // three lines no test could reach, and a wrong branch here passes the whole
+  // suite while reintroducing the state-2 dead end chunk 3 exists to fix.
   useEffect(() => {
     if (apiKey) return;
     let live = true;
-    (async () => {
-      try {
-        const res = await fetch('/api/agent/capabilities');
-        // A 429 is NOT one of the four states, so it gets its own probe value rather
-        // than being collapsed into one (see the route, which sends `rateLimited` for
-        // exactly this). Recording it matters: returning early here left the probe at
-        // `loading` forever, which renders state 2 — composer disabled and NO key
-        // field — so a venue that trips the shared-IP probe limit could not paste its
-        // own key at all. Codex R1 medium.
-        if (res.status === 429) {
-          if (live) setFetchedProbe('rateLimited');
-          return;
-        }
-        if (!res.ok) throw new Error(`probe failed: ${res.status}`);
-        const body = (await res.json()) as Capabilities;
-        if (live) setFetchedProbe(body);
-      } catch {
-        if (live) setFetchedProbe('error');
-      }
-    })();
+    void probeCapabilities().then((probe) => {
+      if (live) setFetchedProbe(probe);
+    });
     return () => { live = false; };
   }, [apiKey]);
 
@@ -5090,8 +5091,22 @@ function AgentChat({
     const userText = text ?? input.trim();
     if (!userText || streaming) return;
 
+    // §5.2a.3: the cache write and the clear are ONE action — the composer must
+    // never be emptied without the text landing somewhere first. `rememberPrompt`
+    // is best-effort and cannot throw, so a failing store can't block a send.
+    rememberPrompt(sessionStorage, owner, slug, userText);
     setInput('');
     setError('');
+    // Cleared with the error it annotates. A rejection describes ONE response;
+    // left standing it would put "That key was rejected. Clear it" under the
+    // NEXT failure — a 502 or an offline send — and talk the user into deleting
+    // a working credential over a fault that was never theirs.
+    setKeyRejected(false);
+
+    // §5.2a.4: set at the first read chunk, before any SSE parsing — NOT at the
+    // parse and emphatically not `assistantText.length === 0`, which is wrong for
+    // tool-only streams (Codex R4 medium).
+    let streamStarted = false;
 
     const userMsg: AgentMessage = { role: 'user', content: userText };
     const newMessages = [...messages, userMsg];
@@ -5121,6 +5136,11 @@ function AgentChat({
       if (!res.ok) {
         const err = await res.json();
         if (err.tryitExhausted) setTryitExhausted(true);
+        // §5.1: our saved key was rejected. Without this the tester sees only
+        // "Invalid API key" and never learns try-it might work — the app has a
+        // working path and never offers it. The predicate (and why the route's
+        // other 401 cannot collide with it) lives in lib/send-recovery.ts.
+        if (isSavedKeyRejected({ status: res.status, hasKey: !!apiKey })) setKeyRejected(true);
         throw new Error(err.error || 'Request failed');
       }
 
@@ -5139,6 +5159,7 @@ function AgentChat({
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        streamStarted = true;
         buffer += decoder.decode(value, { stream: true });
 
         const lines = buffer.split('\n');
@@ -5188,6 +5209,14 @@ function AgentChat({
       setMessages([...newMessages, { role: 'assistant', content: assistantText, toolCalls: toolCalls.length > 0 ? toolCalls : undefined }]);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error');
+      // §5.2a.4: nothing was delivered, so put the text back and drop the
+      // optimistic entry — a restored composer PLUS a stranded transcript entry
+      // reads as though the message was sent twice. Retry stays explicit: this
+      // re-arms Send, it does not re-send.
+      if (shouldRestoreComposer(streamStarted)) {
+        setInput(userText);
+        setMessages((prev) => rollbackOptimisticSend(prev, userText));
+      }
     } finally {
       setStreaming(false);
     }
@@ -5389,6 +5418,61 @@ function AgentChat({
     });
   }
 
+  // §5.1: one clear path, shared by the panel's small Clear control and the
+  // prominent recovery button, so the two can never drift. Emptying `apiKey`
+  // re-runs the probe via the effect above — that IS the "re-probe on clear"
+  // requirement; there is no second trigger to keep in sync.
+  // ── The ONE path into "we no longer hold a key" ────────────────────────────
+  //
+  // Codex R1 and R2 on #140 were the same defect at two call sites: this
+  // function reset the state derived from the key, and the key field's own
+  // onChange did not — so a user who DELETED the rejected key by hand instead
+  // of pressing Clear kept a stale `tryitExhausted`/`tryitRemaining`, which
+  // overrides a fresh probe and pins them in state 4 with the composer
+  // disabled. Patching the second handler would leave a third to find, so the
+  // handler below routes into this one instead.
+  //
+  // Storage is not touched here on purpose. The persist effect above calls
+  // `persistKey(local, session, apiKey, remember)`, and an empty key removes
+  // the entry from BOTH stores (lib/byoa-key-storage.ts, pinned by
+  // tests/byoa-key-storage.test.ts). The explicit removeItem calls that used to
+  // sit here were a second storage path that could drift from the first —
+  // the same class as the finding itself.
+  function handleClearKey() {
+    setApiKey('');
+    // A rejection describes a key we no longer hold.
+    setKeyRejected(false);
+    // Back to state 2 (`checking`) while the probe re-runs, rather than showing
+    // whatever a PREVIOUS probe found — plausibly `error` from before the key
+    // was pasted — as though it described the request now in flight. Safe
+    // because `effectiveProbe` derives `skipped` from `loading` only while a
+    // key is held.
+    setFetchedProbe('loading');
+    // The load-bearing pair (Codex R1). `sendRemaining`/`sendExhausted` OUTRANK
+    // the probe in `resolveAvailability` — deliberately, so spending the last
+    // free message updates the panel without a remount — so a stale
+    // exhausted-or-zero from an earlier send silently beats the fresh probe.
+    // §5.1 promises the opposite: clearing re-probes and, when try-it is
+    // available, lands in state 3. The probe is the newer measurement, so
+    // everything derived from older sends goes with the key.
+    setTryitRemaining(null);
+    setTryitExhausted(false);
+  }
+
+  function handleApiKeyChange(next: string) {
+    // Emptying the field IS clearing the key — same operation, so the same
+    // reset, via the same function (Codex R2 medium).
+    if (!next) {
+      handleClearKey();
+      return;
+    }
+    // A rejection describes the key that was rejected. Typing a different one
+    // makes it stale, and a stale "that key was rejected" banner over a key the
+    // user just fixed is its own small lie.
+    setApiKey(next);
+    setKeyRejected(false);
+  }
+
   const hasPendingTools = messages.some((m) => m.toolCalls?.some((tc) => tc.status === 'pending'));
 
   // Replaces `!!apiKey || !tryitExhausted` (§5). That predicate was true whenever no
@@ -5428,14 +5512,10 @@ function AgentChat({
         apiKey={apiKey}
         rememberKey={rememberKey}
         showKey={showKey}
-        onApiKeyChange={setApiKey}
+        onApiKeyChange={handleApiKeyChange}
         onRememberChange={setRememberKey}
         onRevealKey={() => setShowKey(true)}
-        onClearKey={() => {
-          setApiKey('');
-          localStorage.removeItem(BYOA_KEY);
-          sessionStorage.removeItem(BYOA_KEY);
-        }}
+        onClearKey={handleClearKey}
       />
 
       {/* Chat messages */}
@@ -5492,7 +5572,33 @@ function AgentChat({
       </div>}
 
       {error && (
-        <p className="text-sm text-red-600">{error}</p>
+        <div className="space-y-2">
+          <p className="text-sm text-red-600">{error}</p>
+          {/* §5.1: a prominent action, not a small link beside the input. The
+              existing Clear control is undiscoverable at the moment of failure,
+              which is the only moment it matters. Clearing re-runs the probe
+              (the effect fires when `apiKey` empties), so if try-it is
+              configured the panel drops straight into state 3 and the user
+              continues with no key at all. The failed message is NOT
+              auto-retried — Send is re-armed and the user presses it. */}
+          {keyRejected && (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleClearKey}
+                className="px-3 py-2 text-sm font-medium text-white bg-red-600 rounded hover:bg-red-700"
+              >
+                Clear saved key
+              </button>
+              {/* "That key" rather than "your saved key": the rejected key may
+                  have been typed a second ago and never saved. The button label
+                  is §5.1's, verbatim. */}
+              <span className="text-xs text-gray-500">
+                That key was rejected. Clearing it lets ShowRunr check whether
+                free try-it mode is available.
+              </span>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Input */}

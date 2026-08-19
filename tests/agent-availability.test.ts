@@ -3,6 +3,7 @@ import {
   resolveAvailability,
   canSendMessage,
   effectiveProbe,
+  probeCapabilities,
   type Probe,
 } from '../lib/agent-availability';
 import { TRYIT_QUOTA, type Capabilities } from '../lib/agent-key';
@@ -314,5 +315,115 @@ describe('probe 429 — Codex R1 medium: state 2 was a dead end', () => {
     const withKey = resolve({ probe: 'rateLimited', apiKey: 'sk-ant-mine' });
     expect(withKey.state).toBe(1);
     expect(canSendMessage({ availability: withKey, streaming: false, hasPendingTools: false })).toBe(true);
+  });
+});
+
+// Design docs/design-ai-key-availability.md §4 + issue #136, chunk 4.
+//
+// Codex R2 on chunk 3 logged the gap these close: `resolveAvailability` and the
+// panel were well covered, but the three lines that PRODUCE a `FetchedProbe`
+// lived in a page effect no harness can drive. A wrong branch there passes the
+// whole suite while reintroducing the dead end chunk 3 exists to fix — probe
+// stuck non-resolving ⇒ state 2 ⇒ composer disabled AND key field hidden.
+describe('probeCapabilities — status → FetchedProbe (#136)', () => {
+  const res = (status: number, body: unknown = {}): Response =>
+    ({
+      status,
+      ok: status >= 200 && status < 300,
+      json: async () => body,
+    }) as Response;
+
+  it('returns the measured capabilities on 200', async () => {
+    const body = caps();
+    expect(await probeCapabilities(async () => res(200, body))).toEqual(body);
+  });
+
+  it('asks the capabilities route', async () => {
+    const calls: string[] = [];
+    await probeCapabilities(async (url) => {
+      calls.push(String(url));
+      return res(200, caps());
+    });
+    expect(calls).toEqual(['/api/agent/capabilities']);
+  });
+
+  it('maps 429 to rateLimited, NOT to error', async () => {
+    // The distinction the route sends `rateLimited: true` for. Collapsing it
+    // into `error` renders "the key store is unreachable" at a venue whose
+    // shared IP merely tripped the 60/min probe limit.
+    expect(await probeCapabilities(async () => res(429, { rateLimited: true }))).toBe('rateLimited');
+  });
+
+  it('maps a non-ok status to error', async () => {
+    expect(await probeCapabilities(async () => res(500))).toBe('error');
+  });
+
+  it('resolves to error rather than rejecting when the fetch throws', async () => {
+    // Offline. A rejection here would leave the caller's probe at 'loading'
+    // forever — the exact strand this function's 429 branch exists to prevent —
+    // because the page does `.then(setFetchedProbe)` with no catch of its own.
+    await expect(
+      probeCapabilities(async () => {
+        throw new TypeError('Failed to fetch');
+      }),
+    ).resolves.toBe('error');
+  });
+
+  it('resolves to error when a 200 body is not JSON', async () => {
+    const broken = {
+      status: 200,
+      ok: true,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON');
+      },
+    } as unknown as Response;
+    expect(await probeCapabilities(async () => broken)).toBe('error');
+  });
+});
+
+// Codex R1 medium on #140 — §5.1's clear-and-re-probe contract.
+//
+// The page's `handleClearKey` resets the probe to `loading`, but the probe is
+// not the only input: send-derived quota state outranks it. These pin WHY the
+// clear path must reset that state too. They assert the precedence rule, not the
+// handler — the handler lives inside AgentChat and is unreachable from any
+// harness here (the seam declared in the PR).
+describe('clearing a rejected key — stale send state must not outrank a fresh probe', () => {
+  const freshProbe = caps({ tryit: 'available', tryitRemaining: 7 });
+
+  it('a stale exhausted flag overrides a probe that says try-it works', () => {
+    // The hazard, stated as a fact about the rules: this is exactly what the
+    // user would see after clearing a rejected key if the page kept the flag —
+    // state 4, composer disabled, on a fresh measurement that said otherwise.
+    const stale = resolve({ probe: freshProbe, sendExhausted: true });
+
+    expect(stale.state).toBe(4);
+    expect(stale.allowsSend).toBe(false);
+  });
+
+  it('a stale zero remaining does the same', () => {
+    const stale = resolve({ probe: freshProbe, sendRemaining: 0 });
+
+    expect(stale.state).toBe(4);
+    expect(stale.allowsSend).toBe(false);
+  });
+
+  it('cleared to the reset values, the fresh probe is authoritative again', () => {
+    // §5.1: "clearing re-runs the probe; if try-it is available the panel drops
+    // straight into state 3 and the user continues with no key at all."
+    const cleared = resolve({ probe: freshProbe, sendRemaining: null, sendExhausted: false });
+
+    expect(cleared.state).toBe(3);
+    expect(cleared.allowsSend).toBe(true);
+    expect(cleared.remaining).toBe(7);
+  });
+
+  it('the precedence itself is correct and stays — it is not the bug', () => {
+    // Spending the last free message must still update the panel without a
+    // remount. The fix is to clear the stale value at the clear, NOT to demote
+    // send state below the probe.
+    const justSpent = resolve({ probe: caps({ tryitRemaining: 5 }), sendExhausted: true });
+
+    expect(justSpent.state).toBe(4);
   });
 });
