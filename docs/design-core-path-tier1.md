@@ -1,8 +1,8 @@
 # Design: Core-Path UAT Blockers (Tier 1)
 
-**Status:** Proposed v4 — Codex R1 (2 High + 1 Medium) and R2 (1 High + 1 Medium)
-folded, plus four gaps found by my own sweeps. Awaiting Graham's approval and
-Codex R3.
+**Status:** Proposed v5 — Codex R1, R2 folded; **R3 = no findings**, its wording
+nit folded. Plus four gaps found by my own sweeps. AWAITING GRAHAM'S APPROVAL.
+
 **Date:** 2026-08-19
 **Source:** `docs/uat-readiness-gaps.md` (PR #142). Graham ruled **all six Tier-1
 items** in scope, and ruled that **pre-existing production data does not need
@@ -544,8 +544,14 @@ and it does not require rewriting the tool contract the model is already trained
 against by the system prompt.
 
 **What step 6 still holds that this does not build:** true op-level granularity
-(so a model can say "move one slot" rather than re-emitting the world) and a
-hard atomic gate that refuses a partially-invalid plan. Both remain open. This
+(so a model can say "move one slot" rather than re-emitting the world) and the
+**general op-level atomic gate** that refuses any partially-invalid plan across
+all three tools. Both remain open.
+
+To be unambiguous about the one gate this document *does* add: §2.4's
+`validateMonitors` refusal is **narrow and single-purpose** — it covers
+`update_monitors` mix-number validity only. It is not the general atomic gate,
+and it does not generalise to slot or input validity. This
 document should be treated as reducing step 6's scope, not closing it — and
 `design-input-plot-linkage.md` should have its status line updated to say so
 rather than sitting at "Proposed (v9)" implying nothing shipped.
