@@ -5,6 +5,7 @@ import {
   parseSseEvent,
   reduceStreamEvent,
   finalizeTurn,
+  arrivedFrom,
   type StreamState,
 } from '@/lib/agent-stream';
 import { shouldRestoreComposer } from '@/lib/send-recovery';
@@ -146,8 +147,10 @@ describe('13j — a mid-stream error is NOT the pre-stream case', () => {
 
     // It was delivered and billed (§5.2a.4 row 2). The turn stays.
     expect(finalizeTurn(state).content).toBe('partial');
-    // And the composer is not refilled: bytes arrived, so streamStarted is true.
-    expect(shouldRestoreComposer(true)).toBe(false);
+    // And the composer is not refilled — text reached the transcript. Asserted
+    // through arrivedFrom so this tracks the real call site, not a hand-built
+    // boolean that could drift from it.
+    expect(shouldRestoreComposer(arrivedFrom(state))).toBe(false);
   });
 });
 
@@ -200,5 +203,38 @@ describe('the reducer is pure', () => {
     expect(parseSseEvent('"a string"')).toBeNull();
     expect(parseSseEvent('[1,2]')).toBeNull();
     expect(parseSseEvent('{not json')).toBeNull();
+  });
+});
+
+// Item 2, Codex R1 fold: `arrivedFrom` is the single definition of "what
+// reached the transcript", shared by both failure paths so they cannot drift.
+describe('arrivedFrom — the restore decision has one source of truth', () => {
+  it('reports nothing arrived for a fresh state', () => {
+    expect(arrivedFrom(newStreamState())).toEqual({ text: '', completedToolCalls: 0 });
+    expect(shouldRestoreComposer(arrivedFrom(newStreamState()))).toBe(true);
+  });
+
+  it('counts completed tool calls, so a tool-only turn is delivered', () => {
+    const state: StreamState = {
+      ...newStreamState(),
+      toolCalls: [{ id: 't1', name: 'set_bpm', input: {}, status: 'pending' }],
+    };
+    expect(arrivedFrom(state)).toEqual({ text: '', completedToolCalls: 1 });
+    expect(shouldRestoreComposer(arrivedFrom(state))).toBe(false);
+  });
+
+  it('EXCLUDES an in-flight tool block — it never completed, so nothing survives', () => {
+    const state: StreamState = {
+      ...newStreamState(),
+      currentTool: { id: 't1', name: 'set_bpm', json: '{"bpm":12' },
+    };
+    expect(arrivedFrom(state)).toEqual({ text: '', completedToolCalls: 0 });
+    expect(shouldRestoreComposer(arrivedFrom(state))).toBe(true);
+  });
+
+  it('a failed turn that delivered text is NOT restored — the text is kept and marked', () => {
+    const state: StreamState = { ...newStreamState(), text: 'half an ans', failed: true };
+    expect(shouldRestoreComposer(arrivedFrom(state))).toBe(false);
+    expect(finalizeTurn(state)).toEqual({ role: 'assistant', content: 'half an ans', failed: true });
   });
 });

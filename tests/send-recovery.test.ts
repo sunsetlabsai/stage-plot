@@ -7,28 +7,51 @@ import { shouldRestoreComposer, rollbackOptimisticSend, isSavedKeyRejected } fro
 
 describe('13a/13b — restore when nothing was delivered', () => {
   it('restores when the stream never started', () => {
-    expect(shouldRestoreComposer(false)).toBe(true);
+    // No bytes read means no events reduced, which means newStreamState().
+    expect(shouldRestoreComposer({ text: '', completedToolCalls: 0 })).toBe(true);
   });
 
-  it('does not restore once the stream has started', () => {
-    expect(shouldRestoreComposer(true)).toBe(false);
+  it('does not restore once text has reached the transcript', () => {
+    expect(shouldRestoreComposer({ text: 'partial answer', completedToolCalls: 0 })).toBe(false);
   });
 });
 
-describe('13c-i/ii — the predicate is the flag, not the text', () => {
-  // These pin the REASON the flag exists. A tool-only stream carries
-  // content_block_start / input_json_delta and no text at all, so an
-  // implementation using `assistantText.length === 0` would restore a message
-  // the model had already begun acting on (Codex R4 medium). The flag knows the
-  // difference; a text-length check cannot.
-  it('a started stream that produced no text is still not restored', () => {
-    const streamStarted = true; // tool-only turn: bytes arrived, assistantText === ''
-    expect(shouldRestoreComposer(streamStarted)).toBe(false);
+describe('13c-i — the predicate is content, not byte timing', () => {
+  // Codex R4's medium still binds: a tool-only turn carries content_block_start
+  // / input_json_delta and NO text, so `text === ''` alone would restore a
+  // message the model had already begun acting on. Counting completed tool
+  // calls is what keeps that case correct after the item-2 change.
+  it('a tool-only turn that completed a tool call is not restored', () => {
+    expect(shouldRestoreComposer({ text: '', completedToolCalls: 1 })).toBe(false);
   });
 
-  it('a started stream that produced only unparseable bytes is not restored', () => {
-    const streamStarted = true; // garbage SSE: read happened, parse yielded nothing
-    expect(shouldRestoreComposer(streamStarted)).toBe(false);
+  it('text AND tool calls together are still not restored', () => {
+    expect(shouldRestoreComposer({ text: 'here goes', completedToolCalls: 2 })).toBe(false);
+  });
+});
+
+describe('13c-ii — REVERSED by item 2: an empty failed stream now restores', () => {
+  // ★ This deliberately reverses the chunk-4 behaviour that the old boolean
+  // pinned ("a started stream that produced only unparseable bytes is not
+  // restored"). Under the byte rule, a stream that opened and died before any
+  // text or completed tool call committed an assistant turn whose whole content
+  // was the red "interrupted" line, and left the composer empty. Nothing
+  // reached the transcript, so there is nothing to mark and nothing to protect
+  // — and the §5.2a.3 prompt cache cannot hand the text back during UAT because
+  // `readPrompts` has no production caller yet.
+  it('a stream that opened and died before any content is restored', () => {
+    expect(shouldRestoreComposer({ text: '', completedToolCalls: 0 })).toBe(true);
+  });
+
+  it('a stream carrying only unparseable bytes is restored', () => {
+    // Garbage SSE: reads happened, the reducer committed nothing.
+    expect(shouldRestoreComposer({ text: '', completedToolCalls: 0 })).toBe(true);
+  });
+
+  it('an in-flight tool block that never completed does not count as delivered', () => {
+    // currentTool is excluded from `arrivedFrom` on purpose: it never becomes a
+    // completed call, and finalizeTurn discards even completed ones on failure.
+    expect(shouldRestoreComposer({ text: '', completedToolCalls: 0 })).toBe(true);
   });
 });
 

@@ -46,7 +46,7 @@ import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
 import { resolveAvailability, canSendMessage, effectiveProbe, probeCapabilities, type FetchedProbe } from '@/lib/agent-availability';
 import { rememberPrompt } from '@/lib/prompt-cache';
 import { shouldRestoreComposer, rollbackOptimisticSend, isSavedKeyRejected } from '@/lib/send-recovery';
-import { newStreamState, splitSseData, parseSseEvent, reduceStreamEvent, finalizeTurn } from '@/lib/agent-stream';
+import { newStreamState, splitSseData, parseSseEvent, reduceStreamEvent, finalizeTurn, arrivedFrom } from '@/lib/agent-stream';
 import { buildApiMessages, hasPendingTools as transcriptHasPendingTools } from '@/lib/agent-history';
 // No BYOA_KEY here any more: the page no longer touches either store directly,
 // so the storage-key name is now entirely `lib/byoa-key-storage`'s business.
@@ -5079,13 +5079,10 @@ function AgentChat({
     // a working credential over a fault that was never theirs.
     setKeyRejected(false);
 
-    // §5.2a.4: set at the first read chunk, before any SSE parsing — NOT at the
-    // parse and emphatically not `assistantText.length === 0`, which is wrong for
-    // tool-only streams (Codex R4 medium).
-    let streamStarted = false;
-
     // Declared outside the try so the catch can commit whatever arrived before
     // a transport drop. The rules live in lib/agent-stream.ts.
+    // (The old `streamStarted` byte-timing flag is gone: §5.2a.4 now keys the
+    // restore decision on what reached the transcript. See shouldRestoreComposer.)
     let streamState = newStreamState();
 
     const userMsg: AgentMessage = { role: 'user', content: userText };
@@ -5134,7 +5131,6 @@ function AgentChat({
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        streamStarted = true;
         buffer += decoder.decode(value, { stream: true });
 
         const { payloads, rest } = splitSseData(buffer);
@@ -5158,18 +5154,27 @@ function AgentChat({
         }
       }
 
-      // §5.2a.2: an `error` event is surfaced rather than swallowed. The partial
+      // §5.2a.2: an `error` event is surfaced rather than swallowed. Partial
       // content is kept and marked — it was delivered and billed — and the
       // composer is NOT restored (§5.2a.4 row 2).
       if (streamState.failed && streamState.errorMessage) setError(streamState.errorMessage);
-      setMessages([...newMessages, finalizeTurn(streamState)]);
+      // ...but a failed turn that delivered NOTHING has nothing to mark. The
+      // `failed` guard is load-bearing: a SUCCESSFUL empty turn also satisfies
+      // the predicate, and restoring the composer there would put the text back
+      // after Claude legitimately answered with nothing.
+      if (streamState.failed && shouldRestoreComposer(arrivedFrom(streamState))) {
+        setInput(userText);
+        setMessages((prev) => rollbackOptimisticSend(prev, userText));
+      } else {
+        setMessages([...newMessages, finalizeTurn(streamState)]);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error');
       // §5.2a.4: nothing was delivered, so put the text back and drop the
       // optimistic entry — a restored composer PLUS a stranded transcript entry
       // reads as though the message was sent twice. Retry stays explicit: this
       // re-arms Send, it does not re-send.
-      if (shouldRestoreComposer(streamStarted)) {
+      if (shouldRestoreComposer(arrivedFrom(streamState))) {
         setInput(userText);
         setMessages((prev) => rollbackOptimisticSend(prev, userText));
       } else {

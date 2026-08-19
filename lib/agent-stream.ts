@@ -155,6 +155,22 @@ export function reduceStreamEvent(state: StreamState, event: Record<string, unkn
   return state;
 }
 
+/**
+ * What actually reached the transcript, for `shouldRestoreComposer`.
+ *
+ * A function rather than two field reads at the call site because there are two
+ * failure paths — the `error` frame (the read loop ends normally) and the
+ * transport drop (the `catch`) — and they must not disagree about what "nothing
+ * arrived" means. Inlining the mapping twice is how they would drift.
+ *
+ * `currentTool` is excluded on purpose: an in-flight tool block never becomes a
+ * completed call, and `finalizeTurn` discards completed ones on a failed turn
+ * anyway, so nothing from it survives. See `shouldRestoreComposer`.
+ */
+export function arrivedFrom(state: StreamState): { text: string; completedToolCalls: number } {
+  return { text: state.text, completedToolCalls: state.toolCalls.length };
+}
+
 /** The assistant turn as it goes into the transcript. */
 export interface FinalizedTurn {
   role: 'assistant';
