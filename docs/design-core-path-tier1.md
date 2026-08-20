@@ -5,7 +5,7 @@
 | Chunk | Scope | State |
 |---|---|---|
 | **1** | §1 — loud failures (save error, PDF-only charts, title ownership) | **BUILT & MERGED**, PR #144 (`cfdc07c`), Codex R1 NOGO → R2 GO |
-| **2** | §2 — AI apply integrity | **NOT STARTED** |
+| **2** | §2 — AI apply integrity | **⚠ SUPERSEDED — DO NOT BUILD.** Replaced by `docs/design-ai-op-contract.md`. §2.3 alone survives; see the notice at §2. |
 | **3** | §3 — mix identity | **NOT STARTED** |
 
 ★ **This block is load-bearing. Keep it current.** This project has already been
@@ -220,6 +220,33 @@ work. Candidate follow-ups, not scheduled: teach `summarizeApplyImpact` to repor
 ---
 
 ## §2 Chunk 2 — AI apply integrity
+
+> # ⚠ SUPERSEDED — DO NOT BUILD THIS SECTION
+>
+> **Replaced by `docs/design-ai-op-contract.md` (2026-08-20).** Everything below
+> is retained as the historical record of a rejected approach; it is **not** the
+> plan.
+>
+> **Why it was rejected.** §2.1 teaches the model to echo `id`s so that
+> whole-list replace *happens* to be non-destructive, and §2.4 builds an
+> impact-warning system for when it forgets — **§2.4 exists because §2.1 cannot
+> be trusted.** The op contract removes the class instead: the model names only
+> the rows it touches, so rows it does not mention **cannot** be destroyed, and
+> there is nothing left for a warning system to backstop.
+>
+> **★ §2.3 SURVIVES AND STILL SHIPS** — `withStableIds` at the `setConfig(` sites
+> (`page.tsx:596`, `:614`, `:622`; line numbers re-verified after PR #144 shifted
+> them). It is a **manual-path** bug — CSV/sheet-imported rows land with no `id`
+> against 12 `.id!` dereferences, no AI involved — and it is a **prerequisite**
+> for the op contract, which addresses rows by `id`.
+>
+> **★ One warning below is wrong, and the correction matters.** §2.4 says
+> `'refused'` must count as resolved in `hasPendingTools` or the composer locks.
+> Read against the code, `hasPendingTools` tests `=== 'pending'`, so any new
+> status is resolved by construction — **no lock**. The real defect is that
+> `buildApiMessages` emits a `tool_result` only for `'applied'` and `'rejected'`,
+> so a refused call leaves a `tool_use` with no matching result and the **next**
+> request fails outright. See `design-ai-op-contract.md` §5.5.
 
 Fixes gap-doc findings 3 and 6 together, because they are one flow.
 
