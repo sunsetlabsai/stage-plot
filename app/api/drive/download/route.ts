@@ -1,13 +1,7 @@
 import { NextRequest } from 'next/server';
-import { DriveAuthError } from '@/lib/drive';
+import { DriveAuthError, EXPORT_MIME_TYPES } from '@/lib/drive';
 
 // Google Workspace MIME types that need export (can't be downloaded directly)
-const EXPORT_MIME_TYPES: Record<string, string> = {
-  'application/vnd.google-apps.document': 'application/pdf',
-  'application/vnd.google-apps.spreadsheet': 'application/pdf',
-  'application/vnd.google-apps.presentation': 'application/pdf',
-};
-
 // Simple in-memory rate limit: max 60 unauthenticated requests per IP per minute
 const unauthRateMap = new Map<string, { count: number; resetAt: number }>();
 const UNAUTH_RATE_LIMIT = 60;

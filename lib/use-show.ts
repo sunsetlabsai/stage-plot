@@ -78,18 +78,48 @@ export function useShow(
         }));
       }
 
-      const res = await fetch('/api/shows/update', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      // ★ Only the FETCH may produce the offline message (Codex R1 medium).
+      // Wrapping the whole success branch meant any later throw — the browser
+      // cache write below, or a malformed 200 body — reported "you appear to be
+      // offline" for a save that had already persisted server-side. That is this
+      // chunk's own defect wearing the opposite mask: §1.1 exists to stop the app
+      // reporting success it did not achieve, and it must not start reporting
+      // failure it did not suffer.
+      let res: Response;
+      try {
+        res = await fetch('/api/shows/update', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch {
+        // §1.1: the config IS still cached (saveConfig writes localStorage before
+        // debouncing) but it did NOT reach the server. Saying nothing here left
+        // `lastSavedAt` at its previous value, so the pill kept rendering a green
+        // "Saved" through an entire offline session — the app reporting success
+        // for something that did not happen.
+        //
+        // The pill already prefixes "Couldn't save — ", so this carries the CAUSE
+        // only. No auto-retry: the existing 2s debounce retries on the next edit,
+        // and a background loop would be a new mechanism with its own failure modes.
+        setSaveError(
+          "you appear to be offline. Your changes are cached in this browser and will save on your next edit once you're back.",
+        );
+        return; // `finally` still clears `saving`
+      }
 
       if (res.ok) {
         const { updated_at } = await res.json();
         setLastSavedAt(updated_at);
         setSaveError(null);
-        // Cache server timestamp for offline conflict detection
-        localStorage.setItem(`showrunr-last-saved-${showId}`, updated_at);
+        // Cache server timestamp for offline conflict detection. Best-effort:
+        // the SERVER is the source of truth and the save has already persisted,
+        // so a quota error or Safari private mode must not surface as a failure.
+        try {
+          localStorage.setItem(`showrunr-last-saved-${showId}`, updated_at);
+        } catch {
+          // Conflict detection degrades; the save itself stands.
+        }
         // Once entries have been sent successfully, lock into entries path
         if (payload.entries !== undefined) {
           hasSentEntries.current = true;
@@ -101,18 +131,11 @@ export function useShow(
         setSaveError(error || 'Could not save changes.');
       }
     } catch {
-      // §1.1: the config IS still cached (saveConfig writes localStorage before
-      // debouncing) but it did NOT reach the server. Saying nothing here left
-      // `lastSavedAt` at its previous value, so the pill kept rendering a green
-      // "Saved" through an entire offline session — the app reporting success for
-      // something that did not happen.
-      //
-      // The pill already prefixes "Couldn't save — ", so this carries the CAUSE
-      // only. No auto-retry: the existing 2s debounce retries on the next edit,
-      // and a background loop would be a new mechanism with its own failure modes.
-      setSaveError(
-        "you appear to be offline. Your changes are cached in this browser and will save on your next edit once you're back.",
-      );
+      // Anything left: payload serialization, or a 200 whose body would not
+      // parse. The save may or may not have landed, so this deliberately does
+      // NOT claim offline — an unreachable network is one specific cause and it
+      // is handled at its own call above.
+      setSaveError('Could not save changes.');
     } finally {
       setSaving(false);
     }

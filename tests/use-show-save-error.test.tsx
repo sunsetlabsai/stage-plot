@@ -11,9 +11,15 @@ import { useShow } from '../lib/use-show';
 // reported success for something that did not happen.
 //
 // NOTE ON THE HARNESS: this repo's jsdom `localStorage` is a bare `{}` (setItem
-// undefined) — the documented gap that left BYOA untested before #133. The
-// SUCCESS path calls localStorage.setItem outside a try, so it is stubbed here
-// rather than left to explode and disguise itself as the failure being tested.
+// undefined) — the documented gap that left BYOA untested before #133. It is
+// stubbed below so a harness explosion cannot disguise itself as the failure
+// under test.
+//
+// ★ That stub is also how the R1 medium hid. The first version of this file
+// noted "the SUCCESS path calls localStorage.setItem outside a try" and worked
+// AROUND it here — treating a production hazard as a test-harness inconvenience.
+// Codex found the defect I had already written down and routed past. The
+// `test 2b` block below is the coverage that observation should have produced.
 
 const SAVE_DEBOUNCE_MS = 2000;
 
@@ -128,5 +134,84 @@ describe('test 2 — a later success clears the error', () => {
 
     expect(result.current.context.saveError).toMatch(/position 3/);
     expect(result.current.context.lastSavedAt).toBeNull();
+  });
+});
+
+describe('test 2b — a save that PERSISTED must never report failure (Codex R1 medium)', () => {
+  it('★ a localStorage quota error does not turn a successful save into "offline"', async () => {
+    // The distinguishing case. The server accepted the write; only the
+    // best-effort conflict-detection cache failed. Reporting "you appear to be
+    // offline" here is §1.1's own defect inverted — claiming a failure that did
+    // not happen — and it is exactly what a try around the whole success branch
+    // produced. Real trigger: Safari private mode, or a full quota.
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: () => null,
+        removeItem: () => {},
+        setItem: () => { throw new DOMException('QuotaExceededError'); },
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ updated_at: '2026-08-20T12:00:00Z' }),
+      }),
+    );
+
+    const { result } = renderUseShow();
+    act(() => result.current.saveConfig({ stagePlot: [] }));
+    await flushDebounce();
+
+    expect(result.current.context.saveError).toBeNull();
+    expect(result.current.context.lastSavedAt).toBe('2026-08-20T12:00:00Z');
+    expect(result.current.context.saving).toBe(false);
+  });
+
+  it('★ still WRITES the conflict-detection cache — guarding it is not dropping it', async () => {
+    // Mutation testing caught the gap: deleting the cache write entirely also
+    // passes the quota test above, because "no error" is true when nothing was
+    // attempted. Wrapping a call in try/catch must not become an invitation to
+    // delete it — offline conflict detection depends on this timestamp.
+    const setItem = vi.fn();
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: { getItem: () => null, removeItem: () => {}, setItem },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ updated_at: '2026-08-20T12:00:00Z' }),
+      }),
+    );
+
+    const { result } = renderUseShow();
+    act(() => result.current.saveConfig({ stagePlot: [] }));
+    await flushDebounce();
+
+    expect(setItem).toHaveBeenCalledWith('showrunr-last-saved-show-1', '2026-08-20T12:00:00Z');
+    expect(result.current.context.saveError).toBeNull();
+  });
+
+  it('a malformed 200 body reports a generic error, and never claims offline', async () => {
+    // Same class, second instance — found by sweeping the shape rather than
+    // folding the one call site Codex named. "Offline" is one specific cause and
+    // belongs only to a fetch that actually threw.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => { throw new SyntaxError('Unexpected token <'); },
+      }),
+    );
+
+    const { result } = renderUseShow();
+    act(() => result.current.saveConfig({ stagePlot: [] }));
+    await flushDebounce();
+
+    expect(result.current.context.saveError).toBeTruthy();
+    expect(result.current.context.saveError).not.toMatch(/offline/i);
   });
 });
