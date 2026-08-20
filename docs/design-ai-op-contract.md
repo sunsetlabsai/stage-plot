@@ -734,7 +734,7 @@ same op shape against a field that exists today.
 10e. A `patch` on a row whose `name`/`inst`/`needs` is `''` **succeeds**. *(The user's half-filled row must not block the AI from helping them finish it — the failure a non-empty rule would cause.)*
 10f. `POSITIONS` has exactly one definition: the editor `<select>` and the validator import the same constant. *(Guards the duplication that produced the Drive-export regression on #144.)*
 
-### 10.3 History (§5.4)
+### 10.3 History (§5.5)
 
 11. A `'refused'` call produces a `tool_result` in `buildApiMessages`. *(Without this the next request 400s — the actual bug, not the predicted one.)*
 12. That result is **not** `"Rejected by user."` and is distinguishable from a user rejection.
