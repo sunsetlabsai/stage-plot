@@ -94,7 +94,8 @@ exists today.
 | **O3** | A reference (`slotId`, `mix`) is never left dangling by an applied plan. | Reference validation over the **post-batch** config (§5.2) — **does not exist yet** |
 | **O4** | A plan applies completely or not at all. | Single tool, single approve card, pure `planChanges` (§6) — **does not exist yet** |
 | **O5** | An ambiguous request produces a question, not a guess. | System prompt rule + no forced `tool_choice` (§4) |
-| **O6** | Every tool call the model makes resolves to exactly one `tool_result`. | `buildApiMessages` — **currently violated by the new status; see §5.4** |
+| **O6** | Every tool call the model makes resolves to exactly one `tool_result`. | `buildApiMessages` — **currently violated by the new status; see §5.5** |
+| **O8** | An applied row is a valid row of its entity. | Per-entity shape validation, keyed `Record<keyof T, …>` so drift is a compile error (§5.3) — **does not exist yet** |
 | **O7** | The user can see what a plan will change before approving it. | Approve card renders the ops as a diff (§7) — **does not exist yet** |
 
 ---
@@ -113,8 +114,9 @@ apply_changes({ ops: [ ... ] })
 two calls, one can be approved and the other rejected, leaving a half-edited
 show. A single call is atomic by construction and renders as one approve card.
 
-The six existing tools are **not** removed by this document. See §9.2 for their
-disposition.
+`apply_changes` is the **only** edit tool. The six existing tools are reduced to
+three: `generate_show` (first run / replace), `update_notes` and
+`update_show_info` (single-value writes with no identity to lose). See §9.2.
 
 ### 3.2 Op shape
 
@@ -138,11 +140,26 @@ type Op = {
 whole point: "all wedges to IEMs" is four patches carrying one field each, not
 four rows rewritten from memory.
 
-**`values` is deliberately field-agnostic** — any field of the target entity.
-Enumerating patchable fields per entity would be a second schema to keep in sync
-with `lib/types.ts`, and drift between the two is precisely the class of defect
-this project keeps producing. Validation (§5) checks references and identity, not
-field names; an unknown field is dropped with a warning rather than refused.
+**`values` carries fields of the target entity, and its SHAPE IS VALIDATED
+(§5.3).**
+
+> **★ Codex R1 High, folded — v1 of this section was wrong.** It said validation
+> "checks references and identity, not field names," justified by not wanting a
+> second schema to drift from `lib/types.ts`. **The concern was real; the
+> conclusion was not.** Unvalidated `values` lets a plan write a stage slot with
+> a missing or invalid `pos` — and the UI assumes valid shapes:
+> `page.tsx:1184` groups by `pos` and renders only known grid cells (a bad `pos`
+> makes the performer **silently vanish from the plot**), and `page.tsx:6190`
+> binds `slot.pos` to a fixed `<select>` (a bad value renders a control matching
+> no option). Worse, `values.id` would let a patch **rewrite a row's identity**
+> and orphan every reference pointing at it — a direct O1/O3 violation through a
+> hole I left open. **"Don't validate, to avoid drift" traded a certain defect
+> for a hypothetical one.**
+>
+> §5.3 answers the drift objection properly: the validators are keyed
+> `Record<keyof T, …>`, so **adding a field to `lib/types.ts` fails the build
+> until the validator covers it.** Drift becomes a compile error rather than a
+> discipline.
 
 ### 3.3 ★ Intra-batch references — the hole a naive contract leaves
 
@@ -201,14 +218,41 @@ comment. So of the three bulk changes Graham named:
 | straight stands → boom | `InputChannel.stand` | ✅ |
 | **all wedges → IEMs** | — | ❌ **no such field** |
 
-The monitor-type case would require adding `MonitorMix.type` — a schema change
-touching the mix editor, print/PDF, YAML import/export, and console export. That
-is real scope Graham has not seen and has not ruled on.
+The monitor-type case requires adding `MonitorMix.type`.
 
-**Disposition: OUT OF SCOPE here, and called out rather than quietly dropped.**
-The op contract is field-agnostic (§3.2), so it will handle `type` the day the
-field exists — no change to this design. **This is an open question for Graham
-(§12 Q1).**
+**★ GRAHAM RULED 2026-08-20: ADD IT** — conditional on it not being "a mountain
+of work" and on high confidence of getting it right first time. **Both hold, and
+here is the evidence rather than the assurance:**
+
+| Consumer | Change needed |
+|---|---|
+| `lib/types.ts` | add `type?: string` — **one line** |
+| Mix editor (`page.tsx:4998` row) | one field alongside `needs` |
+| Mix display (`page.tsx:1485`) | render it |
+| AI approve-card preview (`page.tsx:5742`) | one string in the summary line |
+| `generate_show` schema (`lib/agent.ts`) | one property |
+| **YAML export/import** (`lib/show-file.ts:47`, `:93`) | **none** — `monitors.map(({id, ...rest}) => rest)` spreads, and import passes `doc.monitors` through. Verified, not assumed. |
+| **Console export** (`lib/console-export.ts`) | **none** — does not touch monitors |
+| Dashboard, `app/api/show/route.ts` | **none** — pass-through |
+
+`grep -rn '\.needs\b'` returns exactly **three** call sites, all in `page.tsx`.
+That is the true surface: **five small edits, and the two paths that usually make
+schema changes expensive — serialization and export — are free by construction.**
+
+**Optional field ⇒ no migration**, which matches Graham's standing ruling that
+production data needs no repair. Existing monitors simply have no `type`.
+
+**Shape: a free-text string, not an enum.** His words were *"keep the mix stuff
+simple and loosely connected."* An enum (`Wedge | IEM`) reads tidier and is
+easier for the model to bulk-match, but real rigs carry side-fills, drum fills,
+and hybrids, and an enum turns every one of those into a schema change. A string
+with a `<datalist>` of common values (Wedge, IEM, Side-fill, None) stays loose,
+and bulk patching still works because the model matches on the value it can see
+in `<current_config>`.
+
+**Build disposition:** its own small PR, **before** the op work, since
+`apply_changes` needs the field to exist to patch it. Not folded into this
+design's build.
 
 **Lesson, recorded because it is the second instance in two weeks:** speccing the
 fix is what revealed that one of the two motivating use cases has no data model
@@ -297,7 +341,40 @@ rule evaluated against the pre-batch state would wrongly refuse it.
 Unknown fields in `values` are **dropped with a warning**, not refused — a
 refusal there would turn a harmless model quirk into a dead end.
 
-### 5.3 Refusal is a state, and the card must say what to do
+### 5.3 ★ Shape validation, with drift made a compile error
+
+Every op's `values` is validated against the target entity **after** the merge,
+so a `patch` is judged on the row it produces, not the fragment it carries.
+
+```ts
+type FieldRule = { required: boolean; check: (v: unknown) => boolean };
+const STAGE_SLOT_RULES: Record<keyof StageSlot, FieldRule> = { /* … */ };
+const INPUT_RULES:      Record<keyof InputChannel, FieldRule> = { /* … */ };
+const MONITOR_RULES:    Record<keyof MonitorMix, FieldRule> = { /* … */ };
+```
+
+**`Record<keyof T, …>` is the whole point.** Adding a field to `lib/types.ts`
+without adding its rule is a **type error**, so the validator cannot silently
+fall behind the schema. That is what makes §3.2's drift objection answerable
+rather than fatal.
+
+| Entity | Required | Constrained |
+|---|---|---|
+| `StageSlot` | `name`, `pos`, `role`, `mix` | `pos` ∈ `StagePosition`; `mix` a positive finite integer; `name`/`role` non-empty strings; `power`/`featured` boolean |
+| `InputChannel` | `ch`, `inst`, `mic`, `stand` | `ch` a positive finite integer; `inst`/`mic`/`stand` strings; `slotId` a reference (§5.2); `needsReview` boolean |
+| `MonitorMix` | `mix`, `name` | `mix` a positive finite integer; `name`/`needs`/`type` strings |
+
+**`id` and `tempId` are forbidden inside `values`, always.** Identity is carried
+by the op, never by its payload. A `values.id` would let a patch rewrite the row's
+own identity and orphan every reference to it. `slotId` is *not* covered by this
+rule — it is a reference to another row, and legitimate in `values`.
+
+**★ A `patch` that changes `MonitorMix.mix` is a renumber**, and the post-batch
+rule catches its blast radius: every `stagePlot.mix` must still resolve after the
+batch. This is the same defect class `design-core-path-tier1.md` §3 exists to fix
+on the manual path; ops must not reintroduce it on the AI path.
+
+### 5.4 Refusal is a state, and the card must say what to do
 
 A refused plan: **config unchanged**, the proposal **stays in the transcript**,
 the card shows the reason **and the recovery**, and **Apply is removed, not
@@ -307,7 +384,7 @@ succeed. **No auto-retry.**
 > *"This plan would leave 2 performers pointing at Mix 3, which it removes. Ask
 > again, or move those performers first."*
 
-### 5.4 ★★ The `'refused'` status breaks API history — and it is the OPPOSITE bug the tier-1 doc predicted
+### 5.5 ★★ The `'refused'` status breaks API history — and it is the OPPOSITE bug the tier-1 doc predicted
 
 `design-core-path-tier1.md` §2.4 warns that `'refused'` must count as **resolved**
 in `hasPendingTools` or the composer locks. **Read against the code, that warning
@@ -435,11 +512,72 @@ finding we would miss by testing one model.
 
 ### 9.2 The six existing tools
 
-`update_stage_plot`, `update_inputs`, `update_monitors` become **create-only**:
-permitted when the target list is empty, refused when it is not, with the refusal
-naming `apply_changes`. That preserves the first-run "describe your band" flow —
-the flagship path, and the one thing whole-list replace is genuinely good at —
-while closing the destructive edit path.
+**`update_stage_plot`, `update_inputs` and `update_monitors` are replaced by ONE
+tool, `generate_show({ stagePlot, inputs, monitors })`, and the client-side
+cascade is deleted.**
+
+> **★★ Codex R1 High, folded — v1 said "the three become create-only" and left a
+> contradiction it could not resolve.** Verified in code:
+> `lib/agent.ts:29` instructs *"**ALWAYS cascade** … Call `update_stage_plot`,
+> `update_inputs`, and `update_monitors` together"*, and applying
+> `update_stage_plot` **itself** fills `inputs` and `monitors` by cascade
+> (`page.tsx:5364`). So a per-tool "is the list empty?" check evaluated at apply
+> time is **incoherent on the flagship first-run flow**: the cascade populates
+> both lists, and then the model's own `update_inputs` and `update_monitors` —
+> which the prompt required it to send — arrive to find the lists non-empty and
+> are **refused**, or silently overwrite the cascade depending on arrival order.
+> Either way the first-run experience breaks.
+>
+> **Patching the evaluation order would preserve the incoherence.** The cascade
+> is a third writer nobody asked for: the model sends inputs and monitors *and*
+> the client invents them, and which one survives is an ordering accident. That
+> is the same defect `design-core-path-tier1.md` §2.2 tried to contain with a
+> conditional. **One tool that writes the whole initial config in one call
+> removes the coordination problem instead of sequencing it.**
+
+| | Before | After |
+|---|---|---|
+| Tools for first run | 3, prompt-coordinated | **1** — `generate_show` |
+| Cascade | client invents inputs + monitors on `update_stage_plot` | **deleted** |
+| Atomicity | 3 approve cards, any subset approvable | **1 card, all or nothing** |
+| Guard | per-tool, evaluated after the cascade already wrote | **one check, pre-apply, on the whole config** |
+
+`generate_show` is a **whole-config create**, which is the one shape whole-list
+replace is genuinely good at and the one the model already handles well — it
+keeps §8's weakest-model criterion satisfied for the flagship flow instead of
+asking a mid-tier model to emit ~30 wired-up ops on a first run.
+
+**The prompt's cascade instruction (`lib/agent.ts:29`) is replaced** with a
+single rule: *on an empty show call `generate_show` once; on a show with content
+call `apply_changes`.* One path each, no coordination.
+
+**On a show that already has content, `generate_show` offers
+confirm-and-replace** — Graham's ruling, see §9.2a.
+
+### 9.2a Regenerating a show that already has content — **confirm and replace**
+
+**Graham ruled 2026-08-20: offer confirm-and-replace, not a refusal.**
+
+A `generate_show` call against a non-empty show is not an error — it is the user
+asking to start over, which is a legitimate thing to want and the *entire*
+iteration story if the spike fails (§9.3). Refusing it would make "re-prompt
+until you like it" impossible, and that loop is the one Graham identified as the
+AI's real strength.
+
+The approve card states the cost in rows, because "replace" is the most
+destructive thing the AI can do and the user must see its size before agreeing:
+
+> ⚠ **Replace the whole show?** This discards 6 performers, 24 inputs and 4
+> monitor mixes, and builds a new show from your description.
+> **[Replace everything]  [Cancel]**
+
+- The confirm is **explicit and distinct** from the ordinary Apply — the same
+  click must never mean "tweak" in one context and "discard everything" in
+  another.
+- Cancel leaves the config **untouched** and the proposal in the transcript.
+- **The setlist, charts and show info are NOT touched** by a replace. They are
+  not the AI's to destroy (§9.2), and a user regenerating a stage plot has not
+  asked to lose their songs.
 
 **`update_setlist` is removed. Graham ruled the AI should not touch the setlist
 or charts.** It replaces the whole list; §1.3 (shipped, PR #144) just made song
@@ -509,8 +647,9 @@ minimal ops? Seven cases, each naming what a correct answer must **not** do:
 | E | "Separate mixes for the vocalist and each guitarist" | monitor adds + `stagePlot.mix` patches, consistent | leaving a performer on a removed mix |
 
 Run against **the shipping model first** (§8), then a tier up as a diagnostic.
-**Case B requires `MonitorMix.type` to exist (§3.4) — until Graham rules on Q1,
-substitute a `stand` bulk change, which is expressible today.**
+**Case B depends on `MonitorMix.type`, which Graham approved (Q1) and which ships
+at build step 1 (§13).** Until it lands, run B as a `stand` bulk change — the
+same op shape against a field that exists today.
 
 > **★ The current spike script tests a straw-man contract and case C1 is
 > unanswerable under it** — it has no `tempId`, so a new input cannot reference a
@@ -536,16 +675,21 @@ substitute a `stand` bulk change, which is expressible today.**
 12. That result is **not** `"Rejected by user."` and is distinguishable from a user rejection.
 13. `hasPendingTools` is false with a `'refused'` call present. *(Pins the behaviour the tier-1 doc worried about, which the code already satisfies — a regression guard, not a fix.)*
 
-### 10.4 Create-only guard (§9.2)
+### 10.4 `generate_show` and replace (§9.2, §9.2a)
 
-14. `update_inputs` on an empty list applies; on a populated list refuses, naming `apply_changes`.
-15. First-run "describe your band" still produces a full plot + inputs + monitors. *(The flagship flow must not regress — this is the one thing whole-list replace was good at.)*
+14. First-run "describe your band" on an empty show produces plot + inputs + monitors in **one** call. *(The flagship flow must not regress — this is the one thing whole-list replace was good at.)*
+15. **No cascade runs.** After `generate_show`, `inputs` and `monitors` are exactly what the model sent — not a keyword expansion of the stage plot. *(Distinguishes "cascade deleted" from "cascade still there and overwritten by arrival order", which is the ambiguity Codex R1 caught.)*
+16. `generate_show` on a **populated** show does not apply on first Apply — it requires the distinct replace confirmation (§9.2a).
+17. A confirmed replace discards plot/inputs/monitors and **leaves `setlist`, charts and `showInfo` byte-identical**. *(The distinguishing case: "replace the show" must not mean "delete the songs.")*
+18. A cancelled replace leaves the **entire** config byte-identical and keeps the proposal in the transcript.
 
 ---
 
 ## §11 Out of scope
 
-- **`MonitorMix.type`** (§3.4) — a schema change, Graham's call (Q1).
+- **`MonitorMix.type`** — **approved (Q1) but built separately**, ahead of this
+  work (§13 step 1). Out of scope *for this document's build*, not out of scope
+  for the product.
 - **Predicate ops** (`where mic = 'wedge'`) — a query language; large surface, small gain over enumerate-and-touch, and worse under §8's weakest-model criterion.
 - **Undo of an applied plan.** Approve is the gate. Ops are small and legible (§7), which is what makes that acceptable.
 - **AI editing charts or the setlist** (§9.2) — ruled out.
@@ -553,18 +697,37 @@ substitute a `stand` bulk change, which is expressible today.**
 
 ---
 
-## §12 Open questions for Graham
+## §12 Questions — ALL THREE RULED by Graham 2026-08-20
 
-**Q1. `MonitorMix.type` — add it, or drop "wedges → IEMs" from v1?** (§3.4)
-It is one of the two bulk changes he named, and it has no field today. Adding it
-touches the mix editor, print/PDF, YAML import/export, and console export. The
-other two bulk changes (mics, stands) work as-is.
+**Q1. `MonitorMix.type` — ADD IT.** (§3.4) Conditional on scope, and the scope
+holds: five small edits, YAML and console export free by construction, optional
+field so no migration. **Free-text string, not an enum** — his "simple and
+loosely connected". Ships as its own small PR **before** the op work, because
+`apply_changes` needs the field to exist before it can patch it.
 
-**Q2. Should the model be a config key now, or later?** (§8) The plumbing exists
-and is already imported. It is a small change that removes a deploy from every
-future model move — but it is scope beyond this document.
+**Q2. Model as a config key — NOW.** (§8) `TRYIT_MODEL` / `BYOA_MODEL` move from
+hardcoded constants (`lib/agent-key.ts:14-15`) to `readAdminConfig` keys, which
+that file **already imports**, with the current values as the fallback default so
+behaviour is unchanged on day one. Small, and it removes a deploy from every
+future model move — which matters more here than usual, because §8 makes the
+shipping model a variable the contract must tolerate.
 
-**Q3. Create-only guard: refuse, or offer "replace everything"?** (§9.2) When a
-user asks the AI to regenerate a show that already has content, is the right
-answer a refusal that names `apply_changes`, or a confirm-and-replace? This is a
-product call, not a technical one.
+**Q3. Regenerate on a non-empty show — CONFIRM AND REPLACE.** (§9.2a) Not a
+refusal. Re-prompting until you like the result is the AI's real strength, and a
+refusal would break exactly that loop. The card names the row counts before the
+user agrees, the confirm is visually distinct from an ordinary Apply, and
+setlist/charts/show-info are excluded from the replace.
+
+---
+
+## §13 Build order, once the spike clears
+
+Nothing below starts without Graham's go ([[wait-for-approval]] applies).
+
+| # | Scope | Why this order |
+|---|---|---|
+| 0 | **Tier-1 §2.3** — `withStableIds` at `page.tsx:596`/`:614`/`:622` | Independent manual-path bug (§9.4), and a **prerequisite**: ops address rows by `id` |
+| 1 | **`MonitorMix.type`** (§3.4) + **model as config key** (§8/Q2) | Two small, independent unblockers. `apply_changes` cannot patch a field that does not exist. |
+| 2 | **`planChanges` + validation** (§5) — pure `lib/`, no UI | The whole decidable core, fully testable before anything renders |
+| 3 | **`generate_show`, cascade deleted, prompt rewritten** (§9.2) | Removes the third writer; first-run flow must be re-verified here |
+| 4 | **`apply_changes` wiring + diff card + `'refused'` history fix** (§5.5, §7) | The `page.tsx` surface, i.e. the untested seam — last, on top of a proven core |
