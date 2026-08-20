@@ -63,10 +63,14 @@ export const PDF_MIME = 'application/pdf';
  * > a real Google MIME: `drive/batch/route.ts` stores `file.mimeType` verbatim.
  * > So the predicate refused **exactly the charts the Drive export path exists to
  * > serve** — a Google Doc chart that renders in production today would have
- * > shown "This chart is an image" and never reached the export. The false
- * > sentence came from the design doc; I wrote it there, then implemented it.
- * > **A wrong premise in a spec becomes a regression at exactly the speed you
- * > build it.**
+ * > shown "This chart is an image" and never reached the export.
+ * >
+ * > **The spec did not say this; I did.** §1.2 never mentions Drive at all —
+ * > its part 3 states the rule as "mimeType present and not application/pdf ⇒
+ * > image message", which is over-broad by OMISSION. Implementing it literally
+ * > produced the regression, and I invented a justifying fact in this very
+ * > comment rather than checking the one code path that could refute it.
+ * > **An unstated case in a spec is not permission to assume it away.**
  *
  * After §1.2 part 2b every newly UPLOADED chart carries `application/pdf`, so a
  * `true` here means a legacy Supabase row that predates the upload guard, or a
