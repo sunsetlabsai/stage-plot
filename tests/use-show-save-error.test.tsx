@@ -195,6 +195,26 @@ describe('test 2b — a save that PERSISTED must never report failure (Codex R1 
     expect(result.current.context.saveError).toBeNull();
   });
 
+  it('a payload that will not serialize reports a generic error, not "offline"', async () => {
+    // Codex R2 low. JSON.stringify ran inside the fetch-only try, so a circular
+    // config claimed "you appear to be offline" for a request never sent — and
+    // the generic catch that documents itself as owning this case could not
+    // reach it. Serializing before the try makes the comment true.
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    const { result } = renderUseShow();
+    act(() => result.current.saveConfig({ stagePlot: [], circular }));
+    await flushDebounce();
+
+    expect(result.current.context.saveError).toBeTruthy();
+    expect(result.current.context.saveError).not.toMatch(/offline/i);
+    expect(fetchMock).not.toHaveBeenCalled(); // nothing was ever sent
+    expect(result.current.context.saving).toBe(false);
+  });
+
   it('a malformed 200 body reports a generic error, and never claims offline', async () => {
     // Same class, second instance — found by sweeping the shape rather than
     // folding the one call site Codex named. "Offline" is one specific cause and

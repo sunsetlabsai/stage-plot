@@ -85,12 +85,17 @@ export function useShow(
       // chunk's own defect wearing the opposite mask: §1.1 exists to stop the app
       // reporting success it did not achieve, and it must not start reporting
       // failure it did not suffer.
+      // Serialize BEFORE the fetch-only try (Codex R2 low): inside it, a
+      // JSON.stringify throw would report "offline" for a request never sent,
+      // and the generic catch below claims to own this case but could not reach it.
+      const body = JSON.stringify(payload);
+
       let res: Response;
       try {
         res = await fetch('/api/shows/update', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
+          body,
         });
       } catch {
         // §1.1: the config IS still cached (saveConfig writes localStorage before
