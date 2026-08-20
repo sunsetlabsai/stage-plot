@@ -1,9 +1,26 @@
 # Design: Core-Path UAT Blockers (Tier 1)
 
-**Status:** Proposed v5 — Codex R1, R2 folded; **R3 = no findings**, its wording
-nit folded. Plus four gaps found by my own sweeps. AWAITING GRAHAM'S APPROVAL.
+**Status:** v6 — **APPROVED and PARTIALLY BUILT.**
 
-**Date:** 2026-08-19
+| Chunk | Scope | State |
+|---|---|---|
+| **1** | §1 — loud failures (save error, PDF-only charts, title ownership) | **BUILT & MERGED**, PR #144 (`cfdc07c`), Codex R1 NOGO → R2 GO |
+| **2** | §2 — AI apply integrity | **NOT STARTED** |
+| **3** | §3 — mix identity | **NOT STARTED** |
+
+★ **This block is load-bearing. Keep it current.** This project has already been
+burned once by the opposite: `docs/design-input-plot-linkage.md` sat at
+"Proposed (v9)" with steps 1–5 shipped and step 6 never built, and **four
+separate audits missed that most of the Tier-1 findings were already designed.**
+A design doc that does not say what was built leaves no signal anywhere that the
+job is half done.
+
+**v6 changes (post-build):** §1.2 part 3 corrected — the rule omitted
+Drive-exported charts and caused a regression when implemented literally
+(Codex R1 High on #144). §4 gains test 4a. Design review history: R1, R2 folded;
+**R3 = no findings**, its wording nit folded; plus four gaps from my own sweeps.
+
+**Date:** 2026-08-19 (v5 frozen) · 2026-08-20 (v6, post-chunk-1)
 **Source:** `docs/uat-readiness-gaps.md` (PR #142). Graham ruled **all six Tier-1
 items** in scope, and ruled that **pre-existing production data does not need
 repair or migration** — all but one show is past-tense and that one can be
@@ -125,14 +142,37 @@ branch — `chart.mimeType` is written at `page.tsx:473` and never read again.
    > through the mechanism" finding here.
 
 3. **Use the dead `mimeType` field** rather than deleting it: when a chart's
-   `mimeType` is present and is not `application/pdf`, `ChartNavigator` renders
-   *"This chart is an image. Images can't be displayed in the viewer — replace it
-   with a PDF."* instead of the generic "Couldn't load this chart."
+   `mimeType` is present, is not `application/pdf`, **and is not a Google-native
+   type the Drive proxy exports to PDF**, `ChartNavigator` renders *"This chart
+   is an image. Images can't be displayed in the viewer — replace it with a
+   PDF."* instead of the generic "Couldn't load this chart."
 
-   **With 2b, this branch is reachable only for LEGACY rows** — anything stored
-   after this change carries `application/pdf` by construction. That is the
-   correct scope: part 3 exists for rows that predate the guard, and normalization
-   is what stops it from misfiring on newly-accepted PDFs.
+   > **★ CORRECTED after the build — v1 of this rule caused a regression.**
+   > As first written this said simply "present and not `application/pdf`", which
+   > **never considered Drive-sourced charts**. Implemented literally, it broke
+   > them: `app/api/drive/batch/route.ts` stores the real Google MIME verbatim
+   > (e.g. `application/vnd.google-apps.document`), and `lib/pdf-viewer.ts` and
+   > `lib/chart-cache.ts` post that MIME to `/api/drive/download`, which
+   > **exports Docs/Sheets/Slides to PDF** before pdf.js sees a byte. Those
+   > charts render in production today. The over-broad rule blocked them at the
+   > viewer with "This chart is an image" and they never reached the export.
+   > Caught by Codex R1 on PR #144 and fixed there.
+   >
+   > **The rule this omission earns: a predicate stated as "not X" must
+   > enumerate every path that reaches it.** An unstated case is not an
+   > excluded one, and a reader implementing this literally had no signal that
+   > Drive charts existed at all.
+
+   The canonical list of exportable types is **`EXPORT_MIME_TYPES` in
+   `lib/drive.ts`** — deliberately shared, because it now has two consumers that
+   must agree on what "renderable" means (the export route and this viewer
+   predicate). Duplicating it is how the regression above returns.
+
+   **With 2b, this branch is reachable only for LEGACY Supabase rows or genuine
+   images** — anything uploaded after this change carries `application/pdf` by
+   construction, and Drive charts are excluded by the export-map check. That is
+   the correct scope: part 3 exists for rows that predate the guard, and
+   normalization is what stops it from misfiring on newly-accepted PDFs.
 
 Part 3 is not redundant with parts 1–2. Legacy rows exist (Graham's own shows),
 and the honest message costs three lines and turns a dead field into the thing
@@ -471,6 +511,13 @@ the plausible-wrong one.** Every rule below gets its mutation.
    image-specific message, which is the contradiction Codex R2 caught.
 4. `ChartNavigator` renders the image-specific message for a non-PDF `mimeType`,
    and the generic load error for a PDF that genuinely fails.
+4a. **A Google-native `mimeType` in `EXPORT_MIME_TYPES` is NOT flagged** — the
+   Drive proxy exports it to PDF, so it renders. This is the distinguishing case
+   for part 3: the plausible-wrong predicate (`mimeType !== 'application/pdf'`)
+   passes test 4 and still breaks every Google Doc chart in production.
+   Pin the exportable types **by name** as well — an assertion that loops over
+   `EXPORT_MIME_TYPES` cannot detect that map shrinking, so removing a supported
+   format would pass silently.
 5. Title is read-only **iff** `songId` is present — both directions, since the
    `songId`-absent case is what keeps import working.
 
