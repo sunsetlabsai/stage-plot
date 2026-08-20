@@ -194,3 +194,61 @@ export function moveMonitor(monitors: MonitorMix[], from: number, to: number): M
 export function isTitleEditableInSetlist(song: Pick<SetlistSong, 'songId'>): boolean {
   return !song.songId;
 }
+
+// ── Whole-config id normalization ─────────────────────────────────────────
+
+/** True when `next` contains any element the source array did not. */
+function anyRowReplaced<T>(next: readonly T[], prev: readonly T[]): boolean {
+  return next.length !== prev.length || next.some((row, i) => row !== prev[i]);
+}
+
+/**
+ * Mint/de-dupe ids across EVERY entity, and repair or flag broken links.
+ *
+ * **Ordering is load-bearing and must not be rearranged.** `ensureStageSlotIds`
+ * runs FIRST: it may clear a `slotId` whose target id COLLIDED (setting
+ * `needsReview`), and input id-minting must run on top of that cleared state.
+ * Reversed, an input would be normalized against a link about to be
+ * invalidated. Note the two cases differ — a **collision** clears the `slotId`,
+ * a merely **dangling** one keeps the value and only sets `needsReview`, so the
+ * original can still be repaired.
+ *
+ * **Ref-stable when nothing was minted**, which is what makes it safe at a
+ * per-keystroke chokepoint: it returns the original object, so a no-op update
+ * cannot force a re-render or a save.
+ *
+ * > ★ That stability had to be BUILT, not assumed. `ensureSetlistSongIds`,
+ * > `ensureInputIds` and `ensureMonitorIds` are all `arr.map(...)`, which
+ * > allocates a new array **unconditionally** — so a plain `!==` on the result
+ * > is always true and this function always returned a fresh config. Harmless
+ * > while it only ran on load; not harmless at a mutation chokepoint that fires
+ * > on every keystroke. Hence `anyRowReplaced`, which compares element
+ * > identity instead of array identity.
+ *
+ * Generic rather than typed to `AppConfig` because `AppConfig` is declared in
+ * the page component; this mirrors `ensureStageSlotIds`'s own signature.
+ *
+ * Lives here rather than in the page component so it is testable at all — the
+ * bug it fixes was a WIRING bug (the wrong normalizer at the mutation site),
+ * and nothing inside a 6,700-line client component can be exercised by a test
+ * in this repo. `planChanges` (design-ai-op-contract §5) will call it too.
+ */
+export function withStableIds<
+  C extends {
+    stagePlot: StageSlot[];
+    inputs: InputChannel[];
+    monitors: MonitorMix[];
+    setlist: SetlistSong[];
+  },
+>(config: C): C {
+  const { config: linked } = ensureStageSlotIds(config);
+  const setlist = ensureSetlistSongIds(linked.setlist);
+  const inputs = ensureInputIds(linked.inputs);
+  const monitors = ensureMonitorIds(linked.monitors);
+  const changed =
+    linked !== config ||
+    anyRowReplaced(setlist, linked.setlist) ||
+    anyRowReplaced(inputs, linked.inputs) ||
+    anyRowReplaced(monitors, linked.monitors);
+  return changed ? { ...linked, setlist, inputs, monitors } : config;
+}
