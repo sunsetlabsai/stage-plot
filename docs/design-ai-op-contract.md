@@ -335,7 +335,7 @@ rule evaluated against the pre-batch state would wrongly refuse it.
 | Identity | `remove`/`patch` naming an id that does not exist (O2); `add` carrying an `id`; `patch` with empty `values` |
 | Temp ids | `tempId` without the `new:` prefix; duplicate `tempId`; a `new:` reference with no matching `tempId` |
 | Links | `slotId` that resolves to neither an existing slot nor a batch-created one (O3) |
-| Mixes | `stagePlot.mix` pointing at a monitor absent after the batch; duplicate `mix` numbers; non-positive `mix` |
+| Mixes | **`stagePlot.mix ≥ 1`** pointing at a monitor absent after the batch; duplicate `mix` among monitors. **`mix: 0` is the "unassigned" sentinel and is EXEMPT from resolution** (§5.3c) — an unassigned performer is a normal state, not a dangling reference. |
 | Channels | duplicate `ch` after the batch |
 
 Unknown fields in `values` are **dropped with a warning**, not refused — a
@@ -353,16 +353,71 @@ const INPUT_RULES:      Record<keyof InputChannel, FieldRule> = { /* … */ };
 const MONITOR_RULES:    Record<keyof MonitorMix, FieldRule> = { /* … */ };
 ```
 
-**`Record<keyof T, …>` is the whole point.** Adding a field to `lib/types.ts`
-without adding its rule is a **type error**, so the validator cannot silently
-fall behind the schema. That is what makes §3.2's drift objection answerable
-rather than fatal.
+**`Record<keyof T, …>` covers FIELDS, not VALUES.** Adding a field to
+`lib/types.ts` without adding its rule is a type error, so the validator cannot
+silently fall behind the *schema*. That is what makes §3.2's drift objection
+answerable.
 
-| Entity | Required | Constrained |
+> **★★ Codex R2, and the correction matters more than the table.** v2 of this
+> section got **three of its value domains wrong**, and a fourth I found sweeping
+> for the class. Every one of them is a value-domain error — **exactly the axis
+> `Record<keyof T, …>` cannot check.** I introduced the mechanism and then trusted
+> it further than it earns in the very same commit.
+>
+> **The durable rule: derive the validator's domain from what the APP ITSELF
+> CREATES, not from the TypeScript type.** The type is a superset in one
+> direction (`StagePosition` has three members the UI can neither create nor
+> render) and silent in the other (it cannot say "non-empty", and the app writes
+> empty strings everywhere). **Reading the type is not the same as reading the
+> code that populates it.**
+
+| Entity | Required (present + typed) | Value domain |
 |---|---|---|
-| `StageSlot` | `name`, `pos`, `role`, `mix` | `pos` ∈ `StagePosition`; `mix` a positive finite integer; `name`/`role` non-empty strings; `power`/`featured` boolean |
-| `InputChannel` | `ch`, `inst`, `mic`, `stand` | `ch` a positive finite integer; `inst`/`mic`/`stand` strings; `slotId` a reference (§5.2); `needsReview` boolean |
-| `MonitorMix` | `mix`, `name` | `mix` a positive finite integer; `name`/`needs`/`type` strings |
+| `StageSlot` | `name`, `pos`, `role`, `mix` | **`pos` ∈ `POSITIONS` (the 9 grid cells), NOT `StagePosition`** · `mix` a **non-negative** integer, **`0` = unassigned** · `name`/`role` strings, **may be empty** · `power`/`featured` boolean |
+| `InputChannel` | `ch`, `inst`, `mic`, `stand` | `ch` an integer **≥ 1** · `inst`/`mic`/`stand`/`notes` strings, **may be empty** · `slotId` a reference (§5.2) · `needsReview` boolean |
+| `MonitorMix` | `mix`, `name`, **`needs`** | `mix` an integer **≥ 1** · `name`/`needs`/`type` strings, **may be empty** |
+
+**Each correction, with the evidence:**
+
+**(a) `pos` must be `POSITIONS`, not `StagePosition`.** The type carries `PIT`,
+`FOH` and `OTHER` (`lib/types.ts:5-7`), but the plot renders only the nine grid
+cells (`POSITIONS`, `page.tsx:209`) — **so validating against the type still
+permits the "silently vanishes from the plot" failure this section exists to
+prevent.** I cited that failure as the reason to validate and then validated
+against the wrong set. Deciding evidence: the editor's `<select>` offers
+`POSITIONS.map(...)` (`page.tsx:6199`) — **a human cannot create a `PIT` slot
+either**, so neither should the AI.
+
+> **`POSITIONS` must move out of `page.tsx` into `lib/`** so the `<select>` and
+> the validator share one definition. Two consumers that must agree on "what is
+> renderable" is precisely the shape that produced the Drive-export regression on
+> PR #144 — a duplicated list is how it comes back.
+
+**(b) `needs` is required.** `MonitorMix.needs` is non-optional (`lib/types.ts:33`)
+and the editor binds it directly — `value={mon.needs}` (`page.tsx:4998`) — so an
+`undefined` makes React flip the field to uncontrolled and editing breaks. v2
+listed only `mix` and `name`, reopening the malformed-row hole for monitor adds.
+**Empty string is fine; absent is not.** (`page.tsx:6352` creates monitors with
+`needs: ''`.)
+
+**(c) `StageSlot.mix` of `0` is legal — it is the "no monitor" sentinel.**
+Verified in four places: new slots are created `mix: 0` (`page.tsx:6134`, `:6275`,
+`:6320`), the cascade skips on `if (!slot.mix)` (`:5377`), and the orphan badge
+guards on `slot.mix > 0` (`:6182`). Requiring positive would **refuse an
+unrelated patch to any unassigned slot** after the merge. So: `0` is valid **and
+exempt from §5.2's reference rule** — only `mix ≥ 1` must resolve to a monitor.
+**`MonitorMix.mix` itself is still ≥ 1** (`page.tsx:6352` assigns `length + 1`);
+the asymmetry between a slot's mix and a monitor's mix is deliberate and is
+exactly the kind of thing a shared "positive number" rule would have flattened.
+
+**(d) Self-found, same class: nothing may be required to be NON-EMPTY.** The app
+creates rows with empty strings throughout — `{name: '', pos, role: '', mix: 0}`
+(`:6134`), `{ch, inst: '', mic: '', stand: '', notes: ''}` (`:6330`),
+`{mix, name: '', needs: ''}` (`:6352`). Since validation runs **post-merge on the
+whole row** (§5.3), a non-empty rule would refuse an ordinary patch to any row a
+user had not finished filling in — **the user's incomplete data would block the
+AI from helping them complete it.** Emptiness is a UI-completeness concern, not a
+data-validity one.
 
 **`id` and `tempId` are forbidden inside `values`, always.** Identity is carried
 by the op, never by its payload. A `values.id` would let a patch rewrite the row's
@@ -668,6 +723,16 @@ same op shape against a field that exists today.
 8. `add` on `inputs` omitting `ch` assigns `max+1`; a colliding explicit `ch` refuses.
 9. An unknown field in `values` is dropped and warned — **not** refused.
 10. `ChangeSummary` counts match what apply actually changed. *(Pins §7 to §6 — the summary cannot drift from the apply, because a divergence is a lie on the approve card.)*
+
+**Value domains — one test per R2 correction, because these are the rules a
+`Record<keyof T, …>` cannot enforce (§5.3):**
+
+10a. `pos: 'PIT'` is **refused**, `pos: 'DSC'` accepted. *(Distinguishes `POSITIONS` from `StagePosition`. The plausible-wrong validator uses the TypeScript union, passes every other test here, and still lets a performer vanish from the plot.)*
+10b. A `patch` on a slot with `mix: 0` **succeeds**, and `mix: 0` does **not** count as a dangling reference. *(The sentinel. A "positive mix" rule passes every other test and refuses ordinary edits to unassigned performers.)*
+10c. `mix: 3` with no monitor 3 after the batch is refused — pinning that 10b exempts `0` **only**, not all unresolved mixes.
+10d. A monitor `add` omitting `needs` is **refused**; `needs: ''` is **accepted**. *(Absent breaks the controlled input; empty is legitimate.)*
+10e. A `patch` on a row whose `name`/`inst`/`needs` is `''` **succeeds**. *(The user's half-filled row must not block the AI from helping them finish it — the failure a non-empty rule would cause.)*
+10f. `POSITIONS` has exactly one definition: the editor `<select>` and the validator import the same constant. *(Guards the duplication that produced the Drive-export regression on #144.)*
 
 ### 10.3 History (§5.4)
 
