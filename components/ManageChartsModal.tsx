@@ -9,7 +9,12 @@ import { availableRoles, applyUploadedChart, removeChartById } from '@/lib/chart
 import { loadPdfDoc, renderPage } from '@/lib/pdf-viewer';
 import RoadmapBuilder, { type EditChart } from '@/components/RoadmapBuilder';
 
-const ACCEPT = '.pdf,.png,.jpg,.jpeg';
+// PDF only: the in-show viewer renders to a canvas via pdf.js and has NO image
+// branch, so an accepted .png uploaded fine, showed a role chip and a working
+// preview HERE, and then gave every performer a blank canvas
+// (design-core-path-tier1 §1.2). This is the hint; /api/charts/upload sniffs the
+// bytes and is the actual boundary.
+const ACCEPT = '.pdf';
 
 interface Props {
   songTitle: string;

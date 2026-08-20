@@ -6,6 +6,26 @@ export class DriveAuthError extends Error {
 
 export type DriveFile = { id: string; name: string; webViewLink: string; mimeType?: string; modifiedTime?: string };
 
+/**
+ * Google-native types the Drive API can EXPORT to PDF, and the type it exports to.
+ *
+ * These charts carry a real Google MIME (`drive/batch/route.ts` stores
+ * `file.mimeType` verbatim) and are perfectly renderable: the viewer posts
+ * `chart.mimeType` to `/api/drive/download`, which exports to PDF before the
+ * bytes ever reach pdf.js.
+ *
+ * ★ This map lives here, not in the download route, because it now has TWO
+ * consumers — the export path and `isUnsupportedChartMime`, which must agree on
+ * what "renderable" means. Codex R1 caught the viewer refusing exactly the
+ * charts this export path exists to serve; duplicating the list is how that
+ * disagreement would come back. Adding a type here teaches both at once.
+ */
+export const EXPORT_MIME_TYPES: Record<string, string> = {
+  'application/vnd.google-apps.document': 'application/pdf',
+  'application/vnd.google-apps.spreadsheet': 'application/pdf',
+  'application/vnd.google-apps.presentation': 'application/pdf',
+};
+
 const SHARED_DRIVE_PARAMS = {
   supportsAllDrives: 'true',
   includeItemsFromAllDrives: 'true',

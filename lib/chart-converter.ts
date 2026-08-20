@@ -6,6 +6,7 @@ import type {
   System,
 } from './types';
 import { CALIBRATION_SCHEMA_VERSION, isValidCalibration } from './chart-calibration';
+import { EXPORT_MIME_TYPES } from './drive';
 
 // ─── Caps (tunable constants — see docs/design-chart-converter.md §Limits) ────
 // File-size cap: oversized PDFs skip vision and degrade to manual (`too_large`).
@@ -27,6 +28,59 @@ export function sniffPdf(bytes: Uint8Array): boolean {
     bytes[3] === 0x46 &&
     bytes[4] === 0x2d
   );
+}
+
+/**
+ * The one type we store, and the one type the viewer renders.
+ *
+ * Lives beside `sniffPdf` on purpose: the upload route decides what a file IS by
+ * sniffing, then persists THIS constant (design-core-path-tier1 §1.2 part 2b) —
+ * so the sniff and the stored value can never disagree. Splitting them across
+ * modules is how they would drift.
+ */
+export const PDF_MIME = 'application/pdf';
+
+/**
+ * Can the in-show viewer render this chart?
+ *
+ * `ChartNavigator` draws to a `<canvas>` via pdf.js and has no image branch, so
+ * a non-PDF row loads, throws, and shows a generic failure. This predicate lets
+ * it say WHY instead (§1.2 part 3).
+ *
+ * Three things are renderable, and only the third is obvious:
+ *
+ * 1. **`application/pdf`** — the format the viewer actually draws.
+ * 2. **An ABSENT `mimeType`** — older rows carry no MIME and are overwhelmingly
+ *    PDFs. Unknown stays on the existing path: attempt the load, report a real
+ *    failure if it fails. Treating unknown as unsupported would refuse charts
+ *    that work today.
+ * 3. **★ A Google-native type in `EXPORT_MIME_TYPES`** — these render fine.
+ *    `lib/pdf-viewer.ts` posts `chart.mimeType` to `/api/drive/download`, which
+ *    EXPORTS Docs/Sheets/Slides to PDF before the bytes reach pdf.js.
+ *
+ * > **Codex R1 High, folded — and the root cause was a claim I never checked.**
+ * > v1 of this comment asserted "Drive charts carry no MIME at all". They carry
+ * > a real Google MIME: `drive/batch/route.ts` stores `file.mimeType` verbatim.
+ * > So the predicate refused **exactly the charts the Drive export path exists to
+ * > serve** — a Google Doc chart that renders in production today would have
+ * > shown "This chart is an image" and never reached the export.
+ * >
+ * > **The spec did not say this; I did.** §1.2 never mentions Drive at all —
+ * > its part 3 states the rule as "mimeType present and not application/pdf ⇒
+ * > image message", which is over-broad by OMISSION. Implementing it literally
+ * > produced the regression, and I invented a justifying fact in this very
+ * > comment rather than checking the one code path that could refute it.
+ * > **An unstated case in a spec is not permission to assume it away.**
+ *
+ * After §1.2 part 2b every newly UPLOADED chart carries `application/pdf`, so a
+ * `true` here means a legacy Supabase row that predates the upload guard, or a
+ * genuine image — never a Drive chart.
+ */
+export function isUnsupportedChartMime(mimeType?: string): boolean {
+  if (!mimeType) return false;
+  if (mimeType === PDF_MIME) return false;
+  if (EXPORT_MIME_TYPES[mimeType]) return false; // exported to PDF before render
+  return true;
 }
 
 // ─── Vision JSON contract (what the model returns) ────────────────────────────
