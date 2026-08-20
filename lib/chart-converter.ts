@@ -29,6 +29,35 @@ export function sniffPdf(bytes: Uint8Array): boolean {
   );
 }
 
+/**
+ * The one type we store, and the one type the viewer renders.
+ *
+ * Lives beside `sniffPdf` on purpose: the upload route decides what a file IS by
+ * sniffing, then persists THIS constant (design-core-path-tier1 §1.2 part 2b) —
+ * so the sniff and the stored value can never disagree. Splitting them across
+ * modules is how they would drift.
+ */
+export const PDF_MIME = 'application/pdf';
+
+/**
+ * Can the in-show viewer render this chart?
+ *
+ * `ChartNavigator` draws to a `<canvas>` via pdf.js and has no image branch, so
+ * a non-PDF row loads, throws, and shows a generic failure. This predicate lets
+ * it say WHY instead (§1.2 part 3).
+ *
+ * **Absent `mimeType` is NOT unsupported.** Older rows and Drive charts carry no
+ * MIME at all, and the overwhelming majority are PDFs; treating unknown as
+ * unsupported would refuse to render charts that work today. Unknown stays on
+ * the existing path — attempt the load, and report a real failure if it fails.
+ *
+ * After §1.2 part 2b every newly stored chart carries `application/pdf`, so a
+ * `true` here means a LEGACY row that predates the upload guard.
+ */
+export function isUnsupportedChartMime(mimeType?: string): boolean {
+  return !!mimeType && mimeType !== PDF_MIME;
+}
+
 // ─── Vision JSON contract (what the model returns) ────────────────────────────
 // Geometry is rough by design; bindings are by INDEX (resolved to ids/FKs
 // server-side, per the spec). Coordinates are normalized 0..1.

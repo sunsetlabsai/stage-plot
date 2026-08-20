@@ -101,7 +101,18 @@ export function useShow(
         setSaveError(error || 'Could not save changes.');
       }
     } catch {
-      // Network error — config remains in localStorage as fallback
+      // §1.1: the config IS still cached (saveConfig writes localStorage before
+      // debouncing) but it did NOT reach the server. Saying nothing here left
+      // `lastSavedAt` at its previous value, so the pill kept rendering a green
+      // "Saved" through an entire offline session — the app reporting success for
+      // something that did not happen.
+      //
+      // The pill already prefixes "Couldn't save — ", so this carries the CAUSE
+      // only. No auto-retry: the existing 2s debounce retries on the next edit,
+      // and a background loop would be a new mechanism with its own failure modes.
+      setSaveError(
+        "you appear to be offline. Your changes are cached in this browser and will save on your next edit once you're back.",
+      );
     } finally {
       setSaving(false);
     }

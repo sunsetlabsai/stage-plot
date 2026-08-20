@@ -38,7 +38,7 @@ import type {
   Bar,
   RoadmapMarker,
 } from '@/lib/types';
-import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf } from '@/lib/setlist';
+import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
@@ -64,6 +64,7 @@ import {
   type DownloadProgress,
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart, fetchChartBytes } from '@/lib/pdf-viewer';
+import { isUnsupportedChartMime } from '@/lib/chart-converter';
 import { parseChartDeepLink, buildChartShareUrl, buildShowShareUrl, chartShareFilename } from '@/lib/share';
 import ShareButton from '@/components/ShareButton';
 import ManageChartsModal from '@/components/ManageChartsModal';
@@ -3753,6 +3754,24 @@ function ChartNavigator({
               ? `No ${roleFilter} chart for this song`
               : 'No charts for this song'}
           </div>
+        ) : activeChart && isUnsupportedChartMime(activeChart.mimeType) ? (
+          /* §1.2 part 3: this viewer is pdf.js-on-canvas with no image branch, so
+             a non-PDF row used to load, throw, and report a generic failure. Say
+             why instead. Reachable only for LEGACY rows — since §1.2 part 2b the
+             upload route stores `application/pdf` by construction. */
+          <div className="text-center space-y-3">
+            <p className="text-sm text-zinc-400">
+              This chart is an image. Images can&apos;t be displayed in the viewer — replace it with a PDF.
+            </p>
+            <a
+              href={activeChart.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block px-4 py-2 text-sm font-bold bg-white text-black rounded hover:bg-zinc-200 transition-colors"
+            >
+              Open {activeChart.role} Chart &rarr;
+            </a>
+          </div>
         ) : activeChart && !activeChart.fileId ? (
           <div className="text-center space-y-3">
             <p className="text-sm text-zinc-400">This chart can only be viewed externally</p>
@@ -4644,7 +4663,30 @@ function SetupSortableRow({
         <span className="text-xs font-mono text-gray-400">{song.position}</span>
       </td>
       <td className="px-2 py-1">
-        <input className={inputCls} value={song.title} onChange={(e) => onUpdate(idx, 'title', e.target.value)} />
+        {/* §1.3: a library-linked row's title is NOT editable here. The server
+            rebuilds config.setlist from the songs table on every save
+            (shows/update/route.ts writes `title: song.title`), so typing here
+            reverted on reload with a green "Saved" in between — a field offered
+            as editable that cannot persist.
+            A row with NO songId is different and stays editable: route.ts:100
+            genuinely resolves (or auto-creates) that row BY its title, so making
+            it read-only would break CSV import and the AI's update_setlist. */}
+        {!isTitleEditableInSetlist(song) ? (
+          <div className="flex items-center gap-1.5 group">
+            <span className="text-sm text-gray-700 truncate" title={song.title}>{song.title}</span>
+            <a
+              href="/library"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[10px] text-blue-600 hover:text-blue-800 underline opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity whitespace-nowrap"
+              title="Song titles live in your library — renaming there updates every show"
+            >
+              Rename in Library
+            </a>
+          </div>
+        ) : (
+          <input className={inputCls} value={song.title} onChange={(e) => onUpdate(idx, 'title', e.target.value)} />
+        )}
       </td>
       <td className="px-2 py-1">
         <input className={`${inputCls} w-16`} placeholder="Eb" value={song.key ?? ''} onChange={(e) => onUpdate(idx, 'key', e.target.value)} />

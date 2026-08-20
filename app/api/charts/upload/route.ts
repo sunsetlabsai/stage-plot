@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { normalizeSongKey, canonicalizeRole } from '@/lib/normalize';
+import { sniffPdf, PDF_MIME } from '@/lib/chart-converter';
 
 // POST /api/charts/upload — upload a chart to owner's library
 export async function POST(request: NextRequest) {
@@ -32,9 +33,24 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Invalid song title — cannot be empty or punctuation-only' }, { status: 400 });
   }
 
+  // §1.2 part 2: the picker's `accept` is a HINT; this is the boundary. Classify
+  // by the leading bytes, never by `file.type` — that is caller-controlled and
+  // can be empty or spoofed, so a MIME check would let PNG bytes labelled
+  // application/pdf through and strand every performer on a blank canvas.
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!sniffPdf(bytes)) {
+    return Response.json(
+      { error: 'Charts must be PDF files — this file is not a PDF.' },
+      { status: 400 },
+    );
+  }
+
   const role = canonicalizeRole(rawRole);
-  const ext = file.name.split('.').pop()?.toLowerCase() || 'pdf';
-  const storagePath = `${user.id}/${songKey}/${role}.${ext}`;
+  // §1.2 part 2b: the sniff is the authority, so the stored EXTENSION follows it
+  // too — a real PDF named "chart.png" must not be stored at a `.png` path while
+  // its contentType says application/pdf. Every disagreement between what we
+  // stored and what we say we stored is a future viewer bug.
+  const storagePath = `${user.id}/${songKey}/${role}.pdf`;
 
   const admin = getSupabaseAdmin();
 
@@ -52,8 +68,12 @@ export async function POST(request: NextRequest) {
   // Upload new blob FIRST (before deleting old — safe on failure)
   const { error: uploadError } = await admin.storage
     .from('charts')
-    .upload(storagePath, file, {
-      contentType: file.type,
+    .upload(storagePath, bytes, {
+      // §1.2 part 2b: normalize — persist what the sniff determined, never what
+      // the caller claimed. A browser mislabelling a real PDF (empty type, or
+      // image/png from a bad OS guess) is exactly the case the sniff exists to
+      // rescue; storing that claim would hand the viewer a lie about its own file.
+      contentType: PDF_MIME,
       upsert: true,
     });
 
@@ -80,7 +100,7 @@ export async function POST(request: NextRequest) {
         role,
         file_name: file.name,
         storage_path: storagePath,
-        mime_type: file.type,
+        mime_type: PDF_MIME, // §1.2 part 2b — normalized, not `file.type`
         file_size: file.size,
         source_spec: null,
       },

@@ -170,3 +170,27 @@ export function moveMonitor(monitors: MonitorMix[], from: number, to: number): M
   arr.splice(to, 0, moved);
   return arr.map((mon, i) => (mon.mix === i + 1 ? mon : { ...mon, mix: i + 1 }));
 }
+
+// ── Setlist title ownership (design-core-path-tier1 §1.3) ─────────────────
+
+/**
+ * Is this row's title editable in the setlist table?
+ *
+ * **Only when the row has no `songId`.** A library-linked row's title is owned by
+ * the `songs` table: `PUT /api/shows/update` rebuilds `config.setlist` on every
+ * save and writes `title: song.title` back over whatever the client sent, so an
+ * edit here silently reverted on the next load — with a green "Saved" in the
+ * meantime. Offering an unsavable field as editable is the defect; renames belong
+ * in `/library`, which already cascades to `chart_library.song_key`.
+ *
+ * A row WITHOUT a `songId` is the opposite case and must stay editable: the
+ * server resolves (or auto-creates) that row BY its title, so a blanket
+ * read-only would break CSV/sheet import and the agent's `update_setlist`.
+ *
+ * A predicate rather than an inline ternary because that asymmetry is the whole
+ * of §1.3's correctness, and nothing inside a 6700-line client component can be
+ * exercised by a test in this repo.
+ */
+export function isTitleEditableInSetlist(song: Pick<SetlistSong, 'songId'>): boolean {
+  return !song.songId;
+}
