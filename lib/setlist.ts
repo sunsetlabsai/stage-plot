@@ -194,3 +194,101 @@ export function moveMonitor(monitors: MonitorMix[], from: number, to: number): M
 export function isTitleEditableInSetlist(song: Pick<SetlistSong, 'songId'>): boolean {
   return !song.songId;
 }
+
+// ── Whole-config id normalization ─────────────────────────────────────────
+
+/** True when `next` contains any element the source array did not. */
+function anyRowReplaced<T>(next: readonly T[], prev: readonly T[]): boolean {
+  return next.length !== prev.length || next.some((row, i) => row !== prev[i]);
+}
+
+/**
+ * Re-mint any id already seen earlier in the same array. Ref-stable when clean.
+ *
+ * Presence is the `ensure*Ids` helpers' job; this handles only COLLISIONS, which
+ * they do not: each keeps an existing id verbatim, duplicate or not.
+ *
+ * **Safe to re-mint without a cascade for setlist/inputs/monitors specifically,
+ * and that is a checked property rather than an assumption:** nothing references
+ * those ids as a foreign key. The only cross-entity link is
+ * `InputChannel.slotId → StageSlot.id`, which is why slot de-duping lives in
+ * `ensureStageSlotIds` — it must also clear the referring `slotId`. Do not reuse
+ * this helper for slots.
+ */
+function dedupeIds<T extends { id?: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  let dirty = false;
+  const out = rows.map((row) => {
+    if (!row.id) return row;
+    if (seen.has(row.id)) {
+      dirty = true;
+      return { ...row, id: crypto.randomUUID() };
+    }
+    seen.add(row.id);
+    return row;
+  });
+  return dirty ? out : rows;
+}
+
+/**
+ * Mint AND de-dupe ids across EVERY entity, and repair or flag broken links.
+ *
+ * > ★ Codex R1 medium, folded. The first version said "mint/de-dupe across every
+ * > entity" while only STAGE SLOTS were actually de-duped — `ensureSetlistSongIds`,
+ * > `ensureInputIds` and `ensureMonitorIds` each keep an existing id verbatim,
+ * > duplicate or not. A duplicate id breaks React keys and drag identity exactly
+ * > as a missing one does, so the comment promised a guarantee the code did not
+ * > give. Rather than narrow the contract, `dedupeIds` now makes it true: the
+ * > re-mint is safe for those three because nothing references their ids as a
+ * > foreign key (checked, not assumed — only `slotId → StageSlot.id` exists).
+ *
+ * **Ordering is load-bearing and must not be rearranged.** `ensureStageSlotIds`
+ * runs FIRST: it may clear a `slotId` whose target id COLLIDED (setting
+ * `needsReview`), and input id-minting must run on top of that cleared state.
+ * Reversed, an input would be normalized against a link about to be
+ * invalidated. Note the two cases differ — a **collision** clears the `slotId`,
+ * a merely **dangling** one keeps the value and only sets `needsReview`, so the
+ * original can still be repaired.
+ *
+ * **Ref-stable when nothing was minted**, which is what makes it safe at a
+ * per-keystroke chokepoint: it returns the original object, so a no-op update
+ * cannot force a re-render or a save.
+ *
+ * > ★ That stability had to be BUILT, not assumed. `ensureSetlistSongIds`,
+ * > `ensureInputIds` and `ensureMonitorIds` are all `arr.map(...)`, which
+ * > allocates a new array **unconditionally** — so a plain `!==` on the result
+ * > is always true and this function always returned a fresh config. Harmless
+ * > while it only ran on load; not harmless at a mutation chokepoint that fires
+ * > on every keystroke. Hence `anyRowReplaced`, which compares element
+ * > identity instead of array identity.
+ *
+ * Generic rather than typed to `AppConfig` because `AppConfig` is declared in
+ * the page component; this mirrors `ensureStageSlotIds`'s own signature.
+ *
+ * Lives here rather than in the page component so it is testable at all — the
+ * bug it fixes was a WIRING bug (the wrong normalizer at the mutation site),
+ * and nothing inside a 6,700-line client component can be exercised by a test
+ * in this repo. `planChanges` (design-ai-op-contract §5) will call it too.
+ */
+export function withStableIds<
+  C extends {
+    stagePlot: StageSlot[];
+    inputs: InputChannel[];
+    monitors: MonitorMix[];
+    setlist: SetlistSong[];
+  },
+>(config: C): C {
+  const { config: linked } = ensureStageSlotIds(config);
+  // ensure*Ids guarantees PRESENCE; dedupeIds guarantees UNIQUENESS. Slots need
+  // neither wrapper — ensureStageSlotIds already does both, plus the slotId
+  // cascade a slot re-mint requires.
+  const setlist = dedupeIds(ensureSetlistSongIds(linked.setlist));
+  const inputs = dedupeIds(ensureInputIds(linked.inputs));
+  const monitors = dedupeIds(ensureMonitorIds(linked.monitors));
+  const changed =
+    linked !== config ||
+    anyRowReplaced(setlist, linked.setlist) ||
+    anyRowReplaced(inputs, linked.inputs) ||
+    anyRowReplaced(monitors, linked.monitors);
+  return changed ? { ...linked, setlist, inputs, monitors } : config;
+}

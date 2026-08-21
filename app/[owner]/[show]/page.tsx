@@ -38,7 +38,7 @@ import type {
   Bar,
   RoadmapMarker,
 } from '@/lib/types';
-import { ensureSetlistSongIds, moveSetlistSong, ensureStageSlotIds, ensureInputIds, moveInput, ensureMonitorIds, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist } from '@/lib/setlist';
+import { moveSetlistSong, moveInput, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
@@ -302,22 +302,6 @@ function decodeConfig(s: string): AppConfig | null {
 // ════════════════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ════════════════════════════════════════════════════════════════════════════
-function withStableIds(config: AppConfig): AppConfig {
-  // Mint/de-dupe the StageSlot.id hub + flag ambiguous/dangling links FIRST, so input
-  // id-minting runs on top of any cleared slotIds. When this is dirty it returns a new
-  // config object → the persist effect saves it → the lazy-mint race is closed.
-  const { config: linked } = ensureStageSlotIds(config);
-  const setlist = ensureSetlistSongIds(linked.setlist);
-  const inputs = ensureInputIds(linked.inputs);
-  const monitors = ensureMonitorIds(linked.monitors);
-  const changed =
-    linked !== config ||
-    setlist !== linked.setlist ||
-    inputs !== linked.inputs ||
-    monitors !== linked.monitors;
-  return changed ? { ...linked, setlist, inputs, monitors } : config;
-}
-
 function initConfig(): AppConfig {
   if (typeof window === 'undefined') return withStableIds(bandToConfig(fallbackBand));
 
@@ -424,7 +408,10 @@ export default function Page() {
         if (!showId) return false;
         const cached = localStorage.getItem(`showrunr-cache-${showId}`);
         if (!cached) return false;
-        setConfig(withStableIds(JSON.parse(cached)));
+        // Explicit type argument: withStableIds is generic, and `JSON.parse`
+        // returns `any`, so inference would make the whole config `any` and
+        // silently drop type-checking on every downstream field.
+        setConfig(withStableIds<AppConfig>(JSON.parse(cached)));
         setLoadedPath(`/${owner}/${slug}`);
         return true;
       } catch {
@@ -459,7 +446,7 @@ export default function Page() {
         const data = await res.json();
         if (cancelled || !data?.config) return;
 
-        const cfg = withStableIds(data.config);
+        const cfg = withStableIds<AppConfig>(data.config);
 
         // Apply charts from owner's library (matched by normalized song title)
         if (data.charts && typeof data.charts === 'object') {
@@ -590,10 +577,18 @@ export default function Page() {
     fn: (prev: AppConfig) => AppConfig,
     opts?: { automatic?: boolean },
   ) => {
-    // Normalize StageSlot.id through the single mutation chokepoint so every live
-    // writer (Add Row, AI ops, DnD) mints ids + de-dupes/flags links — not just
-    // load/import. Idempotent and ref-stable when nothing's dirty (no edit churn).
-    setConfig((prev) => ensureStageSlotIds(fn(prev)).config);
+    // Normalize EVERY entity's id through the single mutation chokepoint so every
+    // live writer (Add Row, AI ops, DnD) mints ids + de-dupes/flags links — not
+    // just load/import. Idempotent and ref-stable when nothing's dirty (no edit
+    // churn), because withStableIds returns the original object unless it minted.
+    //
+    // `withStableIds`, not `ensureStageSlotIds` alone: the latter covers slots
+    // only, so setlist/input/monitor rows created here landed with `id:
+    // undefined` while 12 sites dereference `.id!` — broken React keys and dead
+    // drag-and-drop (design-ai-op-contract §9.4). The ordering inside
+    // withStableIds is deliberate and preserved: slot ids first, so input
+    // id-minting runs on top of any cleared slotIds.
+    setConfig((prev) => withStableIds(fn(prev)));
     // §7: undo survives only until the next mutation. Because updateConfig is the
     // single mutation chokepoint, clearing here covers every writer in the app
     // without each one having to remember. The import apply deliberately does not
@@ -611,7 +606,10 @@ export default function Page() {
   // Commit an import merge and arm undo. Bypasses updateConfig on purpose — see
   // above — so the ordering of the two setStates carries no meaning.
   const applyImportMerge = useCallback((merged: SetlistSong[], before: SetlistSong[]) => {
-    setConfig((prev) => ensureStageSlotIds({ ...prev, setlist: merged }).config);
+    // withStableIds, not ensureStageSlotIds: this is THE path CSV/sheet-imported
+    // rows arrive on, and slot-only normalization left every imported song with
+    // no `id` — the defect this fix exists for.
+    setConfig((prev) => withStableIds({ ...prev, setlist: merged }));
     setImportUndo(before);
   }, []);
 
@@ -619,7 +617,9 @@ export default function Page() {
   // StrictMode, so the snapshot is read from scope and each setState is called once.
   const undoImport = useCallback(() => {
     if (!importUndo) return;
-    setConfig((prev) => ensureStageSlotIds({ ...prev, setlist: importUndo }).config);
+    // Same reason as applyImportMerge: undo restores the pre-import setlist, whose
+    // rows may themselves predate id-minting.
+    setConfig((prev) => withStableIds({ ...prev, setlist: importUndo }));
     setImportUndo(null);
   }, [importUndo]);
 
