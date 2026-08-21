@@ -528,12 +528,43 @@ export const TRYIT_MODEL = 'claude-sonnet-4-6';
 export const BYOA_MODEL  = 'claude-sonnet-4-6';
 ```
 
-**The mechanism to fix this already exists and is already imported into that very
-file.** `lib/agent-key.ts:1` imports `readAdminConfig` from `lib/admin-config.ts`
-— a generic keyed store with Redis + env fallback (`{value, source:'redis'|'env'}`),
-a `setAdminConfig` setter, and an existing `/admin` surface. Making the model a
-config key is a value edit with **no deploy**, and it satisfies the standing
-no-hardcoding rule the constants currently violate.
+> ### ★ BUILT AS ENV-ONLY, NOT Redis — corrected after the build (PR #149)
+>
+> This section originally said to route the model through `readAdminConfig`
+> (Redis, then env), which `lib/agent-key.ts` already imports, giving a value
+> edit with **no deploy**. **That was specced, built, and reverted, because an
+> existing test caught it and the test was right:**
+>
+> ```js
+> // tests/agent-key.test.ts
+> expect(redis.getCalls).toBe(0);
+> // "BYOA wins unconditionally, so nothing else should even be consulted"
+> ```
+>
+> **BYOA is the escape hatch that works when server-side config is broken.**
+> `resolveKeyMode` returns on that branch *before* touching Redis precisely so a
+> user with their own key is never subject to our infrastructure. Resolving the
+> model through Redis puts a network round-trip — and during an outage, a
+> **connect timeout** — on exactly that path. A 60s cache does not save the first
+> call, so the stall recurs once per minute per process.
+>
+> **That trades reliability for convenience on the most reliability-sensitive
+> path in the app, to change a value that changes maybe monthly.** So the shipped
+> mechanism is `AGENT_MODEL_BYOA` / `AGENT_MODEL_TRYIT` read synchronously from
+> the environment, with `DEFAULT_AGENT_MODEL` as fallback — **no code change**,
+> though **not** no deploy.
+>
+> **The no-deploy half is deferred, and its real cost is:** Redis for the value,
+> plus the `/admin` UI, which is **hardcoded per field rather than a generic
+> loop** — `getAllAdminConfig`'s key list, the settings route's `allowedKeys`,
+> `maskSecret` (a model name is not a secret and must not be masked), and four
+> spots in `app/admin/page.tsx`. It would also need the Redis-on-BYOA problem
+> solved another way. **Graham's call; not scheduled.**
+>
+> **The lesson, which outlives this section: when a test blocks a change, ask
+> what contract it encodes before treating it as an obstacle.**
+
+Either way it satisfies the standing no-hardcoding rule the constants violate.
 
 **The design consequence is larger than the config change.** If the model is a
 config value — and under BYOA it is effectively whatever we point it at — then:
@@ -770,12 +801,14 @@ field so no migration. **Free-text string, not an enum** — his "simple and
 loosely connected". Ships as its own small PR **before** the op work, because
 `apply_changes` needs the field to exist before it can patch it.
 
-**Q2. Model as a config key — NOW.** (§8) `TRYIT_MODEL` / `BYOA_MODEL` move from
-hardcoded constants (`lib/agent-key.ts:14-15`) to `readAdminConfig` keys, which
-that file **already imports**, with the current values as the fallback default so
-behaviour is unchanged on day one. Small, and it removes a deploy from every
-future model move — which matters more here than usual, because §8 makes the
-shipping model a variable the contract must tolerate.
+**Q2. Model as a config value — NOW. Shipped in PR #149 as env vars, not Redis.**
+(§8) `TRYIT_MODEL` / `BYOA_MODEL` are gone; `AGENT_MODEL_BYOA` /
+`AGENT_MODEL_TRYIT` drive it, with `DEFAULT_AGENT_MODEL` as the fallback so
+behaviour is unchanged on day one. **This removes the CODE change from a model
+move, not the deploy** — the Redis route was built and reverted because it put a
+round-trip (and, during an outage, a connect timeout) on the BYOA path, which
+exists to work when our infrastructure does not. Full reasoning and the deferred
+no-deploy cost are in the corrected §8 block.
 
 **Q3. Regenerate on a non-empty show — CONFIRM AND REPLACE.** (§9.2a) Not a
 refusal. Re-prompting until you like the result is the AI's real strength, and a
@@ -792,7 +825,7 @@ Nothing below starts without Graham's go ([[wait-for-approval]] applies).
 | # | Scope | Why this order |
 |---|---|---|
 | 0 | **Tier-1 §2.3** — `withStableIds` at `page.tsx:596`/`:614`/`:622` | Independent manual-path bug (§9.4), and a **prerequisite**: ops address rows by `id` |
-| 1 | **`MonitorMix.type`** (§3.4) + **model as config key** (§8/Q2) | Two small, independent unblockers. `apply_changes` cannot patch a field that does not exist. |
+| 1 | **`MonitorMix.type`** (§3.4, PR #148) + **model as a config VALUE** (§8/Q2, PR #149 — env, not Redis) | Two small, independent unblockers. `apply_changes` cannot patch a field that does not exist. |
 | 2 | **`planChanges` + validation** (§5) — pure `lib/`, no UI | The whole decidable core, fully testable before anything renders |
 | 3 | **`generate_show`, cascade deleted, prompt rewritten** (§9.2) | Removes the third writer; first-run flow must be re-verified here |
 | 4 | **`apply_changes` wiring + diff card + `'refused'` history fix** (§5.5, §7) | The `page.tsx` surface, i.e. the untested seam — last, on top of a proven core |
