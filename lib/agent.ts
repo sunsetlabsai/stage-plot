@@ -112,6 +112,14 @@ export const TOOLS = [
               mix: { type: 'number' as const, description: 'Mix number' },
               name: { type: 'string' as const, description: 'Who gets this mix' },
               needs: { type: 'string' as const, description: 'What they need in the mix' },
+              // Optional and free-text on purpose — suggestions, not a whitelist
+              // (MONITOR_TYPES in lib/setlist.ts). Leaving it out is valid; the
+              // viewer renders nothing rather than guessing.
+              type: {
+                type: 'string' as const,
+                description:
+                  'How they hear it — typically "Wedge" or "IEM"; also "Side-fill", "Drum fill", "None". Omit if the user has not said.',
+              },
             },
             required: ['mix', 'name', 'needs'],
           },
