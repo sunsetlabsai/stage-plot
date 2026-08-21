@@ -147,6 +147,48 @@ describe('withStableIds — every entity, not just slots', () => {
     expect(src).toContain('withStableIds('); // and it does use the composite
   });
 
+  it('★ de-dupes setlist, input and monitor ids — not just slots (Codex R1 medium)', () => {
+    // The first version's comment claimed de-dupe "across every entity" while
+    // only slots got it: ensure*Ids keeps an existing id verbatim, duplicate or
+    // not. A duplicate id breaks React keys and drag identity exactly as a
+    // missing one does, so this is the same defect the helper exists to prevent.
+    const out = withStableIds(config({
+      setlist: [
+        { id: 'same', position: 1, title: 'A', lead: 'R' },
+        { id: 'same', position: 2, title: 'B', lead: 'R' },
+      ],
+      inputs: [
+        { id: 'dupe', ch: 1, inst: 'Kick', mic: 'Beta 52', stand: 'Short' },
+        { id: 'dupe', ch: 2, inst: 'Snare', mic: 'SM57', stand: 'Short' },
+      ],
+      monitors: [
+        { id: 'clash', mix: 1, name: 'A', needs: '' },
+        { id: 'clash', mix: 2, name: 'B', needs: '' },
+      ],
+    }));
+
+    expect(out.setlist[0].id).not.toBe(out.setlist[1].id);
+    expect(out.inputs[0].id).not.toBe(out.inputs[1].id);
+    expect(out.monitors[0].id).not.toBe(out.monitors[1].id);
+    // The FIRST occurrence keeps its id; only the later collision is re-minted,
+    // so a stable row does not churn just because a duplicate appeared after it.
+    expect(out.setlist[0].id).toBe('same');
+    expect(out.inputs[0].id).toBe('dupe');
+    expect(out.monitors[0].id).toBe('clash');
+  });
+
+  it('de-duping does not disturb the rest of the row', () => {
+    const out = withStableIds(config({
+      inputs: [
+        { id: 'dupe', ch: 1, inst: 'Kick', mic: 'Beta 52', stand: 'Short' },
+        { id: 'dupe', ch: 2, inst: 'Snare', mic: 'SM57', stand: 'Short', slotId: 'x' },
+      ],
+      stagePlot: [{ id: 'x', name: 'Marcus', pos: 'USC', role: 'Drums', mix: 1 }],
+    }));
+
+    expect(out.inputs[1]).toMatchObject({ ch: 2, inst: 'Snare', mic: 'SM57', slotId: 'x' });
+  });
+
   it('leaves non-id fields untouched', () => {
     const out = withStableIds(config({
       setlist: [{ position: 1, title: 'Wonderwall', lead: 'Renee', key: 'Eb', notes: 'capo 2' }],

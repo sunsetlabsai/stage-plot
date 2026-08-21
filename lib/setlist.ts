@@ -203,7 +203,44 @@ function anyRowReplaced<T>(next: readonly T[], prev: readonly T[]): boolean {
 }
 
 /**
- * Mint/de-dupe ids across EVERY entity, and repair or flag broken links.
+ * Re-mint any id already seen earlier in the same array. Ref-stable when clean.
+ *
+ * Presence is the `ensure*Ids` helpers' job; this handles only COLLISIONS, which
+ * they do not: each keeps an existing id verbatim, duplicate or not.
+ *
+ * **Safe to re-mint without a cascade for setlist/inputs/monitors specifically,
+ * and that is a checked property rather than an assumption:** nothing references
+ * those ids as a foreign key. The only cross-entity link is
+ * `InputChannel.slotId → StageSlot.id`, which is why slot de-duping lives in
+ * `ensureStageSlotIds` — it must also clear the referring `slotId`. Do not reuse
+ * this helper for slots.
+ */
+function dedupeIds<T extends { id?: string }>(rows: T[]): T[] {
+  const seen = new Set<string>();
+  let dirty = false;
+  const out = rows.map((row) => {
+    if (!row.id) return row;
+    if (seen.has(row.id)) {
+      dirty = true;
+      return { ...row, id: crypto.randomUUID() };
+    }
+    seen.add(row.id);
+    return row;
+  });
+  return dirty ? out : rows;
+}
+
+/**
+ * Mint AND de-dupe ids across EVERY entity, and repair or flag broken links.
+ *
+ * > ★ Codex R1 medium, folded. The first version said "mint/de-dupe across every
+ * > entity" while only STAGE SLOTS were actually de-duped — `ensureSetlistSongIds`,
+ * > `ensureInputIds` and `ensureMonitorIds` each keep an existing id verbatim,
+ * > duplicate or not. A duplicate id breaks React keys and drag identity exactly
+ * > as a missing one does, so the comment promised a guarantee the code did not
+ * > give. Rather than narrow the contract, `dedupeIds` now makes it true: the
+ * > re-mint is safe for those three because nothing references their ids as a
+ * > foreign key (checked, not assumed — only `slotId → StageSlot.id` exists).
  *
  * **Ordering is load-bearing and must not be rearranged.** `ensureStageSlotIds`
  * runs FIRST: it may clear a `slotId` whose target id COLLIDED (setting
@@ -242,9 +279,12 @@ export function withStableIds<
   },
 >(config: C): C {
   const { config: linked } = ensureStageSlotIds(config);
-  const setlist = ensureSetlistSongIds(linked.setlist);
-  const inputs = ensureInputIds(linked.inputs);
-  const monitors = ensureMonitorIds(linked.monitors);
+  // ensure*Ids guarantees PRESENCE; dedupeIds guarantees UNIQUENESS. Slots need
+  // neither wrapper — ensureStageSlotIds already does both, plus the slotId
+  // cascade a slot re-mint requires.
+  const setlist = dedupeIds(ensureSetlistSongIds(linked.setlist));
+  const inputs = dedupeIds(ensureInputIds(linked.inputs));
+  const monitors = dedupeIds(ensureMonitorIds(linked.monitors));
   const changed =
     linked !== config ||
     anyRowReplaced(setlist, linked.setlist) ||
