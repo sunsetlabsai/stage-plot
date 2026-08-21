@@ -11,10 +11,77 @@ import { createClient } from 'redis';
 // in the exact scenario where the fallback is load-bearing. §9 test 8 pins it.
 
 export const TRYIT_QUOTA = 50; // §7: raised from 10 for the UAT window
-export const TRYIT_MODEL = 'claude-sonnet-4-6';
-export const BYOA_MODEL = 'claude-sonnet-4-6';
 export const TRYIT_MAX_TOKENS = 2048;
 export const BYOA_MAX_TOKENS = 4096;
+
+// ── Agent model, configurable at runtime ───────────────────────────────────
+//
+// Graham, 2026-08-20: "We don't WANT to be wed to a single model version.
+// Shouldn't this be easy/flexible enough to change?" It was two hardcoded
+// constants, which also sat against the standing no-hardcoding rule.
+//
+// design-ai-op-contract §8 turns that into a design criterion rather than a
+// preference: the op contract must be drivable by whatever model we point at,
+// so the model has to be a value, not a deploy.
+
+/** Used when nothing is configured, and whenever a configured value is unusable. */
+export const DEFAULT_AGENT_MODEL = 'claude-sonnet-4-6';
+
+/**
+ * Environment variables, read synchronously. **NOT Redis — see below.**
+ *
+ * > ★ The first cut of this resolved through `readAdminConfig` (Redis, then env),
+ * > which would have allowed changing the model with no deploy at all. An
+ * > existing test killed it, and the test was right:
+ * >
+ * > ```
+ * > expect(redis.getCalls).toBe(0);
+ * > // "BYOA wins unconditionally, so nothing else should even be consulted"
+ * > ```
+ * >
+ * > **BYOA is the escape hatch that works when server-side config is broken.**
+ * > `resolveKeyMode` returns on that branch before touching Redis precisely so a
+ * > user with their own key is never subject to our infrastructure. Resolving the
+ * > model through Redis puts a network round-trip — and, during an outage, a
+ * > connect timeout — on exactly that path. A 60s cache does not save the first
+ * > call, so the stall would recur once per minute per process.
+ * >
+ * > **That trades reliability for convenience on the most reliability-sensitive
+ * > path in the app, to change a value that changes maybe monthly.** Env vars
+ * > cost nothing, need no I/O, and still remove the code change. The Redis half —
+ * > true no-deploy switching — is a costed follow-up, not something to smuggle in
+ * > here (see the PR body).
+ */
+export const BYOA_MODEL_ENV = 'AGENT_MODEL_BYOA';
+export const TRYIT_MODEL_ENV = 'AGENT_MODEL_TRYIT';
+
+/**
+ * Is this usable as a model id?
+ *
+ * **Deliberately shape-agnostic — NO `claude-` prefix check.** The entire point
+ * is not being wed to a naming convention, and a prefix rule would re-couple us
+ * to one, breaking the day a model family is named differently. This catches
+ * what actually goes wrong when a human edits a config value: an empty value, a
+ * pasted line with whitespace, or a runaway string.
+ */
+function isUsableModelId(value: string): boolean {
+  return value.length > 0 && value.length <= 100 && !/\s/.test(value);
+}
+
+/**
+ * Resolve the model for an env var, falling back to `DEFAULT_AGENT_MODEL`.
+ *
+ * Synchronous and allocation-free: no I/O, so it adds nothing to any request
+ * path and cannot introduce a failure mode of its own.
+ *
+ * **A misconfigured value must never break the AI.** An unset, blank or
+ * malformed value falls back — so the worst outcome of a fat-fingered env var is
+ * that we keep serving the default, not that every request 404s on a bad id.
+ */
+export function resolveAgentModel(envVar: string): string {
+  const configured = (process.env[envVar] ?? '').trim();
+  return isUsableModelId(configured) ? configured : DEFAULT_AGENT_MODEL;
+}
 const QUOTA_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
 /** THE in-memory fallback, used when Redis is unavailable. Exactly one instance. */
@@ -120,7 +187,14 @@ export async function resolveKeyMode(
   opts: { consume: boolean },
 ): Promise<KeyMode> {
   if (clientKey) {
-    return { mode: 'byoa', apiKey: clientKey, model: BYOA_MODEL, maxTokens: BYOA_MAX_TOKENS };
+    // Synchronous env read — this branch still consults NOTHING external, which
+    // is the property `agent-key.test.ts` pins with `expect(redis.getCalls).toBe(0)`.
+    return {
+      mode: 'byoa',
+      apiKey: clientKey,
+      model: resolveAgentModel(BYOA_MODEL_ENV),
+      maxTokens: BYOA_MAX_TOKENS,
+    };
   }
 
   const read = await readAdminConfig('claude_tryit_key');
@@ -133,7 +207,7 @@ export async function resolveKeyMode(
   return {
     mode: 'tryit',
     apiKey: read.value,
-    model: TRYIT_MODEL,
+    model: resolveAgentModel(TRYIT_MODEL_ENV),
     maxTokens: TRYIT_MAX_TOKENS,
     remaining: q.remaining,
   };
