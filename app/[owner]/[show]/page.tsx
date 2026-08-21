@@ -38,7 +38,7 @@ import type {
   Bar,
   RoadmapMarker,
 } from '@/lib/types';
-import { moveSetlistSong, moveInput, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds } from '@/lib/setlist';
+import { moveSetlistSong, moveInput, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
@@ -1481,6 +1481,13 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
                 <div key={m.mix} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
                   <h3 className="font-bold flex items-center gap-2">
                     <span className="text-blue-600">Mix {m.mix}:</span> {m.name}
+                    {/* Legacy mixes have no type — render nothing rather than
+                        guess "Wedge", which would be a fact we do not have. */}
+                    {m.type && (
+                      <span className="text-xs font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
+                        {m.type}
+                      </span>
+                    )}
                   </h3>
                   <p className="text-sm text-gray-600 mt-1">{m.needs}</p>
                 </div>
@@ -4942,6 +4949,7 @@ function SetupMonitorTable({
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-14">Mix #</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[140px]">Name</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[160px]">Needs</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-28">Type</th>
                   <th className="w-16"></th>
                   <th className="w-10"></th>
                 </tr>
@@ -4964,6 +4972,10 @@ function SetupMonitorTable({
           </div>
         </SortableContext>
       </DndContext>
+      {/* One datalist for the whole table — the rows reference it by id. */}
+      <datalist id="monitor-types">
+        {MONITOR_TYPES.map((t) => <option key={t} value={t} />)}
+      </datalist>
       <button className={`${btnAdd} mt-3`} onClick={onAdd}>+ Add Mix</button>
     </>
   );
@@ -4996,6 +5008,19 @@ function SortableMonitorRow({
       </td>
       <td className="px-2 py-1">
         <input className={inputCls} value={mon.needs} onChange={(e) => onUpdate(idx, 'needs', e.target.value)} />
+      </td>
+      <td className="px-2 py-1">
+        {/* Datalist, not a select: MONITOR_TYPES suggests, it does not constrain
+            — side-fills and hybrid rigs are real and an enum would make each one
+            a schema change (design-ai-op-contract §3.4). `?? ''` keeps the input
+            controlled for the legacy rows that predate this field. */}
+        <input
+          className={inputCls}
+          list="monitor-types"
+          placeholder="Wedge"
+          value={mon.type ?? ''}
+          onChange={(e) => onUpdate(idx, 'type', e.target.value)}
+        />
       </td>
       <td className="px-1 py-1">
         <div className="flex flex-col items-center">
@@ -5739,7 +5764,10 @@ function ToolCallPreview({ name, input }: { name: string; input: Record<string, 
         <ul className="space-y-0.5">
           {monitors.map((m: Record<string, unknown>, i: number) => (
             <li key={i}>
-              Mix {String(m.mix)}: {String(m.name)} — {String(m.needs)}
+              {/* `m.type &&` not `String(m.type)`: an absent type must render
+                  nothing, and String(undefined) is the literal "undefined". */}
+              Mix {String(m.mix)}: {String(m.name)}
+              {m.type ? ` (${String(m.type)})` : ''} — {String(m.needs)}
             </li>
           ))}
         </ul>

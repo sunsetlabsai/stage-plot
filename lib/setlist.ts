@@ -1,5 +1,13 @@
 import type { SetlistSong, StagePosition, StageSlot, InputChannel, MonitorMix } from './types';
 
+/**
+ * Suggested values for `MonitorMix.type`, offered via datalist — NOT a
+ * whitelist. Typing anything else is valid and intended; see the field's doc
+ * comment in `types.ts`. One definition so the editor and any future consumer
+ * cannot drift.
+ */
+export const MONITOR_TYPES = ['Wedge', 'IEM', 'Side-fill', 'Drum fill', 'None'] as const;
+
 // ── Stage-plot grouping / derivation (multi-occupant blocks) ──────────────
 
 // Group slots by stage position, preserving stable insertion (array) order within

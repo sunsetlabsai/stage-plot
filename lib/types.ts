@@ -32,6 +32,18 @@ export interface MonitorMix {
   mix: number;
   name: string;
   needs: string;
+  /**
+   * How the performer hears this mix — "Wedge", "IEM", "Side-fill", "None"…
+   *
+   * **Free text, not an enum, deliberately** (design-ai-op-contract §3.4): real
+   * rigs carry side-fills, drum fills and hybrids, and an enum would turn each
+   * of those into a schema change. `MONITOR_TYPES` supplies suggestions via a
+   * datalist without constraining what can be typed.
+   *
+   * **Optional, so no migration** — existing mixes simply have no type, which
+   * renders as blank rather than as a wrong guess.
+   */
+  type?: string;
 }
 
 export interface GeneralNote {
