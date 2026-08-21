@@ -1298,7 +1298,10 @@ the converter was not taken.
    reintroduce the defect §4.1 exists to remove, one layer over.
 4. **Quota applies to try-it on these routes too.** A chart parse on the
    platform key is a billable call and must not be free of the accounting the
-   AI tab is subject to. *(See Q5 — the per-call weighting is open.)*
+   AI tab is subject to. **One call = one unit, no weighting** (Q5, ruled).
+   Consumption stays a property of `resolveKeyMode`'s `{ consume }` flag and is
+   never open-coded per route, so revisiting 1:1 before public launch is a
+   one-function change.
 
 ### 13.5 Failure modes stay DIFFERENT on purpose
 
@@ -1324,10 +1327,24 @@ operator, shown to someone who cannot operate anything.
 
 ### 13.6 Open questions
 
-- **Q5.** Does a chart parse or a PDF conversion consume **one** try-it message,
-  the same as a chat turn? A conversion is a vision call over a whole PDF and
-  costs materially more than a chat turn. One quota unit each is simple and
-  wrong-ish; weighting is fair and invents a currency. **Graham's call.**
+- **Q5 — RULED by Graham 2026-08-21: 1:1. One call, one unit.** A chart parse
+  and a PDF conversion each consume **one** try-it message, exactly like a chat
+  turn, even though a vision call over a whole PDF costs materially more.
+  **No weighting, no per-surface cost model.** `TRYIT_QUOTA` stays the single
+  constant everything derives from (§4).
+
+  **His reasoning, recorded because it bounds how long this holds:** *"we'll have
+  to see how long this survives. For now, 1:1 is fine. I suspect that's not going
+  to be the case when we offer this publicly."* So 1:1 is a **UAT-window
+  decision**, in the same class as §7 raising the quota to 50 — right for the
+  current audience, explicitly expected to be revisited before public launch.
+
+  **The design consequence, so the revisit is cheap:** nothing may hard-code the
+  1:1 assumption. Quota consumption stays a property of `resolveKeyMode`'s
+  `{ consume: boolean }` and is never open-coded per route. A future weighting
+  becomes a change to one function, not an audit of every AI surface — which is
+  the same argument §4 makes for one resolver, applied to the thing most likely
+  to change next.
 - **Q6.** `convert` currently degrades identically for "no key" and "the model
   failed" — both are `degrade('failed')` (`:105`, `:117`, `:123`, `:125`). Should
   a missing key become its own `ConvertReason` so the UI can point at Settings
