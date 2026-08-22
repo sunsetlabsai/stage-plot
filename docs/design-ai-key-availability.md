@@ -38,6 +38,26 @@ must not share a PR:**
 | 1 | **§13** — unify key resolution; honest failure copy | its own design + build | Strictly an improvement even if §14 never ships, and it is what is blocking production today. Depends on nothing in §14. |
 | 2 | **§14** — settings overlay + the §5 relocation | its own design + build | §14.3 rewrites a merged, mid-build spec. Speccing the settings page without the §5 rewrite would leave the show page contradicting it, so those two are one item — but neither blocks §13. |
 
+**v10.1 changelog** — Codex R1 on PR #150 returned **NOGO (2 High + 2 Medium)**.
+All four folded, nothing declined. **Every one of them is the same defect class:
+a claim in one section that another section quietly contradicts** — which is
+what this document exists to catch and, three times in v10, did not.
+
+| Change | Source |
+|---|---|
+| **§13.4.2 NEW — §13 now includes MINIMAL CLIENT KEY DELIVERY.** v10 claimed §13 "depends on nothing in §14" *and* that its BYOA half was §14.2 — so as written **work item 1 did not fix Graham's symptom.** A route that accepts `Authorization` is inert while no client sends one, and neither chart client sends any header but `Content-Type` (`chart-upload.ts:51`, `RoadmapBuilder.tsx:91`). Both now read `lib/byoa-key-storage` directly. | Codex R1 **High** |
+| **§13.5 + Q6 CLOSED — the converter gets a distinct `no_key` reason.** v10 required the `unconfigured`/`error` distinction to propagate on both chart routes while leaving the converter at `degrade('failed')` and Q6 open. **Those cannot both be true**: `'failed'` erases the distinction the same sentence demands. Q6 is closed as a **yes** inside this design rather than carried. | Codex R1 **High** |
+| **§9 test 20 scoped to the three routes**, with `admin/backfill-chart-overlays` explicitly excluded and the reason given. v10's blanket "no file under `app/api/`" **would have failed on the first run** — `:158` calls the key, and §4.1 named it as one of four callers a version ago. | Codex R1 **Medium** |
+| **§13.5 gains PRE-§14 copy that names a surface that exists.** v10's interim copy was "the same, without the link" — still pointing at a Settings page that does not exist yet. It now points at the show page's AI tab, which is where a key can actually be entered today. | Codex R1 **Medium** |
+
+**★ The lesson, and it is the one worth keeping from this round:** all four
+findings are *internal* contradictions — §13's independence claim vs §13.4, §13.4's
+distinction requirement vs §13.5's converter row, test 20's scope vs §4.1's own
+list of callers, §13.5's copy vs §14's existence. **Nothing needed external
+knowledge to catch.** A self-sweep asking "does any section here contradict any
+other section here?" would have found every one, and §5.2a's own "self-sweep after
+the fold" note says to do exactly that. It was not done for v10.
+
 **v9 changelog** — §11 Q3 was reserved for Graham and he ruled on 2026-08-14.
 This is a **spec change to §5.2**, not a build deviation, so it lands before
 chunk 4 rather than in §12 after it:
@@ -1077,7 +1097,7 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
     `"Parser is not configured"`, **and** a store-unreachable failure is
     reported differently from a store-reachable-nothing-set one. A fix that only
     rewrites the copy passes the first half and rebuilds §4.1's ambiguity.
-18. **`convert` still DEGRADES when no key is available** after being moved onto
+18. **`convert` still DEGRADES when no key is available, carrying the distinct `no_key` reason** (amended v10.1) after being moved onto
     `resolveKeyMode`. *This is the test that stops "unify" from flattening §13.5* —
     the plausible-wrong refactor makes all three surfaces fail identically, and
     it would pass every other test here.
@@ -1085,11 +1105,40 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
     then a chat send, then a parse observe **the same** counter — decrementing by
     exactly the number of consuming calls. Extends test 8 to the two new callers;
     fails if either re-declares its own map.
-20. **No route resolves `claude_tryit_key` directly.** A source-level assertion
-    that no file under `app/api/` calls `getAdminConfig('claude_tryit_key')`.
-    Crude, and it is the only thing that catches the regression: every behavioural
-    test above passes against a route that resolves correctly *today* and drifts
-    tomorrow. Same wiring-guard technique used for `withStableIds` in #147.
+20. **Neither chart route resolves `claude_tryit_key` directly.** A source-level
+    assertion scoped to **exactly two files** — `app/api/charts/convert/route.ts`
+    and `app/api/charts/roadmap/parse/route.ts` — that neither calls
+    `getAdminConfig('claude_tryit_key')`. Crude, and it is the only thing that
+    catches the regression: every behavioural test above passes against a route
+    that resolves correctly *today* and drifts tomorrow. Same wiring-guard
+    technique used for `withStableIds` in #147.
+
+    > **★ Scoped at v10.1 — Codex R1 Medium, and v10's version would have failed
+    > on its first run.** v10 asserted "no file under `app/api/`", but
+    > `app/api/admin/backfill-chart-overlays/route.ts:158` calls that key too.
+    > **§4.1 listed it as one of four callers a version ago and I did not check
+    > my own document.** A test that fails immediately is the good outcome here;
+    > the bad one is an implementer "fixing" it by dragging a fourth surface into
+    > this build.
+    >
+    > **Backfill is deliberately excluded, and the reason is not convenience.**
+    > It is an **operator maintenance job behind admin auth, not a user-facing AI
+    > surface** — it has no end user, so there is no BYOA key to offer it and no
+    > quota that would mean anything. It is correct for it to use the platform
+    > key directly. Recorded so the exclusion reads as a decision rather than an
+    > oversight, which is exactly the ambiguity that produced this finding.
+
+**§13.4.2 — client key delivery (new at v10.1, Codex R1 High):**
+
+25. **`RoadmapBuilder` sends `Authorization: Bearer` when a key is stored, and
+    omits the header entirely when one is not.** Assert both halves. The
+    omit-when-absent case is load-bearing: `resolveKeyMode` treats *any* truthy
+    `clientKey` as BYOA and returns before consulting try-it, so sending an
+    empty string would route every keyless user down the BYOA branch and 401
+    them against try-it that works.
+26. **The same for `lib/chart-upload`**, asserted separately rather than by
+    analogy. These are two independent call sites and #140 is the recorded
+    instance of one call site being fixed while its twin was missed.
 
 **§14 — settings overlay (new in v10):**
 
@@ -1183,6 +1232,30 @@ rounds has been accepted, nothing declined, and the two behavior calls I was
 least sure of are now ratified rather than assumed. The remaining §11 questions
 are refinements, not blockers — none of them change the shape of the build.
 
+## 10e. Codex R1 on PR #150 (v10) — disposition
+
+**NOGO: 2 High + 2 Medium. All four accepted, nothing declined.**
+
+| Finding | Disposition |
+|---|---|
+| **High** — §13 claims independence from §14 while deferring its BYOA client half to §14.2, so work item 1 does not fix the reported symptom | **Accepted, and it was the most useful finding of the round.** §13 now includes **§13.4.2 client key delivery** — `RoadmapBuilder` and `chart-upload` read `lib/byoa-key-storage` directly. The confusion was mine and it was conceptual: §14 changes where a key is **entered**, §13.4.2 changes where a key is **read**, and I collapsed the two. Tests 25, 26. |
+| **High** — converter cannot both preserve `unconfigured`/`error` and keep `degrade('failed')`; Q6 left open | **Accepted. Q6 CLOSED inside this design**, answered yes: a distinct `no_key` `ConvertReason`. A requirement contradicted by the section implementing it is worse than no requirement — it reads as satisfied. Test 18 amended to assert the reason, not just that a degrade happened. |
+| **Medium** — test 20's `app/api/` scope catches `admin/backfill-chart-overlays` | **Accepted; it would have failed on the first run.** Scoped to the two chart routes, with backfill **explicitly excluded and the reason stated** — an operator job behind admin auth has no end user, so no BYOA key and no meaningful quota. **§4.1 listed that caller a version ago and I did not check my own document.** |
+| **Medium** — §13's pre-§14 copy still points at a Settings page that does not exist | **Accepted.** Interim copy now names the show page's AI tab — a surface that exists today and, after §13.4.2, genuinely works. It also *explains* the inconsistency Graham reported rather than papering over it. |
+
+**★ The disposition worth reading is the pattern, not the four rows: every
+finding is an INTERNAL contradiction.** §13 vs §13.4. §13.4 vs §13.5. Test 20 vs
+§4.1's own list. §13.5's copy vs §14's existence. **None required knowledge
+outside this file.** §5.2a's "self-sweep after the fold" note prescribes exactly
+the pass that would have caught all four, and it was not run on v10 — the doc
+grew two large sections in one sitting and I reviewed each against the code
+rather than against each other.
+
+**The rule this adds to §0's discipline:** a new section is walked against the
+seven invariants **and against every other section it references or is
+referenced by**, before the version ships. Cross-references are where a design
+lies to itself.
+
 ## 11. Questions raised for Codex R6 — ALL DISPOSED (v8)
 
 **Review closed at R6, no R7.** None of these is open against the design; 3 is the
@@ -1228,7 +1301,8 @@ only one that still needs a human call, and it is scoped to chunk 4.
 
 ## 13. One key resolver for all three AI surfaces (new in v10)
 
-**Work item 1. Independent of §14. This is the production defect.**
+**Work item 1. Independent of §14 — including its client half (§13.4.2), which
+v10 wrongly deferred to §14.2.** This is the production defect.
 
 ### 13.1 What is true today — measured, not recalled
 
@@ -1289,13 +1363,33 @@ the converter was not taken.
    No route calls `getAdminConfig('claude_tryit_key')` directly. After this,
    `agent/chat`, `charts/convert` and `charts/roadmap/parse` share one resolver,
    one `fallbackQuota`, and one `unconfigured`/`error` distinction.
-2. **Both routes accept a BYOA key** the way `agent/chat` does. The client half
-   of that is §14.2 — until a surface can *reach* a key, a BYOA-capable route
-   receives nothing, so §13 alone changes no user-visible behaviour for
-   BYOA holders. **Stated plainly so §13 is not mistaken for the whole fix.**
-3. **The `unconfigured` / `error` distinction propagates**, per §0 invariant 2.
-   These routes have never been able to express it; collapsing it here would
-   reintroduce the defect §4.1 exists to remove, one layer over.
+2. **Both routes accept a BYOA key, AND both clients send one.** *(Rewritten at
+   v10.1 — Codex R1 High. v10 deferred the client half to §14.2 while also
+   claiming §13 was independent and was the production fix. **Two of those three
+   could be true at once.** A route that accepts `Authorization` is inert while
+   no client sends one: `lib/chart-upload.ts:51` and
+   `components/RoadmapBuilder.tsx:91` send `Content-Type` and nothing else.)*
+
+   **§13.4.2 — the client half, and it is four lines, not a project.**
+   `RoadmapBuilder` and `chart-upload` import `readKey` from
+   `lib/byoa-key-storage` — the module that already exists, is already tested,
+   and today has exactly one reader — and send `Authorization: Bearer` when a key
+   is present, exactly as `page.tsx` does.
+
+   **This does not depend on §14 and must not wait for it.** §14 changes where a
+   key is *entered*; §13.4.2 changes where a key is *read*. Anyone who has ever
+   set a key on the show page gets a working chart builder the moment §13 ships.
+
+   **Scope honesty:** a user who has never visited the show page still has no
+   key, and no way to get one until §14. §13 is therefore a **complete fix for
+   BYOA holders and an honest failure for everyone else** — which is the most
+   §13 can be, and is materially more than v10 claimed for it.
+3. **The `unconfigured` / `error` distinction propagates on both routes**, per §0
+   invariant 2 — **and for the converter that requires a new `ConvertReason`, so
+   Q6 is closed here rather than carried (§13.5).** *(Codex R1 High: v10 demanded
+   the distinction and simultaneously kept the converter at `degrade('failed')`,
+   which erases it. A requirement contradicted by the section that implements it
+   is worse than no requirement — it reads as satisfied.)*
 4. **Quota applies to try-it on these routes too.** A chart parse on the
    platform key is a billable call and must not be free of the accounting the
    AI tab is subject to. **One call = one unit, no weighting** (Q5, ruled).
@@ -1310,7 +1404,7 @@ genuinely different right answers, and flattening them would be a regression:
 
 | Surface | Right failure | Why |
 |---|---|---|
-| Converter | **degrade to manual**, as today | A manual chart path exists and works. Erroring would take away a capability the user has. |
+| Converter | **degrade to manual, carrying a distinct `no_key` reason** | A manual chart path exists and works, so erroring would take away a capability the user has. But `degrade('failed')` says *the conversion failed* when the truth is *there was nothing to convert with* — a failure misreporting its own cause, which is the same defect as the 503. **Q6 closed: add the reason.** |
 | Roadmap builder | **honest, actionable error** | No manual path exists (§13.3), so there is nothing to degrade to. Pretending otherwise strands the user in Compose. |
 | AI designer | **states 5/6/7**, as today | Already designed; §14.3 only relocates the remedy. |
 
@@ -1320,10 +1414,24 @@ infrastructure and offers them nothing:**
 > **AI chart generation isn't available.** Add your Anthropic API key in Settings
 > to generate charts from a description. *(Settings →)*
 
-The `Settings →` affordance is §14.4's overlay. Before §14 ships, the same copy
-lands without the link, which is still strictly better than
-`"Parser is not configured"` — a sentence whose only possible reader is an
-operator, shown to someone who cannot operate anything.
+The `Settings →` affordance is §14.4's overlay.
+
+**★ Interim copy, for the window where §13 has shipped and §14 has not**
+*(Codex R1 Medium — v10 said "the same copy without the link", which still
+described a Settings page that does not exist. Copy must name a surface the
+reader can actually reach **today**):*
+
+> **AI chart generation isn't available.** If you have an Anthropic API key, add
+> it on a show's AI tab — it applies here too. *(Open a show →)*
+
+That is accurate the moment §13.4.2 ships, because the chart routes read the
+same stored key the show page writes. It also does something better than
+placeholder copy: **it explains the inconsistency Graham reported** — one key,
+entered in one odd place, working everywhere — instead of hiding it. §14 then
+replaces the sentence with the Settings link and the oddness goes away.
+
+Either version beats `"Parser is not configured"`: a sentence whose only possible
+reader is an operator, shown to someone who cannot operate anything.
 
 ### 13.6 Open questions
 
@@ -1345,11 +1453,22 @@ operator, shown to someone who cannot operate anything.
   becomes a change to one function, not an audit of every AI surface — which is
   the same argument §4 makes for one resolver, applied to the thing most likely
   to change next.
-- **Q6.** `convert` currently degrades identically for "no key" and "the model
-  failed" — both are `degrade('failed')` (`:105`, `:117`, `:123`, `:125`). Should
-  a missing key become its own `ConvertReason` so the UI can point at Settings
-  rather than saying conversion failed? **Recommend yes**, and it is the same
-  defect class as the 503: a failure that misreports its own cause.
+- **Q6 — CLOSED at v10.1, answered YES inside this design** (Codex R1 High
+  forced it: §13.4.3 cannot require the `unconfigured`/`error` distinction while
+  §13.5 keeps the converter at a reason that erases it).
+
+  `convert` degrades identically for "no key" and "the model failed" — both are
+  `degrade('failed')` (`:105`, `:117`, `:123`, `:125`). **A missing key becomes
+  its own `ConvertReason`**, so the UI can say what actually happened and point
+  the user at a key rather than reporting a conversion failure that never
+  occurred. Same defect class as the 503, and the same fix.
+
+  **Deliberately NOT a per-`KeyMode` enum.** `unconfigured` and `error` are an
+  *operator* distinction; to the user both mean "AI conversion is off right now".
+  One new reason, the distinction preserved in logs and in the route's own
+  branching per §0 invariant 2, and one user-facing message. Adding two reasons
+  would publish an infrastructure distinction to someone who cannot act on it —
+  which is §5's converge-the-copy-not-the-data rule.
 
 ---
 
