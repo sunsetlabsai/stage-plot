@@ -970,8 +970,10 @@ Both, and the per-account model stays backlog rather than being pretended at.
 ## 8. Explicitly not built
 
 - **Per-user server-side BYOA.** `user_secrets` (`001_initial_schema.sql:49-55`)
-  has RLS insert/update policies, no SELECT policy, and **no application code
-  whatsoever**. It should either be wired up in a later pass or dropped in a
+  has RLS insert/update policies (`:149`, `:153`), no SELECT policy, no DELETE
+  policy, and **no application code** — *scope: `grep -rn "user_secrets"` across
+  `app/ lib/ components/ tests/` returns nothing; all hits are in `docs/` and
+  `supabase/migrations/`.* It should either be wired up in a later pass or dropped in a
   migration; leaving a key-shaped table unused invites someone to assume keys are
   being stored. Backlog item, not this build.
 - Changing the model or token caps (`route.ts:8-11`).

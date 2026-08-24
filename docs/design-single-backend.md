@@ -74,10 +74,16 @@ Two supporting facts, neither decisive alone:
 
 | Key | Supabase equivalent | Status |
 |---|---|---|
-| `show:{slug}` | `shows` + `/api/shows/[owner]/[show]` | ✅ replaced — **the Redis route has ZERO callers and was never deleted** |
-| `quota:{ip}` | `tryit_quota` + `increment_tryit()` (`001_initial_schema.sql:82`, `:234`) | ⚠ **built, migrated, ZERO callers.** Code still uses Redis. **Not a drop-in — see §5.2** |
-| `admin:*` (3 keys) | **none** | ❗ the only genuinely Redis-only workload |
-| — | `user_secrets.claude_api_key` (`:49`) | ⚠ table exists, **zero application code** |
+**Every negative below states the search that establishes it.** All were re-run
+repo-wide across `app/`, `lib/`, `components/` and `tests/` on 2026-08-24; none
+is scoped to production code only unless it says so.
+
+| Key | Supabase equivalent | Status |
+|---|---|---|
+| `show:{slug}` | `shows` + `/api/shows/[owner]/[show]` | ✅ replaced — **the Redis route has ZERO callers and was never deleted.** *Scope: `grep -rn "api/show"` repo-wide excluding `node_modules`/`.next`/`docs`, plus a check that `next.config` declares no rewrites; the only hits are the route's own comments.* |
+| `quota:{ip}` | `tryit_quota` + `increment_tryit()` (`001_initial_schema.sql:82`, `:234`) | ⚠ **built, migrated, ZERO callers.** Code still uses Redis. **Not a drop-in — see §5.2.** *Scope: `grep -rn "increment_tryit\|tryit_quota"` across `app/ lib/ components/ tests/`; every hit is in `docs/` or the migration itself.* |
+| `admin:*` (3 keys) | **none** | ❗ the only genuinely Redis-only workload. *Scope: `grep -rn "admin_config\|app_config"` across `supabase/migrations/` returns nothing; the migration table list is `profiles, shows, show_collaborators, user_secrets, charts, chart_library, chart_calibration, songs, setlist_entries, tryit_quota`.* |
+| — | `user_secrets.claude_api_key` (`:49`) | ⚠ table exists, **zero application code.** *Scope: `grep -rn "user_secrets"` across `app/ lib/ components/ tests/` returns nothing; all hits are in `docs/` and `supabase/migrations/`.* |
 
 **⇒ The whole justification for the second vendor is three admin config keys** —
 `google_client_id`, `google_client_secret`, `claude_tryit_key` — and every one of
@@ -392,10 +398,16 @@ it becomes one of two backends behind one UI.
 `increment_tryit(p_ip_hash text, p_limit integer, p_window_days integer)` —
 `001_initial_schema.sql:234`. Atomic via `insert … on conflict do update`,
 `security definer`, and `revoke execute … from public, anon, authenticated` so
-only the service role may call it. **Zero callers.**
+only the service role may call it. **Zero callers** — *scope: `grep -rn
+"increment_tryit\|tryit_quota"` across `app/ lib/ components/ tests/`; every hit
+is in `docs/` or the migration that defines it.*
 
 **Privacy improvement, free:** the parameter is `p_ip_hash`. Redis stores the
-**raw IP** in `quota:{ip}`. Nothing hashes IPs today. Migrating removes raw IPs
+**raw IP** in `quota:{ip}`. **Nothing hashes IPs today** — *scope: `grep -rn
+"createHash\|sha256\|bcrypt\|hashIp\|ip_hash"` across `app/ lib/ tests/`; the
+only hashing in the repo is sha256 of PDF bytes for chart versioning
+(`lib/chart-calibration.ts:1167`), and every `getClientIp`/`getIp` consumer
+passes the address through unmodified.* Migrating removes raw IPs
 from persistence.
 
 ### 5.2 ★ It is NOT a drop-in — the peek path does not exist
