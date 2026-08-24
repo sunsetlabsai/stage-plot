@@ -6,24 +6,41 @@ Version: **v11** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5, v
 registry, v8 = review-closure bookkeeping, v9 = Q3 ruled: prompt cache + mid-stream error,
 v9.1 = Codex R1 on #137 folded + scope split, v10 = §8 bullet 3 promoted: key resolution
 unified across all three AI surfaces, and key ENTRY relocated to a settings overlay,
-**v11 = §14 EXTRACTED to `docs/design-single-backend.md`** — see the v11 changelog)
+**v11 = §14 REMOVED, pending re-spec in a document not yet written** — see the v11 changelog)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status, and — new at v10 —
 `/api/charts/roadmap/parse` and `/api/charts/convert`.
 **`/dashboard/settings` is NO LONGER in this document's scope (v11).**
 
-**v11 changelog — §14 is extracted, not deleted.**
+**v11 changelog — §14 is REMOVED from this document, pending re-spec elsewhere.**
 
 Graham ruled on **2026-08-24** that ShowRunr is **multi-tenant SaaS**, not
 instance-per-customer, and that the app consolidates onto **one backend
-(Supabase)** with Redis retired. §14 specified BYOA key entry storing to
-`localStorage` (§14.5: *"no settings framework, no schema, no persistence
-layer"*), which is a per-**browser** key. Under multi-tenant SaaS a key must
-follow the **account**, which makes §14 a `user_secrets` question — the same
-work as retiring Redis, not adjacent to it.
+(Supabase)** with Redis retired. The removed section specified BYOA key entry
+storing to `localStorage` — explicitly *"no settings framework, no schema, no
+persistence layer"* — which is a per-**browser** key. Under multi-tenant SaaS a
+key must follow the **account**, which makes it a `user_secrets` question — the
+same work as retiring Redis, not adjacent to it.
 
-**§14 therefore moves to `docs/design-single-backend.md` to be re-spec'd there.**
-It is NOT superseded and NOT cancelled; every ruling inside it (the overlay, the
-§5 remedy relocation, the BYOA-everywhere reversal) is carried over verbatim.
+**⚠ STATE THIS PRECISELY, because the first draft of this changelog did not
+(Codex R2 High).** As of this commit:
+
+- The section's full text exists **only in git history, at `a624650`**. It is
+  recoverable with
+  `git show a624650:docs/design-ai-key-availability.md`.
+- **`docs/design-single-backend.md` DOES NOT EXIST YET.** This commit modifies
+  one file and creates none. Every forward reference to that filename in this
+  document is a reference to an **intended** target, not an existing one.
+- Therefore the rulings it carried — the overlay (settled spec, for the
+  data-loss reason), the §5 states 5–7 remedy relocation, and the
+  BYOA-extends-to-every-surface reversal — are **preserved in history and NOT
+  YET re-spec'd anywhere.** They are not superseded and not cancelled, but
+  neither are they currently written down in any live document.
+
+**Consequence for merge, and it is a real one:** merging this document before
+`design-single-backend.md` exists puts dangling filename references on `main`,
+and leaves the settings-overlay work recorded nowhere but a commit SHA.
+**Sequencing is Graham's call** — either the two land together, or this merges
+first and the dangle is accepted as temporary and tracked.
 
 **§13 is unaffected and this document is now §13-only.** §13 specs resolution
 through `resolveKeyMode`, which reads through `readAdminConfig`'s existing
@@ -46,10 +63,10 @@ is now promoted to spec.
 |---|---|
 | **§13 NEW — all three AI surfaces resolve keys through `resolveKeyMode`.** `parse` (`:48`) and `convert` (`:104`) call `getAdminConfig('claude_tryit_key')` directly, so **neither has ever had a BYOA path**. §4's whole argument against duplicated resolution applies to them and was never extended to them. | §8 bullet 3, forced by a live defect |
 | **§13.3 — "parse degrades to the manual editor" is NOT AVAILABLE and is not specified.** `RoadmapBuilder` sets `view` only from `specToView(...)` (`:74` edit, `:104` parse). **There is no blank-spec entry point**, so the builder is unusable without a successful AI call. Manual-first roadmap building is a feature, and it is backlog. | Corrected against code before drafting |
-| ~~**§14 NEW — BYOA key ENTRY moves off the operational pages**~~ | **MOVED at v11 → `docs/design-single-backend.md`.** Rulings carried verbatim. |
-| ~~**§14.4 — the overlay is settled spec**~~ | **MOVED at v11.** Still settled; the data-loss reason (§5.2a's prompt cache is write-only in production) travels with it. |
-| ~~**§14.2 — with ONE key surface, BYOA extends to every AI surface**~~ | **MOVED at v11.** |
-| §5 — states 5, 6 and 7 keep their copy and lose their inline key input. **Remedy superseded — now specified in `design-single-backend.md`.** | Follows from §14, relocated at v11 |
+| ~~**§14 NEW — BYOA key ENTRY moves off the operational pages**~~ | **REMOVED at v11.** Text recoverable at `a624650`; **not yet re-spec'd in any live document.** |
+| ~~**§14.4 — the overlay is settled spec**~~ | **REMOVED at v11.** The ruling still stands and the data-loss reason (§5.2a's prompt cache is write-only in production) is restated in the §14 tombstone so it is not lost. |
+| ~~**§14.2 — with ONE key surface, BYOA extends to every AI surface**~~ | **REMOVED at v11.** Ruling restated in the tombstone. |
+| §5 — states 5, 6 and 7 keep their copy and lose their inline key input. **Remedy superseded, and the superseding spec is currently UNWRITTEN** — do not build these states' key field from this document. | Follows from the removed section, v11 |
 | §8 — bullet 3 promoted to §13; its `convert/route.ts:102` citation was stale (the call is `:104`, `:102` is a comment). | Promotion + re-verification |
 | §9 — tests 16–20, 25, 26 (§13). **Tests 21–24 moved with §14.** | Follows from §13 |
 
@@ -59,7 +76,7 @@ must not share a PR. At v11 the split became a document split as well:**
 | # | Work item | Ships as | Why separate |
 |---|---|---|---|
 | 1 | **§13** — unify key resolution; honest failure copy | **this document** | Strictly an improvement even if §14 never ships, and it is what is blocking production today. Depends on nothing in §14. |
-| 2 | ~~**§14** — settings overlay + the §5 relocation~~ | **`docs/design-single-backend.md`** (moved at v11) | §14's storage layer is a `user_secrets` decision under Graham's 2026-08-24 multi-tenant ruling, which is the same work as retiring Redis. Keeping it here would have left a known-stale section inside a mergeable document — the exact failure mode the 08-24 sweep exists to remove. |
+| 2 | ~~**§14** — settings overlay + the §5 relocation~~ | **NOT CURRENTLY SPEC'D** — removed at v11, intended target `docs/design-single-backend.md`, which does not exist yet | Its storage layer is a `user_secrets` decision under Graham's 2026-08-24 multi-tenant ruling, which is the same work as retiring Redis. Keeping it here would have left a known-stale section inside a mergeable document — the exact failure mode the 08-24 sweep exists to remove. |
 
 **v10.1 changelog** — Codex R1 on PR #150 returned **NOGO (2 High + 2 Medium)**.
 All four folded, nothing declined. **Every one of them is the same defect class:
@@ -421,7 +438,8 @@ and the endpoint returns no secret, so the exposure is a Redis read per request.
 ## 5. AI tab states
 
 > **★ v11 — the REMEDY in states 5, 6 and 7 is superseded, and the superseding
-> spec now lives in `docs/design-single-backend.md` (was §14.3 here until v11).**
+> superseding spec was removed at v11 and is not yet rewritten anywhere — see
+> the §14 tombstone below.**
 > Every state's condition, copy and `canSend` behaviour stands. What changes is
 > that the inline key input becomes an affordance opening the settings overlay.
 > **Do not build states 5–7's key field from this section alone, and do not
@@ -1172,14 +1190,16 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
     analogy. These are two independent call sites and #140 is the recorded
     instance of one call site being fixed while its twin was missed.
 
-**Tests 21–24 (settings overlay) MOVED at v11** to
-`docs/design-single-backend.md` along with §14. They are not cancelled — they
-pin §14.4's data-loss property and the no-duplicate-entry requirement, and they
-must be written against whatever storage that document settles on.
+**Tests 21–24 (settings overlay) REMOVED at v11** along with §14; their text is
+at `a624650` and they are **not yet restated in any live document.** Their
+intended home is `docs/design-single-backend.md`, which does not exist yet.
+They are not cancelled — they
+pin the overlay's data-loss property and the no-duplicate-entry requirement, and
+they must be written against whatever storage that document settles on.
 
 Target for **this** document: **~36 new tests** (v3 said ~13; 13a–13d, 14, 15 in
 v4; 13c-i/ii/iii in v5; 13e–13m in v9; 16–20, 25, 26 in v10/v10.1 — tests 21–24
-left with §14 at v11). **Split across work items — see §5.2a.0 and the scope
+removed with §14 at v11). **Split across work items — see §5.2a.0 and the scope
 split above**, so no single PR carries all of them.
 Delta reported on the build PR — measured on both refs immediately before the
 PR body is written, never quoted from notes.
@@ -1321,8 +1341,9 @@ only one that still needs a human call, and it is scoped to chunk 4.
 
 ## 13. One key resolver for all three AI surfaces (new in v10)
 
-**Work item 1. Independent of §14 — including its client half (§13.4.2), which
-v10 wrongly deferred to §14.2.** This is the production defect.
+**Work item 1. Independent of the settings-overlay work — including its client
+half (§13.4.2), which v10 wrongly deferred to that work.** This is the
+production defect.
 
 ### 13.1 What is true today — measured, not recalled
 
@@ -1384,7 +1405,8 @@ the converter was not taken.
    `agent/chat`, `charts/convert` and `charts/roadmap/parse` share one resolver,
    one `fallbackQuota`, and one `unconfigured`/`error` distinction.
 2. **Both routes accept a BYOA key, AND both clients send one.** *(Rewritten at
-   v10.1 — Codex R1 High. v10 deferred the client half to §14.2 while also
+   v10.1 — Codex R1 High. v10 deferred the client half to the settings-overlay
+   work while also
    claiming §13 was independent and was the production fix. **Two of those three
    could be true at once.** A route that accepts `Authorization` is inert while
    no client sends one: `lib/chart-upload.ts:51` and
@@ -1396,7 +1418,8 @@ the converter was not taken.
    and today has exactly one reader — and send `Authorization: Bearer` when a key
    is present, exactly as `page.tsx` does.
 
-   **This does not depend on §14 and must not wait for it.** §14 changes where a
+   **This does not depend on the settings-overlay work and must not wait for
+   it.** That work changes where a
    key is *entered*; §13.4.2 changes where a key is *read*. Anyone who has ever
    set a key on the show page gets a working chart builder the moment §13 ships.
 
@@ -1426,7 +1449,7 @@ genuinely different right answers, and flattening them would be a regression:
 |---|---|---|
 | Converter | **degrade to manual, carrying a distinct `no_key` reason** | A manual chart path exists and works, so erroring would take away a capability the user has. But `degrade('failed')` says *the conversion failed* when the truth is *there was nothing to convert with* — a failure misreporting its own cause, which is the same defect as the 503. **Q6 closed: add the reason.** |
 | Roadmap builder | **honest, actionable error** | No manual path exists (§13.3), so there is nothing to degrade to. Pretending otherwise strands the user in Compose. |
-| AI designer | **states 5/6/7**, as today | Already designed. The remedy relocation lives in `docs/design-single-backend.md` and does not change these states' conditions, copy or `canSend` behaviour — so §13 ships against them unchanged. |
+| AI designer | **states 5/6/7**, as today | Already designed. The remedy relocation was removed at v11 and is not yet re-spec'd, but it does not change these states' conditions, copy or `canSend` behaviour — so §13 ships against them unchanged either way. |
 
 **The roadmap builder's new copy replaces a message that tells the user about our
 infrastructure and offers them nothing:**
@@ -1435,9 +1458,10 @@ infrastructure and offers them nothing:**
 > to generate charts from a description. *(Settings →)*
 
 The `Settings →` affordance is the overlay specified in
-`docs/design-single-backend.md` (was §14.4 here until v11). **That copy is the
-eventual target and MUST NOT be built from this document** — §13 does not create
-a Settings page, so shipping this string would point users at a route that 404s.
+the settings overlay, which was removed at v11 and is not yet re-spec'd. **That
+copy is the eventual target and MUST NOT be built from this document** — §13
+does not create a Settings page, so shipping this string would point users at a
+route that 404s.
 
 **★ THE COPY §13 ACTUALLY SHIPS** *(at v11 this is no longer "interim" — it is
 what §13 builds, and it stands until the settings surface exists. Codex R1
@@ -1497,26 +1521,41 @@ reader is an operator, shown to someone who cannot operate anything.
 
 ---
 
-## 14. Key ENTRY moves to a settings overlay — MOVED AT v11
+## 14. Key ENTRY / settings overlay — REMOVED AT v11, NOT YET RE-SPEC'D
 
-**This section now lives in `docs/design-single-backend.md`.** It was not
-superseded, cancelled or de-scoped. Every ruling it carried is intact there:
-the overlay (settled spec, for the data-loss reason), the §5 states 5–7 remedy
-relocation, and the BYOA-extends-to-every-surface reversal.
+**Where the text is: `git show a624650:docs/design-ai-key-availability.md`.**
+That commit is the last one containing this section in full. It was not
+superseded, cancelled or de-scoped — but it is **not currently specified in any
+live document**, and pretending otherwise is what Codex R2 caught in the first
+draft of this block.
 
-**Why it moved (2026-08-24):** §14.5 specified `localStorage` — explicitly *"no
-settings framework, no schema, no persistence layer"* — which stores a key per
-**browser**. Graham ruled the same day that ShowRunr is **multi-tenant SaaS**,
-where a key must follow the **account**. That makes §14 a `user_secrets`
-question, and `user_secrets` is part of the single-backend consolidation, not of
+**Where it is going:** `docs/design-single-backend.md`. **That file does not
+exist yet.** Until it does, this heading is a tombstone with a forwarding
+address, not a redirect.
+
+**What must survive the re-spec** — the rulings, so they are not re-litigated:
+
+1. **The overlay is settled spec**, and the reason is data loss: navigating away
+   would destroy the restored composer text, because the prompt cache is
+   write-only in production (`page.tsx:47` imports only `rememberPrompt`;
+   `readPrompts` has zero callers).
+2. **The §5 states 5–7 remedy relocation** — conditions, copy and `canSend`
+   behaviour all stand; only the inline key input becomes an affordance.
+3. **BYOA extends to every AI surface**, reversed from try-it-only on the
+   grounds that one entry surface dissolves the stale-second-input objection.
+
+**Why it was removed (2026-08-24):** it specified `localStorage` — a
+per-**browser** key. Graham ruled the same day that ShowRunr is **multi-tenant
+SaaS**, where a key must follow the **account**. That makes it a `user_secrets`
+question, and `user_secrets` belongs to the single-backend consolidation, not to
 key resolution.
 
-**The collision that forced the move, recorded so it is not re-discovered:**
-§14.6 argued BYOA's reliability value is that `resolveKeyMode` returns **before
-touching any store** (`agent-key.ts:189-198`, pinned by
-`expect(redis.getCalls).toBe(0)`). Moving BYOA server-side breaks that property.
-With Redis retired, one Supabase outage would take shows, charts, auth, try-it
-**and** BYOA down together. `design-single-backend.md` must resolve that
+**★ The collision that forced the removal, recorded so it is not re-discovered:**
+the removed section argued BYOA's reliability value is that `resolveKeyMode`
+returns **before touching any store** (`agent-key.ts:189-198`, pinned by
+`expect(redis.getCalls).toBe(0)`). Moving BYOA server-side **breaks that
+property**. With Redis retired, one Supabase outage would take shows, charts,
+auth, try-it **and** BYOA down together. The re-spec must resolve that
 explicitly rather than inherit it.
 
 **§13 does not depend on any of this** and does not wait for it.
