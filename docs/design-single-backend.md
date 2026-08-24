@@ -3,9 +3,15 @@
 Status: **PRE-CODEX. Do not build to this text until it has been reviewed and
 Graham has given the go.**
 Version: **v1**
-Scope: `lib/admin-config.ts`, `lib/agent-key.ts`, `app/api/admin/settings`,
-`app/api/show` (deletion), `user_secrets`, `tryit_quota`, a new `admin_config`
-table, and a new `/dashboard/settings` surface.
+Scope: `lib/admin-config.ts`, `lib/agent-key.ts`, **deletion of `/admin` and
+`app/api/admin/settings`**, deletion of `app/api/show`, `user_secrets`,
+`tryit_quota`, new `admin_config` + `profiles.is_platform_admin`, Supabase Vault
+for all stored secrets, and a new `/dashboard/settings` carrying both a per-user
+BYOA section and a flag-gated platform section.
+
+**All five open questions were ruled by Graham on 2026-08-24 (§8). Nothing in
+this document is waiting on him**; the only unresolved item is the §8.1 spike,
+which gates chunk 3's implementation choice, not the design.
 
 **Lands together with `docs/design-ai-key-availability.md` v11+**, by Graham's
 ruling 2026-08-24. That document carries §13 (unify key resolution) and a §14
@@ -127,7 +133,8 @@ matters more as soon as there are paying customers.
 ```sql
 create table admin_config (
   key text primary key,
-  value text not null,
+  vault_secret_id uuid not null,   -- §8.1: the VALUE lives in Supabase Vault.
+                                   -- This table holds no credential.
   updated_at timestamptz default now(),
   updated_by uuid references auth.users(id)
 );
@@ -184,7 +191,11 @@ Moving admin config into Supabase forces a choice that did not previously exist:
 | **`profiles.is_platform_admin`** + policy | migration + bootstrap seeding | Multi-tenant-correct, auditable, revocable per person |
 
 **Recommendation: the flag.** A shared secret does not survive a second person,
-and `updated_by` is meaningless without an identity. **Q1 — Graham to rule.**
+and `updated_by` is meaningless without an identity.
+**✅ RULED by Graham 2026-08-24: add the flag.**
+
+**`/admin` is removed entirely** (§8 Q5) — platform config becomes a gated
+section of `/dashboard/settings`, and `ADMIN_SECRET` retires with the route.
 
 **Bootstrap:** the migration seeds `is_platform_admin = true` for the row whose
 `owner_slug` matches a value supplied at migration time. It must not be
@@ -298,6 +309,10 @@ it becomes one of two backends behind one UI.
 6. **Blast radius, stated so the risk is calibrated:** an Anthropic key is
    revocable by its owner and scoped to their own billing. That is not a reason
    for laxity; it is context for proportionate controls.
+7. **Encrypted at rest via Supabase Vault** (§8.1). `user_secrets` stores a
+   `vault_secret_id`, never the key. **Not** pgsodium, and **not** Transparent
+   Column Encryption — the vendor recommends against both. Gated on the §8.1
+   scale spike.
 
 ---
 
@@ -344,8 +359,8 @@ Redis, and resets every 30 days under Postgres.
 **Recommendation: take the fixed window.** It is what "50 messages per 30 days"
 actually means, and the sliding behaviour was an artifact of TTL being the only
 expiry Redis offers, not a decision anyone made. **But it is a real change in
-what users get and it must not be smuggled in as a port.** **Q2 — Graham to
-rule.**
+what users get and it must not be smuggled in as a port.**
+**✅ RULED by Graham 2026-08-24: fixed is fine.**
 
 ### 5.4 `fallbackQuota` stays
 
@@ -361,8 +376,8 @@ a safety valve, not an accounting system.
 1. **`app/api/show/route.ts`** — zero callers, verified by whole-repo sweep and
    by confirming no rewrites in `next.config`. Superseded 2026-05-25. Its
    `show:{slug}` data is **not migrated**: nothing reads it, the keys carried a
-   90-day TTL, and the store is currently unreachable. **§8 Q3 — confirm no
-   published-slug URLs of the old form are still circulating before this lands.**
+   90-day TTL, and the store is currently unreachable. **✅ RULED by Graham
+   2026-08-24: old slug URLs are not a concern.** No migration, no redirect.
 2. **`lib/admin-config.ts`'s Redis client** and the `__DISABLED__` sentinel.
 3. **`redis` from `package.json`** (`"redis": "^5.12.1"`) — the last import goes
    with chunk 3. **This is the check that proves the whole job is done:**
@@ -380,8 +395,8 @@ table nothing reads.
 | # | Chunk | Ships | Independent? |
 |---|---|---|---|
 | 0 | **Delete `/api/show`** | route deletion + a test asserting no `redis` import remains in `app/api/` | yes — pure removal, no dependency |
-| 1 | **`admin_config` table + RBAC** (§3) | migration, `readAdminConfig` swap, `/admin` route auth change, `admin_config` CRUD | depends on Q1 |
-| 2 | **Quota** (§5) | `peek_tryit` migration, `quota()` rewritten onto both functions, IP hashing | depends on Q2 |
+| 1 | **`admin_config` + Vault + `is_platform_admin`** (§3, §8.1) | migrations, `readAdminConfig` swap onto Vault, **`/admin` route DELETED**, platform section of `/dashboard/settings` gated on the flag | yes — all inputs ruled |
+| 2 | **Quota** (§5) | `peek_tryit` migration, `quota()` rewritten onto both functions, IP hashing, **fixed window** | yes — all inputs ruled |
 | 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display | depends on chunk 1 for `/dashboard/settings` scaffolding only |
 | 4 | **Settings overlay** (§4.3) | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated | depends on chunk 3 |
 | 5 | **Remove `redis`** | dependency removal, `REDIS_URL` retirement | depends on 0–3 |
@@ -392,25 +407,72 @@ interface, which §3.2 preserves exactly.
 
 ---
 
-## 8. Open questions
+## 8. Questions — ALL FIVE RULED by Graham, 2026-08-24
 
-- **Q1 — Admin RBAC (§3.3).** Shared secret retained, or
-  `profiles.is_platform_admin`? Recommend the flag. **Graham.**
-- **Q2 — Quota window (§5.3).** Accept the change from sliding to fixed?
-  Recommend yes. **Graham.**
-- **Q3 — Old slug URLs (§6.1).** Are any `show:{slug}` links still circulating
-  that would break on deletion? Nothing reads the route today, so they are
-  **already** broken — the question is whether anyone will report it. **Graham.**
-- **Q4 — Column-level encryption.** Should `user_secrets.claude_api_key` and
-  `admin_config.value` be encrypted at the application layer rather than relying
-  on Supabase's at-rest encryption? Disk encryption does not protect against a
-  leaked `service_role` key. **This question is deliberately unanswered: it turns
-  on what pgsodium / Supabase Vault currently offer, and this document will not
-  assert a vendor mechanism it has not verified.** Requires checking before it is
-  answered — see `feedback_verify_vendor_mechanisms`.
-- **Q5 — Does `/admin` remain a separate surface at all**, or does platform
-  admin become a section of `/dashboard/settings` gated on the flag? Out of
-  scope for v1; raised so it is not assumed either way.
+- **Q1 — Admin RBAC (§3.3). RULED: add the flag.** `profiles.is_platform_admin`,
+  not the shared secret.
+- **Q2 — Quota window (§5.3). RULED: fixed is fine.** The sliding→fixed change is
+  accepted deliberately, not ported silently.
+- **Q3 — Old slug URLs (§6.1). RULED: not a concern.** Chunk 0 deletes
+  `/api/show` without a migration or a redirect.
+- **Q4 — Encryption at rest for stored secrets. RULED: research it and
+  recommend.** Done — see §8.1, which is now normative, not a question.
+- **Q5 — Does `/admin` survive as its own surface? RULED: no.** Platform admin
+  becomes a **gated section of `/dashboard/settings`**. His reasoning:
+
+  > *"i think part of dashboard/settings not its own surface, since it's tenant
+  > not 'master' level surface in the commercial multi-tenant world."*
+
+  **⚠ One scope property this must preserve, stated because the page now mixes
+  two scopes on one surface:** the BYOA section is **per-user** (`auth.uid() =
+  user_id`, affects only that person), while the platform section is
+  **global** — editing `claude_tryit_key` affects *every* tenant. One page, two
+  blast radii. The platform section must be visually and textually distinct, and
+  gated on `is_platform_admin`, so nobody edits a global value believing it is
+  theirs. `/admin`'s route is removed; its shared-secret auth goes with it (§3.3).
+
+### 8.1 ★ Encryption at rest — researched 2026-08-24, VERIFIED against vendor docs
+
+**Ruling: use Supabase Vault for BOTH `admin_config.value` and the BYOA key.
+Do NOT use pgsodium or Transparent Column Encryption.**
+
+**What was verified, with the vendor's own words:**
+
+| Finding | Source |
+|---|---|
+| **pgsodium is pending deprecation.** *"Supabase does not recommend the usage of pgsodium as it will be deprecated. Use Supabase Vault instead."* | [pgsodium docs](https://supabase.com/docs/guides/database/extensions/pgsodium) |
+| **Transparent Column Encryption is explicitly not recommended:** *"we do not recommend using either on the Supabase platform due to their high level of operational complexity and misconfiguration risk."* Also removed from the table editor; SQL-only. | [pgsodium docs](https://supabase.com/docs/guides/database/extensions/pgsodium), [Discussion #18849](https://github.com/orgs/supabase/discussions/18849) |
+| **Vault survives the deprecation.** Its internal implementation shifts off pgsodium; **the interface and API stay unchanged.** | [Discussion #27109](https://github.com/orgs/supabase/discussions/27109) |
+| **Vault's encryption key lives OUTSIDE the database**, in Supabase's backend — so a database dump does not yield the key. Secrets are AEAD-encrypted via libsodium and decrypted on the fly through the `vault.decrypted_secrets` view, staying encrypted in **backups and replication streams**. | [Vault docs](https://supabase.com/docs/guides/database/vault) |
+
+**Storage shape:** `user_secrets` stores a `vault_secret_id uuid` rather than the
+key itself; likewise `admin_config`. Nothing in either table is a credential.
+
+**★ The honest limit, stated because the whole point of Q4 was not to overclaim:
+Vault does NOT protect against a compromised `service_role` key.** Our server
+must decrypt the key in order to call Anthropic, so whatever credential performs
+that read can, if leaked, yield plaintext. The docs do not claim otherwise; they
+say only *"protect access to this view with the appropriate SQL privilege
+settings at all times."*
+
+**What it therefore does and does not buy:**
+
+- **Protects against:** database dumps and backups, replication streams, a
+  leaked database password without the root key, and read access to the raw
+  table — all real, all common.
+- **Does not protect against:** a leaked `service_role` key used through the
+  application's own read path. That threat is addressed by §4.6's controls
+  (never logged, never in a JWT, write-only) and by §4.5 — **a user who chooses
+  "remember on this device" has no server-side exposure at all**, which remains
+  the single strongest privacy control available here.
+
+**⚠ One uncertainty that must be spiked before chunk 3 commits to this:** Vault's
+documented design centre is a *small number of app-level secrets*. Using it for
+**one row per user, unbounded**, is beyond the documented examples. The docs
+state no limit, but "no documented limit" is not "verified to scale". A spike
+must confirm per-user secrets behave under realistic row counts before chunk 3
+builds on it. **`admin_config` has no such doubt — three named secrets is exactly
+Vault's design centre.**
 
 ---
 
