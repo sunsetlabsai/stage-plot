@@ -1,11 +1,111 @@
 # Design — AI key availability: capability probe + real empty state
 
-Status: **IN BUILD (chunks 1–2 shipped; chunk 3 = PR #135). §5.2 REOPENED at v9 by
-Graham's Q3 ruling — chunk 4 must not be built to the v8 text.**
-Version: **v9.1** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5, v7 = invariant
+Status: **IN BUILD. §13 is NEW at v10 and is PRE-CODEX — do not build to this
+text until it has been through review and Graham has given the go.**
+Version: **v11** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5, v7 = invariant
 registry, v8 = review-closure bookkeeping, v9 = Q3 ruled: prompt cache + mid-stream error,
-v9.1 = Codex R1 on #137 folded + scope split)
-Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status
+v9.1 = Codex R1 on #137 folded + scope split, v10 = §8 bullet 3 promoted: key resolution
+unified across all three AI surfaces, and key ENTRY relocated to a settings overlay,
+**v11 = §14 REMOVED, pending re-spec in a document not yet written** — see the v11 changelog)
+Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status, and — new at v10 —
+`/api/charts/roadmap/parse` and `/api/charts/convert`.
+**`/dashboard/settings` is NO LONGER in this document's scope (v11).**
+
+**v11 changelog — §14 is REMOVED from this document, pending re-spec elsewhere.**
+
+Graham ruled on **2026-08-24** that ShowRunr is **multi-tenant SaaS**, not
+instance-per-customer, and that the app consolidates onto **one backend
+(Supabase)** with Redis retired. The removed section specified BYOA key entry
+storing to `localStorage` — explicitly *"no settings framework, no schema, no
+persistence layer"* — which is a per-**browser** key. Under multi-tenant SaaS a
+key must follow the **account**, which makes it a `user_secrets` question — the
+same work as retiring Redis, not adjacent to it.
+
+**⚠ STATE THIS PRECISELY, because the first draft of this changelog did not
+(Codex R2 High).** As of this commit:
+
+- The section's full text exists **only in git history, at `a624650`**. It is
+  recoverable with
+  `git show a624650:docs/design-ai-key-availability.md`.
+- **`docs/design-single-backend.md` NOW EXISTS**, created at `894c25c` on this
+  same branch. *(It did not at `d5f8a94`, when this changelog was first written;
+  the statement was true then and is corrected here rather than left to rot —
+  which is the whole failure mode this file's v11 history is a record of.)*
+  Forward references to that filename now resolve.
+- The **removed section's full text** — its argument, its citations, its
+  worked detail — exists **only at `a624650`**.
+- The **three rulings** it carried (the overlay as settled spec for the
+  data-loss reason; the §5 states 5–7 remedy relocation; the
+  BYOA-extends-to-every-surface reversal) are **restated in full in the §14
+  tombstone in this document**, so no ruling depends on git history or on
+  another file. They are not superseded and not cancelled. **As of `894c25c`
+  they are also RE-SPEC'D**, in `design-single-backend.md` §4.3, against the
+  multi-tenant `user_secrets` storage model that made the move necessary.
+
+**Consequence for merge:** merging this document alone would put dangling
+`design-single-backend.md` references on `main`. **RULED by Graham 2026-08-24:
+the two documents LAND TOGETHER**, so the dangle never reaches `main` — this
+document is not to be merged on its own.
+
+*(Superseded framing, kept because the reasoning is the record: this was posed as
+a choice — either the two land together, or this merges first and the dangle is
+accepted as temporary and tracked. Graham took the first.)*
+
+**§13 is unaffected and this document is now §13-only.** §13 specs resolution
+through `resolveKeyMode`, which reads through `readAdminConfig`'s existing
+store-then-env abstraction. Whether the store beneath is Redis, Supabase or
+env-only is invisible to this spec — the centralisation §4 argued for is what
+makes §13 backend-agnostic. **Nothing in the 2026-08-24 Redis findings changes a
+line of §13.**
+
+**v10 changelog** — this version exists because **§8's third out-of-scope bullet
+came true**. It read:
+
+> *"three AI surfaces fail three different ways. Unifying them is worth doing and
+> is **not** in this scope; flagged so it isn't forgotten."*
+
+Graham hit it in production on 2026-08-21: the chart builder returned
+`503 "Parser is not configured"` while the AI input list worked fine. The bullet
+is now promoted to spec.
+
+| Change | Source |
+|---|---|
+| **§13 NEW — all three AI surfaces resolve keys through `resolveKeyMode`.** `parse` (`:48`) and `convert` (`:104`) call `getAdminConfig('claude_tryit_key')` directly, so **neither has ever had a BYOA path**. §4's whole argument against duplicated resolution applies to them and was never extended to them. | §8 bullet 3, forced by a live defect |
+| **§13.3 — "parse degrades to the manual editor" is NOT AVAILABLE and is not specified.** `RoadmapBuilder` sets `view` only from `specToView(...)` (`:74` edit, `:104` parse). **There is no blank-spec entry point**, so the builder is unusable without a successful AI call. Manual-first roadmap building is a feature, and it is backlog. | Corrected against code before drafting |
+| ~~**§14 NEW — BYOA key ENTRY moves off the operational pages**~~ | **REMOVED at v11.** Its **rulings** are restated in the §14 tombstone below; its **full text** (argument, citations, worked detail) is only at `a624650`, and has **not been re-spec'd** into a replacement document. |
+| ~~**§14.4 — the overlay is settled spec**~~ | **REMOVED at v11.** The ruling still stands and the data-loss reason (§5.2a's prompt cache is write-only in production) is restated in the §14 tombstone so it is not lost. |
+| ~~**§14.2 — with ONE key surface, BYOA extends to every AI surface**~~ | **REMOVED at v11.** Ruling restated in the tombstone. |
+| §5 — states 5, 6 and 7 keep their copy and lose their inline key input. **Remedy superseded, and the superseding spec is currently UNWRITTEN** — do not build these states' key field from this document. | Follows from the removed section, v11 |
+| §8 — bullet 3 promoted to §13; its `convert/route.ts:102` citation was stale (the call is `:104`, `:102` is a comment). | Promotion + re-verification |
+| §9 — tests 16–20, 25, 26 (§13). **Tests 21–24 REMOVED with §14 at v11; original text at `a624650`, carried forward as `design-single-backend.md` §9 chunk 4's test requirement.** | Follows from §13 |
+
+**Scope split, ruled by Graham 2026-08-21 — §13 and §14 are TWO work items and
+must not share a PR. At v11 the split became a document split as well:**
+
+| # | Work item | Ships as | Why separate |
+|---|---|---|---|
+| 1 | **§13** — unify key resolution; honest failure copy | **this document** | Strictly an improvement even if §14 never ships, and it is what is blocking production today. Depends on nothing in §14. |
+| 2 | ~~**§14** — settings overlay + the §5 relocation~~ | **`docs/design-single-backend.md` §4** (created `894c25c`, same branch) | Its storage layer is a `user_secrets` decision under Graham's 2026-08-24 multi-tenant ruling, which is the same work as retiring Redis. Keeping it here would have left a known-stale section inside a mergeable document — the exact failure mode the 08-24 sweep exists to remove. |
+
+**v10.1 changelog** — Codex R1 on PR #150 returned **NOGO (2 High + 2 Medium)**.
+All four folded, nothing declined. **Every one of them is the same defect class:
+a claim in one section that another section quietly contradicts** — which is
+what this document exists to catch and, three times in v10, did not.
+
+| Change | Source |
+|---|---|
+| **§13.4.2 NEW — §13 now includes MINIMAL CLIENT KEY DELIVERY.** v10 claimed §13 "depends on nothing in §14" *and* that its BYOA half was §14.2 — so as written **work item 1 did not fix Graham's symptom.** A route that accepts `Authorization` is inert while no client sends one, and neither chart client sends any header but `Content-Type` (`chart-upload.ts:51`, `RoadmapBuilder.tsx:91`). Both now read `lib/byoa-key-storage` directly. | Codex R1 **High** |
+| **§13.5 + Q6 CLOSED — the converter gets a distinct `no_key` reason.** v10 required the `unconfigured`/`error` distinction to propagate on both chart routes while leaving the converter at `degrade('failed')` and Q6 open. **Those cannot both be true**: `'failed'` erases the distinction the same sentence demands. Q6 is closed as a **yes** inside this design rather than carried. | Codex R1 **High** |
+| **§9 test 20 scoped to the three routes**, with `admin/backfill-chart-overlays` explicitly excluded and the reason given. v10's blanket "no file under `app/api/`" **would have failed on the first run** — `:158` calls the key, and §4.1 named it as one of four callers a version ago. | Codex R1 **Medium** |
+| **§13.5 gains PRE-§14 copy that names a surface that exists.** v10's interim copy was "the same, without the link" — still pointing at a Settings page that does not exist yet. It now points at the show page's AI tab, which is where a key can actually be entered today. | Codex R1 **Medium** |
+
+**★ The lesson, and it is the one worth keeping from this round:** all four
+findings are *internal* contradictions — §13's independence claim vs §13.4, §13.4's
+distinction requirement vs §13.5's converter row, test 20's scope vs §4.1's own
+list of callers, §13.5's copy vs §14's existence. **Nothing needed external
+knowledge to catch.** A self-sweep asking "does any section here contradict any
+other section here?" would have found every one, and §5.2a's own "self-sweep after
+the fold" note says to do exactly that. It was not done for v10.
 
 **v9 changelog** — §11 Q3 was reserved for Graham and he ruled on 2026-08-14.
 This is a **spec change to §5.2**, not a build deviation, so it lands before
@@ -254,7 +354,7 @@ whole document exists to end, reintroduced one layer down.
 
 ```ts
 export type ConfigRead =
-  | { status: 'ok';    value: string; source: 'redis' | 'env' }
+  | { status: 'ok';    value: string; source: 'store' | 'env' }
   | { status: 'none' }                        // store reachable, nothing set
   | { status: 'error'; reason: string };      // store unreachable, no env fallback
 
@@ -345,6 +445,20 @@ and the endpoint returns no secret, so the exposure is a Redis read per request.
 ---
 
 ## 5. AI tab states
+
+> **★ v11 — the REMEDY in states 5, 6 and 7 is superseded, and the superseding
+> spec was removed at v11. See the §14 tombstone below for the ruling it
+> carried.**
+> Every state's condition, copy and `canSend` behaviour stands. What changes is
+> that the inline key input becomes an affordance opening the settings overlay.
+> **Do not build states 5–7's key field from this section alone, and do not
+> build it from §13 either — §13 does not touch key ENTRY.**
+>
+> §5's `page.tsx:5298` / `:5331` citations are v2-era and no longer resolve.
+> **The current mechanisms, stated here so this section does not depend on any
+> other document:** `canSendMessage({ availability, streaming, hasPendingTools })`
+> at `page.tsx:5528`, and `availability.showKeyField && !apiKey` at `:5529`,
+> both via `lib/agent-availability`.
 
 `AgentChat` gains `probe: 'loading' | Capabilities | 'error'`, fetched once on
 mount — **skipped entirely when a BYOA key is already in localStorage**, since
@@ -788,9 +902,15 @@ Requirements:
 
 1. **Source is invisible.** `getAllAdminConfig` (`lib/admin-config.ts:56-68`)
    returns `{ configured, masked }` — you cannot tell whether a configured key
-   came from Redis or from `CLAUDE_TRYIT_KEY`. Add `source: 'redis' | 'env' |
+   came from the store or from `CLAUDE_TRYIT_KEY`. Add `source: 'store' | 'env' |
    'none' | 'error'`, **derived from `readAdminConfig` (§4.1)** rather than
-   computed separately. Without it, §1's three cases stay indistinguishable from
+   computed separately.
+   *(v11.1: the discriminant is `'store'`, not `'redis'` — it names a role, not a
+   vendor, so it survives the backend change specified in
+   `design-single-backend.md` §3.2. **That document also rules `/admin` DELETED**
+   — this display moves to the flag-gated platform section of
+   `/dashboard/settings`. The gap and its fix are unchanged; only the surface
+   that renders it moves.)* Without it, §1's three cases stay indistinguishable from
    the UI, which is exactly the hole this whole document exists to close — and
    the `'error'` member is what §4.1 makes expressible for the first time.
 
@@ -850,18 +970,24 @@ Both, and the per-account model stays backlog rather than being pretended at.
 ## 8. Explicitly not built
 
 - **Per-user server-side BYOA.** `user_secrets` (`001_initial_schema.sql:49-55`)
-  has RLS insert/update policies, no SELECT policy, and **no application code
-  whatsoever**. It should either be wired up in a later pass or dropped in a
+  has RLS insert/update policies (`:149`, `:153`), no SELECT policy, no DELETE
+  policy, and **no application code** — *scope: `grep -rn "user_secrets"` across
+  `app/ lib/ components/ tests/` returns nothing; all hits are in `docs/` and
+  `supabase/migrations/`.* It should either be wired up in a later pass or dropped in a
   migration; leaving a key-shaped table unused invites someone to assume keys are
   being stored. Backlog item, not this build.
 - Changing the model or token caps (`route.ts:8-11`).
 - Any change to try-it quota accounting beyond §7's constant.
-- Per-owner BYOA for chart conversion — still the TODO at
-  `app/api/charts/convert/route.ts:102`. Note that route **silently degrades**
-  when no key is present (`:105`, `return degrade('failed')`), and
-  `/api/charts/roadmap/parse` returns a `503 "Parser is not configured"`
-  (`:48-51`). So three AI surfaces fail three different ways. Unifying them is
-  worth doing and is **not** in this scope; flagged so it isn't forgotten.
+- ~~Per-owner BYOA for chart conversion~~ — **PROMOTED TO §13 AT v10. No longer
+  out of scope.** This bullet said *"three AI surfaces fail three different ways.
+  Unifying them is worth doing and is not in this scope; flagged so it isn't
+  forgotten."* It was not forgotten, and on 2026-08-21 it became a production
+  defect. See §13.
+
+  *Two citation corrections made on promotion, recorded because this doc's rule
+  is that a restated citation is still a quote from memory:* the convert route's
+  key read is at **`:104`**, not `:102` (`:102` is the comment above it), and its
+  degrade is at `:105`. The parse route's `503` at `:48-51` still resolves.
 
 ---
 
@@ -1023,9 +1149,78 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
     `/admin` reports the store unreachable and disables save. Both at once, in
     one test, because the risk is that only one of them ships.
 
-Target: **~31 new tests** (v3 said ~13; 13a–13d, 14, 15 in v4; 13c-i/ii/iii in
-v5; 13e–13m in v9). **Split across three work items — see §5.2a.0**, so no
-single PR carries all of them.
+**§13 — one resolver, three surfaces (new in v10):**
+
+16. **A BYOA key on `/api/charts/roadmap/parse` is used, and the config store is
+    never consulted** — `expect(redis.getCalls).toBe(0)`, the same assertion that
+    guards the escape hatch on `agent/chat` (`tests/agent-key.test.ts`, and see
+    `agent-key.ts:189-198`). Without this the route can "support BYOA" while
+    still stalling on the store during the outage BYOA exists to survive.
+
+    *v11 note: the assertion is named for Redis because that is what the store is
+    today. It pins a property — **BYOA resolves without external I/O** — not a
+    vendor. `docs/design-single-backend.md` must keep the property true after the
+    store changes, and rename the assertion with it.*
+17. **Unconfigured parse returns the actionable copy, and `unconfigured` stays
+    distinct from `error`.** Assert both: the string is not
+    `"Parser is not configured"`, **and** a store-unreachable failure is
+    reported differently from a store-reachable-nothing-set one. A fix that only
+    rewrites the copy passes the first half and rebuilds §4.1's ambiguity.
+18. **`convert` still DEGRADES when no key is available, carrying the distinct `no_key` reason** (amended v10.1) after being moved onto
+    `resolveKeyMode`. *This is the test that stops "unify" from flattening §13.5* —
+    the plausible-wrong refactor makes all three surfaces fail identically, and
+    it would pass every other test here.
+19. **One `fallbackQuota` across all three routes.** With Redis down, a probe,
+    then a chat send, then a parse observe **the same** counter — decrementing by
+    exactly the number of consuming calls. Extends test 8 to the two new callers;
+    fails if either re-declares its own map.
+20. **Neither chart route resolves `claude_tryit_key` directly.** A source-level
+    assertion scoped to **exactly two files** — `app/api/charts/convert/route.ts`
+    and `app/api/charts/roadmap/parse/route.ts` — that neither calls
+    `getAdminConfig('claude_tryit_key')`. Crude, and it is the only thing that
+    catches the regression: every behavioural test above passes against a route
+    that resolves correctly *today* and drifts tomorrow. Same wiring-guard
+    technique used for `withStableIds` in #147.
+
+    > **★ Scoped at v10.1 — Codex R1 Medium, and v10's version would have failed
+    > on its first run.** v10 asserted "no file under `app/api/`", but
+    > `app/api/admin/backfill-chart-overlays/route.ts:158` calls that key too.
+    > **§4.1 listed it as one of four callers a version ago and I did not check
+    > my own document.** A test that fails immediately is the good outcome here;
+    > the bad one is an implementer "fixing" it by dragging a fourth surface into
+    > this build.
+    >
+    > **Backfill is deliberately excluded, and the reason is not convenience.**
+    > It is an **operator maintenance job behind admin auth, not a user-facing AI
+    > surface** — it has no end user, so there is no BYOA key to offer it and no
+    > quota that would mean anything. It is correct for it to use the platform
+    > key directly. Recorded so the exclusion reads as a decision rather than an
+    > oversight, which is exactly the ambiguity that produced this finding.
+
+**§13.4.2 — client key delivery (new at v10.1, Codex R1 High):**
+
+25. **`RoadmapBuilder` sends `Authorization: Bearer` when a key is stored, and
+    omits the header entirely when one is not.** Assert both halves. The
+    omit-when-absent case is load-bearing: `resolveKeyMode` treats *any* truthy
+    `clientKey` as BYOA and returns before consulting try-it, so sending an
+    empty string would route every keyless user down the BYOA branch and 401
+    them against try-it that works.
+26. **The same for `lib/chart-upload`**, asserted separately rather than by
+    analogy. These are two independent call sites and #140 is the recorded
+    instance of one call site being fixed while its twin was missed.
+
+**Tests 21–24 (settings overlay) REMOVED at v11** along with §14; their text is
+at `a624650`. They are **carried forward as `design-single-backend.md` §9 chunk
+4's test requirement** (created `894c25c`), which names them but does not
+reproduce their text — the originals remain the reference.
+They are not cancelled — they
+pin the overlay's data-loss property and the no-duplicate-entry requirement, and
+they must be written against whatever storage that document settles on.
+
+Target for **this** document: **~36 new tests** (v3 said ~13; 13a–13d, 14, 15 in
+v4; 13c-i/ii/iii in v5; 13e–13m in v9; 16–20, 25, 26 in v10/v10.1 — tests 21–24
+removed with §14 at v11). **Split across work items — see §5.2a.0 and the scope
+split above**, so no single PR carries all of them.
 Delta reported on the build PR — measured on both refs immediately before the
 PR body is written, never quoted from notes.
 
@@ -1097,6 +1292,30 @@ rounds has been accepted, nothing declined, and the two behavior calls I was
 least sure of are now ratified rather than assumed. The remaining §11 questions
 are refinements, not blockers — none of them change the shape of the build.
 
+## 10e. Codex R1 on PR #150 (v10) — disposition
+
+**NOGO: 2 High + 2 Medium. All four accepted, nothing declined.**
+
+| Finding | Disposition |
+|---|---|
+| **High** — §13 claims independence from §14 while deferring its BYOA client half to §14.2, so work item 1 does not fix the reported symptom | **Accepted, and it was the most useful finding of the round.** §13 now includes **§13.4.2 client key delivery** — `RoadmapBuilder` and `chart-upload` read `lib/byoa-key-storage` directly. The confusion was mine and it was conceptual: §14 changes where a key is **entered**, §13.4.2 changes where a key is **read**, and I collapsed the two. Tests 25, 26. |
+| **High** — converter cannot both preserve `unconfigured`/`error` and keep `degrade('failed')`; Q6 left open | **Accepted. Q6 CLOSED inside this design**, answered yes: a distinct `no_key` `ConvertReason`. A requirement contradicted by the section implementing it is worse than no requirement — it reads as satisfied. Test 18 amended to assert the reason, not just that a degrade happened. |
+| **Medium** — test 20's `app/api/` scope catches `admin/backfill-chart-overlays` | **Accepted; it would have failed on the first run.** Scoped to the two chart routes, with backfill **explicitly excluded and the reason stated** — an operator job behind admin auth has no end user, so no BYOA key and no meaningful quota. **§4.1 listed that caller a version ago and I did not check my own document.** |
+| **Medium** — §13's pre-§14 copy still points at a Settings page that does not exist | **Accepted.** Interim copy now names the show page's AI tab — a surface that exists today and, after §13.4.2, genuinely works. It also *explains* the inconsistency Graham reported rather than papering over it. |
+
+**★ The disposition worth reading is the pattern, not the four rows: every
+finding is an INTERNAL contradiction.** §13 vs §13.4. §13.4 vs §13.5. Test 20 vs
+§4.1's own list. §13.5's copy vs §14's existence. **None required knowledge
+outside this file.** §5.2a's "self-sweep after the fold" note prescribes exactly
+the pass that would have caught all four, and it was not run on v10 — the doc
+grew two large sections in one sitting and I reviewed each against the code
+rather than against each other.
+
+**The rule this adds to §0's discipline:** a new section is walked against the
+seven invariants **and against every other section it references or is
+referenced by**, before the version ships. Cross-references are where a design
+lies to itself.
+
 ## 11. Questions raised for Codex R6 — ALL DISPOSED (v8)
 
 **Review closed at R6, no R7.** None of these is open against the design; 3 is the
@@ -1140,7 +1359,244 @@ only one that still needs a human call, and it is scoped to chunk 4.
 
 ---
 
+## 13. One key resolver for all three AI surfaces (new in v10)
+
+**Work item 1. Independent of the settings-overlay work — including its client
+half (§13.4.2), which v10 wrongly deferred to that work.** This is the
+production defect.
+
+### 13.1 What is true today — measured, not recalled
+
+| Surface | Route | How it resolves a key | BYOA? | Failure when unconfigured |
+|---|---|---|---|---|
+| AI Show Designer | `/api/agent/chat` | **`resolveKeyMode`** (`lib/agent-key.ts:184`) | ✅ | 401 carrying `reason: 'unconfigured' \| 'error'` |
+| Chart converter | `/api/charts/convert` | `getAdminConfig('claude_tryit_key')` (`:104`) | ❌ | `degrade('failed')` (`:105`) — silent fall back to manual |
+| Roadmap builder | `/api/charts/roadmap/parse` | `getAdminConfig('claude_tryit_key')` (`:48`) | ❌ | `503 "Parser is not configured"` (`:50`) |
+
+Three surfaces, three resolutions, three failure modes — and **only one of them
+can accept a user's own key.** That is the whole defect, and §8 named it a
+version ago.
+
+**The symptom Graham hit is the exact shape this predicts.** His key worked in
+the AI input list and the chart builder returned 503, at the same moment, from
+the same browser. The input list works because `resolveKeyMode` takes the BYOA
+branch (`agent-key.ts:189-198`); the chart builder 503s because it only ever
+consults server-side config, which was unset in production. **Nothing was
+broken.** Two routes simply answer a different question.
+
+### 13.2 Why this was missed, and it is not an oversight
+
+§4 argued the resolution must live in one place, and gave a specific reason:
+`fallbackQuota` is a module-level `Map`, so two routes with two copies would
+count in two different maps and disagree during exactly the outage the fallback
+exists for. That argument was applied to the probe and the send path **and
+stopped there.** §4.1 even names the four `getAdminConfig` callers and says *"this
+design does not touch them."*
+
+So the extraction was correct and its blast radius was underestimated. **The
+lesson worth keeping: an argument for centralising a resolver is an argument
+about every caller of that resolver, not about the two you happened to be
+editing.** Same shape as §12's `resolveAvailability` finding — when you fix one
+input to a shared decision, enumerate all of them.
+
+### 13.3 ★ "Degrade to the manual editor" is NOT available — corrected before spec
+
+The obvious fix for the 503 is to copy the converter: degrade instead of
+erroring. **It cannot be specified, because the roadmap builder has no manual
+mode to degrade into.**
+
+`RoadmapBuilder` sets `view` in exactly two places — `specToView(editChart.spec)`
+when re-opening a saved chart (`:74`), and `specToView(data.spec)` after a
+successful parse (`:104`). There is **no blank-spec constructor and no
+manual-first entry**. A fresh build starts at Compose with `view === null`, and
+the only way out of Compose is the AI.
+
+⇒ **The roadmap builder is unusable without a working AI key, by construction.**
+That is a bigger statement than the bug report, and it belongs on the record.
+
+**Manual-first roadmap building is a FEATURE, not this fix.** Backlog. It is
+called out here so nobody reads §13.4 and wonders why the obvious symmetry with
+the converter was not taken.
+
+### 13.4 Spec
+
+1. **Both routes resolve through `resolveKeyMode(clientKey, ip, { consume })`.**
+   No route calls `getAdminConfig('claude_tryit_key')` directly. After this,
+   `agent/chat`, `charts/convert` and `charts/roadmap/parse` share one resolver,
+   one `fallbackQuota`, and one `unconfigured`/`error` distinction.
+2. **Both routes accept a BYOA key, AND both clients send one.** *(Rewritten at
+   v10.1 — Codex R1 High. v10 deferred the client half to the settings-overlay
+   work while also
+   claiming §13 was independent and was the production fix. **Two of those three
+   could be true at once.** A route that accepts `Authorization` is inert while
+   no client sends one: `lib/chart-upload.ts:51` and
+   `components/RoadmapBuilder.tsx:91` send `Content-Type` and nothing else.)*
+
+   **§13.4.2 — the client half, and it is four lines, not a project.**
+   `RoadmapBuilder` and `chart-upload` import `readKey` from
+   `lib/byoa-key-storage` — the module that already exists, is already tested,
+   and today has exactly one reader — and send `Authorization: Bearer` when a key
+   is present, exactly as `page.tsx` does.
+
+   **This does not depend on the settings-overlay work and must not wait for
+   it.** That work changes where a
+   key is *entered*; §13.4.2 changes where a key is *read*. Anyone who has ever
+   set a key on the show page gets a working chart builder the moment §13 ships.
+
+   **Scope honesty:** a user who has never visited the show page still has no
+   key, and no way to get one until §14. §13 is therefore a **complete fix for
+   BYOA holders and an honest failure for everyone else** — which is the most
+   §13 can be, and is materially more than v10 claimed for it.
+3. **The `unconfigured` / `error` distinction propagates on both routes**, per §0
+   invariant 2 — **and for the converter that requires a new `ConvertReason`, so
+   Q6 is closed here rather than carried (§13.5).** *(Codex R1 High: v10 demanded
+   the distinction and simultaneously kept the converter at `degrade('failed')`,
+   which erases it. A requirement contradicted by the section that implements it
+   is worse than no requirement — it reads as satisfied.)*
+4. **Quota applies to try-it on these routes too.** A chart parse on the
+   platform key is a billable call and must not be free of the accounting the
+   AI tab is subject to. **One call = one unit, no weighting** (Q5, ruled).
+   Consumption stays a property of `resolveKeyMode`'s `{ consume }` flag and is
+   never open-coded per route, so revisiting 1:1 before public launch is a
+   one-function change.
+
+### 13.5 Failure modes stay DIFFERENT on purpose
+
+"Unify" means one resolver, **not** one failure. The three surfaces have
+genuinely different right answers, and flattening them would be a regression:
+
+| Surface | Right failure | Why |
+|---|---|---|
+| Converter | **degrade to manual, carrying a distinct `no_key` reason** | A manual chart path exists and works, so erroring would take away a capability the user has. But `degrade('failed')` says *the conversion failed* when the truth is *there was nothing to convert with* — a failure misreporting its own cause, which is the same defect as the 503. **Q6 closed: add the reason.** |
+| Roadmap builder | **honest, actionable error** | No manual path exists (§13.3), so there is nothing to degrade to. Pretending otherwise strands the user in Compose. |
+| AI designer | **states 5/6/7**, as today | Already designed. The remedy relocation was removed at v11 and re-spec'd in `design-single-backend.md` §4.3, which does not change these states' conditions, copy or `canSend` behaviour — so §13 ships against them unchanged. |
+
+**The roadmap builder's new copy replaces a message that tells the user about our
+infrastructure and offers them nothing:**
+
+> **AI chart generation isn't available.** Add your Anthropic API key in Settings
+> to generate charts from a description. *(Settings →)*
+
+The `Settings →` affordance is the overlay specified in
+`docs/design-single-backend.md` §4.3. **That copy is the eventual target and
+MUST NOT be built from this document** — §13
+does not create a Settings page, so shipping this string would point users at a
+route that 404s.
+
+**★ THE COPY §13 ACTUALLY SHIPS** *(at v11 this is no longer "interim" — it is
+what §13 builds, and it stands until the settings surface exists. Codex R1
+Medium — v10 said "the same copy without the link", which still described a
+Settings page that does not exist. Copy must name a surface the reader can
+actually reach **today**):*
+
+> **AI chart generation isn't available.** If you have an Anthropic API key, add
+> it on a show's AI tab — it applies here too. *(Open a show →)*
+
+That is accurate the moment §13.4.2 ships, because the chart routes read the
+same stored key the show page writes. It also does something better than
+placeholder copy: **it explains the inconsistency Graham reported** — one key,
+entered in one odd place, working everywhere — instead of hiding it. The
+settings work then replaces the sentence with the Settings link and the oddness
+goes away.
+
+Either version beats `"Parser is not configured"`: a sentence whose only possible
+reader is an operator, shown to someone who cannot operate anything.
+
+### 13.6 Open questions
+
+- **Q5 — RULED by Graham 2026-08-21: 1:1. One call, one unit.** A chart parse
+  and a PDF conversion each consume **one** try-it message, exactly like a chat
+  turn, even though a vision call over a whole PDF costs materially more.
+  **No weighting, no per-surface cost model.** `TRYIT_QUOTA` stays the single
+  constant everything derives from (§4).
+
+  **His reasoning, recorded because it bounds how long this holds:** *"we'll have
+  to see how long this survives. For now, 1:1 is fine. I suspect that's not going
+  to be the case when we offer this publicly."* So 1:1 is a **UAT-window
+  decision**, in the same class as §7 raising the quota to 50 — right for the
+  current audience, explicitly expected to be revisited before public launch.
+
+  **The design consequence, so the revisit is cheap:** nothing may hard-code the
+  1:1 assumption. Quota consumption stays a property of `resolveKeyMode`'s
+  `{ consume: boolean }` and is never open-coded per route. A future weighting
+  becomes a change to one function, not an audit of every AI surface — which is
+  the same argument §4 makes for one resolver, applied to the thing most likely
+  to change next.
+- **Q6 — CLOSED at v10.1, answered YES inside this design** (Codex R1 High
+  forced it: §13.4.3 cannot require the `unconfigured`/`error` distinction while
+  §13.5 keeps the converter at a reason that erases it).
+
+  `convert` degrades identically for "no key" and "the model failed" — both are
+  `degrade('failed')` (`:105`, `:117`, `:123`, `:125`). **A missing key becomes
+  its own `ConvertReason`**, so the UI can say what actually happened and point
+  the user at a key rather than reporting a conversion failure that never
+  occurred. Same defect class as the 503, and the same fix.
+
+  **Deliberately NOT a per-`KeyMode` enum.** `unconfigured` and `error` are an
+  *operator* distinction; to the user both mean "AI conversion is off right now".
+  One new reason, the distinction preserved in logs and in the route's own
+  branching per §0 invariant 2, and one user-facing message. Adding two reasons
+  would publish an infrastructure distinction to someone who cannot act on it —
+  which is §5's converge-the-copy-not-the-data rule.
+
+---
+
+## 14. Key ENTRY / settings overlay — REMOVED AT v11, RE-SPEC'D ELSEWHERE
+
+**Where the original text is: `git show a624650:docs/design-ai-key-availability.md`.**
+That commit is the last one containing this section in full. It was not
+superseded, cancelled or de-scoped.
+
+**Where it is now: `docs/design-single-backend.md` §4**, created at `894c25c` on
+this branch. *(At `d5f8a94` that file did not exist and this block said so;
+corrected here as soon as it did. Claiming a file exists before it does is what
+Codex R2 caught in the first draft of this block, and the inverse — leaving a
+"does not exist" claim standing after it exists — is the same defect.)*
+
+The rulings below are **restated in full here anyway**, so no ruling depends on
+git history or on another file. Until the re-spec is reviewed, this heading
+remains a tombstone with a forwarding
+address, not a redirect.
+
+**What must survive the re-spec** — the rulings, so they are not re-litigated:
+
+1. **The overlay is settled spec**, and the reason is data loss: navigating away
+   would destroy the restored composer text, because **no product path reads the
+   prompt cache back.** `page.tsx:47` imports only `rememberPrompt`, and
+   `readPrompts`' sole production use is **internal de-duplication inside
+   `rememberPrompt` itself** (`lib/prompt-cache.ts:78`) — it is also exercised
+   throughout `tests/prompt-cache.test.ts`. *(Codex R7: earlier wording said
+   `readPrompts` "has zero callers", which is false as written. The property the
+   ruling depends on — nothing hands the text back to the UI — is unchanged.)*
+2. **The §5 states 5–7 remedy relocation** — conditions, copy and `canSend`
+   behaviour all stand; only the inline key input becomes an affordance.
+3. **BYOA extends to every AI surface**, reversed from try-it-only on the
+   grounds that one entry surface dissolves the stale-second-input objection.
+
+**Why it was removed (2026-08-24):** it specified `localStorage` — a
+per-**browser** key. Graham ruled the same day that ShowRunr is **multi-tenant
+SaaS**, where a key must follow the **account**. That makes it a `user_secrets`
+question, and `user_secrets` belongs to the single-backend consolidation, not to
+key resolution.
+
+**★ The collision that forced the removal, recorded so it is not re-discovered:**
+the removed section argued BYOA's reliability value is that `resolveKeyMode`
+returns **before touching any store** (`agent-key.ts:189-198`, pinned by
+`expect(redis.getCalls).toBe(0)`). Moving BYOA server-side **breaks that
+property**. With Redis retired, one Supabase outage would take shows, charts,
+auth, try-it **and** BYOA down together. The re-spec must resolve that
+explicitly rather than inherit it.
+
+**§13 does not depend on any of this** and does not wait for it.
+
+---
+
+---
+
 ## 12. Build deviations (folded back post-merge)
+
+*(§12 is kept last on purpose: it is an append-only log, and §13/§14 were
+inserted above it so future rows stay at the end of the file.)*
 
 This doc merged to main **during** the build, by decision on 2026-08-12: the
 alternative left `lib/agent-key.ts` and `tests/agent-key.test.ts` on main citing

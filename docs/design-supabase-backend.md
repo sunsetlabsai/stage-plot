@@ -1,7 +1,35 @@
 # Design: Supabase Backend — Shows, Charts, Sharing
 
-**Status:** Draft v1.4 — Post-adversarial review (14 findings across 3 rounds), awaiting build approval
-**Replaces:** Redis (slugs, admin config, try-it quota), Google Drive (charts), localStorage-as-primary
+> ## ⚠ PARTIALLY BUILT — read `docs/design-single-backend.md` first
+>
+> **Status below is STALE.** "Awaiting build approval" is wrong: shows, charts,
+> auth, songs, profiles and collaborators were all built and are in production.
+>
+> **What was NOT built, despite this document declaring it replaced:**
+> - `/api/show` (Redis slug CRUD) — the replacement shipped 2026-05-25; **the
+>   Redis route was never deleted and still sits in the tree with zero callers.**
+> - `tryit_quota` + `increment_tryit()` — migrated in `001_initial_schema.sql`,
+>   **never called.** Production still uses Redis `quota:{ip}`.
+> - `user_secrets` — table created, **zero application code**.
+> - Admin config — still Redis-only.
+>
+> **⇒ This document's `Replaces: Redis` claim has been TRUE ON PAPER AND FALSE IN
+> PRODUCTION since May 2026.** `docs/design-single-backend.md` executes it, and
+> supersedes two specifics here:
+>
+> - The **`user_secrets` policy block**. *(Corrected 2026-08-24: an earlier
+>   version of this notice said those write policies "were never created". **That
+>   was wrong** — `001_initial_schema.sql:149` and `:153` create them exactly as
+>   specified here.* They are being **dropped** by `design-single-backend.md`
+>   §4.2, because Supabase Vault requires server-side writes that a browser
+>   client cannot perform, and because no DELETE policy exists for the Remove
+>   action. *The write-only guarantee comes from the absent SELECT policy, which
+>   this document got right.)*
+> - The **"Env vars only"** row in the table below — Graham ruled 2026-08-24 for
+>   a Supabase `admin_config` table instead.
+
+**Status:** ~~Draft v1.4 — Post-adversarial review (14 findings across 3 rounds), awaiting build approval~~ — **superseded, see notice above**
+**Replaces:** Redis (slugs, admin config, try-it quota) — **aspirational; only partially executed, see notice above**, Google Drive (charts), localStorage-as-primary
 **Depends on:** None (greenfield backend addition)
 **Scope:** Single Supabase project replaces all current server-side storage. Anonymous viewing, authenticated editing, chart uploads, multi-show dashboard.
 
