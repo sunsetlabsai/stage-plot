@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import ts from 'typescript';
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 
@@ -29,82 +30,84 @@ function walk(dir: string): string[] {
 }
 
 /**
- * Runtime imports only — `import type` cannot pull a driver into the bundle.
+ * Runtime module specifiers, via the TypeScript compiler's own parser.
  *
- * Covers static `from '…'`, side-effect `import '…'`, CJS `require('…')`, and
- * DYNAMIC `import('…')` / `await import('…')`. The dynamic case was a real gap
- * (Codex): the first version of this guard matched the other three, so a route
- * could `await import('redis')` — a genuine runtime Redis import inside
- * app/api/ — while the test still passed.
+ * ★ THIS WAS A REGEX SCANNER AND IT WAS WRONG THREE ROUNDS RUNNING. Each round
+ * closed the hole Codex named and left an adjacent one: `require (` with a
+ * space, then an interstitial comment, then `import { type as foo }`, then a
+ * comment-stripper that ate `"http://"` and deleted the import after it.
  *
- * Quote styles include backticks, since require(`redis`) and import(`redis`)
- * are both valid and both evade a ['"]-only character class.
+ * The mistake was not any individual pattern — it was hand-rolling a TypeScript
+ * lexer in a TypeScript repo. `typescript` is already a devDependency. The
+ * compiler tokenises strings, comments, regex literals and template literals
+ * correctly BY DEFINITION, and it exposes `isTypeOnly` on both the import clause
+ * and each individual specifier, which is precisely the distinction three
+ * regex attempts kept getting wrong.
  *
- * ★ WHAT THIS CANNOT CATCH — stated in full rather than implied, because two
- * rounds of review found evasions I had claimed were already covered:
- *   - computed specifiers: `import(driverName)`, `require('re' + 'dis')`
- *   - an aliased require: `const r = require; r('redis')`
- *   - `createRequire(import.meta.url)('redis')`
+ * Type-only bindings are excluded because they are erased at compile time and
+ * cannot pull a driver into the bundle. A MIXED clause is NOT excluded:
+ * `import { createClient, type X }` is a runtime import.
  *
- * ⇒ This guard defends against ACCIDENTAL REINTRODUCTION — someone adding a
- * Redis import to a route without realising the retirement is underway. It is
- * NOT a control against deliberate evasion, and must not be cited as one.
- * The real guarantee is chunk 5 removing `redis` from package.json: once the
- * package is not installed, no specifier of any form resolves, and the failure
- * is a build error rather than a test that has to be clever enough.
+ * ★ REMAINING LIMIT — genuinely out of reach of a source-level check, not a
+ * gap I have merely failed to close yet: a specifier that is not a string
+ * literal. `import(driverName)`, `require('re' + 'dis')`, an aliased
+ * `const r = require; r('redis')`, `createRequire(import.meta.url)('redis')`.
+ * This guard defends against ACCIDENTAL REINTRODUCTION and must not be cited
+ * as a control against deliberate evasion. The real guarantee is chunk 5
+ * removing `redis` from package.json — then no specifier of any form resolves
+ * and the failure is a build error, not a test being clever enough.
  */
-/** Remove block and line comments so they can neither hide nor fake an import. */
-export function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, '');
-}
-
-/**
- * True when an import clause binds NOTHING at runtime.
- *
- * `import type { X }` and `import { type X }` are both erased by the compiler.
- * A MIXED clause is not: `import { createClient, type X }` still pulls the
- * module in. So the rule is "every binding is type-only", not "any binding is".
- */
-function isTypeOnlyClause(clause: string): boolean {
-  const c = clause.trim();
-  if (/^type\b/.test(c)) return true; // import type { X } / import type X
-  const braced = c.match(/^\{([\s\S]*)\}$/);
-  if (!braced) return false; // default or namespace binding — runtime
-  const entries = braced[1].split(',').map((e) => e.trim()).filter(Boolean);
-  if (entries.length === 0) return false; // `import {} from` — still a runtime import
-  return entries.every((e) => /^type\s/.test(e));
-}
-
-const Q = `['"\`]`;
-const SPEC = `([^'"\`]+)`;
-
-function importSpecifiers(rawSrc: string): Set<string> {
-  const src = stripComments(rawSrc);
+function importSpecifiers(src: string): Set<string> {
+  const sf = ts.createSourceFile('probe.ts', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const specs = new Set<string>();
 
-  // Static `import <clause> from '…'` / `export <clause> from '…'`. The clause is
-  // captured so type-only forms can be excluded by analysis rather than by a
-  // lookahead, which cannot see inline `{ type X }`.
-  const staticRe = new RegExp(
-    `\\b(?:import|export)\\s+([\\s\\S]*?)\\s+from\\s*${Q}${SPEC}${Q}`,
-    'g',
-  );
-  let m: RegExpExecArray | null;
-  while ((m = staticRe.exec(src))) {
-    if (!isTypeOnlyClause(m[1])) specs.add(m[2]);
-  }
+  const literal = (n: ts.Node | undefined): string | null =>
+    n && ts.isStringLiteralLike(n) ? n.text : null;
 
-  // Side-effect import, CJS require, and dynamic import. `\s*` before every call
-  // paren: `require ('redis')` is valid JS and was a real evasion (Codex).
-  const simple = [
-    new RegExp(`^\\s*import\\s*${Q}${SPEC}${Q}`, 'gm'),
-    new RegExp(`\\brequire\\s*\\(\\s*${Q}${SPEC}${Q}\\s*\\)`, 'g'),
-    new RegExp(`\\bimport\\s*\\(\\s*${Q}${SPEC}${Q}\\s*\\)`, 'g'),
-  ];
-  for (const re of simple) {
-    while ((m = re.exec(src))) specs.add(m[1]);
-  }
+  const visit = (node: ts.Node): void => {
+    // import … from '…'  /  import '…'
+    if (ts.isImportDeclaration(node)) {
+      const spec = literal(node.moduleSpecifier);
+      const clause = node.importClause;
+      // No clause at all => side-effect import, always runtime.
+      if (spec && (!clause || !isClauseTypeOnly(clause))) specs.add(spec);
+    }
+    // export … from '…'
+    else if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
+      const spec = literal(node.moduleSpecifier);
+      if (spec && !isExportTypeOnly(node)) specs.add(spec);
+    }
+    // import('…')  and  require('…')
+    else if (ts.isCallExpression(node)) {
+      const isDynamic = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
+      if (isDynamic || isRequire) {
+        const spec = literal(node.arguments[0]);
+        if (spec) specs.add(spec);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
   return specs;
+}
+
+/** `import type …`, or named bindings where EVERY specifier is type-only. */
+function isClauseTypeOnly(clause: ts.ImportClause): boolean {
+  if (clause.isTypeOnly) return true;
+  if (clause.name) return false; // default binding is runtime
+  const b = clause.namedBindings;
+  if (!b || ts.isNamespaceImport(b)) return false; // `* as ns` is runtime
+  if (b.elements.length === 0) return false; // `import {} from` still loads the module
+  return b.elements.every((e) => e.isTypeOnly);
+}
+
+function isExportTypeOnly(node: ts.ExportDeclaration): boolean {
+  if (node.isTypeOnly) return true;
+  const c = node.exportClause;
+  if (!c || !ts.isNamedExports(c)) return false; // `export * from` is runtime
+  if (c.elements.length === 0) return false;
+  return c.elements.every((e) => e.isTypeOnly);
 }
 
 describe('chunk 0 — the Redis show route is gone and stays gone', () => {
@@ -148,6 +151,16 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     // Mixed clause: one type binding does NOT make the import type-only.
     ["mixed type + runtime", `import { type RedisClientType, createClient } from 'redis';`],
     ["empty clause", `import {} from 'redis';`],
+    // `type` is a valid RUNTIME export name. `{ type as foo }` imports the
+    // binding named `type` — TypeScript reports isTypeOnly: false. A textual
+    // /^type\s/ check treated it as type-only and dropped it (Codex).
+    ["runtime export literally named `type`", `import { type as foo } from 'redis';`],
+    ["same via export-from", `export { type as foo } from 'redis';`],
+    // A string containing comment delimiters must not swallow the real import
+    // that follows it. The previous regex comment-stripper turned
+    // `const s = "http://"` into `const s = "http:` and ate the next line.
+    ["import after a string holding //", `const s = "http://"; const r = await import('redis');`],
+    ["import after a string holding /*", `const s = "/*"; const r = require('redis');`],
   ])('detects a redis import written as: %s', (_label, src) => {
     const specs = [...importSpecifiers(src)];
     expect(specs.some((s) => s === 'redis' || s.startsWith('redis/'))).toBe(true);
@@ -169,6 +182,25 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
   it('ignores an import that is itself commented out', () => {
     expect([...importSpecifiers(`// import { createClient } from 'redis';`)]).not.toContain('redis');
     expect([...importSpecifiers(`/* import 'redis'; */`)]).not.toContain('redis');
+  });
+
+  it('does not invent an import out of string contents', () => {
+    // The regex comment-stripper could splice two string literals into a fake
+    // import (Codex). A real parser sees two strings and no import at all.
+    const src = `const a = "import x /*"; const b = "*/ from 'redis'";`;
+    expect([...importSpecifiers(src)]).not.toContain('redis');
+  });
+
+  it('parses a route with JSX/generics/regex literals without choking', () => {
+    // A hand-rolled lexer trips on `/` in regex literals and `<` in generics.
+    // Pinned so a future "optimisation" back to regex scanning fails loudly.
+    const src = `
+      const re = /from 'redis'/g;
+      const pick = <T,>(x: T) => x;
+      const tpl = \`require('redis')\`;
+      export async function GET() { return Response.json({ ok: !!re && !!pick && !!tpl }); }
+    `;
+    expect([...importSpecifiers(src)]).not.toContain('redis');
   });
 
   it('the walker actually reaches route files (positive control)', () => {
