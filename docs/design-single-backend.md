@@ -303,10 +303,14 @@ which is what must not be lost. **The full original wording is at
 exact phrasing matters.
 
 1. **The overlay is settled spec**, and the reason is data loss: navigating away
-   from the show page destroys restored composer text, because the prompt cache
-   is write-only in production (`page.tsx:47` imports only `rememberPrompt`;
-   `readPrompts` has zero callers). A plain link would cause the exact data loss
-   §5.2a exists to prevent.
+   from the show page destroys restored composer text, because **no product path
+   reads the prompt cache back.** `page.tsx:47` imports only `rememberPrompt`,
+   and `readPrompts`' sole production use is **internal de-duplication inside
+   `rememberPrompt`** (`lib/prompt-cache.ts:78`); it is also exercised
+   throughout `tests/prompt-cache.test.ts`. A plain link would cause the exact
+   data loss §5.2a exists to prevent. *(Codex R7 Medium: earlier wording said
+   `readPrompts` "has zero callers" — false as written, and inherited unchecked
+   from the section this one restates. The ruling's basis is unaffected.)*
 2. **§5 states 5, 6 and 7 keep their condition, copy and `canSend` behaviour.**
    Only the inline key input becomes an affordance opening the overlay. Current
    mechanisms: `canSendMessage({ availability, streaming, hasPendingTools })` at

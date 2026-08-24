@@ -1559,9 +1559,13 @@ address, not a redirect.
 **What must survive the re-spec** — the rulings, so they are not re-litigated:
 
 1. **The overlay is settled spec**, and the reason is data loss: navigating away
-   would destroy the restored composer text, because the prompt cache is
-   write-only in production (`page.tsx:47` imports only `rememberPrompt`;
-   `readPrompts` has zero callers).
+   would destroy the restored composer text, because **no product path reads the
+   prompt cache back.** `page.tsx:47` imports only `rememberPrompt`, and
+   `readPrompts`' sole production use is **internal de-duplication inside
+   `rememberPrompt` itself** (`lib/prompt-cache.ts:78`) — it is also exercised
+   throughout `tests/prompt-cache.test.ts`. *(Codex R7: earlier wording said
+   `readPrompts` "has zero callers", which is false as written. The property the
+   ruling depends on — nothing hands the text back to the UI — is unchanged.)*
 2. **The §5 states 5–7 remedy relocation** — conditions, copy and `canSend`
    behaviour all stand; only the inline key input becomes an affordance.
 3. **BYOA extends to every AI surface**, reversed from try-it-only on the
