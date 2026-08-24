@@ -97,8 +97,13 @@ connected**, with both halves left live:
 3. `user_secrets` — flagged as dead in `design-ai-key-availability.md:189`
    (*"zero references in any `.ts`/`.tsx`"*), still dead.
 
-**A fourth, found while writing this document (§4.2):** `user_secrets`' RLS
-policies were specified and never created.
+**~~A fourth, found while writing this document (§4.2): `user_secrets`' RLS
+policies were specified and never created.~~ RETRACTED at v1.1 — they WERE
+created (`001_initial_schema.sql:149`, `:153`). The claim came from a
+same-line `grep` that could not match a multi-line `create policy`, whose empty
+result was then reported as proof of absence.** The correct state and the
+ruling that replaces it are in §4.2. *Recorded rather than deleted: a retracted
+finding in a document about undetected drift is itself worth seeing.*
 
 **★ And a fifth, which contains the other four.** `design-supabase-backend.md`'s
 own header reads **`Replaces: Redis (slugs, admin config, try-it quota)`** — the
@@ -148,23 +153,42 @@ alter table admin_config enable row level security;
 `updated_by` exists because a shared secret has no attribution and §3.3 removes
 it. It is nullable so the bootstrap migration can seed rows with no actor.
 
-### 3.2 `readAdminConfig` keeps its interface exactly
+### 3.2 `readAdminConfig` keeps its STATUS contract; the source discriminant is renamed
 
-This is the load-bearing compatibility claim, and it is why **§13 of
-`design-ai-key-availability.md` needs no changes**:
+**⚠ Corrected at v1.1 (Codex High). v1 claimed the interface was preserved
+"exactly" and that §13 therefore needed no changes, while simultaneously
+changing `source` from `'redis'` to `'db'` — and the paired document still
+specifies `source: 'redis' | 'env'` (`design-ai-key-availability.md:356`) and an
+admin state of `'redis' | 'env' | 'none' | 'error'` (`:905`). Two
+landing-together documents cannot give contradictory targets for one API.**
 
 ```ts
 export type ConfigRead =
-  | { status: 'ok'; value: string; source: 'db' | 'env' }
+  | { status: 'ok'; value: string; source: 'store' | 'env' }
   | { status: 'none' }
   | { status: 'error'; reason: string }
 ```
 
-Only the `source` discriminant changes (`'redis'` → `'db'`). The three statuses,
-their meanings, and the ordering subtlety — *a store failure with a valid env
-fallback is still `ok`/`env`, never `error`* — all survive verbatim. Four
-callers (`agent/chat`, `charts/convert`, `charts/roadmap/parse`,
-`admin/backfill-chart-overlays`) are unaffected.
+**The discriminant becomes `'store'`, not `'db'` and not `'redis'` — it names a
+ROLE, not a vendor.** That is the same correction test 16 already carries in the
+paired document: pin the property, not the product. A field called `'redis'`
+would have to change again the next time the store does.
+
+**Cost of the rename: zero behavioural surface.** `source` is **produced and
+never consumed** — the only occurrences in the codebase are its own type
+definition and the two `return` statements that populate it
+(`lib/admin-config.ts:33`, `:59`, `:74`). Nothing branches on it.
+
+**What genuinely survives, and is the real compatibility claim:** the three
+statuses, their meanings, and the ordering subtlety — *a store failure with a
+valid env fallback is still `ok`/`env`, never `error`*. Four callers
+(`agent/chat`, `charts/convert`, `charts/roadmap/parse`,
+`admin/backfill-chart-overlays`) branch only on `status` and are unaffected.
+
+**⇒ §13 requires ONE change, not zero: the discriminant rename.** Stating it as
+zero was the overclaim. The paired document is updated in the same commit so the
+two cannot diverge, and §6's admin-state display there is corrected for both the
+rename and the `/admin` deletion ruled in §8 Q5.
 
 **The `__DISABLED__` sentinel is DELETED.** It exists because Redis has no way to
 express "explicitly off" other than a magic value, and it caused a real
@@ -219,26 +243,57 @@ is the primary key referencing `auth.users`; the entire authorization rule is
 not attached to a show — so owner-vs-collaborator does not apply. Every user,
 owner or collaborator, has exactly one key that is theirs.
 
-### 4.2 ★ The policies were specified and never created — keep the stricter state
+### 4.2 `user_secrets`' actual RLS state — and why the write policies must GO
 
-`design-supabase-backend.md:130-140` specifies two write policies on
-`user_secrets`. **Neither exists.** `001_initial_schema.sql:55` enables RLS and
-creates **no policies at all**, with only a comment at `:148`.
+**⚠ Corrected at v1.1 (Codex High). The v1 text of this section asserted the two
+write policies "were never created" and that the table had "no policies at all".
+That was FALSE.** Both exist — `001_initial_schema.sql:149` (`"User write own
+secrets"`, insert) and `:153` (`"User update own secrets"`, update). The claim
+came from a `grep` that required `user_secrets` and `policy` on the **same
+line**, which a multi-line `create policy … on user_secrets …` can never
+satisfy; the empty result was then reported as proof of absence. **The
+conclusion §4.6 drew from it — that write-only is enforced by a zero-policy
+database — was therefore also false.**
 
-In Postgres, **RLS enabled with zero policies denies everything** to roles that
-do not bypass it. So today the table is `service_role`-only for **read and
-write** — *stricter* than designed.
+**The actual state, verified multi-line:**
 
-**Ruling: keep the stricter state, and record it as deliberate.** It forces BYOA
-writes through a server route using the admin client, which means the key never
-rides a client-side Supabase call. The designed insert/update policies are
-**not** to be added. This document supersedes
-`design-supabase-backend.md`'s §`user_secrets` policy block.
+| Operation | Policy | Effect on an authenticated browser client |
+|---|---|---|
+| `select` | **none** | **denied** — cannot read any key, including its own |
+| `insert` | `auth.uid() = user_id` | **allowed** |
+| `update` | `auth.uid() = user_id` | **allowed** |
+| `delete` | **none** | **denied** |
+
+**The write-only property SURVIVES, for a different reason than v1 claimed.** It
+comes from the **absence of a SELECT policy**, not from an absence of all
+policies. A user can write their key and can never read it back. `service_role`
+bypasses RLS and does the server-side read.
+
+**Ruling: DROP both write policies. Writes go through a server route.** The
+reason is not the retired premise — it is forced by two facts:
+
+1. **§8.1 puts the key in Supabase Vault.** An authenticated browser client
+   cannot create a Vault secret; only the server can. So a client-side insert
+   path cannot produce the encrypted representation the design requires.
+2. **There is no DELETE policy**, so §4.6's mandatory **Remove** action cannot
+   work client-side either.
+
+⇒ Writes must be server-side regardless. Leaving the insert/update policies in
+place preserves a **second, unused write path** that could store a plaintext key
+directly into a column the rest of the design assumes holds a `vault_secret_id`.
+That is a live foot-gun, not harmless dead weight.
+
+**This document supersedes `design-supabase-backend.md`'s `user_secrets` policy
+block** — not because the policies were never built, but because the Vault
+decision retires them.
 
 ### 4.3 The three §14 rulings, carried forward
 
-Restated verbatim so the re-spec cannot lose them. Full original text at
-`a624650:docs/design-ai-key-availability.md`.
+**Condensed restatements — not verbatim text** (Codex Low; v1 said "restated
+verbatim", and these are summaries). Each preserves the ruling and its reason,
+which is what must not be lost. **The full original wording is at
+`a624650:docs/design-ai-key-availability.md` and remains the reference** where
+exact phrasing matters.
 
 1. **The overlay is settled spec**, and the reason is data loss: navigating away
    from the show page destroys restored composer text, because the prompt cache
@@ -294,8 +349,11 @@ it becomes one of two backends behind one UI.
 ### 4.6 Security requirements — normative
 
 1. **Write-only.** No route, policy or UI path returns a stored key. Display is
-   masked (`sk-ant-…4f2a`) with **Replace** and **Remove** only. Enforced at the
-   database by §4.2's zero-policy state, not by route discipline alone.
+   masked (`sk-ant-…4f2a`) with **Replace** and **Remove** only. **Enforced at
+   the database by the absence of a SELECT policy on `user_secrets`**
+   (§4.2) — so even a browser client holding a valid session cannot read its own
+   key back. *(v1 attributed this to a "zero-policy state"; that was wrong. The
+   guarantee holds, but it comes from the missing SELECT policy specifically.)*
 2. **Never in a JWT or `user_metadata`** — `user_metadata` is user-editable and
    can ride in auth token claims (`design-supabase-backend.md:141`).
 3. **Never logged.** Explicit scrubbing on every error path that can carry a
@@ -516,9 +574,12 @@ separate work):
    `app/api/profiles/route.ts:12` is `POST /api/profiles — claim owner slug
    (onboarding)` — self-serve owners on one deployment.
 2. **`design-supabase-backend.md`** — its `user_secrets` policy block specifies
-   two write policies that were never created and are now explicitly **not to be
-   added** (§4.2). Its replacement table at `:45` is correct but was never
-   executed for `/api/show`; chunk 0 executes it.
+   two write policies that **were** created (`001_initial_schema.sql:149`,
+   `:153`) and are now **dropped** by §4.2, because Vault requires server-side
+   writes and no DELETE policy exists for the Remove action. *(v1 of this
+   document claimed they were never created. Retracted — see §4.2.)* Its
+   replacement table at `:45` is correct but was never executed for
+   `/api/show`; chunk 0 executes it.
 
 **Leaving these uncorrected is precisely the failure this document exists to
 end** (§2.1). A superseded document that still reads as current is how

@@ -15,10 +15,18 @@
 >
 > **⇒ This document's `Replaces: Redis` claim has been TRUE ON PAPER AND FALSE IN
 > PRODUCTION since May 2026.** `docs/design-single-backend.md` executes it, and
-> supersedes two specifics here: the **`user_secrets` policy block** (§4.2 —
-> those write policies were never created and are now deliberately *not* to be
-> added) and the **"Env vars only"** row in the table below (Graham ruled
-> 2026-08-24 for a Supabase `admin_config` table instead).
+> supersedes two specifics here:
+>
+> - The **`user_secrets` policy block**. *(Corrected 2026-08-24: an earlier
+>   version of this notice said those write policies "were never created". **That
+>   was wrong** — `001_initial_schema.sql:149` and `:153` create them exactly as
+>   specified here.* They are being **dropped** by `design-single-backend.md`
+>   §4.2, because Supabase Vault requires server-side writes that a browser
+>   client cannot perform, and because no DELETE policy exists for the Remove
+>   action. *The write-only guarantee comes from the absent SELECT policy, which
+>   this document got right.)*
+> - The **"Env vars only"** row in the table below — Graham ruled 2026-08-24 for
+>   a Supabase `admin_config` table instead.
 
 **Status:** ~~Draft v1.4 — Post-adversarial review (14 findings across 3 rounds), awaiting build approval~~ — **superseded, see notice above**
 **Replaces:** Redis (slugs, admin config, try-it quota) — **aspirational; only partially executed, see notice above**, Google Drive (charts), localStorage-as-primary

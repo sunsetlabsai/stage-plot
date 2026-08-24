@@ -354,7 +354,7 @@ whole document exists to end, reintroduced one layer down.
 
 ```ts
 export type ConfigRead =
-  | { status: 'ok';    value: string; source: 'redis' | 'env' }
+  | { status: 'ok';    value: string; source: 'store' | 'env' }
   | { status: 'none' }                        // store reachable, nothing set
   | { status: 'error'; reason: string };      // store unreachable, no env fallback
 
@@ -902,9 +902,15 @@ Requirements:
 
 1. **Source is invisible.** `getAllAdminConfig` (`lib/admin-config.ts:56-68`)
    returns `{ configured, masked }` — you cannot tell whether a configured key
-   came from Redis or from `CLAUDE_TRYIT_KEY`. Add `source: 'redis' | 'env' |
+   came from the store or from `CLAUDE_TRYIT_KEY`. Add `source: 'store' | 'env' |
    'none' | 'error'`, **derived from `readAdminConfig` (§4.1)** rather than
-   computed separately. Without it, §1's three cases stay indistinguishable from
+   computed separately.
+   *(v11.1: the discriminant is `'store'`, not `'redis'` — it names a role, not a
+   vendor, so it survives the backend change specified in
+   `design-single-backend.md` §3.2. **That document also rules `/admin` DELETED**
+   — this display moves to the flag-gated platform section of
+   `/dashboard/settings`. The gap and its fix are unchanged; only the surface
+   that renders it moves.)* Without it, §1's three cases stay indistinguishable from
    the UI, which is exactly the hole this whole document exists to close — and
    the `'error'` member is what §4.1 makes expressible for the first time.
 
