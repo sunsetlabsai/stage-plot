@@ -48,6 +48,21 @@ function walk(dir: string): string[] {
  * cannot pull a driver into the bundle. A MIXED clause is NOT excluded:
  * `import { createClient, type X }` is a runtime import.
  *
+ * ★ THE FIVE RUNTIME MODULE-LOAD FORMS, enumerated from the AST rather than
+ * discovered one review round at a time (which is how the previous four
+ * versions of this function were built, and why each had a neighbour):
+ *   1. ImportDeclaration                  import x from '…' / import '…'
+ *   2. ExportDeclaration + specifier      export … from '…' / export * from '…'
+ *   3. ImportEqualsDeclaration            import x = require('…')
+ *   4. CallExpression + ImportKeyword     import('…')
+ *   5. CallExpression + require           require('…')
+ *
+ * DELIBERATELY EXCLUDED, because none loads a module at runtime:
+ *   - ImportTypeNode — `let x: import('redis').RedisClientType`. Type position,
+ *     fully erased.
+ *   - JSDoc `@type {import('redis')}` — same, in a comment.
+ *   - `declare module 'redis'` — an ambient declaration, not a load.
+ *
  * ★ REMAINING LIMIT — genuinely out of reach of a source-level check, not a
  * gap I have merely failed to close yet: a specifier that is not a string
  * literal. `import(driverName)`, `require('re' + 'dis')`, an aliased
@@ -57,27 +72,42 @@ function walk(dir: string): string[] {
  * removing `redis` from package.json — then no specifier of any form resolves
  * and the failure is a build error, not a test being clever enough.
  */
-function importSpecifiers(src: string): Set<string> {
-  const sf = ts.createSourceFile('probe.ts', src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+function importSpecifiers(src: string, fileName = 'probe.ts'): Set<string> {
+  // ScriptKind from the extension: TSX parses `<T,>` differently from TS, so
+  // guessing here would mis-parse one or the other. app/api is all .ts today,
+  // but the walker accepts .tsx and that should not silently become wrong.
+  const kind = fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, kind);
   const specs = new Set<string>();
 
   const literal = (n: ts.Node | undefined): string | null =>
     n && ts.isStringLiteralLike(n) ? n.text : null;
 
   const visit = (node: ts.Node): void => {
-    // import … from '…'  /  import '…'
+    // (1) import … from '…'  /  import '…'
     if (ts.isImportDeclaration(node)) {
       const spec = literal(node.moduleSpecifier);
       const clause = node.importClause;
       // No clause at all => side-effect import, always runtime.
       if (spec && (!clause || !isClauseTypeOnly(clause))) specs.add(spec);
     }
-    // export … from '…'
+    // (2) export … from '…'  /  export * from '…'
     else if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
       const spec = literal(node.moduleSpecifier);
       if (spec && !isExportTypeOnly(node)) specs.add(spec);
     }
-    // import('…')  and  require('…')
+    // (3) import redis = require('…')  /  export import redis = require('…')
+    //     TS-only syntax. Parsed as ImportEqualsDeclaration wrapping an
+    //     ExternalModuleReference — neither an ImportDeclaration nor a
+    //     CallExpression, so a visitor that checks only those walks past it
+    //     (Codex). `import type x = require('…')` is erased and excluded.
+    else if (ts.isImportEqualsDeclaration(node)) {
+      if (!node.isTypeOnly && ts.isExternalModuleReference(node.moduleReference)) {
+        const spec = literal(node.moduleReference.expression);
+        if (spec) specs.add(spec);
+      }
+    }
+    // (4) import('…')  and  (5) require('…')
     else if (ts.isCallExpression(node)) {
       const isDynamic = node.expression.kind === ts.SyntaxKind.ImportKeyword;
       const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
@@ -123,7 +153,8 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
 
   it('no route under app/api/ imports redis directly', () => {
     const offenders = walk(API_DIR).filter((file) => {
-      const specs = importSpecifiers(readFileSync(file, 'utf8'));
+      // Filename passed so .tsx parses as TSX — see importSpecifiers.
+      const specs = importSpecifiers(readFileSync(file, 'utf8'), file);
       return [...specs].some((s) => s === 'redis' || s.startsWith('redis/'));
     });
 
@@ -161,6 +192,10 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     // `const s = "http://"` into `const s = "http:` and ate the next line.
     ["import after a string holding //", `const s = "http://"; const r = await import('redis');`],
     ["import after a string holding /*", `const s = "/*"; const r = require('redis');`],
+    // TS-only ImportEqualsDeclaration. Not an ImportDeclaration and not a
+    // CallExpression, so a visitor checking only those walks past it (Codex).
+    ["import-equals-require", `import redis = require('redis');`],
+    ["exported import-equals", `export import redis = require('redis');`],
   ])('detects a redis import written as: %s', (_label, src) => {
     const specs = [...importSpecifiers(src)];
     expect(specs.some((s) => s === 'redis' || s.startsWith('redis/'))).toBe(true);
@@ -175,6 +210,10 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     ["inline type, multiple", `import { type A, type B } from 'redis';`],
     ["export inline type", `export { type RedisClientType } from 'redis';`],
     ["export type clause", `export type { RedisClientType } from 'redis';`],
+    ["type-only import-equals", `import type redis = require('redis');`],
+    // Type-position import — erased, loads nothing.
+    ["import type node", `let x: import('redis').RedisClientType | null = null;`],
+    ["declare module", `declare module 'redis' { export const x: number; }`],
   ])('does NOT flag type-only form: %s', (_label, src) => {
     expect([...importSpecifiers(src)]).not.toContain('redis');
   });
