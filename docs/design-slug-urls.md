@@ -1,5 +1,24 @@
 # Slug URLs — Design Spec v1.0
 
+> ## ⛔ SUPERSEDED — THE ROUTE THIS SPECIFIES NO LONGER EXISTS
+>
+> **`app/api/show/route.ts` was DELETED 2026-08-24** (`docs/design-single-backend.md`
+> chunk 0). Every endpoint below — `POST /api/show`, `GET /api/show?slug=xxx`,
+> and the client fetch in the flow at the end — describes code that is gone.
+>
+> **What replaced it:** Supabase-backed owner-scoped slugs. Shows resolve at
+> `/[owner]/[show]` via `GET /api/shows/[owner]/[show]` (note the **plural**),
+> and the Redis `show:{slug}` namespace is retired with the rest of Redis.
+> The replacement shipped **2026-05-25 — one day after this spec's route was
+> built** — and the two lived side by side, both apparently current, for fifteen
+> months. That is exactly the drift `design-single-backend.md` §2.1 exists to end,
+> and this notice is here because the deletion without it would have left the
+> pattern intact.
+>
+> **Still accurate and worth keeping:** the Problem section. Base64 `?config=`
+> URLs really did break over SMS and really were stale snapshots, and the
+> owner-scoped replacement inherits that reasoning unchanged.
+
 ## Problem
 
 The original sharing mechanism encoded the entire show config as base64 in a `?config=` URL parameter. This produced URLs that were thousands of characters long, broke when sent via SMS/iMessage (truncated), and represented a stale snapshot — recipients got whatever was current at share time, not the latest version.

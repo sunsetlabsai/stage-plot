@@ -233,7 +233,7 @@ here is the evidence rather than the assurance:**
 | `generate_show` schema (`lib/agent.ts`) | one property |
 | **YAML export/import** (`lib/show-file.ts:47`, `:93`) | **none** — `monitors.map(({id, ...rest}) => rest)` spreads, and import passes `doc.monitors` through. Verified, not assumed. |
 | **Console export** (`lib/console-export.ts`) | **none** — does not touch monitors |
-| Dashboard, `app/api/show/route.ts` | **none** — pass-through |
+| Dashboard, ~~`app/api/show/route.ts`~~ | **none** — pass-through. *(That route was DELETED 2026-08-24, `design-single-backend.md` chunk 0; it had zero callers. The "none" verdict is unaffected — there is now not even a pass-through to check.)* |
 
 `grep -rn '\.needs\b'` returns exactly **three** call sites, all in `page.tsx`.
 That is the true surface: **five small edits, and the two paths that usually make

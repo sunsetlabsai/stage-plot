@@ -28,13 +28,34 @@ function walk(dir: string): string[] {
   return out;
 }
 
-/** Runtime imports only — `import type` cannot pull a driver into the bundle. */
+/**
+ * Runtime imports only — `import type` cannot pull a driver into the bundle.
+ *
+ * Covers static `from '…'`, side-effect `import '…'`, CJS `require('…')`, and
+ * DYNAMIC `import('…')` / `await import('…')`. The dynamic case was a real gap
+ * (Codex): the first version of this guard matched the other three, so a route
+ * could `await import('redis')` — a genuine runtime Redis import inside
+ * app/api/ — while the test still passed.
+ *
+ * Quote styles include backticks, since require(`redis`) and import(`redis`)
+ * are both valid and both evade a ['"]-only character class.
+ *
+ * KNOWN LIMIT, stated rather than implied: a COMPUTED specifier
+ * (`import(driverName)`) cannot be resolved statically by any regex. This guard
+ * catches literal specifiers. That is the honest boundary of a source-level
+ * check, and the reason chunk 5 removes the dependency from package.json
+ * outright — once it is not installed, no specifier of any form can resolve.
+ */
 function importSpecifiers(src: string): Set<string> {
   const specs = new Set<string>();
+  const Q = `['"\\\`]`;
   const patterns = [
-    /^\s*(?:import|export)(?!\s+type\b)[\s\S]*?\bfrom\s*['"]([^'"]+)['"]/gm,
-    /^\s*import\s*['"]([^'"]+)['"]/gm,
-    /\brequire\(\s*['"]([^'"]+)['"]\s*\)/g,
+    new RegExp(`^\\s*(?:import|export)(?!\\s+type\\b)[\\s\\S]*?\\bfrom\\s*${Q}([^'"\`]+)${Q}`, 'gm'),
+    new RegExp(`^\\s*import\\s*${Q}([^'"\`]+)${Q}`, 'gm'),
+    new RegExp(`\\brequire\\(\\s*${Q}([^'"\`]+)${Q}\\s*\\)`, 'g'),
+    // Dynamic import — `import('redis')`, `await import('redis')`. The negative
+    // lookbehind keeps this from double-matching the static `from` form.
+    new RegExp(`\\bimport\\s*\\(\\s*${Q}([^'"\`]+)${Q}\\s*\\)`, 'g'),
   ];
   for (const re of patterns) {
     let m: RegExpExecArray | null;
@@ -62,6 +83,28 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
 
     // Named, not just counted — a failure should say which file to look at.
     expect(offenders.map((f) => f.slice(REPO.length + 1))).toEqual([]);
+  });
+
+  it.each([
+    ["static default", `import redis from 'redis';`],
+    ["static named", `import { createClient } from 'redis';`],
+    ["static namespace", `import * as r from 'redis';`],
+    ["side-effect", `import 'redis';`],
+    ["re-export", `export { createClient } from 'redis';`],
+    ["require", `const r = require('redis');`],
+    ["require backtick", 'const r = require(`redis`);'],
+    ["dynamic import", `const r = await import('redis');`],
+    ["dynamic, no await", `void import('redis');`],
+    ["dynamic backtick", 'const r = await import(`redis`);'],
+    ["subpath", `import x from 'redis/dist/thing';`],
+  ])('detects a redis import written as: %s', (_label, src) => {
+    const specs = [...importSpecifiers(src)];
+    expect(specs.some((s) => s === 'redis' || s.startsWith('redis/'))).toBe(true);
+  });
+
+  it('does not flag `import type`, which cannot pull a driver into the bundle', () => {
+    const specs = [...importSpecifiers(`import type { RedisClientType } from 'redis';`)];
+    expect(specs).not.toContain('redis');
   });
 
   it('the walker actually reaches route files (positive control)', () => {
