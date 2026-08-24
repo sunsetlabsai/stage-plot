@@ -1,7 +1,27 @@
 # Design: Supabase Backend — Shows, Charts, Sharing
 
-**Status:** Draft v1.4 — Post-adversarial review (14 findings across 3 rounds), awaiting build approval
-**Replaces:** Redis (slugs, admin config, try-it quota), Google Drive (charts), localStorage-as-primary
+> ## ⚠ PARTIALLY BUILT — read `docs/design-single-backend.md` first
+>
+> **Status below is STALE.** "Awaiting build approval" is wrong: shows, charts,
+> auth, songs, profiles and collaborators were all built and are in production.
+>
+> **What was NOT built, despite this document declaring it replaced:**
+> - `/api/show` (Redis slug CRUD) — the replacement shipped 2026-05-25; **the
+>   Redis route was never deleted and still sits in the tree with zero callers.**
+> - `tryit_quota` + `increment_tryit()` — migrated in `001_initial_schema.sql`,
+>   **never called.** Production still uses Redis `quota:{ip}`.
+> - `user_secrets` — table created, **zero application code**.
+> - Admin config — still Redis-only.
+>
+> **⇒ This document's `Replaces: Redis` claim has been TRUE ON PAPER AND FALSE IN
+> PRODUCTION since May 2026.** `docs/design-single-backend.md` executes it, and
+> supersedes two specifics here: the **`user_secrets` policy block** (§4.2 —
+> those write policies were never created and are now deliberately *not* to be
+> added) and the **"Env vars only"** row in the table below (Graham ruled
+> 2026-08-24 for a Supabase `admin_config` table instead).
+
+**Status:** ~~Draft v1.4 — Post-adversarial review (14 findings across 3 rounds), awaiting build approval~~ — **superseded, see notice above**
+**Replaces:** Redis (slugs, admin config, try-it quota) — **aspirational; only partially executed, see notice above**, Google Drive (charts), localStorage-as-primary
 **Depends on:** None (greenfield backend addition)
 **Scope:** Single Supabase project replaces all current server-side storage. Anonymous viewing, authenticated editing, chart uploads, multi-show dashboard.
 

@@ -1,6 +1,33 @@
 # Design: Vercel KV Foundation + Admin Settings
 
-**Status:** Implemented (PRs #19, #20) — v1.1 + SDK correction
+> ## ⛔ SUPERSEDED 2026-08-24 — DO NOT BUILD FROM THIS DOCUMENT
+>
+> **Redis is being retired.** See `docs/design-single-backend.md`.
+>
+> **Two load-bearing premises here are dead:**
+>
+> 1. **"Why Redis over Postgres"** (§1) argues from the opening claim that
+>    *"ShowRunr currently has zero server-side persistence."* That was true on
+>    **2026-05-20**. Supabase landed **2026-05-25** — five days later. Every
+>    bullet in that comparison was written against a codebase with no database.
+> 2. **The "Hosting Model Context" section is wrong about the product.** It
+>    specs a **paid tier where each customer gets their own Vercel deployment**,
+>    which is the entire reason `/admin` exists as a globally-scoped config
+>    surface — a non-technical operator on their own deployment cannot set env
+>    vars. **Graham ruled 2026-08-24: multi-tenant SaaS, one deployment, no
+>    per-customer instances.** The code already agreed:
+>    `app/api/profiles/route.ts:12` is `POST /api/profiles — claim owner slug
+>    (onboarding)`, i.e. self-serve owners sharing one deployment.
+>
+> **What remains accurate and worth keeping:** the `admin:*` key namespace, the
+> `__DISABLED__` sentinel's *behaviour* (documented here, and the trap it caused
+> in production on 2026-08-24 — a cleared field suppressing the
+> `CLAUDE_TRYIT_KEY` env fallback), and the session-22 note recording that
+> `@vercel/kv` was sunset by Vercel in Dec 2024, forcing the PR #20 rewrite. The
+> sentinel itself is **deleted** by the new design: in Postgres, "off" is the
+> absence of a row.
+
+**Status:** ~~Implemented (PRs #19, #20) — v1.1 + SDK correction~~ — **SUPERSEDED, see notice above**
 **Depends on:** None (foundational infrastructure)
 **Scope:** Add Redis as the persistence layer; build an admin settings panel for operator self-service configuration; migrate try-it quota from in-memory to Redis
 
