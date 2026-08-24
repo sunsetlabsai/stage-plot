@@ -174,10 +174,17 @@ ROLE, not a vendor.** That is the same correction test 16 already carries in the
 paired document: pin the property, not the product. A field called `'redis'`
 would have to change again the next time the store does.
 
-**Cost of the rename: zero behavioural surface.** `source` is **produced and
-never consumed** — the only occurrences in the codebase are its own type
-definition and the two `return` statements that populate it
-(`lib/admin-config.ts:33`, `:59`, `:74`). Nothing branches on it.
+**Cost of the rename: four sites, no branching.** **No production code branches
+on `source`** — in `app/` and `lib/` it appears only in its own type definition
+and the two `return` statements that populate it (`lib/admin-config.ts:33`,
+`:59`, `:74`).
+
+**It IS asserted in tests**, and the rename must update them:
+`tests/agent-key.test.ts:78` expects `source: 'redis'` (`:88` and `:119` expect
+`'env'` and are unaffected). *(Codex R6 Medium: v1.1 said "produced and never
+consumed", scoping a search to `app lib` and stating the result as a claim about
+the whole codebase — the same unsupported-negative shape as the R5 High. The
+claim is true of production callers and was never true of the suite.)*
 
 **What genuinely survives, and is the real compatibility claim:** the three
 statuses, their meanings, and the ordering subtlety — *a store failure with a
@@ -540,7 +547,7 @@ Vault's design centre.**
 `app/api/` imports `redis` *(mirrors test 20's shape in the key-availability
 doc)*.
 
-**Chunk 1:** `readAdminConfig` returns `ok`/`db` from a row, `ok`/`env` from the
+**Chunk 1:** `readAdminConfig` returns `ok`/**`store`** from a row, `ok`/`env` from the
 env fallback when the row is absent, `none` when neither, `error` only when the
 database is unreachable **and** no env fallback exists. **A deleted row must
 allow the env fallback** — the regression test for the retired `__DISABLED__`
