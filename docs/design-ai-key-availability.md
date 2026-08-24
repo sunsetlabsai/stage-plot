@@ -30,17 +30,23 @@ same work as retiring Redis, not adjacent to it.
 - **`docs/design-single-backend.md` DOES NOT EXIST YET.** This commit modifies
   one file and creates none. Every forward reference to that filename in this
   document is a reference to an **intended** target, not an existing one.
-- Therefore the rulings it carried — the overlay (settled spec, for the
-  data-loss reason), the §5 states 5–7 remedy relocation, and the
-  BYOA-extends-to-every-surface reversal — are **preserved in history and NOT
-  YET re-spec'd anywhere.** They are not superseded and not cancelled, but
-  neither are they currently written down in any live document.
+- The **removed section's full text** — its argument, its citations, its
+  worked detail — exists **only at `a624650`**.
+- The **three rulings** it carried (the overlay as settled spec for the
+  data-loss reason; the §5 states 5–7 remedy relocation; the
+  BYOA-extends-to-every-surface reversal) are **restated in full in the §14
+  tombstone in this document**, so no ruling depends on git history or on an
+  unwritten file. They are not superseded and not cancelled — they are
+  **recorded but not yet re-spec'd**, which is a different thing from lost.
 
-**Consequence for merge, and it is a real one:** merging this document before
-`design-single-backend.md` exists puts dangling filename references on `main`,
-and leaves the settings-overlay work recorded nowhere but a commit SHA.
-**Sequencing is Graham's call** — either the two land together, or this merges
-first and the dangle is accepted as temporary and tracked.
+**Consequence for merge:** merging this document alone would put dangling
+`design-single-backend.md` references on `main`. **RULED by Graham 2026-08-24:
+the two documents LAND TOGETHER**, so the dangle never reaches `main` — this
+document is not to be merged on its own.
+
+*(Superseded framing, kept because the reasoning is the record: this was posed as
+a choice — either the two land together, or this merges first and the dangle is
+accepted as temporary and tracked. Graham took the first.)*
 
 **§13 is unaffected and this document is now §13-only.** §13 specs resolution
 through `resolveKeyMode`, which reads through `readAdminConfig`'s existing
@@ -63,12 +69,12 @@ is now promoted to spec.
 |---|---|
 | **§13 NEW — all three AI surfaces resolve keys through `resolveKeyMode`.** `parse` (`:48`) and `convert` (`:104`) call `getAdminConfig('claude_tryit_key')` directly, so **neither has ever had a BYOA path**. §4's whole argument against duplicated resolution applies to them and was never extended to them. | §8 bullet 3, forced by a live defect |
 | **§13.3 — "parse degrades to the manual editor" is NOT AVAILABLE and is not specified.** `RoadmapBuilder` sets `view` only from `specToView(...)` (`:74` edit, `:104` parse). **There is no blank-spec entry point**, so the builder is unusable without a successful AI call. Manual-first roadmap building is a feature, and it is backlog. | Corrected against code before drafting |
-| ~~**§14 NEW — BYOA key ENTRY moves off the operational pages**~~ | **REMOVED at v11.** Text recoverable at `a624650`; **not yet re-spec'd in any live document.** |
+| ~~**§14 NEW — BYOA key ENTRY moves off the operational pages**~~ | **REMOVED at v11.** Its **rulings** are restated in the §14 tombstone below; its **full text** (argument, citations, worked detail) is only at `a624650`, and has **not been re-spec'd** into a replacement document. |
 | ~~**§14.4 — the overlay is settled spec**~~ | **REMOVED at v11.** The ruling still stands and the data-loss reason (§5.2a's prompt cache is write-only in production) is restated in the §14 tombstone so it is not lost. |
 | ~~**§14.2 — with ONE key surface, BYOA extends to every AI surface**~~ | **REMOVED at v11.** Ruling restated in the tombstone. |
 | §5 — states 5, 6 and 7 keep their copy and lose their inline key input. **Remedy superseded, and the superseding spec is currently UNWRITTEN** — do not build these states' key field from this document. | Follows from the removed section, v11 |
 | §8 — bullet 3 promoted to §13; its `convert/route.ts:102` citation was stale (the call is `:104`, `:102` is a comment). | Promotion + re-verification |
-| §9 — tests 16–20, 25, 26 (§13). **Tests 21–24 moved with §14.** | Follows from §13 |
+| §9 — tests 16–20, 25, 26 (§13). **Tests 21–24 REMOVED with §14 at v11; text at `a624650`, not yet restated in any live document.** | Follows from §13 |
 
 **Scope split, ruled by Graham 2026-08-21 — §13 and §14 are TWO work items and
 must not share a PR. At v11 the split became a document split as well:**
@@ -438,16 +444,18 @@ and the endpoint returns no secret, so the exposure is a Redis read per request.
 ## 5. AI tab states
 
 > **★ v11 — the REMEDY in states 5, 6 and 7 is superseded, and the superseding
-> superseding spec was removed at v11 and is not yet rewritten anywhere — see
-> the §14 tombstone below.**
+> spec was removed at v11. See the §14 tombstone below for the ruling it
+> carried.**
 > Every state's condition, copy and `canSend` behaviour stands. What changes is
 > that the inline key input becomes an affordance opening the settings overlay.
 > **Do not build states 5–7's key field from this section alone, and do not
-> build it from §13 either — §13 does not touch key ENTRY.** §5's
-> `page.tsx:5298` / `:5331` citations are also v2-era and no longer resolve;
-> the current mechanisms (`canSendMessage` at `page.tsx:5528`,
-> `availability.showKeyField && !apiKey` at `:5529`, both via
-> `lib/agent-availability`) are named in the relocated section.
+> build it from §13 either — §13 does not touch key ENTRY.**
+>
+> §5's `page.tsx:5298` / `:5331` citations are v2-era and no longer resolve.
+> **The current mechanisms, stated here so this section does not depend on any
+> other document:** `canSendMessage({ availability, streaming, hasPendingTools })`
+> at `page.tsx:5528`, and `availability.showKeyField && !apiKey` at `:5529`,
+> both via `lib/agent-availability`.
 
 `AgentChat` gains `probe: 'loading' | Capabilities | 'error'`, fetched once on
 mount — **skipped entirely when a BYOA key is already in localStorage**, since
