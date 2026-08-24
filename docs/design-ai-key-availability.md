@@ -27,17 +27,20 @@ same work as retiring Redis, not adjacent to it.
 - The section's full text exists **only in git history, at `a624650`**. It is
   recoverable with
   `git show a624650:docs/design-ai-key-availability.md`.
-- **`docs/design-single-backend.md` DOES NOT EXIST YET.** This commit modifies
-  one file and creates none. Every forward reference to that filename in this
-  document is a reference to an **intended** target, not an existing one.
+- **`docs/design-single-backend.md` NOW EXISTS**, created at `894c25c` on this
+  same branch. *(It did not at `d5f8a94`, when this changelog was first written;
+  the statement was true then and is corrected here rather than left to rot —
+  which is the whole failure mode this file's v11 history is a record of.)*
+  Forward references to that filename now resolve.
 - The **removed section's full text** — its argument, its citations, its
   worked detail — exists **only at `a624650`**.
 - The **three rulings** it carried (the overlay as settled spec for the
   data-loss reason; the §5 states 5–7 remedy relocation; the
   BYOA-extends-to-every-surface reversal) are **restated in full in the §14
-  tombstone in this document**, so no ruling depends on git history or on an
-  unwritten file. They are not superseded and not cancelled — they are
-  **recorded but not yet re-spec'd**, which is a different thing from lost.
+  tombstone in this document**, so no ruling depends on git history or on
+  another file. They are not superseded and not cancelled. **As of `894c25c`
+  they are also RE-SPEC'D**, in `design-single-backend.md` §4.3, against the
+  multi-tenant `user_secrets` storage model that made the move necessary.
 
 **Consequence for merge:** merging this document alone would put dangling
 `design-single-backend.md` references on `main`. **RULED by Graham 2026-08-24:
@@ -74,7 +77,7 @@ is now promoted to spec.
 | ~~**§14.2 — with ONE key surface, BYOA extends to every AI surface**~~ | **REMOVED at v11.** Ruling restated in the tombstone. |
 | §5 — states 5, 6 and 7 keep their copy and lose their inline key input. **Remedy superseded, and the superseding spec is currently UNWRITTEN** — do not build these states' key field from this document. | Follows from the removed section, v11 |
 | §8 — bullet 3 promoted to §13; its `convert/route.ts:102` citation was stale (the call is `:104`, `:102` is a comment). | Promotion + re-verification |
-| §9 — tests 16–20, 25, 26 (§13). **Tests 21–24 REMOVED with §14 at v11; text at `a624650`, not yet restated in any live document.** | Follows from §13 |
+| §9 — tests 16–20, 25, 26 (§13). **Tests 21–24 REMOVED with §14 at v11; original text at `a624650`, carried forward as `design-single-backend.md` §9 chunk 4's test requirement.** | Follows from §13 |
 
 **Scope split, ruled by Graham 2026-08-21 — §13 and §14 are TWO work items and
 must not share a PR. At v11 the split became a document split as well:**
@@ -82,7 +85,7 @@ must not share a PR. At v11 the split became a document split as well:**
 | # | Work item | Ships as | Why separate |
 |---|---|---|---|
 | 1 | **§13** — unify key resolution; honest failure copy | **this document** | Strictly an improvement even if §14 never ships, and it is what is blocking production today. Depends on nothing in §14. |
-| 2 | ~~**§14** — settings overlay + the §5 relocation~~ | **NOT CURRENTLY SPEC'D** — removed at v11, intended target `docs/design-single-backend.md`, which does not exist yet | Its storage layer is a `user_secrets` decision under Graham's 2026-08-24 multi-tenant ruling, which is the same work as retiring Redis. Keeping it here would have left a known-stale section inside a mergeable document — the exact failure mode the 08-24 sweep exists to remove. |
+| 2 | ~~**§14** — settings overlay + the §5 relocation~~ | **`docs/design-single-backend.md` §4** (created `894c25c`, same branch) | Its storage layer is a `user_secrets` decision under Graham's 2026-08-24 multi-tenant ruling, which is the same work as retiring Redis. Keeping it here would have left a known-stale section inside a mergeable document — the exact failure mode the 08-24 sweep exists to remove. |
 
 **v10.1 changelog** — Codex R1 on PR #150 returned **NOGO (2 High + 2 Medium)**.
 All four folded, nothing declined. **Every one of them is the same defect class:
@@ -1199,8 +1202,9 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
     instance of one call site being fixed while its twin was missed.
 
 **Tests 21–24 (settings overlay) REMOVED at v11** along with §14; their text is
-at `a624650` and they are **not yet restated in any live document.** Their
-intended home is `docs/design-single-backend.md`, which does not exist yet.
+at `a624650`. They are **carried forward as `design-single-backend.md` §9 chunk
+4's test requirement** (created `894c25c`), which names them but does not
+reproduce their text — the originals remain the reference.
 They are not cancelled — they
 pin the overlay's data-loss property and the no-duplicate-entry requirement, and
 they must be written against whatever storage that document settles on.
@@ -1457,7 +1461,7 @@ genuinely different right answers, and flattening them would be a regression:
 |---|---|---|
 | Converter | **degrade to manual, carrying a distinct `no_key` reason** | A manual chart path exists and works, so erroring would take away a capability the user has. But `degrade('failed')` says *the conversion failed* when the truth is *there was nothing to convert with* — a failure misreporting its own cause, which is the same defect as the 503. **Q6 closed: add the reason.** |
 | Roadmap builder | **honest, actionable error** | No manual path exists (§13.3), so there is nothing to degrade to. Pretending otherwise strands the user in Compose. |
-| AI designer | **states 5/6/7**, as today | Already designed. The remedy relocation was removed at v11 and is not yet re-spec'd, but it does not change these states' conditions, copy or `canSend` behaviour — so §13 ships against them unchanged either way. |
+| AI designer | **states 5/6/7**, as today | Already designed. The remedy relocation was removed at v11 and re-spec'd in `design-single-backend.md` §4.3, which does not change these states' conditions, copy or `canSend` behaviour — so §13 ships against them unchanged. |
 
 **The roadmap builder's new copy replaces a message that tells the user about our
 infrastructure and offers them nothing:**
@@ -1466,8 +1470,8 @@ infrastructure and offers them nothing:**
 > to generate charts from a description. *(Settings →)*
 
 The `Settings →` affordance is the overlay specified in
-the settings overlay, which was removed at v11 and is not yet re-spec'd. **That
-copy is the eventual target and MUST NOT be built from this document** — §13
+`docs/design-single-backend.md` §4.3. **That copy is the eventual target and
+MUST NOT be built from this document** — §13
 does not create a Settings page, so shipping this string would point users at a
 route that 404s.
 
@@ -1529,16 +1533,21 @@ reader is an operator, shown to someone who cannot operate anything.
 
 ---
 
-## 14. Key ENTRY / settings overlay — REMOVED AT v11, NOT YET RE-SPEC'D
+## 14. Key ENTRY / settings overlay — REMOVED AT v11, RE-SPEC'D ELSEWHERE
 
-**Where the text is: `git show a624650:docs/design-ai-key-availability.md`.**
+**Where the original text is: `git show a624650:docs/design-ai-key-availability.md`.**
 That commit is the last one containing this section in full. It was not
-superseded, cancelled or de-scoped — but it is **not currently specified in any
-live document**, and pretending otherwise is what Codex R2 caught in the first
-draft of this block.
+superseded, cancelled or de-scoped.
 
-**Where it is going:** `docs/design-single-backend.md`. **That file does not
-exist yet.** Until it does, this heading is a tombstone with a forwarding
+**Where it is now: `docs/design-single-backend.md` §4**, created at `894c25c` on
+this branch. *(At `d5f8a94` that file did not exist and this block said so;
+corrected here as soon as it did. Claiming a file exists before it does is what
+Codex R2 caught in the first draft of this block, and the inverse — leaving a
+"does not exist" claim standing after it exists — is the same defect.)*
+
+The rulings below are **restated in full here anyway**, so no ruling depends on
+git history or on another file. Until the re-spec is reviewed, this heading
+remains a tombstone with a forwarding
 address, not a redirect.
 
 **What must survive the re-spec** — the rulings, so they are not re-litigated:
