@@ -9,7 +9,7 @@ import { PROBE_RATE_LIMIT_MAX } from '../lib/admin-rate-limit';
 // literal (§4, Codex R2 medium): §7 raises TRYIT_QUOTA to 50, and a test with 10 baked
 // into it would have gone green while disagreeing with the sender.
 
-const KEY_IN_STORE = 'sk-ant-redis-SUPERSECRET-aaaa';
+const KEY_CONFIGURED = 'sk-ant-redis-SUPERSECRET-aaaa';
 const KEY_IN_ENV = 'sk-ant-env-ALSOSECRET-bbbb';
 
 const redis = {
@@ -84,9 +84,9 @@ afterEach(() => {
   vi.doUnmock('@/lib/agent-key');
 });
 
-/** Configure try-it as it is in production: the key lives in Redis, not the env. */
-function keyInStore() {
-  redis.store.set('admin:claude_tryit_key', KEY_IN_STORE);
+/** Configure try-it as it is in production: the key is an environment variable. */
+function keyConfigured() {
+  process.env.CLAUDE_TRYIT_KEY = KEY_CONFIGURED;
 }
 
 const probe = async (ip: string = IP) => {
@@ -142,23 +142,10 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
     expect(redis.expireCalls).toBe(0);
   });
 
-  it('does not read the quota store on error either', async () => {
-    // Same rule one branch over: §4 says do not touch the store for BOTH none and
-    // error. Deliberately NOT using connectThrows — with connect broken, no read can
-    // be recorded at all, so the assertion would hold vacuously and pass against a
-    // route that read quota first. Here the store is reachable and only the CONFIG
-    // read fails, which is the one arrangement where a wasted quota read is visible.
-    redis.getThrowsFor.add('admin:claude_tryit_key');
-
-    expect((await (await probe()).json()).tryit).toBe('error');
-    expect(quotaReads()).toEqual([]);
-    expect(redis.incrCalls).toBe(0);
-  });
-
   it('DOES read the quota store once a key resolves, proving the assertion has teeth', async () => {
     // Without this, the two tests above would also pass against a route that never
     // consulted the quota store at all.
-    keyInStore();
+    keyConfigured();
 
     await probe();
 
@@ -166,7 +153,7 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
   });
 
   it('reports available with remaining reflecting an existing count (test 2)', async () => {
-    keyInStore();
+    keyConfigured();
     redis.store.set(`quota:${IP}`, '3');
 
     const body = await (await probe()).json();
@@ -176,7 +163,7 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
   });
 
   it('reports exhausted once usage reaches the quota constant (test 3)', async () => {
-    keyInStore();
+    keyConfigured();
     redis.store.set(`quota:${IP}`, String(TRYIT_QUOTA));
 
     const body = await (await probe()).json();
@@ -186,7 +173,7 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
   });
 
   it('reports exhausted past the quota too, never a negative remaining', async () => {
-    keyInStore();
+    keyConfigured();
     redis.store.set(`quota:${IP}`, String(TRYIT_QUOTA + 5));
 
     const body = await (await probe()).json();
@@ -198,7 +185,7 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
   it('serializes quota from the constant in every state (test 6d)', async () => {
     // Walked across states so a hard-coded literal cannot hide in one branch.
     const unconfigured = await (await probe()).json();
-    keyInStore();
+    keyConfigured();
     vi.resetModules();
     const available = await (await probe()).json();
 
@@ -209,7 +196,7 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
 
 describe('GET /api/agent/capabilities — the probe carries no key material (§9 test 4)', () => {
   it('leaks neither the key, its prefix nor its length, in any state', async () => {
-    keyInStore();
+    keyConfigured();
     process.env.CLAUDE_TRYIT_KEY = KEY_IN_ENV;
 
     for (const count of ['0', String(TRYIT_QUOTA)]) {
@@ -218,13 +205,13 @@ describe('GET /api/agent/capabilities — the probe carries no key material (§9
       const res = await probe();
       const raw = await res.text();
 
-      expect(raw).not.toContain(KEY_IN_STORE);
+      expect(raw).not.toContain(KEY_CONFIGURED);
       expect(raw).not.toContain(KEY_IN_ENV);
       expect(raw).not.toContain('SUPERSECRET');
       expect(raw).not.toContain('ALSOSECRET');
       expect(raw).not.toContain('sk-ant');
       // Length is a leak too — §4 forbids the length as explicitly as the value.
-      expect(raw).not.toContain(String(KEY_IN_STORE.length));
+      expect(raw).not.toContain(String(KEY_CONFIGURED.length));
       // Whatever it does carry is exactly the documented three fields.
       expect(Object.keys(JSON.parse(raw)).sort()).toEqual([
         'quota',
@@ -237,7 +224,7 @@ describe('GET /api/agent/capabilities — the probe carries no key material (§9
 
 describe('GET /api/agent/capabilities — a probe must not cost a message (§9 test 5)', () => {
   it('does not increment: probing twice leaves the count untouched', async () => {
-    keyInStore();
+    keyConfigured();
     redis.store.set(`quota:${IP}`, '4');
 
     const first = await (await probe()).json();
@@ -252,7 +239,7 @@ describe('GET /api/agent/capabilities — a probe must not cost a message (§9 t
   });
 
   it('does not seed a quota key for an IP that has never sent (test 5)', async () => {
-    keyInStore();
+    keyConfigured();
 
     const body = await (await probe('198.51.100.22')).json();
 
@@ -263,14 +250,17 @@ describe('GET /api/agent/capabilities — a probe must not cost a message (§9 t
 });
 
 describe('GET /api/agent/capabilities — §4.1 status-aware read (§9 tests 6, 6a–6c)', () => {
-  it('reports error, NOT unconfigured, when the store is unreachable with no env fallback (6a)', async () => {
+  // 6a — "reports error, NOT unconfigured, when the store is unreachable" — is
+  // DELETED, not ported. `tryit: 'error'` no longer exists (design-single-backend
+  // §3.2): config resolves from process.env, so there is no store whose outage
+  // the probe could report. The case below is what replaces it — an unreachable
+  // Redis is now indistinguishable from no Redis, which is the point.
+  it('reports unconfigured, never error, when Redis is unreachable and no env var is set', async () => {
     redis.connectThrows = true;
 
     const body = await (await probe()).json();
 
-    // This is the regression the v2 spec could not have passed: getAdminConfig
-    // swallowed the outage and returned null, identical to "nothing configured".
-    expect(body.tryit).toBe('error');
+    expect(body.tryit).toBe('unconfigured');
     expect(body.tryitRemaining).toBe(null);
   });
 
@@ -296,14 +286,17 @@ describe('GET /api/agent/capabilities — §4.1 status-aware read (§9 tests 6, 
     expect((await res.json()).tryit).toBe('available');
   });
 
-  it('treats the __DISABLED__ sentinel as unconfigured, keeping the env var suppressed (6c)', async () => {
+  // 6c INVERTS. The sentinel's whole purpose was suppressing the env fallback,
+  // and that trap is what the Redis strip removes: a value left behind in a store
+  // nobody reads must not be able to switch try-it off.
+  it('is not suppressed by a leftover __DISABLED__ in Redis (6c, inverted)', async () => {
     redis.store.set('admin:claude_tryit_key', '__DISABLED__');
     process.env.CLAUDE_TRYIT_KEY = KEY_IN_ENV;
 
     const body = await (await probe()).json();
 
-    expect(body.tryit).toBe('unconfigured');
-    expect(body.tryitRemaining).toBe(null);
+    expect(body.tryit).toBe('available');
+    expect(body.tryitRemaining).toBe(TRYIT_QUOTA);
   });
 
   it('reports unconfigured, not error, when REDIS_URL is absent entirely', async () => {
@@ -352,13 +345,13 @@ describe('GET /api/agent/capabilities — probe and send share ONE counter (§9 
 
 describe('GET /api/agent/capabilities — caching and rate limiting (§4)', () => {
   it('is no-store, because a cached "available" hides the empty state', async () => {
-    keyInStore();
+    keyConfigured();
 
     expect((await probe()).headers.get('Cache-Control')).toBe('no-store');
   });
 
   it('admits a full band behind one NAT before limiting', async () => {
-    keyInStore();
+    keyConfigured();
     const { GET } = await import('../app/api/agent/capabilities/route');
     const req = () =>
       new NextRequest('http://localhost/api/agent/capabilities', {
@@ -373,7 +366,7 @@ describe('GET /api/agent/capabilities — caching and rate limiting (§4)', () =
   });
 
   it('does NOT dress a rate limit up as one of the four states', async () => {
-    keyInStore();
+    keyConfigured();
     const { GET } = await import('../app/api/agent/capabilities/route');
     const req = () =>
       new NextRequest('http://localhost/api/agent/capabilities', {
@@ -394,7 +387,7 @@ describe('GET /api/agent/capabilities — caching and rate limiting (§4)', () =
   });
 
   it('limits per IP, so one hammering client cannot lock out the venue', async () => {
-    keyInStore();
+    keyConfigured();
     const { GET } = await import('../app/api/agent/capabilities/route');
     const at = (ip: string) =>
       new NextRequest('http://localhost/api/agent/capabilities', {

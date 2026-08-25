@@ -94,12 +94,10 @@ describe('resolveAvailability — the six states (§5)', () => {
     expect(a.showKeyField).toBe(true);
   });
 
-  it('state 6: a probe REPORTING error is also 6, not 5 (§5, Codex R1 medium)', () => {
-    const a = resolve({ probe: caps({ tryit: 'error', tryitRemaining: null }) });
-
-    expect(a.state).toBe(6);
-    expect(a.lead).toBe('checkFailed');
-  });
+  // "a probe REPORTING error is also 6" is DELETED with `tryit: 'error'`
+  // (design-single-backend §3.2) — the probe has no store outage left to report.
+  // State 6 itself is NOT gone: the test directly above still reaches it from a
+  // probe that failed to answer, which is now its only producer.
 
   it('keeps 5 and 6 distinct in the DATA even though the user sees one thing', () => {
     const five = resolve({ probe: caps({ tryit: 'unconfigured', tryitRemaining: null }) });

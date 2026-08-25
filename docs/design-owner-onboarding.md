@@ -4,6 +4,31 @@
 **Date:** 2026-06-04
 **Depends on:** Owner namespacing (PR #57, migration 005)
 
+> ## ⛔ SUPERSEDED IN PART — the admin auth model in this document is DEAD
+>
+> Superseded by `design-single-backend.md` §3.3a/§3.3b, shipped in its chunk-1
+> build. This document is otherwise still current; only the auth is wrong.
+>
+> **`ADMIN_SECRET` no longer exists.** `/api/admin/owners` — and the other three
+> `/api/admin/*` routes — authenticate against a platform super-admin session:
+> server-side `supabase.auth.getUser()`, compared case-insensitively against
+> `PLATFORM_ADMIN_EMAIL`, failing closed on any missing input. There is no bearer
+> token and no shared secret. Wherever this document says
+> `Authorization: Bearer {ADMIN_SECRET}` (`:55`, `:82`), read "the super-admin's
+> session cookie."
+>
+> **§61's KV-independence rationale is retired, deliberately.** This document had
+> `/api/admin/owners` validate its secret independently of KV so the owner list
+> still rendered when settings 503'd on an unreachable store. There is no store:
+> both routes now read the same environment and the same Postgres, so no
+> partial-availability case remains to preserve. It was a workaround for two
+> stores, not a requirement — recorded here because silently deleting a
+> degradation path is how the next reader concludes it was never wanted.
+>
+> **The `/admin` settings surface is now READ-ONLY.** `PUT /api/admin/settings`
+> was deleted, not re-authed: config lives in environment variables, so there is
+> nothing to write. Changing a value is a Vercel env edit plus a redeploy.
+
 ---
 
 ## Problem

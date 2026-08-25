@@ -8,10 +8,45 @@ v9.1 = Codex R1 on #137 folded + scope split, v10 = §8 bullet 3 promoted: key r
 unified across all three AI surfaces, and key ENTRY relocated to a settings overlay,
 **v11 = §14 REMOVED, pending re-spec in a document not yet written** — see the v11 changelog,
 v11.1 = `source` discriminant renamed to `'store'`,
-**v11.2 = §6's `/admin` relocation RETRACTED — Q5 was reversed, `/admin` survives**)
+**v11.2 = §6's `/admin` relocation RETRACTED — Q5 was reversed, `/admin` survives**,
+**v11.3 = the `'store'` source and the `error` state are RETIRED — see the notice below**)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status, and — new at v10 —
 `/api/charts/roadmap/parse` and `/api/charts/convert`.
 **`/dashboard/settings` is NO LONGER in this document's scope (v11).**
+
+> ## ⛔ SUPERSEDED IN PART — `'store'` and `error` no longer exist (v11.3)
+>
+> Shipped in the chunk-1 build of `design-single-backend.md` (§3.2, §3.3b), which
+> is the authority where the two documents disagree.
+>
+> **`ConfigRead` is now two states, not four:**
+> `{ status: 'ok'; value: string; source: 'env' } | { status: 'none' }`.
+> Admin config resolves from `process.env` alone, so `'store'` has nothing to
+> name and `error` — "no value AND the store was unreachable" — describes a
+> condition that can no longer occur.
+>
+> **The consequences run further than the type**, and every occurrence of `error`
+> below as a CONFIG-resolution outcome is retired with it:
+>
+> | Retired | Replaced by |
+> |---|---|
+> | `ConfigRead.error` | `{ status: 'none' }` |
+> | `KeyMode.error` (`lib/agent-key.ts`) | `mode: 'unconfigured'` |
+> | `Capabilities.tryit: 'error'` (§4 wire shape, `:317`) | `'available' \| 'exhausted' \| 'unconfigured'` |
+> | 401 `reason: 'error'` from `/api/agent/chat` | `reason: 'unconfigured'` |
+> | Tests 6a and 6c as written | inverted — see `tests/agent-capabilities.test.ts` |
+>
+> **§5's SIX UI states are UNCHANGED, including state 6 and its `checkFailed`
+> lead.** State 6 keeps one producer — a probe that fails to answer
+> (`agent-availability.ts`, `probe === 'error'`). What went away is the server's
+> claim to have *measured* an outage it can no longer observe. The
+> `unconfigured`-vs-`error` distinction this document argued for at length was
+> right for a two-store world; there is now one source and nothing to
+> distinguish.
+>
+> It does not return with the chunk-2 quota move: `design-single-backend.md` §5.4
+> keeps `fallbackQuota` as the degradation path, so an unreachable database falls
+> back rather than erroring.
 
 **v11 changelog — §14 is REMOVED from this document, pending re-spec elsewhere.**
 
@@ -314,7 +349,7 @@ New route: `GET /api/agent/capabilities`.
 
 ```jsonc
 {
-  "tryit": "available" | "exhausted" | "unconfigured" | "error",
+  "tryit": "available" | "exhausted" | "unconfigured",
   "tryitRemaining": 7 | 0 | null,   // null unless tryit is available/exhausted
   "quota": TRYIT_QUOTA             // serialized from the constant, never a literal
 }
@@ -355,10 +390,11 @@ whole document exists to end, reintroduced one layer down.
 **New in `lib/admin-config.ts`:**
 
 ```ts
+// ⛔ SUPERSEDED (v11.3) — shipped as two states, not four. See the notice at the
+// top of this document and design-single-backend.md §3.2.
 export type ConfigRead =
-  | { status: 'ok';    value: string; source: 'store' | 'env' }
-  | { status: 'none' }                        // store reachable, nothing set
-  | { status: 'error'; reason: string };      // store unreachable, no env fallback
+  | { status: 'ok'; value: string; source: 'env' }
+  | { status: 'none' }
 
 export async function readAdminConfig(key: string): Promise<ConfigRead>
 ```
@@ -904,12 +940,10 @@ Requirements:
 
 1. **Source is invisible.** `getAllAdminConfig` (`lib/admin-config.ts:56-68`)
    returns `{ configured, masked }` — you cannot tell whether a configured key
-   came from the store or from `CLAUDE_TRYIT_KEY`. Add `source: 'store' | 'env' |
-   'none' | 'error'`, **derived from `readAdminConfig` (§4.1)** rather than
-   computed separately.
-   *(v11.1: the discriminant is `'store'`, not `'redis'` — it names a role, not a
-   vendor, so it survives the backend change specified in
-   `design-single-backend.md` §3.2.)*
+   came from the store or from `CLAUDE_TRYIT_KEY`.
+   *(⛔ v11.3: MOOT. There is one source — the environment — so there is nothing
+   to disambiguate and no `'store'` or `'error'` to report. `ConfigRead` is
+   `source: 'env'` only; see the notice at the top of this document.)*
    *(**v11.2 — CORRECTED.** v11.1 continued: *"That document also rules `/admin`
    DELETED — this display moves to the flag-gated platform section of
    `/dashboard/settings`."* **That is no longer true.** `design-single-backend.md`
@@ -1357,7 +1391,7 @@ only one that still needs a human call, and it is scoped to chunk 4.
    chunk 4 — not a Codex question and not mine. Absent a ruling, chunk 4 builds
    §5.2 exactly as written and the conservative branch stands.
 4. **ANSWERED by chunk 1 — now a chunk-3 requirement, not an open question.**
-   The 401 from `/api/agent/chat` carries `reason: 'unconfigured' | 'error'` as
+   The 401 from `/api/agent/chat` carries `reason: 'unconfigured'` as
    of chunk 1 (`f97d79f`), which is precisely the distinction the send path
    needed in order to disagree honestly during a partial outage. So yes, the
    send path is the third surface, and the mechanism already exists: **§5's
@@ -1377,7 +1411,7 @@ production defect.
 
 | Surface | Route | How it resolves a key | BYOA? | Failure when unconfigured |
 |---|---|---|---|---|
-| AI Show Designer | `/api/agent/chat` | **`resolveKeyMode`** (`lib/agent-key.ts:184`) | ✅ | 401 carrying `reason: 'unconfigured' \| 'error'` |
+| AI Show Designer | `/api/agent/chat` | **`resolveKeyMode`** (`lib/agent-key.ts:184`) | ✅ | 401 carrying `reason: 'unconfigured'` |
 | Chart converter | `/api/charts/convert` | `getAdminConfig('claude_tryit_key')` (`:104`) | ❌ | `degrade('failed')` (`:105`) — silent fall back to manual |
 | Roadmap builder | `/api/charts/roadmap/parse` | `getAdminConfig('claude_tryit_key')` (`:48`) | ❌ | `503 "Parser is not configured"` (`:50`) |
 

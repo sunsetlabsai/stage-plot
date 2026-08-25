@@ -1,68 +1,26 @@
 import { NextRequest } from 'next/server';
-import { getAllAdminConfig, setAdminConfig, isKvConnected } from '@/lib/admin-config';
-import { checkRateLimit, getIp, authenticate } from '@/lib/admin-rate-limit';
+import { getAllAdminConfig } from '@/lib/admin-config';
+import { checkRateLimit, getIp } from '@/lib/admin-rate-limit';
+import { requirePlatformAdmin } from '@/lib/admin-auth';
 
+// GET /api/admin/settings — read-only config status for the /admin page.
+// Auth: platform super-admin session (design-single-backend §3.3a, §3.3b).
+//
+// PUT was DELETED here. Its only body was setAdminConfig(), a Redis write, and
+// §3 rules there is no store: config resolves from process.env alone and the
+// try-it key changes via Vercel env + redeploy. Re-authing a verb with nothing
+// left to write would have shipped a permanently dead endpoint — the §2.1
+// pattern this design exists to end. The masked values below are the whole
+// remaining surface.
 export async function GET(request: NextRequest) {
   const ip = getIp(request);
   if (!checkRateLimit(ip, 'settings')) {
     return Response.json({ error: 'Too many requests' }, { status: 429 });
   }
 
-  if (!authenticate(request)) {
-    return Response.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const kvConnected = await isKvConnected();
-  if (!kvConnected) {
-    return Response.json(
-      { error: 'KV store not connected. Link a KV store in your Vercel dashboard.' },
-      { status: 503 },
-    );
-  }
+  const denied = await requirePlatformAdmin();
+  if (denied) return denied;
 
   const config = await getAllAdminConfig();
-  return Response.json({ config, kvConnected });
-}
-
-export async function PUT(request: NextRequest) {
-  const ip = getIp(request);
-  if (!checkRateLimit(ip, 'settings')) {
-    return Response.json({ error: 'Too many requests' }, { status: 429 });
-  }
-
-  if (!authenticate(request)) {
-    return Response.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  const kvConnected = await isKvConnected();
-  if (!kvConnected) {
-    return Response.json(
-      { error: 'KV store not connected. Cannot save settings without persistence.' },
-      { status: 503 },
-    );
-  }
-
-  let body: Record<string, unknown>;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: 'Invalid JSON' }, { status: 400 });
-  }
-
-  const allowedKeys = ['google_client_id', 'google_client_secret', 'claude_tryit_key'];
-  const updates: string[] = [];
-
-  for (const key of allowedKeys) {
-    if (key in body) {
-      const value = body[key];
-      if (typeof value !== 'string') {
-        return Response.json({ error: `Invalid value for ${key}: must be a string` }, { status: 400 });
-      }
-      await setAdminConfig(key, value);
-      updates.push(key);
-    }
-  }
-
-  const config = await getAllAdminConfig();
-  return Response.json({ config, updated: updates });
+  return Response.json({ config });
 }

@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { normalizeSongKeySafe } from '@/lib/normalize';
-import { checkRateLimit, getIp, authenticate } from '@/lib/admin-rate-limit';
+import { checkRateLimit, getIp } from '@/lib/admin-rate-limit';
+import { requirePlatformAdmin } from '@/lib/admin-auth';
 
 interface SetlistItem {
   title: string;
@@ -13,7 +14,8 @@ interface SetlistItem {
 
 // POST /api/admin/migrate-setlists — one-shot backfill of the song library.
 // Ports scripts/migrate-setlists.ts so it can run on Vercel (no local box).
-// Auth: Authorization: Bearer <ADMIN_SECRET>.
+// Auth: platform super-admin session (design-single-backend §3.3a, §3.3b) —
+// sign in as PLATFORM_ADMIN_EMAIL and call this from that browser session.
 // Pass ?dry_run=true to preview counts without writing.
 // Run migration 006_songs.sql in the Supabase SQL editor BEFORE calling this.
 export async function POST(request: NextRequest) {
@@ -21,9 +23,9 @@ export async function POST(request: NextRequest) {
   if (!checkRateLimit(ip, 'migrate-setlists')) {
     return Response.json({ error: 'Too many requests' }, { status: 429 });
   }
-  if (!authenticate(request)) {
-    return Response.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+
+  const denied = await requirePlatformAdmin();
+  if (denied) return denied;
 
   const dryRun = request.nextUrl.searchParams.get('dry_run') === 'true';
   const admin = getSupabaseAdmin();

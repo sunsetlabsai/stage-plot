@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkRateLimit, getIp, authenticate } from '../lib/admin-rate-limit';
+import { checkRateLimit, getIp } from '../lib/admin-rate-limit';
 
 // Use unique IPs per test to avoid module-level state leaking between tests.
 // The rate limiter Map persists across imports (Vitest caches modules).
@@ -52,31 +52,6 @@ describe('admin-rate-limit', () => {
     it('returns unknown when no header', () => {
       const req = { headers: { get: () => null } };
       expect(getIp(req as never)).toBe('unknown');
-    });
-  });
-
-  describe('authenticate', () => {
-    const originalEnv = process.env.ADMIN_SECRET;
-
-    it('returns true for matching secret', () => {
-      process.env.ADMIN_SECRET = 'test-secret';
-      const req = { headers: { get: (name: string) => name === 'authorization' ? 'Bearer test-secret' : null } };
-      expect(authenticate(req as never)).toBe(true);
-      process.env.ADMIN_SECRET = originalEnv;
-    });
-
-    it('returns false for wrong secret', () => {
-      process.env.ADMIN_SECRET = 'test-secret';
-      const req = { headers: { get: (name: string) => name === 'authorization' ? 'Bearer wrong' : null } };
-      expect(authenticate(req as never)).toBe(false);
-      process.env.ADMIN_SECRET = originalEnv;
-    });
-
-    it('returns false when no ADMIN_SECRET set', () => {
-      delete process.env.ADMIN_SECRET;
-      const req = { headers: { get: (name: string) => name === 'authorization' ? 'Bearer anything' : null } };
-      expect(authenticate(req as never)).toBe(false);
-      process.env.ADMIN_SECRET = originalEnv;
     });
   });
 });
