@@ -6,9 +6,9 @@ Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
 started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
 does not get to exempt itself from its own subject.)*
-Version: **v1.5** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
+Version: **v1.6** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
 Q5 reversed, **v1.3 = Codex R1 on #152: Q5 reversal propagated to the paired doc,
-`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**, **v1.5 = ⛔ §3 `admin_config` RULED OUT 2026-08-25 — marker only, full teardown sequenced after PR #153**)
+`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**, **v1.5 = ⛔ §3 `admin_config` RULED OUT 2026-08-25 — marker only, full teardown sequenced after PR #153**, **v1.6 = Codex R4 High: §9 chunk-1 tests were still an obsolete contract; rewritten, plus a blast-radius index. THREE sites in that index are listed but NOT yet marked in place**)
 Scope:
 
 - `lib/admin-config.ts`, `lib/agent-key.ts` — Redis → Supabase + Vault
@@ -176,6 +176,24 @@ same PR as its schema. No chunk may land a table that nothing reads.
 > **What chunk 1 still ships:** the `/admin` re-auth across all four routes and
 > the `ADMIN_SECRET` retirement (§3.3a, §3.3b). Those are unaffected — they are
 > about the auth boundary, not about where config lives.
+>
+> ### ⚠ Every other site this ruling touches — the complete list
+>
+> *Added at v1.6 after Codex R4 caught §9 still carrying an obsolete test
+> contract. The v1.5 pass marked the loud places and missed the quiet ones.
+> **This index exists so the next reader does not have to re-derive the blast
+> radius**, and so a missed site is a missing row rather than a silent
+> contradiction.*
+>
+> | Site | State |
+> |---|---|
+> | §3.1 schema, §3.2 `__DISABLED__` deletion | **reasoning only** — no table is created |
+> | **§3.2 `ConfigRead`** | ⛔ **behaviourally changed, NOT yet marked in place.** `'store'` and `error` become unreachable; four states collapse to two |
+> | §7 chunk 1 row | ✅ revised |
+> | §7 chunk 3 "depends on chunk 1 for `/dashboard/settings` scaffolding" | ⛔ **dangling** — revised chunk 1 does not create that surface |
+> | **§8.1 Vault ruling** | ⛔ **half-obsolete, NOT yet marked in place.** Vault for `admin_config.value` is moot; Vault for the BYOA key (chunk 3) **stands** |
+> | **§9 chunk 1 tests** | ⛔ **rewritten at v1.6** — was the R4 finding |
+> | §2 measurement table, §2.1 pattern | ✅ still true — they describe what IS, not what to build |
 >
 > **Status: marker only.** The full teardown of this section lands **after**
 > Drive retirement (PR #153), by the sequencing in that document's §6.1: amending
@@ -767,11 +785,44 @@ Vault's design centre.**
 `app/api/` imports `redis` *(mirrors test 20's shape in the key-availability
 doc)*.
 
-**Chunk 1:** `readAdminConfig` returns `ok`/**`store`** from a row, `ok`/`env` from the
-env fallback when the row is absent, `none` when neither, `error` only when the
-database is unreachable **and** no env fallback exists. **A deleted row must
-allow the env fallback** — the regression test for the retired `__DISABLED__`
-trap. Non-admin identity is refused by `admin_config` routes.
+**Chunk 1 — ⛔ REWRITTEN at v1.6 (Codex R4, High).**
+
+> ~~`readAdminConfig` returns `ok`/`store` from a row, `ok`/`env` from the env
+> fallback when the row is absent, `none` when neither, `error` only when the
+> database is unreachable **and** no env fallback exists. **A deleted row must
+> allow the env fallback** — the regression test for the retired `__DISABLED__`
+> trap. Non-admin identity is refused by `admin_config` routes.~~
+>
+> **Obsolete.** Every clause above presumes a row, a store, and a reachable
+> database — none of which exist once §3 is ruled out. It survived the v1.5
+> marker pass because that pass fixed the *loud* places (§3 heading, §7 table)
+> and never swept the test spec. **That is the same incomplete-propagation
+> failure §2.1 is about, and the third instance in this document.**
+
+**Chunk 1, as it actually ships:**
+
+1. **`readAdminConfig` resolves from `process.env` alone.** `ok`/`env` when the
+   variable is set and non-empty; `none` when it is not. **There is no row, so
+   `'store'` is unreachable and `error` is unreachable** — an env var cannot be
+   "unreachable." See the §3.2 marker: `ConfigRead` collapses from four states to
+   two, and that collapse is a behavioural change, not a simplification of
+   wording.
+2. **`__DISABLED__` is gone with the Redis client**, so the trap it caused cannot
+   recur. The regression test for it goes too — **there is no longer a write path
+   that could set it.** Deleting a test whose subject no longer exists is correct;
+   leaving it would assert against a code path that cannot be reached.
+3. **The four-route auth cases below** — unchanged by any of this. They are the
+   substance of chunk 1's test surface now.
+
+**⇒ Chunk 1's test surface is the auth boundary, not config resolution.** One
+resolution case (env set / env unset) plus the eight auth cases below.
+
+**★ Added at v1.4 (Codex R2 on #152, residual implementation risk).** "Refused by
+`admin_config` routes" is too narrow — §3.3b re-auths **four** routes, and a test
+that covers only `settings` would leave three re-authed routes unproven while
+reading as complete. *(v1.6: "`admin_config` routes" is doubly wrong now — the
+table does not exist. The routes are the four `/api/admin/*` ones, named below.)*
+**Every one of the four gets its own rejection case:**
 
 **★ Added at v1.4 (Codex R2 on #152, residual implementation risk).** "Refused by
 `admin_config` routes" is too narrow — §3.3b re-auths **four** routes, and a test
