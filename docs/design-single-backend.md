@@ -6,9 +6,9 @@ Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
 started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
 does not get to exempt itself from its own subject.)*
-Version: **v1.3** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
+Version: **v1.4** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
 Q5 reversed, **v1.3 = Codex R1 on #152: Q5 reversal propagated to the paired doc,
-`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**)
+`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**)
 Scope:
 
 - `lib/admin-config.ts`, `lib/agent-key.ts` — Redis → Supabase + Vault
@@ -737,6 +737,31 @@ env fallback when the row is absent, `none` when neither, `error` only when the
 database is unreachable **and** no env fallback exists. **A deleted row must
 allow the env fallback** — the regression test for the retired `__DISABLED__`
 trap. Non-admin identity is refused by `admin_config` routes.
+
+**★ Added at v1.4 (Codex R2 on #152, residual implementation risk).** "Refused by
+`admin_config` routes" is too narrow — §3.3b re-auths **four** routes, and a test
+that covers only `settings` would leave three re-authed routes unproven while
+reading as complete. **Every one of the four gets its own rejection case:**
+
+| Route | Must reject |
+|---|---|
+| `admin/settings` GET **and** PUT | both verbs, separately — v1.2's `authenticate()` is called twice (`route.ts:11`, `:33`) and one guard could be dropped without the other failing |
+| `admin/owners` | — |
+| `admin/migrate-setlists` | — |
+| `admin/backfill-chart-overlays` | — |
+
+Each case asserts rejection for: **no session**, **a session whose email does not
+match `PLATFORM_ADMIN_EMAIL`**, and **an unset or empty `PLATFORM_ADMIN_EMAIL`**
+(the fail-closed rule of §3.3b — an unset variable must not authorise everyone).
+A case that only tests "no session" would pass against an implementation that
+compares nothing.
+
+**And the reason these are not optional:** `authenticate()` returns `false` the
+moment `ADMIN_SECRET` is unset (`lib/admin-rate-limit.ts:45-46`). A route whose
+re-auth is forgotten therefore **fails closed and looks fine** — no error, no
+alarm, just a permanently 401ing admin tool. Only a positive test that the
+correct identity is ACCEPTED distinguishes "re-authed" from "silently dead," so
+each route also needs the matching accept case.
 
 **Chunk 2:** `increment_tryit` is atomic under concurrent calls; `peek_tryit`
 does **not** increment; both agree on window expiry at the boundary; a raw IP
