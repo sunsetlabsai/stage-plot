@@ -6,13 +6,15 @@ Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
 started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
 does not get to exempt itself from its own subject.)*
-Version: **v1.4** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
+Version: **v1.5** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
 Q5 reversed, **v1.3 = Codex R1 on #152: Q5 reversal propagated to the paired doc,
-`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**)
+`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**, **v1.5 = ⛔ §3 `admin_config` RULED OUT 2026-08-25 — marker only, full teardown sequenced after PR #153**)
 Scope:
 
 - `lib/admin-config.ts`, `lib/agent-key.ts` — Redis → Supabase + Vault
-- new **`admin_config`** table; **no `profiles` change** (RBAC shelved, §3.3a)
+- ~~new **`admin_config`** table~~ — **⛔ RULED OUT 2026-08-25, see the §3 marker.
+  Chunk 1 ships NO migration.** (**no `profiles` change** either — RBAC shelved,
+  §3.3a.) Vault is unaffected: it is still required by chunk 3 for `user_secrets`
 - `user_secrets` wired for per-account BYOA; `tryit_quota` wired for quota
 - ~~`app/api/show`~~ — **deleted, chunk 0 shipped** (PR #151, `c24ef4f`)
 - **`/admin` RE-AUTHED, not deleted** (§8 Q5, reversed) — `ADMIN_SECRET` →
@@ -150,7 +152,40 @@ same PR as its schema. No chunk may land a table that nothing reads.
 
 ## 3. Admin config → a Supabase table
 
-**Ruled by Graham 2026-08-24: a table, not env vars.**
+> # ⛔ SECTION 3 IS RULED OUT — DO NOT BUILD IT
+>
+> **Graham reversed this on 2026-08-25. `admin_config` is not being built.**
+> **Chunk 1 ships NO migration.** Everything below — the table, the schema, the
+> Vault wiring — is retained for its reasoning, not as an instruction.
+>
+> **Why it collapsed:** the table's whole payload was three keys
+> (`google_client_id`, `google_client_secret`, `claude_tryit_key`). Google Drive
+> was ruled retired the same day — 6 shows, 0 using it — which takes the first
+> two with it. The remaining one already resolves through the
+> `CLAUDE_TRYIT_KEY` env fallback. **A migration would exist to hold a single
+> value that does not need it.** Its write surface is also one caller:
+> `PUT /api/admin/settings` (`route.ts:61`).
+>
+> **Graham accepted the consequence explicitly:** the try-it key becomes
+> changeable only via Vercel env + redeploy, not through the UI. *"try-it key IS
+> just an admin function so as vercel env is fine."* That directly reverses the
+> 2026-08-24 rationale below — *"rotating a key should not require a redeploy"* —
+> which was argued for a future with paying customers and three keys, not for one
+> key and one operator.
+>
+> **What chunk 1 still ships:** the `/admin` re-auth across all four routes and
+> the `ADMIN_SECRET` retirement (§3.3a, §3.3b). Those are unaffected — they are
+> about the auth boundary, not about where config lives.
+>
+> **Status: marker only.** The full teardown of this section lands **after**
+> Drive retirement (PR #153), by the sequencing in that document's §6.1: amending
+> §3 first would mean specifying around two keys that are about to be deleted.
+> **This marker exists so `main` does not carry a build instruction its author
+> has already reversed** — the exact §2.1 failure this document was written to
+> end, which it does not get to exempt itself from.
+
+**Ruled by Graham 2026-08-24: a table, not env vars.** *(SUPERSEDED — see the
+marker above. Retained because the reasoning is what the 08-25 reversal acts on.)*
 
 Env vars were the cheaper option and would have deleted the most code, since
 under multi-tenant SaaS he is the only operator. He ruled for the table; the
@@ -616,7 +651,7 @@ table nothing reads.
 | # | Chunk | Ships | Independent? |
 |---|---|---|---|
 | 0 | **Delete `/api/show`** | route deletion + a test asserting no `redis` import remains in `app/api/` | yes — pure removal, no dependency |
-| 1 | **`admin_config` + Vault** (§3, §8.1) | ONE migration (`admin_config` only — **no `profiles` change**, §3.3a), `readAdminConfig` swap onto Vault, **`/admin` RE-AUTHED** from `ADMIN_SECRET` to the super-admin email check, `ADMIN_SECRET` retired | yes — all inputs ruled |
+| 1 | ~~**`admin_config` + Vault**~~ **⛔ REVISED 2026-08-25 — see the §3 marker** | ~~ONE migration (`admin_config` only), `readAdminConfig` swap onto Vault~~ **NO MIGRATION.** Ships only: **`/admin` RE-AUTHED** across all four routes from `ADMIN_SECRET` to the super-admin email check (§3.3a, §3.3b), `ADMIN_SECRET` retired, and Redis stripped from `lib/admin-config.ts` leaving the env fallback | yes — but **sequenced AFTER Drive retirement** (PR #153 §6.1) |
 | 2 | **Quota** (§5) | `peek_tryit` migration, `quota()` rewritten onto both functions, IP hashing, **fixed window** | yes — all inputs ruled |
 | 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display | depends on chunk 1 for `/dashboard/settings` scaffolding only |
 | 4 | **Settings overlay** (§4.3) | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated | depends on chunk 3 |
