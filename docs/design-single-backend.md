@@ -6,13 +6,21 @@ Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
 started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
 does not get to exempt itself from its own subject.)*
-Version: **v1.1**
-Scope: `lib/admin-config.ts`, `lib/agent-key.ts`, **deletion of `/admin` and
-`app/api/admin/settings`**, deletion of `app/api/show`, `user_secrets`,
-`tryit_quota`, new `admin_config`, Supabase Vault
-for all stored secrets, and a new `/dashboard/settings` carrying both a per-user
-BYOA section and a platform section gated on a super-admin email check (§3.3a —
-RBAC shelved 2026-08-24; no role column is built).
+Version: **v1.2**
+Scope:
+
+- `lib/admin-config.ts`, `lib/agent-key.ts` — Redis → Supabase + Vault
+- new **`admin_config`** table; **no `profiles` change** (RBAC shelved, §3.3a)
+- `user_secrets` wired for per-account BYOA; `tryit_quota` wired for quota
+- ~~`app/api/show`~~ — **deleted, chunk 0 shipped** (PR #151, `c24ef4f`)
+- **`/admin` RE-AUTHED, not deleted** (§8 Q5, reversed) — `ADMIN_SECRET` →
+  super-admin session-email check. **Platform config stays here.**
+- new **`/dashboard/settings`** — **owner-scoped only**, v1 content is the
+  owner's own agent API key (§4)
+
+**Two surfaces, two principals, no overlap.** `/admin` is global and
+super-admin-only; `/dashboard/settings` is the signed-in owner's own account.
+Nothing global appears on the tenant page.
 
 **All five open questions were ruled by Graham on 2026-08-24 (§8). Nothing in
 this document is waiting on him**; the only unresolved item is the §8.1 spike,
@@ -252,9 +260,36 @@ answering it:**
 > leaving me as the ONLY admin. When/if we need an additional admin or admins,
 > we can enhance."*
 
-**⇒ `profiles.is_platform_admin` is NOT built. There is no migration in this
-chunk.** Admin identity is a server-side comparison of the authenticated
-session's email against an env var. One principal, no role system.
+**⇒ `profiles.is_platform_admin` is NOT built. There is no migration to
+`profiles` in this chunk.** Admin identity is a server-side comparison of the
+authenticated session's email against an env var. One principal, no role system.
+
+**The identity, ruled 2026-08-24:**
+
+| Env var | Value | Notes |
+|---|---|---|
+| `PLATFORM_ADMIN_EMAIL` | **`graham@sunsetlabs.ai`** | The super-admin. Not a tenant; holds no shows or library. |
+
+**Also ruled, and it matters for testing:** **`Graham.Edwards@gmail.com` is a
+separate OWNER account** and is where the real show and library assets live —
+including the 341 imported lyric PDFs. It **stays**, untouched. Signing in as the
+super-admin therefore shows the platform surface and **no library**, because the
+content belongs to a different principal. That is the model working, not a bug.
+(`graham@salonhq.co` is disposable — *"don't care if we nuke"* it.)
+
+**Comparison rules, normative — a sloppy check here is an auth bypass:**
+
+1. Read the email from **`supabase.auth.getUser()` server-side**, never from a
+   client-supplied value and never from a JWT claim decoded in the browser.
+2. Compare **case-insensitively**, both sides trimmed. Graham wrote the owner
+   address as `Graham.Edwards@gmail.com`; a case-sensitive `===` against a
+   lowercased session email fails open or closed depending on which side drifts,
+   and neither failure is acceptable.
+3. **Fail CLOSED when `PLATFORM_ADMIN_EMAIL` is unset or empty.** An unset
+   variable must never mean "everyone is admin" — the same class of trap as the
+   `__DISABLED__` sentinel this design deletes (§3.2).
+4. The check is enforced **in the route**, not by hiding UI. Hiding a section is
+   presentation; the route is the control.
 
 **Why an env var is the RIGHT mechanism here and not a shortcut:** the two
 things have opposite change rates. **Keys rotate often** — which is exactly why
@@ -280,8 +315,8 @@ with the storage choice of §4.5). Nothing here restricts a tenant.
 additive migration with a real reason behind it. The design above is retained
 for that day rather than deleted.
 
-**`ADMIN_SECRET` still retires** with `/admin` — the shared bearer secret is
-replaced by the session-email check, not carried forward.
+**`ADMIN_SECRET` retires; `/admin` does NOT.** The shared bearer secret is
+replaced by the session-email check on the same route (§8 Q5, reversed).
 
 ---
 
@@ -521,7 +556,7 @@ table nothing reads.
 | # | Chunk | Ships | Independent? |
 |---|---|---|---|
 | 0 | **Delete `/api/show`** | route deletion + a test asserting no `redis` import remains in `app/api/` | yes — pure removal, no dependency |
-| 1 | **`admin_config` + Vault** (§3, §8.1) | ONE migration (`admin_config` only — **no `profiles` change**, §3.3a), `readAdminConfig` swap onto Vault, **`/admin` route DELETED**, platform section of `/dashboard/settings` gated on a super-admin email check | yes — all inputs ruled |
+| 1 | **`admin_config` + Vault** (§3, §8.1) | ONE migration (`admin_config` only — **no `profiles` change**, §3.3a), `readAdminConfig` swap onto Vault, **`/admin` RE-AUTHED** from `ADMIN_SECRET` to the super-admin email check, `ADMIN_SECRET` retired | yes — all inputs ruled |
 | 2 | **Quota** (§5) | `peek_tryit` migration, `quota()` rewritten onto both functions, IP hashing, **fixed window** | yes — all inputs ruled |
 | 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display | depends on chunk 1 for `/dashboard/settings` scaffolding only |
 | 4 | **Settings overlay** (§4.3) | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated | depends on chunk 3 |
@@ -545,19 +580,41 @@ interface, which §3.2 preserves exactly.
   `/api/show` without a migration or a redirect.
 - **Q4 — Encryption at rest for stored secrets. RULED: research it and
   recommend.** Done — see §8.1, which is now normative, not a question.
-- **Q5 — Does `/admin` survive as its own surface? RULED: no.** Platform admin
-  becomes a **gated section of `/dashboard/settings`**. His reasoning:
+- **Q5 — Does `/admin` survive as its own surface? RULED TWICE. Final: YES, IT
+  SURVIVES.**
 
-  > *"i think part of dashboard/settings not its own surface, since it's tenant
-  > not 'master' level surface in the commercial multi-tenant world."*
+  **First ruling (earlier on 2026-08-24): no** — platform admin becomes a gated
+  section of `/dashboard/settings`, reasoning *"i think part of dashboard/settings
+  not its own surface, since it's tenant not 'master' level surface in the
+  commercial multi-tenant world."*
 
-  **⚠ One scope property this must preserve, stated because the page now mixes
-  two scopes on one surface:** the BYOA section is **per-user** (`auth.uid() =
-  user_id`, affects only that person), while the platform section is
-  **global** — editing `claude_tryit_key` affects *every* tenant. One page, two
-  blast radii. The platform section must be visually and textually distinct, and
-  gated on the super-admin email check (§3.3a), so nobody edits a global value believing it is
-  theirs. `/admin`'s route is removed; its shared-secret auth goes with it (§3.3).
+  **Reversed the same day, once the three-tier model was stated (§3.3a).** That
+  first ruling and the model contradict each other: it placed platform config on
+  the tenant settings page *because* it read as tenant-level, but super-admin is
+  explicitly **not** a tenant concern. Graham's reversal:
+
+  > *"yeah, i think we don't want super admin on that sub-page. keep it where it
+  > is."*
+
+  **⇒ `/admin` is NOT deleted.** It stays as its own surface and is **re-authed**
+  from the shared `ADMIN_SECRET` to the super-admin session-email check (§3.3a).
+  `ADMIN_SECRET` still retires; the route does not.
+
+  **★ This resolves the two-blast-radii hazard rather than mitigating it.** The
+  earlier design put a **per-user** control (BYOA key, affects one person) and a
+  **global** control (`claude_tryit_key`, affects every tenant) on one page, and
+  leaned on visual distinction to stop someone editing a global value believing
+  it was theirs. Separate surfaces means that confusion is not possible:
+
+  | Surface | Principal | Scope of every control on it |
+  |---|---|---|
+  | `/admin` | super-admin only | **global** — the platform |
+  | `/dashboard/settings` | the signed-in owner | **their own account** |
+
+  **`/dashboard/settings` is therefore owner-scoped ONLY**, and its v1 content is
+  the owner's own agent API key (§4) — confirmed by Graham: *"the key edit for
+  owner probably needs to be on settings page, yes?"* Yes. That is where it goes,
+  and nothing global joins it.
 
 ### 8.1 ★ Encryption at rest — researched 2026-08-24, VERIFIED against vendor docs
 
