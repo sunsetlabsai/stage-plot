@@ -9,9 +9,10 @@ does not get to exempt itself from its own subject.)*
 Version: **v1.1**
 Scope: `lib/admin-config.ts`, `lib/agent-key.ts`, **deletion of `/admin` and
 `app/api/admin/settings`**, deletion of `app/api/show`, `user_secrets`,
-`tryit_quota`, new `admin_config` + `profiles.is_platform_admin`, Supabase Vault
+`tryit_quota`, new `admin_config`, Supabase Vault
 for all stored secrets, and a new `/dashboard/settings` carrying both a per-user
-BYOA section and a flag-gated platform section.
+BYOA section and a platform section gated on a super-admin email check (§3.3a —
+RBAC shelved 2026-08-24; no role column is built).
 
 **All five open questions were ruled by Graham on 2026-08-24 (§8). Nothing in
 this document is waiting on him**; the only unresolved item is the §8.1 spike,
@@ -76,8 +77,6 @@ Two supporting facts, neither decisive alone:
 
 ## 2. What is actually in Redis — measured 2026-08-24
 
-| Key | Supabase equivalent | Status |
-|---|---|---|
 **Every negative below states the search that establishes it.** All were re-run
 repo-wide across `app/`, `lib/`, `components/` and `tests/` on 2026-08-24; none
 is scoped to production code only unless it says so.
@@ -125,9 +124,12 @@ false in production for fifteen months**, and its status line still reads
 
 **⇒ This document is not proposing a new direction. It is executing a decision
 already taken, and its real contribution is finishing rather than deciding.**
-The design work that matters here is §3.3 (admin RBAC, genuinely new), §4
-(BYOA under multi-tenant, genuinely new), and §5.2/§5.3 (the two places the
-"already built" replacement turns out not to be a drop-in).
+The design work that matters here is §4 (BYOA under multi-tenant, genuinely new)
+and §5.2/§5.3 (the two places the "already built" replacement turns out not to
+be a drop-in). *(v1 also listed §3.3 admin RBAC as genuinely new. It was
+**shelved** on 2026-08-24 — §3.3a — once the three-tier model made clear that
+super-admin is a single principal and not a tenant concern. The remaining work
+there is one new table, not a role system.)*
 
 **This is why invariant 3 exists.** Every chunk in §7 ships its caller in the
 same PR as its schema. No chunk may land a table that nothing reads.
@@ -214,7 +216,7 @@ production trap: a field cleared in the `/admin` UI suppressed the
 a row**, and clearing the field is `delete from admin_config where key = $1`.
 One fewer concept and one fewer trap.
 
-### 3.3 ★ Admin RBAC — this does not exist today and must be built
+### 3.3 Admin RBAC — the original analysis, SUPERSEDED by §3.3a
 
 **Raised by Graham 2026-08-24.** `/admin` authenticates with a **shared bearer
 secret** — `ADMIN_SECRET`, `lib/admin-rate-limit.ts:44-49` — entirely outside
@@ -231,16 +233,55 @@ Moving admin config into Supabase forces a choice that did not previously exist:
 | Keep the shared secret; table reached via `service_role` | ~zero | A shared password. No attribution, no per-person revocation. Adequate for one operator, poor for a commercial product with a team |
 | **`profiles.is_platform_admin`** + policy | migration + bootstrap seeding | Multi-tenant-correct, auditable, revocable per person |
 
-**Recommendation: the flag.** A shared secret does not survive a second person,
-and `updated_by` is meaningless without an identity.
-**✅ RULED by Graham 2026-08-24: add the flag.**
+~~**Recommendation: the flag.**~~ ~~**✅ RULED 2026-08-24: add the flag.**~~
 
-**`/admin` is removed entirely** (§8 Q5) — platform config becomes a gated
-section of `/dashboard/settings`, and `ADMIN_SECRET` retires with the route.
+### 3.3a ★★ SUPERSEDED 2026-08-24 — RBAC is SHELVED. Three tiers, one admin.
 
-**Bootstrap:** the migration seeds `is_platform_admin = true` for the row whose
-`owner_slug` matches a value supplied at migration time. It must not be
-self-service, and no route may ever grant it.
+**Graham clarified the model, and it dissolves the question rather than
+answering it:**
+
+| Tier | Who | Scope | Mechanism |
+|---|---|---|---|
+| **Platform super-admin** | Graham, and only Graham | The platform itself: try-it key, Google OAuth secrets | **Env var identity check.** No column, no role, no migration |
+| **Owner** (tenant) | Anyone who claims a slug | Their own shows, library, and **their own BYOA key** | Existing `profiles` + `auth.uid() = user_id`. Unchanged |
+| **Collaborator** | A bandmate invited by an owner | One show, `editor` or `viewer` | Existing `show_collaborators.role`. Unchanged |
+
+> *"if admin = me … and is the super-admin for the platform itself, and NOT
+> related to owner (i.e., a tenant) or a user/collaborator (i.e., a bandmate
+> invited w/ view access by an owner), then we can shelve this item for now
+> leaving me as the ONLY admin. When/if we need an additional admin or admins,
+> we can enhance."*
+
+**⇒ `profiles.is_platform_admin` is NOT built. There is no migration in this
+chunk.** Admin identity is a server-side comparison of the authenticated
+session's email against an env var. One principal, no role system.
+
+**Why an env var is the RIGHT mechanism here and not a shortcut:** the two
+things have opposite change rates. **Keys rotate often** — which is exactly why
+§3 puts config in a table rather than env vars. **Who is an admin changes
+almost never.** Paying a redeploy to add an admin is correct; paying one to
+rotate a key is not. Splitting them that way is coherent, not lazy.
+
+**★ WHY OWNER-AS-ADMIN WAS NOT AVAILABLE**, recorded so it is not re-proposed:
+**"owner" is not a privileged tier — it is what every user becomes.**
+`POST /api/profiles` (`app/api/profiles/route.ts:12`) gates only on slug format
+and reserved words, and sign-in is `supabase.auth.signInWithOtp({ email })` —
+open email OTP, no allowlist. The invite mechanism only links a signed-in user
+to pending `show_collaborators` rows; it does not gate signup. **PR #123, which
+designs an invite gate, is still OPEN and was never built.** So owner-as-admin
+would put the platform's Anthropic key and Google OAuth secret one self-serve
+signup away from any address on the internet.
+
+**What owners get, unchanged by this chunk:** their own library (already works,
+owner-scoped) and their own agent API key (§4 — `user_secrets`, per account,
+with the storage choice of §4.5). Nothing here restricts a tenant.
+
+**When a second admin is needed**, `profiles.is_platform_admin` becomes a small
+additive migration with a real reason behind it. The design above is retained
+for that day rather than deleted.
+
+**`ADMIN_SECRET` still retires** with `/admin` — the shared bearer secret is
+replaced by the session-email check, not carried forward.
 
 ---
 
@@ -480,7 +521,7 @@ table nothing reads.
 | # | Chunk | Ships | Independent? |
 |---|---|---|---|
 | 0 | **Delete `/api/show`** | route deletion + a test asserting no `redis` import remains in `app/api/` | yes — pure removal, no dependency |
-| 1 | **`admin_config` + Vault + `is_platform_admin`** (§3, §8.1) | migrations, `readAdminConfig` swap onto Vault, **`/admin` route DELETED**, platform section of `/dashboard/settings` gated on the flag | yes — all inputs ruled |
+| 1 | **`admin_config` + Vault** (§3, §8.1) | ONE migration (`admin_config` only — **no `profiles` change**, §3.3a), `readAdminConfig` swap onto Vault, **`/admin` route DELETED**, platform section of `/dashboard/settings` gated on a super-admin email check | yes — all inputs ruled |
 | 2 | **Quota** (§5) | `peek_tryit` migration, `quota()` rewritten onto both functions, IP hashing, **fixed window** | yes — all inputs ruled |
 | 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display | depends on chunk 1 for `/dashboard/settings` scaffolding only |
 | 4 | **Settings overlay** (§4.3) | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated | depends on chunk 3 |
@@ -494,8 +535,10 @@ interface, which §3.2 preserves exactly.
 
 ## 8. Questions — ALL FIVE RULED by Graham, 2026-08-24
 
-- **Q1 — Admin RBAC (§3.3). RULED: add the flag.** `profiles.is_platform_admin`,
-  not the shared secret.
+- **Q1 — Admin RBAC (§3.3). RULED 2026-08-24, then SUPERSEDED the same day.**
+  First ruled "add `profiles.is_platform_admin`"; then **shelved entirely** once
+  Graham clarified the three-tier model — **super-admin is one person and is not
+  a tenant concern at all**. No role column, no migration. See §3.3a.
 - **Q2 — Quota window (§5.3). RULED: fixed is fine.** The sliding→fixed change is
   accepted deliberately, not ported silently.
 - **Q3 — Old slug URLs (§6.1). RULED: not a concern.** Chunk 0 deletes
@@ -513,7 +556,7 @@ interface, which §3.2 preserves exactly.
   user_id`, affects only that person), while the platform section is
   **global** — editing `claude_tryit_key` affects *every* tenant. One page, two
   blast radii. The platform section must be visually and textually distinct, and
-  gated on `is_platform_admin`, so nobody edits a global value believing it is
+  gated on the super-admin email check (§3.3a), so nobody edits a global value believing it is
   theirs. `/admin`'s route is removed; its shared-secret auth goes with it (§3.3).
 
 ### 8.1 ★ Encryption at rest — researched 2026-08-24, VERIFIED against vendor docs
