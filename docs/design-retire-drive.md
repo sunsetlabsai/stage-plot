@@ -307,11 +307,11 @@ written on purpose.
   measuring before chunk 2, not before review.
 - **Q2 — §5.1: does auto-cache actually work?** Graham's 20-second browser check.
   Gates the `OfflineSection` deletion only.
-- **Q3 — the dormant OAuth client.** Deleting the Google Cloud OAuth client makes
-  re-adding Drive a fresh setup (new client, new redirect URIs, new consent
-  screen). Leaving it dormant costs nothing and preserves the "easy to add back"
-  Graham asked for. **Recommend: leave it dormant, remove only the Vercel env
-  vars.**
+- ~~**Q3 — the dormant OAuth client.**~~ **RULED by Graham 2026-08-25: PRESERVE
+  the client, dormant.** Remove only the Vercel env vars. Deleting it would make
+  re-adding Drive a fresh setup — new client, new redirect URIs, new consent
+  screen — and defeat the "easy to add back" that motivated the retirement. See
+  §9 for the disclosure this ruling requires.
 - **Q4 — does anything else read `Chart.mimeType`?** §3.4 keeps it for
   `chartCacheKey`, but its *only* stated purpose in `types.ts:60` is *"original
   MIME type (for export detection)"* — an export path that is being deleted.
@@ -341,3 +341,62 @@ editing either, the change is wrong (§2).
 
 **Delta measured on both refs immediately before each PR body is written, never
 quoted from notes** (`feedback_report_test_delta`).
+
+---
+
+## 9. ★★ Tombstones — normative, required by the Q3 ruling
+
+Graham ruled 2026-08-25: preserve the Google Cloud OAuth client dormant, and
+**comment the fact clearly — in this document and adjacent to the code.**
+
+### 9.1 The code is DELETED, not commented out
+
+Stated explicitly because "adjacent to the commented-out code" admits two
+readings, and they contradict each other. Graham also ruled *"we should remove
+the dead code"* in the same conversation. **Commented-out code is dead code that
+survives review** — it is exactly the artifact §2.1 of `design-single-backend.md`
+was written to stop.
+
+**⇒ Delete the code. Git preserves it. Leave a tombstone COMMENT at each seam a
+future reader will actually land on.** A tombstone is one to four lines naming
+what was removed, when, why, and where to find the design — never the removed
+code itself.
+
+### 9.2 Required tombstone sites
+
+Each of these is a place where a reader encounters a shape that only makes sense
+if they know Drive existed. A tombstone is **required** at each; wording may vary,
+content may not.
+
+| Site | Why a reader lands here confused |
+|---|---|
+| `lib/chart-cache.ts` — at the now-unconditional Supabase fetch | the `if` collapses to a single arm; the vanished `else` is the question |
+| `lib/pdf-viewer.ts` — at the §4.2 `return null` | a bare "give up" needs its reason stated, or someone will "fix" it back into a proxy call |
+| `lib/chart-converter.ts` — at `isUnsupportedChartMime` | §4.1 inverts a rule whose original justification is now invisible |
+| `lib/show-file.ts` — at the surviving `chartsSource` **read** (`:100`) | a read with no matching write reads as a bug, not as deliberate back-compat (§4.3) |
+| `app/api/admin/settings/route.ts` — at the `allowedKeys` array | two keys leave it; the shrunken list is the whole argument for §6.1 |
+
+### 9.3 The dormant-client tombstone — content requirements
+
+At least one tombstone — **`lib/chart-cache.ts` is the natural home**, being the
+first file a chart-loading investigation reaches — must additionally record:
+
+1. The Google Cloud **OAuth client still exists and is deliberately dormant.**
+2. **`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` were removed from Vercel**, so
+   re-enabling means restoring env vars, not creating a client.
+3. The **redirect URI** the preserved client expects:
+   `<origin>/api/auth/google/callback` — the value `app/api/auth/google/route.ts`
+   constructed. Recorded because it is the one piece of configuration that is
+   invisible from the code once the code is gone.
+4. A pointer to **this document** and to the retiring commit.
+
+**⚠ A tombstone must not name a secret, an account, or a Cloud project ID.** It
+records that a client exists and how to re-point it — never how to authenticate
+as it.
+
+### 9.4 The document side of the ruling
+
+This file is the durable record: §7 Q3 carries the ruling, §9.3 carries the
+re-enable facts. **`docs/reference_doc_locations.md`-style indexes are not a
+substitute** — a reader deleting a `fetch` will not consult an index. The
+tombstone has to be where the confusion happens.
