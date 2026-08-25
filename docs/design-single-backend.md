@@ -6,12 +6,36 @@ Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
 started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
 does not get to exempt itself from its own subject.)*
-Version: **v1.1**
-Scope: `lib/admin-config.ts`, `lib/agent-key.ts`, **deletion of `/admin` and
-`app/api/admin/settings`**, deletion of `app/api/show`, `user_secrets`,
-`tryit_quota`, new `admin_config` + `profiles.is_platform_admin`, Supabase Vault
-for all stored secrets, and a new `/dashboard/settings` carrying both a per-user
-BYOA section and a flag-gated platform section.
+Version: **v1.7** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
+Q5 reversed, **v1.3 = Codex R1 on #152: Q5 reversal propagated to the paired doc,
+`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**, **v1.5 = ⛔ §3 `admin_config` RULED OUT 2026-08-25 — marker only**, **v1.6 = Codex R4 High: §9 chunk-1 tests were still an obsolete contract; rewritten, plus a blast-radius index**, **v1.7 = ⛔ THE RULED-OUT CONTENT IS DELETED, not marked**, **v1.8 = fold Codex R5: the chunk-5 completion check was an unscoped repo-wide `grep` that could never pass (§6.3, §9); and two claims that this one-file PR amends other files — the paired doc (§3.2, §7, §9) and `design-owner-onboarding.md`, which was listed as "corrected" at v1.3 and never was (§10)**)
+
+**★ EDITING RULE, ruled by Graham 2026-08-25: ruled-out content is DELETED, not
+marked.** v1.5/v1.6 retained the dead `admin_config` design "for its reasoning,"
+which left ~140 lines of table schema and Vault wiring still readable as
+instructions — red herrings in the one document meant to eliminate them.
+**Reasoning lives in git.** Pre-deletion text:
+`git show d5fe1a8:docs/design-single-backend.md`.
+
+Scope:
+
+- `lib/agent-key.ts` — Redis → Supabase (quota, chunk 2) + Vault (BYOA, chunk 3)
+- `lib/admin-config.ts` — **Redis client stripped, chunk 1. Resolves from
+  `process.env` alone.** No Supabase table, no Vault secret.
+- **NO new `admin_config` table, and no `profiles` change.** Chunk 1 ships **no
+  migration** (§3). Vault is still required by chunk 3 for `user_secrets`.
+- `user_secrets` wired for per-account BYOA; `tryit_quota` wired for quota
+- ~~`app/api/show`~~ — **deleted, chunk 0 shipped** (PR #151, `c24ef4f`)
+- **`/admin` RE-AUTHED, not deleted** (§8 Q5, reversed) — `ADMIN_SECRET` →
+  super-admin session-email check. **Platform config stays here.**
+- **all FOUR `ADMIN_SECRET` route consumers re-authed** (§3.3b, new at v1.3) —
+  `settings`, `owners`, `migrate-setlists`, `backfill-chart-overlays`
+- new **`/dashboard/settings`** — **owner-scoped only**, v1 content is the
+  owner's own agent API key (§4)
+
+**Two surfaces, two principals, no overlap.** `/admin` is global and
+super-admin-only; `/dashboard/settings` is the signed-in owner's own account.
+Nothing global appears on the tenant page.
 
 **All five open questions were ruled by Graham on 2026-08-24 (§8). Nothing in
 this document is waiting on him**; the only unresolved item is the §8.1 spike,
@@ -76,8 +100,6 @@ Two supporting facts, neither decisive alone:
 
 ## 2. What is actually in Redis — measured 2026-08-24
 
-| Key | Supabase equivalent | Status |
-|---|---|---|
 **Every negative below states the search that establishes it.** All were re-run
 repo-wide across `app/`, `lib/`, `components/` and `tests/` on 2026-08-24; none
 is scoped to production code only unless it says so.
@@ -91,8 +113,14 @@ is scoped to production code only unless it says so.
 
 **⇒ The whole justification for the second vendor is three admin config keys** —
 `google_client_id`, `google_client_secret`, `claude_tryit_key` — and every one of
-their **reads** already falls back to an env var in `readAdminConfig`. Only the
-**write** path genuinely requires a store.
+their **reads** already falls back to an env var in `readAdminConfig`.
+
+**And as of 2026-08-25 the write path does not need a store either.** Drive
+retirement (PR #153) deletes the first two keys outright — 6 shows, 0 using
+Drive. The third already resolves through the `CLAUDE_TRYIT_KEY` env fallback.
+**Three keys became one, and one key does not justify a table**, let alone a
+second vendor. Graham accepted the consequence explicitly: the try-it key is
+changed via Vercel env + redeploy, not through a UI. See §3.
 
 ### 2.1 ★ The pattern this document exists to end
 
@@ -125,122 +153,244 @@ false in production for fifteen months**, and its status line still reads
 
 **⇒ This document is not proposing a new direction. It is executing a decision
 already taken, and its real contribution is finishing rather than deciding.**
-The design work that matters here is §3.3 (admin RBAC, genuinely new), §4
-(BYOA under multi-tenant, genuinely new), and §5.2/§5.3 (the two places the
-"already built" replacement turns out not to be a drop-in).
+The design work that matters here is §4 (BYOA under multi-tenant, genuinely new)
+and §5.2/§5.3 (the two places the "already built" replacement turns out not to
+be a drop-in). *(v1 also listed §3.3 admin RBAC as genuinely new. It was
+**shelved** on 2026-08-24 — §3.3a — once the three-tier model made clear that
+super-admin is a single principal and not a tenant concern. **v1.7: the
+remaining work there is now ZERO new tables.** v1.6 said "one new table, not a
+role system"; that table was `admin_config`, ruled out 2026-08-25. What remains
+is an auth-boundary change and no schema at all.)*
+
+**★ The Redis retirement is now the FIFTH instance of this pattern.** Measured
+2026-08-25: `redis@^5.12.1` still in `package.json:25`, two live imports
+(`lib/admin-config.ts:1`, `lib/agent-key.ts:2`). Design PRs #150/#152/#153
+removed **zero** lines of Redis code; chunk 0 (#151) deleted a route that already
+had zero callers. **The remedy is not more design — it is chunks 1 and 2, which
+delete both imports and let the dependency go.**
 
 **This is why invariant 3 exists.** Every chunk in §7 ships its caller in the
 same PR as its schema. No chunk may land a table that nothing reads.
 
 ---
 
-## 3. Admin config → a Supabase table
+## 3. Admin config → environment variables. NO TABLE.
 
-**Ruled by Graham 2026-08-24: a table, not env vars.**
+**RULED by Graham 2026-08-25. There is no `admin_config` table and chunk 1 ships
+no migration.** `readAdminConfig` resolves from `process.env` alone.
 
-Env vars were the cheaper option and would have deleted the most code, since
-under multi-tenant SaaS he is the only operator. He ruled for the table; the
-operative reason is that rotating a key should not require a redeploy, which
-matters more as soon as there are paying customers.
+**Why the table collapsed.** Its whole payload was three keys —
+`google_client_id`, `google_client_secret`, `claude_tryit_key`. Drive retirement
+(PR #153) deletes the first two. The third already rides the `CLAUDE_TRYIT_KEY`
+env fallback. **A migration would have existed to hold one value that does not
+need it.** Its write surface was a single caller, `PUT /api/admin/settings`
+(`route.ts:61`).
 
-### 3.1 Schema
+**The accepted consequence:** the try-it key changes via Vercel env + redeploy,
+not through a UI. *"try-it key IS just an admin function so as vercel env is
+fine."* This reverses the 2026-08-24 "rotating a key should not require a
+redeploy" rationale, which was argued for three keys and paying customers — not
+for one key and one operator.
 
-```sql
-create table admin_config (
-  key text primary key,
-  vault_secret_id uuid not null,   -- §8.1: the VALUE lives in Supabase Vault.
-                                   -- This table holds no credential.
-  updated_at timestamptz default now(),
-  updated_by uuid references auth.users(id)
-);
+**What chunk 1 DOES ship:** the `/admin` re-auth across all four routes and the
+`ADMIN_SECRET` retirement (§3.3a, §3.3b), plus stripping the Redis client out of
+`lib/admin-config.ts`. Those are an auth-boundary change and a dependency
+removal — neither depends on where config lives.
 
-alter table admin_config enable row level security;
--- No policies. Service-role access only, matching tryit_quota's pattern
--- (001_initial_schema.sql:89). Admin config is operator data; no browser
--- client may read or write it under any role.
-```
+> **Deleted at v1.7:** the `admin_config` table design, its `create table`
+> schema, the `updated_by` attribution rationale, and the 2026-08-24 "a table,
+> not env vars" ruling it rested on. All recoverable at
+> `git show d5fe1a8:docs/design-single-backend.md` §3–§3.1.
 
-`updated_by` exists because a shared secret has no attribution and §3.3 removes
-it. It is nullable so the bootstrap migration can seed rows with no actor.
+### 3.2 `readAdminConfig` collapses to env-only — a BEHAVIOURAL change, not a rename
 
-### 3.2 `readAdminConfig` keeps its STATUS contract; the source discriminant is renamed
-
-**⚠ Corrected at v1.1 (Codex High). v1 claimed the interface was preserved
-"exactly" and that §13 therefore needed no changes, while simultaneously
-changing `source` from `'redis'` to `'db'` — and the paired document still
-specifies `source: 'redis' | 'env'` (`design-ai-key-availability.md:356`) and an
-admin state of `'redis' | 'env' | 'none' | 'error'` (`:905`). Two
-landing-together documents cannot give contradictory targets for one API.**
+**⛔ REWRITTEN at v1.7.** v1.6's index flagged this section as *"behaviourally
+changed, NOT yet marked in place"* and left it saying the opposite. With no
+table, there is no store, so the whole v1.1–v1.3 argument about *renaming* the
+`source` discriminant to `'store'` is moot. **The union does not get renamed —
+it loses a member.**
 
 ```ts
 export type ConfigRead =
-  | { status: 'ok'; value: string; source: 'store' | 'env' }
+  | { status: 'ok'; value: string; source: 'env' }
   | { status: 'none' }
-  | { status: 'error'; reason: string }
 ```
 
-**The discriminant becomes `'store'`, not `'db'` and not `'redis'` — it names a
-ROLE, not a vendor.** That is the same correction test 16 already carries in the
-paired document: pin the property, not the product. A field called `'redis'`
-would have to change again the next time the store does.
+**Four states collapse to two.** `'store'` is unreachable because nothing stores
+anything. `error` is unreachable because **an environment variable cannot be
+unreachable** — `process.env` is a synchronous in-process read with no failure
+mode. Today's shape is `source: 'redis' | 'env'` at `lib/admin-config.ts:33`.
 
-**Cost of the rename: four sites, no branching.** **No production code branches
-on `source`** — in `app/` and `lib/` it appears only in its own type definition
-and the two `return` statements that populate it (`lib/admin-config.ts:33`,
-`:59`, `:74`).
+**Ruling: narrow the type; do not keep `'store'` as a reserved member.** An
+unreachable union member is the same class of trap as the `__DISABLED__`
+sentinel this section deletes — a state the type says is possible, that no code
+can produce, that a future reader writes a branch for. If a store ever returns,
+adding the member back is one line.
 
-**It IS asserted in tests**, and the rename must update them:
-`tests/agent-key.test.ts:78` expects `source: 'redis'` (`:88` and `:119` expect
-`'env'` and are unaffected). *(Codex R6 Medium: v1.1 said "produced and never
-consumed", scoping a search to `app lib` and stating the result as a claim about
-the whole codebase — the same unsupported-negative shape as the R5 High. The
-claim is true of production callers and was never true of the suite.)*
-
-**What genuinely survives, and is the real compatibility claim:** the three
-statuses, their meanings, and the ordering subtlety — *a store failure with a
-valid env fallback is still `ok`/`env`, never `error`*. Four callers
+**Cost, measured.** No production code branches on `source` — in `app/` and
+`lib/` it appears only in its own type definition and the two `return`s that
+populate it (`lib/admin-config.ts:33`, `:59`, `:74`). Four callers
 (`agent/chat`, `charts/convert`, `charts/roadmap/parse`,
 `admin/backfill-chart-overlays`) branch only on `status` and are unaffected.
+It **is** asserted in tests: `tests/agent-key.test.ts:78` expects
+`source: 'redis'` and must change (`:88`, `:119` expect `'env'`, unaffected).
 
-**⇒ §13 requires ONE change, not zero: the discriminant rename.** Stating it as
-zero was the overclaim. The paired document is updated in the same commit so the
-two cannot diverge, and §6's admin-state display there is corrected for both the
-rename and the `/admin` deletion ruled in §8 Q5.
+**⚠ CROSS-FILE CONSEQUENCE — new at v1.7, and the index never listed it.**
+`design-ai-key-availability.md` is already on `main` at v11.1 specifying
+`source: 'store' | 'env'` (`:359`, `:907`). **That document now specifies a
+state that can never occur.** It is the paired doc, it landed with #150, and
+nothing in the v1.5/v1.6 marker passes touched it.
 
-**The `__DISABLED__` sentinel is DELETED.** It exists because Redis has no way to
-express "explicitly off" other than a magic value, and it caused a real
-production trap: a field cleared in the `/admin` UI suppressed the
-`CLAUDE_TRYIT_KEY` env fallback entirely. In Postgres, "off" is **the absence of
-a row**, and clearing the field is `delete from admin_config where key = $1`.
-One fewer concept and one fewer trap.
+> **Sequencing:** the paired-doc amendment lands with the **chunk-1 build PR**,
+> where `ConfigRead` actually changes in code and a test can prove the two
+> documents agree. Amending a spec here, with the code three chunks away and
+> nothing to pin it, is how `'store'` got into that file in the first place.
+> **Recorded here so it cannot be lost**; §7 and §9 carry it as an explicit
+> chunk-1 deliverable.
+>
+> *(v1.8 correction: this previously justified the deferral with "#152 is one
+> file." **False** — #152 also amends `design-ai-key-availability.md`, at v1.3,
+> for the Q5 reversal. The sequencing is right; that reason for it was not.)*
 
-### 3.3 ★ Admin RBAC — this does not exist today and must be built
+**The `__DISABLED__` sentinel is DELETED**, and now for a simpler reason than
+v1.6 gave. It existed because Redis has no way to express "explicitly off" other
+than a magic value, and it caused a real production trap: a field cleared in the
+`/admin` UI suppressed the `CLAUDE_TRYIT_KEY` env fallback entirely. **There is
+no longer any write path that could set it** — not "off is the absence of a
+row," which presumed the table. It dies with the Redis client.
 
-**Raised by Graham 2026-08-24.** `/admin` authenticates with a **shared bearer
-secret** — `ADMIN_SECRET`, `lib/admin-rate-limit.ts:44-49` — entirely outside
-Supabase auth. **There is no admin or role column anywhere in the schema:**
-`profiles` is `id, owner_slug, display_name, created_at`
-(`005_owner_namespacing.sql:5-10`), and the only `role` columns are
+### 3.3a ★ The tier model — RBAC is SHELVED. Three tiers, one admin.
+
+**Starting state, measured:** there is **no admin or role column anywhere in the
+schema** — `profiles` is `id, owner_slug, display_name, created_at`
+(`005_owner_namespacing.sql:5-10`); the only `role` columns are
 `show_collaborators.role check in ('editor','viewer')` and chart instrument
-roles.
+roles. `/admin` authenticates today with the shared bearer secret `ADMIN_SECRET`
+(`lib/admin-rate-limit.ts:44-49`), entirely outside Supabase auth.
 
-Moving admin config into Supabase forces a choice that did not previously exist:
+*(§3.3 — the deleted `profiles.is_platform_admin` analysis — is at the SHA above.
+This section keeps the number `3.3a`: it is cited 6× below and once cross-file at
+`design-ai-key-availability.md:917`, already on `main`.)*
 
-| Option | Cost | Fit |
+**Graham clarified the model 2026-08-24, and it dissolves the question rather
+than answering it:**
+
+| Tier | Who | Scope | Mechanism |
+|---|---|---|---|
+| **Platform super-admin** | Graham, and only Graham | The platform itself: try-it key, Google OAuth secrets | **Env var identity check.** No column, no role, no migration |
+| **Owner** (tenant) | Anyone who claims a slug | Their own shows, library, and **their own BYOA key** | Existing `profiles` + `auth.uid() = user_id`. Unchanged |
+| **Collaborator** | A bandmate invited by an owner | One show, `editor` or `viewer` | Existing `show_collaborators.role`. Unchanged |
+
+> *"if admin = me … and is the super-admin for the platform itself, and NOT
+> related to owner (i.e., a tenant) or a user/collaborator (i.e., a bandmate
+> invited w/ view access by an owner), then we can shelve this item for now
+> leaving me as the ONLY admin. When/if we need an additional admin or admins,
+> we can enhance."*
+
+**⇒ `profiles.is_platform_admin` is NOT built. There is no migration to
+`profiles` in this chunk.** Admin identity is a server-side comparison of the
+authenticated session's email against an env var. One principal, no role system.
+
+**The identity, ruled 2026-08-24:**
+
+| Env var | Value | Notes |
 |---|---|---|
-| Keep the shared secret; table reached via `service_role` | ~zero | A shared password. No attribution, no per-person revocation. Adequate for one operator, poor for a commercial product with a team |
-| **`profiles.is_platform_admin`** + policy | migration + bootstrap seeding | Multi-tenant-correct, auditable, revocable per person |
+| `PLATFORM_ADMIN_EMAIL` | **`graham@sunsetlabs.ai`** | The super-admin. Not a tenant; holds no shows or library. |
 
-**Recommendation: the flag.** A shared secret does not survive a second person,
-and `updated_by` is meaningless without an identity.
-**✅ RULED by Graham 2026-08-24: add the flag.**
+**Also ruled, and it matters for testing:** **`Graham.Edwards@gmail.com` is a
+separate OWNER account** and is where the real show and library assets live —
+including the 341 imported lyric PDFs. It **stays**, untouched. Signing in as the
+super-admin therefore shows the platform surface and **no library**, because the
+content belongs to a different principal. That is the model working, not a bug.
+(`graham@salonhq.co` is disposable — *"don't care if we nuke"* it.)
 
-**`/admin` is removed entirely** (§8 Q5) — platform config becomes a gated
-section of `/dashboard/settings`, and `ADMIN_SECRET` retires with the route.
+**Comparison rules, normative — a sloppy check here is an auth bypass:**
 
-**Bootstrap:** the migration seeds `is_platform_admin = true` for the row whose
-`owner_slug` matches a value supplied at migration time. It must not be
-self-service, and no route may ever grant it.
+1. Read the email from **`supabase.auth.getUser()` server-side**, never from a
+   client-supplied value and never from a JWT claim decoded in the browser.
+2. Compare **case-insensitively**, both sides trimmed. Graham wrote the owner
+   address as `Graham.Edwards@gmail.com`; a case-sensitive `===` against a
+   lowercased session email fails open or closed depending on which side drifts,
+   and neither failure is acceptable.
+3. **Fail CLOSED when `PLATFORM_ADMIN_EMAIL` is unset or empty.** An unset
+   variable must never mean "everyone is admin" — the same class of trap as the
+   `__DISABLED__` sentinel this design deletes (§3.2).
+4. The check is enforced **in the route**, not by hiding UI. Hiding a section is
+   presentation; the route is the control.
+
+**Why an env var is the RIGHT mechanism here and not a shortcut:** the two
+things have opposite change rates. **Keys rotate often** — which is exactly why
+§3 puts config in a table rather than env vars. **Who is an admin changes
+almost never.** Paying a redeploy to add an admin is correct; paying one to
+rotate a key is not. Splitting them that way is coherent, not lazy.
+
+**★ WHY OWNER-AS-ADMIN WAS NOT AVAILABLE**, recorded so it is not re-proposed:
+**"owner" is not a privileged tier — it is what every user becomes.**
+`POST /api/profiles` (`app/api/profiles/route.ts:12`) gates only on slug format
+and reserved words, and sign-in is `supabase.auth.signInWithOtp({ email })` —
+open email OTP, no allowlist. The invite mechanism only links a signed-in user
+to pending `show_collaborators` rows; it does not gate signup. **PR #123, which
+designs an invite gate, is still OPEN and was never built.** So owner-as-admin
+would put the platform's Anthropic key and Google OAuth secret one self-serve
+signup away from any address on the internet.
+
+**What owners get, unchanged by this chunk:** their own library (already works,
+owner-scoped) and their own agent API key (§4 — `user_secrets`, per account,
+with the storage choice of §4.5). Nothing here restricts a tenant.
+
+**When a second admin is needed**, `profiles.is_platform_admin` becomes a small
+additive migration with a real reason behind it. The design above is retained
+for that day rather than deleted.
+
+**`ADMIN_SECRET` retires; `/admin` does NOT.** The shared bearer secret is
+replaced by the session-email check on the same route (§8 Q5, reversed).
+
+### 3.3b ★ `ADMIN_SECRET` retirement — every consumer, ruled
+
+**Added at v1.3 (Codex R1 on PR #152, High).** v1.2 said `ADMIN_SECRET` retires
+while discussing only `/api/admin/settings`. **`ADMIN_SECRET` has four route
+consumers, not one** — measured, not recalled:
+
+```
+$ grep -rn "authenticate(request)" app lib
+app/api/admin/settings/route.ts:11              (GET)
+app/api/admin/settings/route.ts:33              (PUT)
+app/api/admin/owners/route.ts:11
+app/api/admin/backfill-chart-overlays/route.ts:113
+app/api/admin/migrate-setlists/route.ts:24
+```
+
+Retiring the env var without ruling on all four leaves three routes calling
+`authenticate()`, which returns `false` the moment `ADMIN_SECRET` is unset
+(`lib/admin-rate-limit.ts:45-46`) — they would fail closed, which is safe, but
+they would be **silently dead**, which is the §2.1 pattern again.
+
+**RULING: all four are re-authed with the identical super-admin email check.**
+One boundary, one implementation, no per-route variation. Deleting the two
+one-shot ops routes is defensible but is **not** this chunk — a dead route is
+cheaper to carry than a second auth path is to reason about.
+
+| Route | Ruling | Note |
+|---|---|---|
+| `admin/settings` GET+PUT | **re-auth** | the `/admin` page's own backend |
+| `admin/owners` | **re-auth** | see the degradation note below |
+| `admin/migrate-setlists` | **re-auth** | one-shot ops tool; deletion is separate work |
+| `admin/backfill-chart-overlays` | **re-auth** | one-shot ops tool; deletion is separate work |
+
+**The check is normative and identical in all four:** server-side
+`supabase.auth.getUser()`; require a non-empty user email **and** a non-empty
+`PLATFORM_ADMIN_EMAIL`; trim and lowercase both; compare; fail closed on any
+missing input; enforce **before** any service-role work. Never a client-supplied
+email, never a browser-decoded JWT, never `getSession()`, never UI hiding.
+
+**⚠ One designed behaviour dies with `ADMIN_SECRET`, deliberately.**
+`design-owner-onboarding.md:61` specifies that `/api/admin/owners` validates the
+secret *independently of KV*, so that when settings 503s on an unreachable store
+the owner list still renders. **That rationale retires with Redis.** Both routes
+now read the same Postgres: if it is unreachable neither can serve, so there is
+no partial-availability case left to preserve. The split was a workaround for
+two stores, not a requirement. Recorded here because deleting a degradation path
+silently is how the next reader concludes it was never wanted.
 
 ---
 
@@ -464,9 +614,37 @@ a safety valve, not an accounting system.
    90-day TTL, and the store is currently unreachable. **✅ RULED by Graham
    2026-08-24: old slug URLs are not a concern.** No migration, no redirect.
 2. **`lib/admin-config.ts`'s Redis client** and the `__DISABLED__` sentinel.
-3. **`redis` from `package.json`** (`"redis": "^5.12.1"`) — the last import goes
-   with chunk 3. **This is the check that proves the whole job is done:**
-   `grep -rn "from 'redis'"` returning nothing.
+3. **`redis` from `package.json`** (`"redis": "^5.12.1"`, `package.json:25`) —
+   **the last PRODUCTION RUNTIME import goes with CHUNK 2.**
+
+   **The completion check is an AST import scan over production source, NOT a
+   grep.** Extend `importSpecifiers()` (`tests/redis-retirement.test.ts:82`) from
+   its current `app/api/` scope (`:20`, `:228`) to **`app/`, `lib/`,
+   `components/`** and assert zero specifier equal to `redis` or starting
+   `redis/`. Keep the walker's positive control (`:342`) so an empty result
+   cannot come from an empty file list.
+
+   > **⛔ CORRECTED at v1.7 (Codex R5).** This said the check was
+   > `grep -rn "from 'redis'"` returning nothing. **That is false repo-wide and
+   > would never pass**: `tests/redis-retirement.test.ts:240` deliberately
+   > contains Redis import strings as scanner fixtures, and `docs/` contains the
+   > phrase in prose — including this line. A raw grep cannot distinguish a
+   > runtime import from a fixture, a comment, or a sentence about imports.
+   > **Scope and mechanism both matter: production source only, parsed not
+   > matched** — which is what chunk 0's five review rounds already concluded.
+
+   > **⛔ CORRECTED at v1.7 — this said "chunk 3". That was a measurement error,
+   > wrong when written, independent of the `admin_config` ruling.** The
+   > production imports are exactly two:
+   >
+   > | File | Redis used for | Removed by |
+   > |---|---|---|
+   > | `lib/admin-config.ts:1` | the config store | **chunk 1** |
+   > | `lib/agent-key.ts:2` | `quota()` only (`:113-144`) | **chunk 2** (§5) |
+   >
+   > **Chunk 3 (BYOA) touches no Redis at all** — `agent-key.ts`'s only
+   > `createClient` is the quota client; `resolveKeyMode` names Redis solely in
+   > comments and the `expect(redis.getCalls).toBe(0)` assertion (§4.4).
 4. **`REDIS_URL`** from Vercel, and the Marketplace store itself, **last** and
    only on Graham's word — that is an infrastructure action, not a code change.
 
@@ -480,46 +658,83 @@ table nothing reads.
 | # | Chunk | Ships | Independent? |
 |---|---|---|---|
 | 0 | **Delete `/api/show`** | route deletion + a test asserting no `redis` import remains in `app/api/` | yes — pure removal, no dependency |
-| 1 | **`admin_config` + Vault + `is_platform_admin`** (§3, §8.1) | migrations, `readAdminConfig` swap onto Vault, **`/admin` route DELETED**, platform section of `/dashboard/settings` gated on the flag | yes — all inputs ruled |
-| 2 | **Quota** (§5) | `peek_tryit` migration, `quota()` rewritten onto both functions, IP hashing, **fixed window** | yes — all inputs ruled |
-| 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display | depends on chunk 1 for `/dashboard/settings` scaffolding only |
+| 1 | **`/admin` re-auth** (§3, §3.3a, §3.3b) | **NO MIGRATION.** `/admin` RE-AUTHED across all four routes from `ADMIN_SECRET` to the super-admin email check; `ADMIN_SECRET` retired; **Redis stripped from `lib/admin-config.ts`**, leaving env-only resolution; **`ConfigRead` narrowed to `source: 'env'` (§3.2); the paired doc's `'store'` spec amended in that same BUILD PR — not in #152** | yes — but **sequenced AFTER Drive retirement** (PR #153 §6.1) |
+| 2 | **Quota** (§5) | `peek_tryit` migration, `quota()` rewritten onto both functions, IP hashing, **fixed window**. **Removes the last `redis` import** (`lib/agent-key.ts:2`, §6.3) | yes — all inputs ruled |
+| 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display, **and the `/dashboard/settings` surface itself** | **independent** — see the note below |
 | 4 | **Settings overlay** (§4.3) | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated | depends on chunk 3 |
-| 5 | **Remove `redis`** | dependency removal, `REDIS_URL` retirement | depends on 0–3 |
+| 5 | **Remove `redis`** | dependency removal, `REDIS_URL` retirement | depends on **0–2** |
+
+**⛔ Two dependency corrections at v1.7.** (1) **Chunk 3 no longer depends on
+chunk 1** — revised chunk 1 does not create `/dashboard/settings`; it re-auths
+`/admin`, a different route for a different principal (§8 Q5). Chunk 3 creates
+that surface itself and may ship in any order. (2) **Chunk 5 depends on 0–2, not
+0–3** — per §6.3, chunk 3 touches no Redis.
 
 **§13 of `design-ai-key-availability.md` is independent of every chunk here** and
 may ship before, during or after — it resolves through `readAdminConfig`'s
-interface, which §3.2 preserves exactly.
+**STATUS contract**, which §3.2 preserves. *(The three statuses survive. What
+changes is the `source` union, and per §3.2 that amendment lands with chunk 1 in
+both documents at once.)*
 
 ---
 
 ## 8. Questions — ALL FIVE RULED by Graham, 2026-08-24
 
-- **Q1 — Admin RBAC (§3.3). RULED: add the flag.** `profiles.is_platform_admin`,
-  not the shared secret.
+- **Q1 — Admin RBAC (§3.3a). RULED 2026-08-24, then SUPERSEDED the same day.**
+  First ruled "add `profiles.is_platform_admin`"; then **shelved entirely** once
+  Graham clarified the three-tier model — **super-admin is one person and is not
+  a tenant concern at all**. No role column, no migration. See §3.3a.
 - **Q2 — Quota window (§5.3). RULED: fixed is fine.** The sliding→fixed change is
   accepted deliberately, not ported silently.
 - **Q3 — Old slug URLs (§6.1). RULED: not a concern.** Chunk 0 deletes
   `/api/show` without a migration or a redirect.
 - **Q4 — Encryption at rest for stored secrets. RULED: research it and
   recommend.** Done — see §8.1, which is now normative, not a question.
-- **Q5 — Does `/admin` survive as its own surface? RULED: no.** Platform admin
-  becomes a **gated section of `/dashboard/settings`**. His reasoning:
+- **Q5 — Does `/admin` survive as its own surface? RULED TWICE. Final: YES, IT
+  SURVIVES.**
 
-  > *"i think part of dashboard/settings not its own surface, since it's tenant
-  > not 'master' level surface in the commercial multi-tenant world."*
+  **First ruling (earlier on 2026-08-24): no** — platform admin becomes a gated
+  section of `/dashboard/settings`, reasoning *"i think part of dashboard/settings
+  not its own surface, since it's tenant not 'master' level surface in the
+  commercial multi-tenant world."*
 
-  **⚠ One scope property this must preserve, stated because the page now mixes
-  two scopes on one surface:** the BYOA section is **per-user** (`auth.uid() =
-  user_id`, affects only that person), while the platform section is
-  **global** — editing `claude_tryit_key` affects *every* tenant. One page, two
-  blast radii. The platform section must be visually and textually distinct, and
-  gated on `is_platform_admin`, so nobody edits a global value believing it is
-  theirs. `/admin`'s route is removed; its shared-secret auth goes with it (§3.3).
+  **Reversed the same day, once the three-tier model was stated (§3.3a).** That
+  first ruling and the model contradict each other: it placed platform config on
+  the tenant settings page *because* it read as tenant-level, but super-admin is
+  explicitly **not** a tenant concern. Graham's reversal:
+
+  > *"yeah, i think we don't want super admin on that sub-page. keep it where it
+  > is."*
+
+  **⇒ `/admin` is NOT deleted.** It stays as its own surface and is **re-authed**
+  from the shared `ADMIN_SECRET` to the super-admin session-email check (§3.3a).
+  `ADMIN_SECRET` still retires; the route does not.
+
+  **★ This resolves the two-blast-radii hazard rather than mitigating it.** The
+  earlier design put a **per-user** control (BYOA key, affects one person) and a
+  **global** control (`claude_tryit_key`, affects every tenant) on one page, and
+  leaned on visual distinction to stop someone editing a global value believing
+  it was theirs. Separate surfaces means that confusion is not possible:
+
+  | Surface | Principal | Scope of every control on it |
+  |---|---|---|
+  | `/admin` | super-admin only | **global** — the platform |
+  | `/dashboard/settings` | the signed-in owner | **their own account** |
+
+  **`/dashboard/settings` is therefore owner-scoped ONLY**, and its v1 content is
+  the owner's own agent API key (§4) — confirmed by Graham: *"the key edit for
+  owner probably needs to be on settings page, yes?"* Yes. That is where it goes,
+  and nothing global joins it.
 
 ### 8.1 ★ Encryption at rest — researched 2026-08-24, VERIFIED against vendor docs
 
-**Ruling: use Supabase Vault for BOTH `admin_config.value` and the BYOA key.
-Do NOT use pgsodium or Transparent Column Encryption.**
+**Ruling: use Supabase Vault for the BYOA key (chunk 3). Do NOT use pgsodium or
+Transparent Column Encryption.**
+
+**⛔ REVISED at v1.7.** This read *"for BOTH `admin_config.value` and the BYOA
+key"* — v1.6's index flagged it half-obsolete and never marked it. **The
+`admin_config` half is deleted: there is no table and no column to encrypt.**
+The BYOA half stands unchanged and is the whole of this ruling now.
 
 **What was verified, with the vendor's own words:**
 
@@ -531,7 +746,8 @@ Do NOT use pgsodium or Transparent Column Encryption.**
 | **Vault's encryption key lives OUTSIDE the database**, in Supabase's backend — so a database dump does not yield the key. Secrets are AEAD-encrypted via libsodium and decrypted on the fly through the `vault.decrypted_secrets` view, staying encrypted in **backups and replication streams**. | [Vault docs](https://supabase.com/docs/guides/database/vault) |
 
 **Storage shape:** `user_secrets` stores a `vault_secret_id uuid` rather than the
-key itself; likewise `admin_config`. Nothing in either table is a credential.
+key itself. Nothing in that table is a credential. *(v1.7: "likewise
+`admin_config`" deleted — no such table.)*
 
 **★ The honest limit, stated because the whole point of Q4 was not to overclaim:
 Vault does NOT protect against a compromised `service_role` key.** Our server
@@ -556,8 +772,15 @@ documented design centre is a *small number of app-level secrets*. Using it for
 **one row per user, unbounded**, is beyond the documented examples. The docs
 state no limit, but "no documented limit" is not "verified to scale". A spike
 must confirm per-user secrets behave under realistic row counts before chunk 3
-builds on it. **`admin_config` has no such doubt — three named secrets is exactly
-Vault's design centre.**
+builds on it.
+
+**⚠⚠ v1.7 — the spike now carries MORE weight.** The deleted sentence
+(*"`admin_config` has no such doubt — three named secrets is exactly Vault's
+design centre"*) was the reassuring half: one Vault use inside the documented
+envelope, one outside it. **With `admin_config` gone, the only remaining use of
+Vault in this design is the unbounded per-user case — the very one the spike
+exists to doubt.** If the spike fails, **nothing here uses Vault at all** and
+chunk 3 needs a different encryption-at-rest answer.
 
 ---
 
@@ -567,11 +790,57 @@ Vault's design centre.**
 `app/api/` imports `redis` *(mirrors test 20's shape in the key-availability
 doc)*.
 
-**Chunk 1:** `readAdminConfig` returns `ok`/**`store`** from a row, `ok`/`env` from the
-env fallback when the row is absent, `none` when neither, `error` only when the
-database is unreachable **and** no env fallback exists. **A deleted row must
-allow the env fallback** — the regression test for the retired `__DISABLED__`
-trap. Non-admin identity is refused by `admin_config` routes.
+**Chunk 1** *(rewritten v1.6 after Codex R4 caught the obsolete contract; the
+struck-through original was deleted at v1.7 — `git show
+d5fe1a8:docs/design-single-backend.md` §9)*:
+
+1. **`readAdminConfig` resolves from `process.env` alone.** `ok`/`env` when the
+   variable is set and non-empty; `none` when it is not. **`'store'` and `error`
+   are both unreachable** — there is no store, and an env var cannot be
+   "unreachable." Per §3.2, `ConfigRead` collapses from four states to two and
+   the type is **narrowed to `source: 'env'`**; that is a behavioural change, not
+   a simplification of wording.
+   **Also in this chunk:** the paired doc's `source: 'store' | 'env'` spec
+   (`design-ai-key-availability.md:359`, `:907`) is amended **in the chunk-1
+   build PR, alongside this code change — NOT in #152**, which touches one file.
+   A test pins that the two documents describe one union.
+2. **`__DISABLED__` is gone with the Redis client**, so the trap it caused cannot
+   recur. The regression test for it goes too — **there is no longer a write path
+   that could set it.** Deleting a test whose subject no longer exists is correct;
+   leaving it would assert against a code path that cannot be reached.
+3. **The four-route auth cases below** — unchanged by any of this. They are the
+   substance of chunk 1's test surface now.
+
+**⇒ Chunk 1's test surface is the auth boundary, not config resolution.** One
+resolution case (env set / env unset) plus the eight auth cases below.
+
+**★ Added at v1.4 (Codex R2 on #152, residual implementation risk).** A test
+covering only `settings` would leave the other three re-authed routes unproven
+while reading as complete — §3.3b re-auths **four** routes. **Every one of the
+four gets its own rejection case:**
+
+*(v1.7: this paragraph appeared twice — a v1.4/v1.6 artifact where the amended
+copy was inserted above the original instead of replacing it. Duplicate deleted.)*
+
+| Route | Must reject |
+|---|---|
+| `admin/settings` GET **and** PUT | both verbs, separately — v1.2's `authenticate()` is called twice (`route.ts:11`, `:33`) and one guard could be dropped without the other failing |
+| `admin/owners` | — |
+| `admin/migrate-setlists` | — |
+| `admin/backfill-chart-overlays` | — |
+
+Each case asserts rejection for: **no session**, **a session whose email does not
+match `PLATFORM_ADMIN_EMAIL`**, and **an unset or empty `PLATFORM_ADMIN_EMAIL`**
+(the fail-closed rule of §3.3b — an unset variable must not authorise everyone).
+A case that only tests "no session" would pass against an implementation that
+compares nothing.
+
+**And the reason these are not optional:** `authenticate()` returns `false` the
+moment `ADMIN_SECRET` is unset (`lib/admin-rate-limit.ts:45-46`). A route whose
+re-auth is forgotten therefore **fails closed and looks fine** — no error, no
+alarm, just a permanently 401ing admin tool. Only a positive test that the
+correct identity is ACCEPTED distinguishes "re-authed" from "silently dead," so
+each route also needs the matching accept case.
 
 **Chunk 2:** `increment_tryit` is atomic under concurrent calls; `peek_tryit`
 does **not** increment; both agree on window expiry at the boundary; a raw IP
@@ -585,6 +854,16 @@ cascades.
 **Chunk 4:** tests 21–24 from `a624650`, restated against whichever storage the
 user chose.
 
+**Chunk 5 — the completion gate** *(added v1.7; §9 previously stopped at chunk 4
+and the check lived only in §6.3, so the one test that proves the whole job is
+done was absent from the test spec)*: extend `importSpecifiers()`
+(`tests/redis-retirement.test.ts:82`) from `app/api/` to **`app/`, `lib/`,
+`components/`** and assert **no production module imports `redis` or `redis/*`**.
+Keep the existing positive control (`:342`) so an empty offender list cannot come
+from an empty file list. **Parsed, not grepped, and scoped to production source**
+— `tests/` legitimately contains `redis` import strings as scanner fixtures
+(`:240`), and `docs/` contains the phrase in prose (§6.3).
+
 **Delta measured on both refs immediately before each PR body is written, never
 quoted from notes** (`feedback_report_test_delta`).
 
@@ -592,15 +871,41 @@ quoted from notes** (`feedback_report_test_delta`).
 
 ## 10. Documents this supersedes
 
-Both are corrected **in this PR** (supersession notices only; full rewrites are
-separate work):
+**⛔ CORRECTED at v1.7 — this said "All three are corrected in this PR." Two
+were; one never was.** Measured 2026-08-25:
+
+| Doc | Supersession notice | Corrected where |
+|---|---|---|
+| `design-kv-admin-settings.md` | ✅ present | **#150** (`dc56c8e`) |
+| `design-supabase-backend.md` | ✅ present | **#150** (`dc56c8e`) |
+| **`design-owner-onboarding.md`** | ❌ **ABSENT** | **nowhere — still uncorrected** |
+
+`design-owner-onboarding.md` was added to this list at **v1.3, inside #152 — a
+one-file PR that could not have corrected it.** Found, listed, never fixed. **It
+still specifies `/api/admin/owners` as `ADMIN_SECRET`-gated** (`:55`, `:61`,
+`:82`).
+
+**⇒ Its notice lands with the chunk-1 build PR**, where `/api/admin/owners` is
+actually re-authed — the same PR as the paired-doc amendment (§3.2, §9).
+
+(Supersession notices only; full rewrites are separate work.)
 
 1. **`design-kv-admin-settings.md`** — its *"Why Redis over Postgres"* rationale
    and its **instance-per-customer hosting model** ("Model C") are both dead.
    Graham ruled multi-tenant SaaS 2026-08-24, and the code already agreed:
    `app/api/profiles/route.ts:12` is `POST /api/profiles — claim owner slug
    (onboarding)` — self-serve owners on one deployment.
-2. **`design-supabase-backend.md`** — its `user_secrets` policy block specifies
+   **Also dead: its auth model.** `:130` makes `ADMIN_SECRET` *"the root of
+   trust… never stored in KV — it stays in `process.env`."* §3.3b retires it
+   outright; the root of trust becomes the Supabase session plus
+   `PLATFORM_ADMIN_EMAIL`. `:213`/`:219` still specify `Authorization: Bearer
+   {ADMIN_SECRET}` as the route contract.
+2. **`design-owner-onboarding.md`** — `:55`, `:61` and `:82` specify
+   `/api/admin/owners` as `ADMIN_SECRET`-gated, with the KV-independent
+   validation whose rationale §3.3b retires. Its *"Registered Owners"* section
+   and the `/admin` surface it hangs on are **unaffected** — only the gate
+   changes.
+3. **`design-supabase-backend.md`** — its `user_secrets` policy block specifies
    two write policies that **were** created (`001_initial_schema.sql:149`,
    `:153`) and are now **dropped** by §4.2, because Vault requires server-side
    writes and no DELETE policy exists for the Remove action. *(v1 of this
