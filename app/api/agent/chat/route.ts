@@ -57,10 +57,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // `unconfigured` and `error` converge on the same 401 for the sender — the
-  // capabilities probe is what tells them apart for the UI (§5 states 5 and 6).
-  // The reason is carried so the distinction survives in logs.
-  if (resolved.mode === 'unconfigured' || resolved.mode === 'error') {
+  // `reason` is still carried so the 401's cause survives in logs. It no longer
+  // has a sibling: `mode: 'error'` retired with the Redis config client
+  // (design-single-backend §3.2) because config cannot fail to resolve.
+  if (resolved.mode === 'unconfigured') {
     return Response.json(
       {
         error: 'No API key provided and try-it mode is not available.',

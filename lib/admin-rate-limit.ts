@@ -40,10 +40,3 @@ export function checkRateLimit(
   entry.count++;
   return entry.count <= max;
 }
-
-export function authenticate(request: NextRequest): boolean {
-  const secret = process.env.ADMIN_SECRET;
-  if (!secret) return false;
-  const provided = request.headers.get('authorization')?.replace('Bearer ', '');
-  return !!provided && provided === secret;
-}

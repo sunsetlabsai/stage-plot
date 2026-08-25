@@ -140,10 +140,11 @@ export function resolveAvailability(args: {
   switch (probe.tryit) {
     case 'unconfigured':
       return { state: 5, allowsSend: false, showKeyField: true, remaining: null, lead: 'unconfigured' };
-    case 'error':
-      // The probe answered, and its answer was "I could not tell." Same user-facing
-      // treatment as a failed probe; still not the same value.
-      return { state: 6, allowsSend: false, showKeyField: true, remaining: null, lead: 'checkFailed' };
+    // `case 'error'` — "the probe answered, and its answer was 'I could not
+    // tell'" — is DELETED with the Redis config client (design-single-backend
+    // §3.2). Config resolves from process.env, so the server has no outage left
+    // to report. State 6 is unchanged: it is still reached above, from a probe
+    // that failed to answer at all.
     case 'exhausted':
       return { state: 4, allowsSend: false, showKeyField: true, remaining: 0, lead: 'exhausted' };
     case 'available': {

@@ -1,92 +1,45 @@
-import { createClient, type RedisClientType } from 'redis';
-
-const DISABLED_SENTINEL = '__DISABLED__';
-
-let client: RedisClientType | null = null;
-
-async function getRedis(): Promise<RedisClientType | null> {
-  const url = process.env.REDIS_URL;
-  if (!url) return null;
-
-  if (client && client.isOpen) return client;
-
-  try {
-    client = createClient({ url });
-    await client.connect();
-    return client;
-  } catch {
-    client = null;
-    return null;
-  }
-}
-
 /**
- * The outcome of a config read, with the store's reachability preserved.
+ * The outcome of a config read.
  *
- * `getAdminConfig` returns `null` for BOTH "nothing is set" and "the store was
- * unreachable and there is no env fallback" — and that conflation is the defect
- * design §4.1 exists to remove. In production (no `CLAUDE_TRYIT_KEY` in the
- * environment) a Redis outage therefore renders as *intentionally off*, which is
- * exactly the ambiguity that made "my account has no AI key" unanswerable.
+ * TWO states, not four (design-single-backend §3.2). Config resolves from
+ * `process.env` alone, so `'store'` and `error` are states no code can produce:
+ * there is nothing to store a value, and `process.env` is a synchronous
+ * in-process read with no failure mode — an environment variable cannot be
+ * unreachable.
+ *
+ * The narrowing is deliberate rather than a reserved member kept "just in case".
+ * An unreachable union member is the same class of trap as the `__DISABLED__`
+ * sentinel deleted alongside it: the type says the state is possible, so a
+ * future reader writes a branch for it that can never run. If a store ever
+ * returns, adding the member back is one line.
  */
 export type ConfigRead =
-  | { status: 'ok'; value: string; source: 'redis' | 'env' }
-  /** Store reachable, nothing set (or explicitly disabled). */
-  | { status: 'none' }
-  /** Store unreachable AND no usable env fallback. */
-  | { status: 'error'; reason: string };
+  | { status: 'ok'; value: string; source: 'env' }
+  | { status: 'none' };
 
 /**
- * Read an admin config value, preserving WHY there is no value.
+ * Read an admin config value from the environment.
  *
- * The ordering subtlety this must keep: a Redis failure with a valid env fallback
- * is still `ok`/`env`, never `error`. `error` means *no usable value and the store
- * was unreachable* — only that combination is ambiguous. (Design §0 invariant 3.)
+ * `claude_tryit_key` → `CLAUDE_TRYIT_KEY`, and so on. Empty string is `none`,
+ * not `ok` — an env var set to '' is unconfigured, matching how every caller
+ * already treats a falsy value.
+ *
+ * Async because four routes and `lib/agent-key.ts` await it. The read itself is
+ * synchronous; the signature is what keeps this a Redis removal rather than a
+ * call-site rewrite.
  */
 export async function readAdminConfig(key: string): Promise<ConfigRead> {
-  let storeReachable = true;
-  let reason = '';
-
-  try {
-    const redis = await getRedis();
-    if (redis) {
-      const value = await redis.get(`admin:${key}`);
-      // The sentinel is a deliberate "off", and it suppresses the env fallback —
-      // matching getAdminConfig's long-standing behavior. An operator who once
-      // cleared the field in the UI must clear this key before CLAUDE_TRYIT_KEY
-      // can take effect (design §6 gap 3 — the trap worth documenting).
-      if (value === DISABLED_SENTINEL) return { status: 'none' };
-      if (value) return { status: 'ok', value, source: 'redis' };
-    } else {
-      // No REDIS_URL configured at all. That is not an outage — env is the
-      // intended source in that deployment, so it must not read as `error`.
-      // Truthiness, not `=== undefined`, to match getRedis's own `if (!url)`:
-      // REDIS_URL='' means unconfigured, and would otherwise report an outage.
-      storeReachable = !process.env.REDIS_URL;
-      if (!storeReachable) reason = 'Redis connection unavailable';
-    }
-  } catch (e) {
-    storeReachable = false;
-    reason = e instanceof Error ? e.message : 'Redis read failed';
-  }
-
-  const envValue = process.env[key.toUpperCase()];
-  if (envValue) return { status: 'ok', value: envValue, source: 'env' };
-
-  return storeReachable
-    ? { status: 'none' }
-    : { status: 'error', reason: reason || 'Key store unreachable' };
+  const value = process.env[key.toUpperCase()];
+  return value ? { status: 'ok', value, source: 'env' } : { status: 'none' };
 }
 
 /**
- * Read an admin config value. Redis first, env var fallback.
- * Returns null if unconfigured or explicitly disabled.
+ * Read an admin config value. Returns null if unconfigured.
  *
- * A thin wrapper over readAdminConfig — one lookup, two shapes (design §4.1).
- * Four other routes call this (agent/chat, charts/convert, charts/roadmap/parse,
- * admin/backfill-chart-overlays) and their behavior is unchanged: every non-`ok`
- * status still collapses to null here. Callers that need the distinction use
- * readAdminConfig directly.
+ * A thin wrapper over readAdminConfig — one lookup, two shapes. Five callers
+ * (auth/google, auth/google/callback, agent chat via agent-key, charts/convert,
+ * charts/roadmap/parse, admin/backfill-chart-overlays) collapse every non-`ok`
+ * status to null here; callers needing the distinction use readAdminConfig.
  */
 export async function getAdminConfig(key: string): Promise<string | null> {
   const read = await readAdminConfig(key);
@@ -94,19 +47,13 @@ export async function getAdminConfig(key: string): Promise<string | null> {
 }
 
 /**
- * Write an admin config value to Redis.
- * Empty string stores DISABLED sentinel (prevents env var fallback).
- * Throws if Redis is unavailable (fail closed for admin writes).
- */
-export async function setAdminConfig(key: string, value: string): Promise<void> {
-  const redis = await getRedis();
-  if (!redis) throw new Error('Redis not connected');
-
-  await redis.set(`admin:${key}`, value || DISABLED_SENTINEL);
-}
-
-/**
  * Read all admin config values (masked for display).
+ *
+ * All three keys still have live consumers: `google_client_id` and
+ * `google_client_secret` by `/api/auth/google` and its callback — PR #153
+ * retired Drive in the DESIGN only, and the OAuth routes plus their entry point
+ * at `app/[owner]/[show]/page.tsx` are still on main — and `claude_tryit_key`
+ * by the three AI routes.
  */
 export async function getAllAdminConfig(): Promise<Record<string, { configured: boolean; masked: string }>> {
   const keys = ['google_client_id', 'google_client_secret', 'claude_tryit_key'] as const;
@@ -128,18 +75,4 @@ function maskSecret(key: string, value: string): string {
   }
   if (value.length <= 8) return '••••••••';
   return `${value.slice(0, 7)}...${value.slice(-4)}`;
-}
-
-/**
- * Check if Redis store is reachable.
- */
-export async function isKvConnected(): Promise<boolean> {
-  try {
-    const redis = await getRedis();
-    if (!redis) return false;
-    await redis.ping();
-    return true;
-  } catch {
-    return false;
-  }
 }

@@ -2,7 +2,8 @@ import { NextRequest } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { getAdminConfig } from '@/lib/admin-config';
-import { checkRateLimit, getIp, authenticate } from '@/lib/admin-rate-limit';
+import { checkRateLimit, getIp } from '@/lib/admin-rate-limit';
+import { requirePlatformAdmin } from '@/lib/admin-auth';
 import { hashPdfBytes } from '@/lib/chart-calibration';
 import {
   MAX_PDF_BYTES,
@@ -102,7 +103,8 @@ async function convertChart(admin: Admin, apiKey: string, chart: ChartRow): Prom
 
 // POST /api/admin/backfill-chart-overlays — A2 one-time overlay backfill on prod.
 // Ports the per-chart converter logic so it can run on Vercel (no local box).
-// Auth: Authorization: Bearer <ADMIN_SECRET>.
+// Auth: platform super-admin session (design-single-backend §3.3a, §3.3b) —
+// sign in as PLATFORM_ADMIN_EMAIL and call this from that browser session.
 // ?dry_run=true  → instant preview (counts only; no downloads, no vision, no writes).
 // ?limit=<1..5>  → max vision calls this request (default 4); call again while `more`.
 export async function POST(request: NextRequest) {
@@ -110,9 +112,9 @@ export async function POST(request: NextRequest) {
   if (!checkRateLimit(ip, 'backfill-chart-overlays')) {
     return Response.json({ error: 'Too many requests' }, { status: 429 });
   }
-  if (!authenticate(request)) {
-    return Response.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+
+  const denied = await requirePlatformAdmin();
+  if (denied) return denied;
 
   const dryRun = request.nextUrl.searchParams.get('dry_run') === 'true';
   const limitParam = Number(request.nextUrl.searchParams.get('limit'));

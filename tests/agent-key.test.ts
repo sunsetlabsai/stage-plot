@@ -68,18 +68,35 @@ afterEach(() => {
 const adminConfig = () => import('../lib/admin-config');
 const agentKey = () => import('../lib/agent-key');
 
-describe('readAdminConfig — the value, and its source', () => {
-  it('reports a Redis value as ok/redis', async () => {
+describe('readAdminConfig — env only (design-single-backend §3.2)', () => {
+  it('reports the env var as ok/env', async () => {
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-env';
+    const { readAdminConfig } = await adminConfig();
+    expect(await readAdminConfig('claude_tryit_key')).toEqual({
+      status: 'ok',
+      value: 'sk-ant-env',
+      source: 'env',
+    });
+  });
+
+  it('reports none when the env var is unset', async () => {
+    const { readAdminConfig } = await adminConfig();
+    expect(await readAdminConfig('claude_tryit_key')).toEqual({ status: 'none' });
+  });
+
+  it('reports none when the env var is set but empty', async () => {
+    process.env.CLAUDE_TRYIT_KEY = '';
+    const { readAdminConfig } = await adminConfig();
+    expect(await readAdminConfig('claude_tryit_key')).toEqual({ status: 'none' });
+  });
+
+  // ★ The counterexample to "we just renamed the source". A REDIS_URL pointing at
+  // a store holding a value must now change nothing: the value is not read, and
+  // the outage that used to produce `error` is not observed. Without this, a
+  // half-finished strip that still consulted Redis first would pass every test
+  // above by falling through to env.
+  it('ignores Redis entirely — a reachable store with a value does not win, and an outage is not an error', async () => {
     redis.store.set('admin:claude_tryit_key', 'sk-ant-redis');
-    const { readAdminConfig } = await adminConfig();
-    expect(await readAdminConfig('claude_tryit_key')).toEqual({
-      status: 'ok',
-      value: 'sk-ant-redis',
-      source: 'redis',
-    });
-  });
-
-  it('falls back to the env var and says so', async () => {
     process.env.CLAUDE_TRYIT_KEY = 'sk-ant-env';
     const { readAdminConfig } = await adminConfig();
     expect(await readAdminConfig('claude_tryit_key')).toEqual({
@@ -87,91 +104,40 @@ describe('readAdminConfig — the value, and its source', () => {
       value: 'sk-ant-env',
       source: 'env',
     });
-  });
+    expect(redis.getCalls).toBe(0);
 
-  it('reports none when the store is reachable and nothing is set', async () => {
-    const { readAdminConfig } = await adminConfig();
-    expect(await readAdminConfig('claude_tryit_key')).toEqual({ status: 'none' });
-  });
-});
-
-describe('readAdminConfig — none vs error (§0 invariant 3)', () => {
-  // 6a. The regression the previous spec could not have passed: getAdminConfig
-  // returned null here, identical to a clean "nothing configured".
-  it('reports ERROR when the store is unreachable and there is no env fallback', async () => {
     redis.connectThrows = true;
-    const { readAdminConfig } = await adminConfig();
-    const read = await readAdminConfig('claude_tryit_key');
-    expect(read.status).toBe('error');
-    expect(read).toHaveProperty('reason');
-  });
-
-  // 6b. A store outage with a working fallback is NOT an error — try-it works, so
-  // the user must be told it works. (The operator learns about the outage from
-  // /admin instead; that is the other half of the §6 pair, chunk 5.)
-  it('reports ok/env — NOT error — when the store is unreachable but the env var is set', async () => {
-    redis.connectThrows = true;
-    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-env';
-    const { readAdminConfig } = await adminConfig();
-    expect(await readAdminConfig('claude_tryit_key')).toEqual({
-      status: 'ok',
-      value: 'sk-ant-env',
-      source: 'env',
-    });
-  });
-
-  it('reports error when the read itself throws, not just the connect', async () => {
-    redis.getThrows = true;
-    const { readAdminConfig } = await adminConfig();
-    expect((await readAdminConfig('claude_tryit_key')).status).toBe('error');
-  });
-
-  // The edge case that would otherwise misreport a deployment choice as an outage.
-  it('reports none, not error, when REDIS_URL is absent entirely', async () => {
-    delete process.env.REDIS_URL;
-    const { readAdminConfig } = await adminConfig();
-    expect(await readAdminConfig('claude_tryit_key')).toEqual({ status: 'none' });
-  });
-
-  it('reports none, not error, when REDIS_URL is set but empty', async () => {
-    process.env.REDIS_URL = '';
-    const { readAdminConfig } = await adminConfig();
-    expect(await readAdminConfig('claude_tryit_key')).toEqual({ status: 'none' });
-  });
-});
-
-describe('readAdminConfig — the __DISABLED__ trap (§6 gap 3)', () => {
-  // 6c. The sentinel is a deliberate "off" and it SUPPRESSES the env fallback. An
-  // operator who once cleared the field in the UI must clear this key before
-  // CLAUDE_TRYIT_KEY can take effect — the interaction worth a test, not just prose.
-  it('treats the sentinel as none', async () => {
-    redis.store.set('admin:claude_tryit_key', '__DISABLED__');
-    const { readAdminConfig } = await adminConfig();
-    expect(await readAdminConfig('claude_tryit_key')).toEqual({ status: 'none' });
-  });
-
-  it('keeps the env var suppressed while the sentinel is present', async () => {
-    redis.store.set('admin:claude_tryit_key', '__DISABLED__');
-    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-env';
-    const { readAdminConfig } = await adminConfig();
-    expect(await readAdminConfig('claude_tryit_key')).toEqual({ status: 'none' });
-  });
-});
-
-describe('getAdminConfig — unchanged for its four existing callers', () => {
-  it('collapses every non-ok status to null', async () => {
-    const { getAdminConfig } = await adminConfig();
-    expect(await getAdminConfig('claude_tryit_key')).toBeNull(); // none
-    redis.connectThrows = true;
+    delete process.env.CLAUDE_TRYIT_KEY;
     vi.resetModules();
-    const { getAdminConfig: g2 } = await adminConfig();
-    expect(await g2('claude_tryit_key')).toBeNull(); // error
+    const { readAdminConfig: r2 } = await adminConfig();
+    expect(await r2('claude_tryit_key')).toEqual({ status: 'none' });
+  });
+
+  // The __DISABLED__ sentinel died with the client. Its regression test died with
+  // it — there is no write path that could set it — but the TRAP it caused was a
+  // stored value suppressing the env fallback, so pin that it cannot recur.
+  it('does not let a leftover __DISABLED__ in Redis suppress the env var', async () => {
+    redis.store.set('admin:claude_tryit_key', '__DISABLED__');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-env';
+    const { readAdminConfig } = await adminConfig();
+    expect(await readAdminConfig('claude_tryit_key')).toEqual({
+      status: 'ok',
+      value: 'sk-ant-env',
+      source: 'env',
+    });
+  });
+});
+
+describe('getAdminConfig — unchanged for its callers', () => {
+  it('collapses none to null', async () => {
+    const { getAdminConfig } = await adminConfig();
+    expect(await getAdminConfig('claude_tryit_key')).toBeNull();
   });
 
   it('still returns the value when there is one', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-redis');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-env';
     const { getAdminConfig } = await adminConfig();
-    expect(await getAdminConfig('claude_tryit_key')).toBe('sk-ant-redis');
+    expect(await getAdminConfig('claude_tryit_key')).toBe('sk-ant-env');
   });
 });
 
@@ -190,16 +156,8 @@ describe('resolveKeyMode — precedence and states', () => {
     expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('unconfigured');
   });
 
-  it('propagates error, with a reason, distinctly from unconfigured', async () => {
-    redis.connectThrows = true;
-    const { resolveKeyMode } = await agentKey();
-    const r = await resolveKeyMode(undefined, 'ip', { consume: true });
-    expect(r.mode).toBe('error');
-    if (r.mode === 'error') expect(r.reason).toBeTruthy();
-  });
-
   it('resolves try-it with a remaining count derived from the quota constant', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { resolveKeyMode, TRYIT_QUOTA } = await agentKey();
     const r = await resolveKeyMode(undefined, 'ip', { consume: true });
     expect(r.mode).toBe('tryit');
@@ -208,7 +166,7 @@ describe('resolveKeyMode — precedence and states', () => {
   });
 
   it('reports exhausted once usage reaches the quota constant', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { resolveKeyMode, TRYIT_QUOTA } = await agentKey();
     redis.store.set('quota:ip', String(TRYIT_QUOTA));
     expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('exhausted');
@@ -217,7 +175,7 @@ describe('resolveKeyMode — precedence and states', () => {
 
 describe('resolveKeyMode — a peek must not cost a message (§4 hard requirement)', () => {
   it('does not INCR when consume is false', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { resolveKeyMode } = await agentKey();
     await resolveKeyMode(undefined, 'ip', { consume: false });
     await resolveKeyMode(undefined, 'ip', { consume: false });
@@ -226,7 +184,7 @@ describe('resolveKeyMode — a peek must not cost a message (§4 hard requiremen
   });
 
   it('reports the same remaining across repeated peeks', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     redis.store.set('quota:ip', '3');
     const { resolveKeyMode, TRYIT_QUOTA } = await agentKey();
     const a = await resolveKeyMode(undefined, 'ip', { consume: false });
@@ -240,7 +198,7 @@ describe('resolveKeyMode — a peek must not cost a message (§4 hard requiremen
   });
 
   it('consume decrements exactly once', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { resolveKeyMode, TRYIT_QUOTA } = await agentKey();
     await resolveKeyMode(undefined, 'ip', { consume: true });
     const after = await resolveKeyMode(undefined, 'ip', { consume: false });

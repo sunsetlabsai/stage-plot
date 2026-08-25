@@ -88,14 +88,14 @@ const proxiedBody = () => JSON.parse(String(sent?.init.body));
 
 describe('POST /api/agent/chat — BYOA wins over try-it', () => {
   it('proxies the caller key even when a server key is configured', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const res = await post({ authorization: 'Bearer sk-ant-mine' });
     expect(res.status).toBe(200);
     expect(proxiedKey()).toBe('sk-ant-mine');
   });
 
   it('spends no try-it quota on a BYOA send', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     await post({ authorization: 'Bearer sk-ant-mine' });
     expect(redis.incrCalls).toBe(0);
   });
@@ -109,7 +109,7 @@ describe('POST /api/agent/chat — BYOA wins over try-it', () => {
 
 describe('POST /api/agent/chat — try-it', () => {
   it('proxies the server key and decrements the quota once', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const res = await post();
     expect(res.status).toBe(200);
     expect(proxiedKey()).toBe('sk-ant-server');
@@ -117,7 +117,7 @@ describe('POST /api/agent/chat — try-it', () => {
   });
 
   it('uses the try-it token ceiling', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { TRYIT_MAX_TOKENS } = await import('../lib/agent-key');
     await post();
     expect(proxiedBody().max_tokens).toBe(TRYIT_MAX_TOKENS);
@@ -128,7 +128,7 @@ describe('POST /api/agent/chat — try-it', () => {
   // show its remaining count, and losing it degrades silently — the exact class of
   // "works until someone looks" defect this design exists to remove.
   it('reports the remaining count on a successful try-it send', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { TRYIT_QUOTA } = await import('../lib/agent-key');
     const res = await post();
     expect(res.headers.get('X-Tryit-Remaining')).toBe(String(TRYIT_QUOTA - 1));
@@ -140,7 +140,7 @@ describe('POST /api/agent/chat — try-it', () => {
   });
 
   it('429s with tryitExhausted once the allowance is spent', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { TRYIT_QUOTA } = await import('../lib/agent-key');
     redis.store.set('quota:unknown', String(TRYIT_QUOTA));
     const res = await post();
@@ -153,7 +153,7 @@ describe('POST /api/agent/chat — try-it', () => {
   });
 
   it('never calls Anthropic on an exhausted send', async () => {
-    redis.store.set('admin:claude_tryit_key', 'sk-ant-server');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { TRYIT_QUOTA } = await import('../lib/agent-key');
     redis.store.set('quota:unknown', String(TRYIT_QUOTA));
     await post();
@@ -169,14 +169,16 @@ describe('POST /api/agent/chat — no key available', () => {
     expect(body.reason).toBe('unconfigured');
   });
 
-  // The user-facing copy converges on the same 401, but the DATA must not — this is
-  // the diagnostic that made "my account has no AI key" answerable (§0 invariant 2).
-  it('401s when the store is unreachable, tagged error — distinct from unconfigured', async () => {
+  // The `reason: 'error'` counterpart is DELETED (design-single-backend §3.2).
+  // It distinguished "no key AND the store was unreachable" from "no key", and
+  // config no longer has a store to be unreachable. What survives is the rule
+  // that an unreachable Redis must not change the answer at all.
+  it('401s as unconfigured — not error — when Redis is unreachable', async () => {
     redis.connectThrows = true;
     const res = await post();
     expect(res.status).toBe(401);
     const body = await res.json();
-    expect(body.reason).toBe('error');
+    expect(body.reason).toBe('unconfigured');
   });
 
   it('still works off the env var when the store is unreachable', async () => {

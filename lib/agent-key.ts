@@ -98,10 +98,19 @@ export type KeyMode =
   | { mode: 'tryit'; apiKey: string; model: string; maxTokens: number; remaining: number }
   /** Try-it is configured but this IP has spent its allowance. */
   | { mode: 'exhausted' }
-  /** No key available: the store was reachable and nothing is set. */
-  | { mode: 'unconfigured' }
-  /** No key available AND the store was unreachable — a different operator problem. */
-  | { mode: 'error'; reason: string };
+  /** No key available: nothing is set. */
+  | { mode: 'unconfigured' };
+
+// `mode: 'error'` was DELETED with the Redis config client (design-single-backend
+// §3.2). It meant "no key AND the store was unreachable" — a state the only
+// producer, readAdminConfig, can no longer reach now that config resolves from
+// process.env. It does not come back with the chunk-2 quota move either: §5.4
+// keeps `fallbackQuota` as the degradation path, so an unreachable database
+// falls back rather than erroring.
+//
+// The USER-facing state 6 survives untouched: agent-availability still reaches
+// it from a failed probe fetch (`probe === 'error'`). What is gone is the
+// server's claim to have measured an outage it can no longer observe.
 
 /**
  * Peek or consume the try-it quota for an IP.
@@ -198,7 +207,6 @@ export async function resolveKeyMode(
   }
 
   const read = await readAdminConfig('claude_tryit_key');
-  if (read.status === 'error') return { mode: 'error', reason: read.reason };
   if (read.status === 'none') return { mode: 'unconfigured' };
 
   const q = await quota(ip, opts.consume);
@@ -226,7 +234,7 @@ export function getClientIp(headers: Headers): string {
  * for the same drift reason `fallbackQuota` lives here.
  */
 export type Capabilities = {
-  tryit: 'available' | 'exhausted' | 'unconfigured' | 'error';
+  tryit: 'available' | 'exhausted' | 'unconfigured';
   /** null unless tryit is available or exhausted — §4 forbids inventing a count. */
   tryitRemaining: number | null;
   /** Always serialized from TRYIT_QUOTA, never a literal (§4, Codex R2 medium). */
@@ -249,8 +257,6 @@ export function capabilitiesFrom(resolved: KeyMode): Capabilities | null {
   switch (resolved.mode) {
     case 'byoa':
       return null;
-    case 'error':
-      return { tryit: 'error', tryitRemaining: null, quota: TRYIT_QUOTA };
     case 'unconfigured':
       return { tryit: 'unconfigured', tryitRemaining: null, quota: TRYIT_QUOTA };
     case 'exhausted':

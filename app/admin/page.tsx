@@ -1,6 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { getSupabaseBrowser } from '@/lib/supabase-browser';
 
 interface ConfigEntry {
   configured: boolean;
@@ -17,283 +19,209 @@ interface Owner {
   created_at: string;
 }
 
+/**
+ * Platform super-admin surface (design-single-backend §3.3a).
+ *
+ * The gating below is PRESENTATION ONLY. `/api/admin/*` enforces the boundary
+ * server-side against PLATFORM_ADMIN_EMAIL, and this page cannot check that
+ * itself — the variable is server-only by design. So "authorized" here means
+ * "the route answered", not "the browser decided": we read the session to tell
+ * signed-out from signed-in-as-someone-else, then let the 401 speak for itself.
+ * §3.3a rule 4 — hiding a section is presentation, the route is the control.
+ *
+ * Read-only. Config lives in Vercel env vars, so there is nothing to submit;
+ * changing the try-it key is an env edit plus a redeploy (§3).
+ */
+type Gate =
+  | { state: 'loading' }
+  | { state: 'signed-out' }
+  | { state: 'forbidden'; email: string }
+  | { state: 'error'; email: string; message: string }
+  | { state: 'ok' };
+
 export default function AdminPage() {
-  const [secret, setSecret] = useState('');
-  const [authenticated, setAuthenticated] = useState(false);
+  const [gate, setGate] = useState<Gate>({ state: 'loading' });
   const [config, setConfig] = useState<AdminConfig | null>(null);
-  const [kvConnected, setKvConnected] = useState(false);
-  const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState('');
   const [owners, setOwners] = useState<Owner[]>([]);
   const [ownersWarning, setOwnersWarning] = useState('');
-  const [ownersError, setOwnersError] = useState('');
 
-  // Form fields
-  const [googleClientId, setGoogleClientId] = useState('');
-  const [googleClientSecret, setGoogleClientSecret] = useState('');
-  const [claudeTryitKey, setClaudeTryitKey] = useState('');
+  useEffect(() => {
+    let cancelled = false;
 
-  async function handleLogin(e: React.FormEvent) {
-    e.preventDefault();
-    setError('');
+    (async () => {
+      const { data } = await getSupabaseBrowser().auth.getUser();
+      const email = data?.user?.email;
+      if (cancelled) return;
+      if (!email) {
+        setGate({ state: 'signed-out' });
+        return;
+      }
 
-    const authHeader = { Authorization: `Bearer ${secret}` };
+      // Same-origin, so the session cookie rides along — no auth header.
+      const ownersRes = await fetch('/api/admin/owners');
+      if (cancelled) return;
 
-    // Step 1: Authenticate via owners endpoint (no KV dependency, 1 rate-limit token)
-    const ownersRes = await fetch('/api/admin/owners', { headers: authHeader });
+      if (ownersRes.status === 401) {
+        setGate({ state: 'forbidden', email });
+        return;
+      }
+      if (ownersRes.status === 429) {
+        setGate({ state: 'error', email, message: 'Too many requests. Wait a minute and reload.' });
+        return;
+      }
+      if (!ownersRes.ok) {
+        setGate({ state: 'error', email, message: 'Failed to load owners.' });
+        return;
+      }
 
-    if (ownersRes.status === 401) {
-      setError('Invalid admin secret.');
-      return;
-    }
-    if (ownersRes.status === 429) {
-      setError('Too many attempts. Wait a minute and try again.');
-      return;
-    }
-
-    // Auth passed — load owners
-    if (ownersRes.ok) {
       const ownersData = await ownersRes.json();
+      if (cancelled) return;
       setOwners(ownersData.owners || []);
       if (ownersData.warning) setOwnersWarning(ownersData.warning);
-    } else {
-      setOwnersError('Failed to load owners');
-    }
+      setGate({ state: 'ok' });
 
-    // Step 2: Fetch settings (may 503/429 — non-fatal, auth already confirmed)
-    try {
-      const settingsRes = await fetch('/api/admin/settings', { headers: authHeader });
-      if (settingsRes.ok) {
-        const settingsData = await settingsRes.json();
-        setConfig(settingsData.config);
-        setKvConnected(settingsData.kvConnected);
-      } else if (settingsRes.status === 503) {
-        // KV down — non-fatal
-        setKvConnected(false);
+      // Config is supplementary — a failure here must not blank the page.
+      try {
+        const settingsRes = await fetch('/api/admin/settings');
+        if (cancelled || !settingsRes.ok) return;
+        setConfig((await settingsRes.json()).config);
+      } catch {
+        // Leave config null; the section renders as unavailable.
       }
-    } catch {
-      setKvConnected(false);
-    }
+    })();
 
-    setAuthenticated(true);
-  }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  async function handleSave(e: React.FormEvent) {
-    e.preventDefault();
-    setError('');
-    setSaveSuccess('');
-    setSaving(true);
+  if (gate.state === 'loading') return <Shell><p className="text-sm text-gray-500">Checking access…</p></Shell>;
 
-    // Only send non-empty fields — blank means "no change"
-    const body: Record<string, string> = {};
-    if (googleClientId) body.google_client_id = googleClientId;
-    if (googleClientSecret) body.google_client_secret = googleClientSecret;
-    if (claudeTryitKey) body.claude_tryit_key = claudeTryitKey;
-
-    if (Object.keys(body).length === 0) {
-      setError('No changes to save.');
-      setSaving(false);
-      return;
-    }
-
-    const res = await fetch('/api/admin/settings', {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    setSaving(false);
-
-    if (!res.ok) {
-      const data = await res.json();
-      setError(data.error || 'Save failed.');
-      return;
-    }
-
-    const data = await res.json();
-    setConfig(data.config);
-    setGoogleClientId('');
-    setGoogleClientSecret('');
-    setClaudeTryitKey('');
-    setSaveSuccess(`Updated: ${data.updated.join(', ')}`);
-    setTimeout(() => setSaveSuccess(''), 3000);
-  }
-
-  async function handleClear(key: string) {
-    if (!confirm(`Disable ${key.replace(/_/g, ' ')}? This will prevent the feature from working.`)) return;
-    setError('');
-    setSaveSuccess('');
-
-    const res = await fetch('/api/admin/settings', {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ [key]: '' }),
-    });
-
-    if (!res.ok) {
-      const data = await res.json();
-      setError(data.error || 'Clear failed.');
-      return;
-    }
-
-    const data = await res.json();
-    setConfig(data.config);
-    setSaveSuccess(`Cleared: ${key}`);
-    setTimeout(() => setSaveSuccess(''), 3000);
-  }
-
-  if (!authenticated) {
+  if (gate.state === 'signed-out') {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <form onSubmit={handleLogin} className="bg-white rounded-xl shadow-lg p-8 w-full max-w-sm">
-          <h1 className="text-xl font-bold mb-2">Admin Settings</h1>
-          <p className="text-sm text-gray-500 mb-6">Enter your admin secret to continue.</p>
-          {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
-          <input
-            type="password"
-            value={secret}
-            onChange={(e) => setSecret(e.target.value)}
-            placeholder="Admin secret"
-            className="w-full px-3 py-2 border rounded-lg mb-4 text-sm"
-            autoFocus
-          />
-          <button
-            type="submit"
-            className="w-full py-2 bg-black text-white font-bold text-sm rounded-lg hover:bg-gray-800 transition-colors"
-          >
-            Authenticate
-          </button>
-        </form>
-      </div>
+      <Shell>
+        <p className="text-sm text-gray-500 mb-4">Sign in to continue.</p>
+        <Link
+          href="/sign-in?redirect=/admin"
+          className="inline-block px-4 py-2 bg-black text-white font-bold text-sm rounded-lg hover:bg-gray-800 transition-colors"
+        >
+          Sign in
+        </Link>
+      </Shell>
+    );
+  }
+
+  if (gate.state === 'forbidden') {
+    return (
+      <Shell>
+        <p className="text-sm text-gray-700 mb-1">Signed in as <span className="font-mono">{gate.email}</span>.</p>
+        <p className="text-sm text-gray-500 mb-4">This account is not the platform administrator.</p>
+        <Link
+          href="/sign-in?redirect=/admin"
+          className="inline-block px-4 py-2 border text-sm rounded-lg hover:bg-gray-50 transition-colors"
+        >
+          Switch account
+        </Link>
+      </Shell>
+    );
+  }
+
+  if (gate.state === 'error') {
+    return (
+      <Shell>
+        <p className="text-sm text-gray-700 mb-1">Signed in as <span className="font-mono">{gate.email}</span>.</p>
+        <p className="text-sm text-red-600">{gate.message}</p>
+      </Shell>
     );
   }
 
   return (
     <div className="min-h-screen bg-gray-50 p-4 md:p-8">
       <div className="max-w-lg mx-auto">
-        <h1 className="text-xl font-bold mb-6">Admin Settings</h1>
+        <h1 className="text-xl font-bold mb-6">Admin</h1>
 
         {/* Status */}
         <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
           <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500 mb-3">Status</h2>
           <div className="space-y-2 text-sm">
-            <StatusRow label="KV Store" ok={kvConnected} />
-            <StatusRow label="Google OAuth" ok={config?.google_client_id?.configured && config?.google_client_secret?.configured} />
+            <StatusRow
+              label="Google OAuth"
+              ok={config?.google_client_id?.configured && config?.google_client_secret?.configured}
+            />
             <StatusRow label="AI Try-It Mode" ok={config?.claude_tryit_key?.configured} />
           </div>
         </div>
 
         {/* Current values */}
-        {config && (
-          <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-            <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500 mb-3">Current Configuration</h2>
-            <div className="space-y-2 text-sm font-mono">
-              <ConfigRow label="Google Client ID" entry={config.google_client_id} />
-              <ConfigRow label="Google Client Secret" entry={config.google_client_secret} />
-              <ConfigRow label="Claude Try-It Key" entry={config.claude_tryit_key} />
-            </div>
-          </div>
-        )}
-
-        {/* Registered Owners */}
         <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-          <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500 mb-3">Registered Owners</h2>
-          {ownersError ? (
-            <p className="text-sm text-red-600">{ownersError}</p>
-          ) : (
+          <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500 mb-3">Configuration</h2>
+          {config ? (
             <>
-              {ownersWarning && (
-                <p className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded mb-3">
-                  {ownersWarning}
-                </p>
-              )}
-              {owners.length === 0 ? (
-                <p className="text-sm text-gray-400">No owners registered yet.</p>
-              ) : (
-                <>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-left text-xs text-gray-500 uppercase tracking-wide border-b">
-                          <th className="pb-2 pr-4">Handle</th>
-                          <th className="pb-2 pr-4">Name</th>
-                          <th className="pb-2 pr-4">Email</th>
-                          <th className="pb-2 pr-4 text-right">Shows</th>
-                          <th className="pb-2">Joined</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {owners.map((o) => (
-                          <tr key={o.owner_slug} className="border-b border-gray-100">
-                            <td className="py-2 pr-4 font-mono text-gray-800">{o.owner_slug}</td>
-                            <td className="py-2 pr-4 text-gray-600">{o.display_name || '—'}</td>
-                            <td className="py-2 pr-4 text-gray-600">{o.email || '—'}</td>
-                            <td className="py-2 pr-4 text-right text-gray-600">{o.show_count}</td>
-                            <td className="py-2 text-gray-400">
-                              {o.created_at ? new Date(o.created_at).toLocaleDateString() : '—'}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <p className="text-xs text-gray-400 mt-3">{owners.length} owner{owners.length !== 1 ? 's' : ''} registered</p>
-                </>
-              )}
+              <div className="space-y-2 text-sm font-mono">
+                <ConfigRow label="Google Client ID" entry={config.google_client_id} />
+                <ConfigRow label="Google Client Secret" entry={config.google_client_secret} />
+                <ConfigRow label="Claude Try-It Key" entry={config.claude_tryit_key} />
+              </div>
+              <p className="text-xs text-gray-400 mt-4">
+                Read-only. These resolve from environment variables — change one in Vercel and redeploy.
+              </p>
             </>
+          ) : (
+            <p className="text-sm text-gray-400">Configuration unavailable.</p>
           )}
         </div>
 
-        {/* Update form */}
-        <form onSubmit={handleSave} className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500 mb-4">Update Settings</h2>
-          <p className="text-xs text-gray-400 mb-4">Only fill in fields you want to change. Leave blank to keep current value.</p>
+        {/* Registered Owners */}
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-gray-500 mb-3">Registered Owners</h2>
+          {ownersWarning && (
+            <p className="text-sm text-amber-600 bg-amber-50 px-3 py-2 rounded mb-3">{ownersWarning}</p>
+          )}
+          {owners.length === 0 ? (
+            <p className="text-sm text-gray-400">No owners registered yet.</p>
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-gray-500 uppercase tracking-wide border-b">
+                      <th className="pb-2 pr-4">Handle</th>
+                      <th className="pb-2 pr-4">Name</th>
+                      <th className="pb-2 pr-4">Email</th>
+                      <th className="pb-2 pr-4 text-right">Shows</th>
+                      <th className="pb-2">Joined</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {owners.map((o) => (
+                      <tr key={o.owner_slug} className="border-b border-gray-100">
+                        <td className="py-2 pr-4 font-mono text-gray-800">{o.owner_slug}</td>
+                        <td className="py-2 pr-4 text-gray-600">{o.display_name || '—'}</td>
+                        <td className="py-2 pr-4 text-gray-600">{o.email || '—'}</td>
+                        <td className="py-2 pr-4 text-right text-gray-600">{o.show_count}</td>
+                        <td className="py-2 text-gray-400">
+                          {o.created_at ? new Date(o.created_at).toLocaleDateString() : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-xs text-gray-400 mt-3">{owners.length} owner{owners.length !== 1 ? 's' : ''} registered</p>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
-          {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
-          {saveSuccess && <p className="text-sm text-green-600 mb-4">{saveSuccess}</p>}
-
-          <div className="space-y-4">
-            <SettingField
-              label="Google Client ID"
-              type="text"
-              value={googleClientId}
-              onChange={setGoogleClientId}
-              configured={config?.google_client_id?.configured}
-              onClear={() => handleClear('google_client_id')}
-            />
-            <SettingField
-              label="Google Client Secret"
-              type="password"
-              value={googleClientSecret}
-              onChange={setGoogleClientSecret}
-              configured={config?.google_client_secret?.configured}
-              onClear={() => handleClear('google_client_secret')}
-            />
-            <SettingField
-              label="Claude API Key (Try-It Mode)"
-              type="password"
-              value={claudeTryitKey}
-              onChange={setClaudeTryitKey}
-              configured={config?.claude_tryit_key?.configured}
-              onClear={() => handleClear('claude_tryit_key')}
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={saving}
-            className="mt-6 w-full py-2 bg-black text-white font-bold text-sm rounded-lg hover:bg-gray-800 transition-colors disabled:opacity-50"
-          >
-            {saving ? 'Saving...' : 'Save Settings'}
-          </button>
-        </form>
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-xl shadow-lg p-8 w-full max-w-sm">
+        <h1 className="text-xl font-bold mb-2">Admin</h1>
+        {children}
       </div>
     </div>
   );
@@ -314,42 +242,7 @@ function ConfigRow({ label, entry }: { label: string; entry: ConfigEntry }) {
   return (
     <div className="flex items-center justify-between">
       <span className="text-gray-600 text-xs">{label}</span>
-      <span className="text-gray-800 text-xs">
-        {entry.configured ? entry.masked : '—'}
-      </span>
-    </div>
-  );
-}
-
-function SettingField({ label, type, value, onChange, configured, onClear }: {
-  label: string;
-  type: string;
-  value: string;
-  onChange: (v: string) => void;
-  configured?: boolean;
-  onClear: () => void;
-}) {
-  return (
-    <div>
-      <label className="block text-xs font-bold text-gray-600 mb-1">{label}</label>
-      <div className="flex gap-2">
-        <input
-          type={type}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder={configured ? 'Currently set — leave blank to keep' : 'Not configured'}
-          className="flex-1 px-3 py-2 border rounded-lg text-sm font-mono"
-        />
-        {configured && (
-          <button
-            type="button"
-            onClick={onClear}
-            className="px-3 py-2 text-xs text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
-          >
-            Clear
-          </button>
-        )}
-      </div>
+      <span className="text-gray-800 text-xs">{entry.configured ? entry.masked : '—'}</span>
     </div>
   );
 }
