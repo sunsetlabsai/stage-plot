@@ -63,10 +63,17 @@ function walk(dir: string): string[] {
  *   - JSDoc `@type {import('redis')}` — same, in a comment.
  *   - `declare module 'redis'` — an ambient declaration, not a load.
  *
- * ★ REMAINING LIMIT — genuinely out of reach of a source-level check, not a
- * gap I have merely failed to close yet: a specifier that is not a string
- * literal. `import(driverName)`, `require('re' + 'dis')`, an aliased
- * `const r = require; r('redis')`, `createRequire(import.meta.url)('redis')`.
+ * ★ REMAINING LIMIT. Now genuinely structural rather than a gap not yet closed.
+ * Two things, and only two:
+ *   1. The SPECIFIER is not a string literal — `import(name)`,
+ *      `require('re' + 'dis')`, `require(\`red${x}is\`)`.
+ *   2. The CALLEE is bound to a different name before use —
+ *      `const r = require; r('redis')`, or
+ *      `const r = createRequire(u); r('redis')`.
+ * Both need name resolution, which is a type-checker's job, not a syntax
+ * walker's. (`createRequire(u)('redis')` INVOKED INLINE is caught; only the
+ * stored-then-called form escapes.)
+ *
  * This guard defends against ACCIDENTAL REINTRODUCTION and must not be cited
  * as a control against deliberate evasion. The real guarantee is chunk 5
  * removing `redis` from package.json — then no specifier of any form resolves
@@ -80,8 +87,14 @@ function importSpecifiers(src: string, fileName = 'probe.ts'): Set<string> {
   const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, kind);
   const specs = new Set<string>();
 
-  const literal = (n: ts.Node | undefined): string | null =>
-    n && ts.isStringLiteralLike(n) ? n.text : null;
+  // The SPECIFIER can be wrapped exactly as the callee can: `require(('redis'))`,
+  // `import('redis' as string)`. Unwrap before testing for a string literal —
+  // otherwise every callee fix has a mirror-image hole on the argument side.
+  const literal = (n: ts.Node | undefined): string | null => {
+    if (!n) return null;
+    const inner = ts.isExpression(n) ? unwrap(n) : n;
+    return ts.isStringLiteralLike(inner) ? inner.text : null;
+  };
 
   const visit = (node: ts.Node): void => {
     // (1) import … from '…'  /  import '…'
@@ -107,11 +120,10 @@ function importSpecifiers(src: string, fileName = 'probe.ts'): Set<string> {
         if (spec) specs.add(spec);
       }
     }
-    // (4) import('…')  and  (5) require('…')
+    // (4) import('…')  and  (5) require('…') in all its callee shapes
     else if (ts.isCallExpression(node)) {
       const isDynamic = node.expression.kind === ts.SyntaxKind.ImportKeyword;
-      const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
-      if (isDynamic || isRequire) {
+      if (isDynamic || isRequireLike(node.expression)) {
         const spec = literal(node.arguments[0]);
         if (spec) specs.add(spec);
       }
@@ -120,6 +132,68 @@ function importSpecifiers(src: string, fileName = 'probe.ts'): Set<string> {
   };
   visit(sf);
   return specs;
+}
+
+/**
+ * Peel wrappers that change an expression's NODE KIND without changing its value.
+ *
+ * Applies to BOTH sides of a call: the callee AND the specifier argument.
+ * `require(('redis'))` and `require('redis' as string)` are as real as
+ * `(require)('redis')`, and I found those by attacking this myself rather than
+ * waiting for review to name them.
+ *
+ * `(require)('redis')` parses as a CallExpression whose callee is a
+ * ParenthesizedExpression, so an `isIdentifier` check falls straight through
+ * (Codex). Rather than special-case parentheses, this handles the whole class —
+ * measured against the real parser, not guessed:
+ *
+ *   (require)('…')                  ParenthesizedExpression
+ *   ((require))('…')                ParenthesizedExpression, nested
+ *   (0, require)('…')               ParenthesizedExpression → comma Binary
+ *   require!('…')                   NonNullExpression
+ *   (require as any)('…')           Parenthesized → AsExpression
+ *   (require satisfies Fn)('…')     Parenthesized → SatisfiesExpression
+ *   (<any>require)('…')             TypeAssertionExpression
+ */
+function unwrap(node: ts.Expression): ts.Expression {
+  let n = node;
+  for (;;) {
+    if (ts.isParenthesizedExpression(n) || ts.isNonNullExpression(n) || ts.isAsExpression(n)) {
+      n = n.expression;
+    } else if (ts.isSatisfiesExpression(n) || ts.isTypeAssertionExpression(n)) {
+      n = n.expression;
+    } else if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+      n = n.right; // `(0, require)` — the value of a comma expression is its right operand
+    } else {
+      return n;
+    }
+  }
+}
+
+/**
+ * True for every LITERAL, DIRECT way of naming CommonJS require.
+ *
+ * Covers the bare identifier, the Node property-access forms, and an immediately
+ * invoked `createRequire(...)`. `require?.('…')` needs nothing extra — optional
+ * call is still a CallExpression with an Identifier callee.
+ */
+function isRequireLike(callee: ts.Expression): boolean {
+  const n = unwrap(callee);
+  if (ts.isIdentifier(n)) return n.text === 'require';
+  // module.require / globalThis.require / global.require — real Node APIs.
+  // Deliberately NOT any `x.require`: that would fail the build on unrelated
+  // code, and a false positive here costs more than this guard is worth.
+  if (ts.isPropertyAccessExpression(n) && n.name.text === 'require') {
+    const obj = unwrap(n.expression);
+    return ts.isIdentifier(obj) && ['module', 'globalThis', 'global'].includes(obj.text);
+  }
+  // createRequire(import.meta.url)('redis') — invoked inline, so the specifier
+  // is still a literal at this call site.
+  if (ts.isCallExpression(n)) {
+    const inner = unwrap(n.expression);
+    return ts.isIdentifier(inner) && inner.text === 'createRequire';
+  }
+  return false;
 }
 
 /** `import type …`, or named bindings where EVERY specifier is type-only. */
@@ -196,6 +270,29 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     // CallExpression, so a visitor checking only those walks past it (Codex).
     ["import-equals-require", `import redis = require('redis');`],
     ["exported import-equals", `export import redis = require('redis');`],
+    // Callee shapes. Codex found the parenthesized one; the rest came from
+    // probing every wrapper against the real parser rather than waiting to be
+    // told about them one at a time.
+    ["parenthesized require", `const r = (require)('redis');`],
+    ["doubly parenthesized", `const r = ((require))('redis');`],
+    ["comma sequence callee", `const r = (0, require)('redis');`],
+    ["non-null asserted", `const r = require!('redis');`],
+    ["as-any callee", `const r = (require as any)('redis');`],
+    ["satisfies callee", `const r = (require satisfies Function)('redis');`],
+    ["optional call", `const r = require?.('redis');`],
+    ["module.require", `const r = module.require('redis');`],
+    ["globalThis.require", `const r = globalThis.require('redis');`],
+    ["createRequire inline", `const r = createRequire(import.meta.url)('redis');`],
+    // ARGUMENT wrappers — the mirror image of the callee case, and the reason
+    // this fix is `unwrap` applied to both sides rather than a parentheses patch.
+    ["parenthesized specifier", `const r = require(('redis'));`],
+    ["specifier as string", `const r = require('redis' as string);`],
+    ["specifier satisfies", `const r = require('redis' satisfies string);`],
+    ["dynamic paren specifier", `const r = await import(('redis'));`],
+    ["dynamic as specifier", `const r = await import('redis' as string);`],
+    ["import-equals paren spec", `import redis = require(('redis'));`],
+    ["optional prop require", `const r = module?.require('redis');`],
+    ["export * as ns", `export * as redisNs from 'redis';`],
   ])('detects a redis import written as: %s', (_label, src) => {
     const specs = [...importSpecifiers(src)];
     expect(specs.some((s) => s === 'redis' || s.startsWith('redis/'))).toBe(true);
