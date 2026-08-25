@@ -164,7 +164,20 @@ async function quota(ip: string, consume: boolean): Promise<{ allowed: boolean; 
     // An RPC error is an unreachable backend, which is what fallback() is for.
     // Failing OPEN here is deliberate and matches the Redis path: a database
     // blip must not lock every try-it user out mid-session.
-    if (error) return fallback(ip, consume);
+    //
+    // But a *configured* backend erroring is not a blip, and the worst case —
+    // a missing `grant execute ... to service_role` — makes every call error
+    // forever, turning "degrade during an outage" into a permanent, silent
+    // quota bypass. So it is logged loudly rather than swallowed. Whether a
+    // permission error should instead fail CLOSED is a policy call, flagged in
+    // PR #155 and not taken unilaterally.
+    if (error) {
+      console.error('[quota] RPC failed — falling back to in-memory counter.', {
+        rpc: consume ? 'increment_tryit' : 'peek_tryit',
+        message: error.message,
+      });
+      return fallback(ip, consume);
+    }
 
     // A null/non-numeric return is treated as no usage rather than NaN-propagating.
     const count = typeof data === 'number' && Number.isSafeInteger(data) && data > 0 ? data : 0;

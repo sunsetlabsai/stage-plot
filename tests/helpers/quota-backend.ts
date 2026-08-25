@@ -68,6 +68,14 @@ export function supabaseAdminMock() {
   return {
     getSupabaseAdmin: () => ({
       rpc: async (fn: string, args: Record<string, unknown>) => {
+        // Counted BEFORE the failure branches, so a failing RPC is still an
+        // observable attempt. Counting after would make `calls === 0` ambiguous
+        // between "never tried" and "tried and blew up" — and the BYOA
+        // no-I/O assertion depends on that distinction being sharp.
+        if (fn === 'peek_tryit') quotaBackend.peekCalls++;
+        else if (fn === 'increment_tryit') quotaBackend.incrCalls++;
+        else throw new Error(`unexpected rpc: ${fn}`);
+
         if (quotaBackend.throws) throw new Error('ECONNREFUSED');
         if (quotaBackend.errors) {
           return { data: null, error: { message: 'rpc failed' } };
@@ -80,21 +88,17 @@ export function supabaseAdminMock() {
         const aged = row ? row.windowStart < now - windowDays * DAY_MS : false;
 
         if (fn === 'peek_tryit') {
-          quotaBackend.peekCalls++;
           // Reads only. An unseen IP must not be written here, or the "a probe
           // must not cost a message" guarantee would be untested.
           return { data: !row || aged ? 0 : row.count, error: null };
         }
 
-        if (fn === 'increment_tryit') {
-          quotaBackend.incrCalls++;
-          const next: Row =
-            !row || aged ? { count: 1, windowStart: now } : { count: row.count + 1, windowStart: row.windowStart };
-          quotaBackend.rows.set(ipHash, next);
-          return { data: next.count, error: null };
-        }
-
-        throw new Error(`unexpected rpc: ${fn}`);
+        // increment_tryit — the only remaining case: peek returned above, and an
+        // unrecognised fn threw before we got here.
+        const next: Row =
+          !row || aged ? { count: 1, windowStart: now } : { count: row.count + 1, windowStart: row.windowStart };
+        quotaBackend.rows.set(ipHash, next);
+        return { data: next.count, error: null };
       },
     }),
   };
