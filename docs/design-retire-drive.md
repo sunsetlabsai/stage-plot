@@ -2,7 +2,9 @@
 
 Status: **PRE-CODEX. Do not build to this text until it has been through review
 and Graham has given the go.**
-Version: **v1**
+Version: **v1.2** (v1 = pre-Codex, v1.1 = Q3 ruled + §9 tombstones,
+**v1.2 = Codex R1 High folded — §1.3's unreachability proof was unsound; see
+§1.3a**)
 Scope: `app/api/drive/*`, `app/api/auth/google/*`, `lib/drive.ts`, the Drive
 branches in `lib/chart-cache.ts` / `lib/pdf-viewer.ts` / `lib/chart-converter.ts`,
 the `googleToken` plumbing and Drive section in `app/[owner]/[show]/page.tsx`,
@@ -71,8 +73,7 @@ is rendered only when `!isReadOnly` (`page.tsx:759`), and `isReadOnly` is
 `!isOwner && !isEditor` (`page.tsx:683`). An anonymous or read-only viewer cannot
 reach the tab, and nothing else sets `tab` to `'config'`.
 
-**⇒ The branch is unreachable for every principal on every show that exists in
-Supabase:**
+**⇒ For a viewer arriving at a show directly, the branch is unreachable:**
 
 | Principal | `showId` | Config tab | Branch reached? |
 |---|---|---|---|
@@ -81,17 +82,64 @@ Supabase:**
 | Read-only collaborator | set | hidden | **no** — both |
 | Offline fallback | null | hidden (`isOwner`/`isEditor` false) | **no** — tab unreachable |
 
-*This is recorded at length because the reachability argument — not the row count
-— is what makes the deletion safe. Six rows is evidence about today; the gate
-analysis is evidence about every future show too.*
+### 1.3a ★★ CORRECTED at v1.2 — the table above is NOT a proof
 
-### 1.4 ⚠ One residual risk worth naming
+**v1.1 claimed the branch was "unreachable for every principal." That claim was
+unsound, and Codex R1 (High) was right to block on it.** The table reasons about
+*arrival* at a show and silently assumes `tab` starts at `'perform'`. It does
+not, on a retained-page **show → show** transition:
 
-`page.tsx:853` renders `{tab === 'config' && <ConfigTab …>}` with **no
-`isReadOnly` guard** — the guard is on the button only. Nothing today sets `tab`
-from a URL, so this is not exploitable. But it means the safety of §1.3 rests on
-a *button*, not on the render. **Deleting the branch removes that dependency
-entirely**, which is a second reason to delete rather than leave it fenced.
+| Fact | Site |
+|---|---|
+| `tab` initialises to `'perform'` — **but only on mount** | `:349` |
+| The load effect resets `loadedPath`, `showId`, `isOwner`, `isEditor`, `loadError`, `chartCacheProgress` on `[owner, slug]` change — **`tab` is NOT in that list** | `:423-429` |
+| `ConfigTab` renders on `{tab === 'config' && …}` with **no `isReadOnly` guard** — the guard is on the *button* (`:759`), not the render | `:853` |
+
+So an owner sitting on the Config tab of show A who navigates to show B keeps
+`tab === 'config'` while `showId` is reset to null — and `ConfigTab` mounts into
+exactly the state §1.3 called impossible.
+
+**Two facts found while verifying, which bound the severity without rescuing the
+argument:**
+
+1. **No show → show navigation exists today.** Every entry into a show is
+   `router.push` from `/dashboard` (`app/dashboard/page.tsx:74`, `:124`, `:233`,
+   `:252`, `:267`) — a different route segment, so the page unmounts and `tab`
+   re-initialises. The show page's own outbound links are `/`, `/sign-in`,
+   `/dashboard`, `/library` and chart URLs. *Scope: `router.push` and `href=`
+   across `app/` and `components/`.*
+2. **The wipe cannot persist even if reached.** The save effect is gated
+   `if (showId)` (`:554-558`), null in precisely that window, and `setConfig`
+   then replaces the state with the incoming show's config. The damage is a
+   transient in-memory wipe, not data loss.
+
+**⇒ The real guarantee is "nobody has added a show-to-show link yet."** That is a
+guarantee about the router, not about this code, and any future "next show" or
+"recent shows" affordance silently removes it.
+
+**This STRENGTHENS the ruling.** A latent chart-wiping effect whose only guard is
+an absent navigation path is worse than dead code — it is a trap that arms itself
+the day someone adds a link. **Deleting the branch removes the question
+permanently**, which is the outcome §0 invariant 4 asks for: deletion justified
+by reachability, and where a path *is* reachable, ruled on rather than waved at.
+
+**⚠ Conditional requirement, should this design be rejected or deferred.** If the
+branch survives for any reason, two fixes become mandatory and are NOT optional
+hardening: guard the render at `:853` with `isReadOnly`, and add `tab` to the
+reset list at `:423`. They are recorded here so a deferral does not silently
+leave the trap armed.
+
+*Recorded rather than quietly rewritten: a document whose subject is undetected
+drift does not get to hide its own unsound proof. The conclusion survived; the
+argument did not, and only the argument was load-bearing.*
+
+### 1.4 ~~One residual risk worth naming~~ — SUPERSEDED by §1.3a
+
+*v1.1 raised the unguarded render at `:853` as a "residual risk… not
+exploitable." It is not residual: combined with `tab` surviving the reset at
+`:423`, it is the mechanism that breaks §1.3's proof outright. Folded into §1.3a
+and stated there at full weight. Kept as a stub because downgrading a finding to
+"residual" and being wrong is the failure worth seeing.*
 
 ---
 
@@ -198,8 +246,23 @@ and the only one in this document.
 *Open question Q1 (§7): is inverting correct, or should a Google-native MIME be
 impossible-by-construction instead — i.e. can a `chart_library` row even hold
 one? If the upload guard already rejects them, the cases should be deleted
-rather than inverted. **I have not measured the upload guard; do not build this
-sub-section until it is measured.***
+rather than inverted.*
+
+**Partially answered by Codex R1 (2026-08-25):** the surviving **creation** paths
+— upload and builder — persist `application/pdf`, so a Google-native MIME cannot
+enter through them. **What remains unmeasured is existing DATA**: whether any
+`chart_library` row already carries a Google MIME from the Drive era. Codex
+confirmed Q1 is correctly a build gate rather than a review blocker.
+
+**⇒ The measurement that closes Q1 is a query, not a code read:**
+
+```sql
+select count(*) from chart_library
+where mime_type like 'application/vnd.google-apps.%';
+```
+
+Zero → **delete** the cases (impossible by construction *and* by data).
+Non-zero → **invert** them, and those rows need a stated fate before chunk 2.
 
 ### 4.2 `lib/pdf-viewer.ts`'s `else` is a catch-all, not a Drive branch
 
