@@ -8,7 +8,7 @@ class of stale claim as §2.1's three unexecuted supersessions, and this documen
 does not get to exempt itself from its own subject.)*
 Version: **v1.7** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
 Q5 reversed, **v1.3 = Codex R1 on #152: Q5 reversal propagated to the paired doc,
-`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**, **v1.5 = ⛔ §3 `admin_config` RULED OUT 2026-08-25 — marker only**, **v1.6 = Codex R4 High: §9 chunk-1 tests were still an obsolete contract; rewritten, plus a blast-radius index**, **v1.7 = ⛔ THE RULED-OUT CONTENT IS DELETED, not marked. See "Why v1.7 deletes" below.**)
+`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**, **v1.5 = ⛔ §3 `admin_config` RULED OUT 2026-08-25 — marker only**, **v1.6 = Codex R4 High: §9 chunk-1 tests were still an obsolete contract; rewritten, plus a blast-radius index**, **v1.7 = ⛔ THE RULED-OUT CONTENT IS DELETED, not marked**, **v1.8 = fold Codex R5: the chunk-5 completion check was an unscoped repo-wide `grep` that could never pass (§6.3, §9); and two claims that this one-file PR amends other files — the paired doc (§3.2, §7, §9) and `design-owner-onboarding.md`, which was listed as "corrected" at v1.3 and never was (§10)**)
 
 **★ EDITING RULE, ruled by Graham 2026-08-25: ruled-out content is DELETED, not
 marked.** v1.5/v1.6 retained the dead `admin_config` design "for its reasoning,"
@@ -241,11 +241,16 @@ It **is** asserted in tests: `tests/agent-key.test.ts:78` expects
 state that can never occur.** It is the paired doc, it landed with #150, and
 nothing in the v1.5/v1.6 marker passes touched it.
 
-> **Sequencing:** the paired-doc amendment is **NOT in this PR** — #152 is one
-> file and has been through four Codex rounds as one file. It lands with the
-> chunk-1 build PR, which is where `ConfigRead` actually changes in code and
-> where a test can prove the two documents agree. **Recorded here so it cannot
-> be lost**; §7 carries it as an explicit chunk-1 deliverable.
+> **Sequencing:** the paired-doc amendment lands with the **chunk-1 build PR**,
+> where `ConfigRead` actually changes in code and a test can prove the two
+> documents agree. Amending a spec here, with the code three chunks away and
+> nothing to pin it, is how `'store'` got into that file in the first place.
+> **Recorded here so it cannot be lost**; §7 and §9 carry it as an explicit
+> chunk-1 deliverable.
+>
+> *(v1.8 correction: this previously justified the deferral with "#152 is one
+> file." **False** — #152 also amends `design-ai-key-availability.md`, at v1.3,
+> for the Q5 reversal. The sequencing is right; that reason for it was not.)*
 
 **The `__DISABLED__` sentinel is DELETED**, and now for a simpler reason than
 v1.6 gave. It existed because Redis has no way to express "explicitly off" other
@@ -610,8 +615,23 @@ a safety valve, not an accounting system.
    2026-08-24: old slug URLs are not a concern.** No migration, no redirect.
 2. **`lib/admin-config.ts`'s Redis client** and the `__DISABLED__` sentinel.
 3. **`redis` from `package.json`** (`"redis": "^5.12.1"`, `package.json:25`) —
-   **the last import goes with CHUNK 2.** **This is the check that proves the
-   whole job is done:** `grep -rn "from 'redis'"` returning nothing.
+   **the last PRODUCTION RUNTIME import goes with CHUNK 2.**
+
+   **The completion check is an AST import scan over production source, NOT a
+   grep.** Extend `importSpecifiers()` (`tests/redis-retirement.test.ts:82`) from
+   its current `app/api/` scope (`:20`, `:228`) to **`app/`, `lib/`,
+   `components/`** and assert zero specifier equal to `redis` or starting
+   `redis/`. Keep the walker's positive control (`:342`) so an empty result
+   cannot come from an empty file list.
+
+   > **⛔ CORRECTED at v1.7 (Codex R5).** This said the check was
+   > `grep -rn "from 'redis'"` returning nothing. **That is false repo-wide and
+   > would never pass**: `tests/redis-retirement.test.ts:240` deliberately
+   > contains Redis import strings as scanner fixtures, and `docs/` contains the
+   > phrase in prose — including this line. A raw grep cannot distinguish a
+   > runtime import from a fixture, a comment, or a sentence about imports.
+   > **Scope and mechanism both matter: production source only, parsed not
+   > matched** — which is what chunk 0's five review rounds already concluded.
 
    > **⛔ CORRECTED at v1.7 — this said "chunk 3". That was a measurement error,
    > wrong when written, independent of the `admin_config` ruling.** The
@@ -638,7 +658,7 @@ table nothing reads.
 | # | Chunk | Ships | Independent? |
 |---|---|---|---|
 | 0 | **Delete `/api/show`** | route deletion + a test asserting no `redis` import remains in `app/api/` | yes — pure removal, no dependency |
-| 1 | **`/admin` re-auth** (§3, §3.3a, §3.3b) | **NO MIGRATION.** `/admin` RE-AUTHED across all four routes from `ADMIN_SECRET` to the super-admin email check; `ADMIN_SECRET` retired; **Redis stripped from `lib/admin-config.ts`**, leaving env-only resolution; **`ConfigRead` narrowed to `source: 'env'` (§3.2) and the paired doc's `'store'` spec amended in the same PR** | yes — but **sequenced AFTER Drive retirement** (PR #153 §6.1) |
+| 1 | **`/admin` re-auth** (§3, §3.3a, §3.3b) | **NO MIGRATION.** `/admin` RE-AUTHED across all four routes from `ADMIN_SECRET` to the super-admin email check; `ADMIN_SECRET` retired; **Redis stripped from `lib/admin-config.ts`**, leaving env-only resolution; **`ConfigRead` narrowed to `source: 'env'` (§3.2); the paired doc's `'store'` spec amended in that same BUILD PR — not in #152** | yes — but **sequenced AFTER Drive retirement** (PR #153 §6.1) |
 | 2 | **Quota** (§5) | `peek_tryit` migration, `quota()` rewritten onto both functions, IP hashing, **fixed window**. **Removes the last `redis` import** (`lib/agent-key.ts:2`, §6.3) | yes — all inputs ruled |
 | 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display, **and the `/dashboard/settings` surface itself** | **independent** — see the note below |
 | 4 | **Settings overlay** (§4.3) | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated | depends on chunk 3 |
@@ -781,8 +801,9 @@ d5fe1a8:docs/design-single-backend.md` §9)*:
    the type is **narrowed to `source: 'env'`**; that is a behavioural change, not
    a simplification of wording.
    **Also in this chunk:** the paired doc's `source: 'store' | 'env'` spec
-   (`design-ai-key-availability.md:359`, `:907`) is amended in the same PR, and a
-   test pins that the two documents describe one union.
+   (`design-ai-key-availability.md:359`, `:907`) is amended **in the chunk-1
+   build PR, alongside this code change — NOT in #152**, which touches one file.
+   A test pins that the two documents describe one union.
 2. **`__DISABLED__` is gone with the Redis client**, so the trap it caused cannot
    recur. The regression test for it goes too — **there is no longer a write path
    that could set it.** Deleting a test whose subject no longer exists is correct;
@@ -833,6 +854,16 @@ cascades.
 **Chunk 4:** tests 21–24 from `a624650`, restated against whichever storage the
 user chose.
 
+**Chunk 5 — the completion gate** *(added v1.7; §9 previously stopped at chunk 4
+and the check lived only in §6.3, so the one test that proves the whole job is
+done was absent from the test spec)*: extend `importSpecifiers()`
+(`tests/redis-retirement.test.ts:82`) from `app/api/` to **`app/`, `lib/`,
+`components/`** and assert **no production module imports `redis` or `redis/*`**.
+Keep the existing positive control (`:342`) so an empty offender list cannot come
+from an empty file list. **Parsed, not grepped, and scoped to production source**
+— `tests/` legitimately contains `redis` import strings as scanner fixtures
+(`:240`), and `docs/` contains the phrase in prose (§6.3).
+
 **Delta measured on both refs immediately before each PR body is written, never
 quoted from notes** (`feedback_report_test_delta`).
 
@@ -840,9 +871,24 @@ quoted from notes** (`feedback_report_test_delta`).
 
 ## 10. Documents this supersedes
 
-All three are corrected **in this PR** (supersession notices only; full rewrites
-are separate work). *(v1.3: "Both" — the list was two. `design-owner-onboarding.md`
-was found by the §3.3b sweep, not by review of this section.)*
+**⛔ CORRECTED at v1.7 — this said "All three are corrected in this PR." Two
+were; one never was.** Measured 2026-08-25:
+
+| Doc | Supersession notice | Corrected where |
+|---|---|---|
+| `design-kv-admin-settings.md` | ✅ present | **#150** (`dc56c8e`) |
+| `design-supabase-backend.md` | ✅ present | **#150** (`dc56c8e`) |
+| **`design-owner-onboarding.md`** | ❌ **ABSENT** | **nowhere — still uncorrected** |
+
+`design-owner-onboarding.md` was added to this list at **v1.3, inside #152 — a
+one-file PR that could not have corrected it.** Found, listed, never fixed. **It
+still specifies `/api/admin/owners` as `ADMIN_SECRET`-gated** (`:55`, `:61`,
+`:82`).
+
+**⇒ Its notice lands with the chunk-1 build PR**, where `/api/admin/owners` is
+actually re-authed — the same PR as the paired-doc amendment (§3.2, §9).
+
+(Supersession notices only; full rewrites are separate work.)
 
 1. **`design-kv-admin-settings.md`** — its *"Why Redis over Postgres"* rationale
    and its **instance-per-customer hosting model** ("Model C") are both dead.
