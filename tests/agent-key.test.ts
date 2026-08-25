@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash, createHmac } from 'node:crypto';
 import { quotaBackend, supabaseAdminMock } from './helpers/quota-backend';
 
 // Design docs/design-ai-key-availability.md §4/§4.1, chunk 1.
@@ -230,13 +231,33 @@ describe('quota — Supabase backend (chunk 2)', () => {
     return agentKey();
   };
 
-  it('does not store the raw IP — the row is keyed by digest', async () => {
+  // Graham ruled 2026-08-25: keyed HMAC, not a bare digest — an unsalted sha256
+  // of an IPv4 is enumerable from a dump. Keyed on the ALREADY-required
+  // service-role secret, so there is no new env var whose absence would
+  // silently rehash every IP and reset every quota.
+  it('keys the row by HMAC — not the raw IP, and not an unsalted sha256', async () => {
     const { resolveKeyMode } = await tryit();
     await resolveKeyMode(undefined, '198.51.100.7', { consume: true });
     const keys = [...quotaBackend.rows.keys()];
     expect(keys).toHaveLength(1);
     expect(keys[0]).not.toContain('198.51.100.7');
     expect(keys[0]).toMatch(/^[0-9a-f]{64}$/);
+    // THE counterexample. Without this line the assertions above pass on the
+    // exact bare-sha256 construction that was ruled insufficient — both are
+    // 64 hex chars and neither contains the address.
+    expect(keys[0]).not.toBe(createHash('sha256').update('198.51.100.7').digest('hex'));
+    expect(keys[0]).toBe(createHmac('sha256', 'service-role-test').update('198.51.100.7').digest('hex'));
+  });
+
+  it('re-keys when the service-role secret rotates — the accepted quota reset', async () => {
+    const { resolveKeyMode, TRYIT_QUOTA } = await tryit();
+    quotaBackend.seed('ip', TRYIT_QUOTA);
+    expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('exhausted');
+
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'rotated-secret';
+    // Same IP, new key: the seeded row is unreachable, so the quota resets
+    // rather than the lookup erroring. Documented consequence, not a bug.
+    expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('tryit');
   });
 
   it('treats a window-expired row as fresh allowance on peek', async () => {
@@ -262,9 +283,38 @@ describe('quota — Supabase backend (chunk 2)', () => {
     expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('exhausted');
   });
 
-  it('falls back rather than locking out when the RPC returns an error', async () => {
+  it('falls back rather than locking out when the RPC returns a transient error', async () => {
     const { resolveKeyMode, TRYIT_QUOTA } = await tryit();
     quotaBackend.errors = true;
+    quotaBackend.errorCode = '08006'; // connection_failure — plausibly a blip
+    const r = await resolveKeyMode(undefined, 'ip', { consume: true });
+    expect(r.mode).toBe('tryit');
+    if (r.mode === 'tryit') expect(r.remaining).toBe(TRYIT_QUOTA - 1);
+  });
+
+  // Graham's ruling, 2026-08-25. 42501 means the grants are wrong: permanent,
+  // total, and silent if it fell back. Everything else stays fail-open.
+  it('fails CLOSED on 42501 rather than falling back', async () => {
+    const { resolveKeyMode } = await tryit();
+    quotaBackend.errors = true;
+    quotaBackend.errorCode = '42501'; // insufficient_privilege
+    expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('exhausted');
+  });
+
+  it('fails CLOSED on 42501 for a peek too, not just a consume', async () => {
+    const { resolveKeyMode } = await tryit();
+    quotaBackend.errors = true;
+    quotaBackend.errorCode = '42501';
+    expect((await resolveKeyMode(undefined, 'ip', { consume: false })).mode).toBe('exhausted');
+  });
+
+  // The counterexample that would prove fail-closed was written too broadly:
+  // 42883 is exactly the state between merging and applying migration 013, and
+  // it MUST still degrade or that window becomes a total outage.
+  it('still falls back on 42883 — a missing RPC is a deploy-ordering gap, not a bypass', async () => {
+    const { resolveKeyMode, TRYIT_QUOTA } = await tryit();
+    quotaBackend.errors = true;
+    quotaBackend.errorCode = '42883'; // undefined_function
     const r = await resolveKeyMode(undefined, 'ip', { consume: true });
     expect(r.mode).toBe('tryit');
     if (r.mode === 'tryit') expect(r.remaining).toBe(TRYIT_QUOTA - 1);

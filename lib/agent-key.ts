@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import { readAdminConfig } from './admin-config';
 import { getSupabaseAdmin } from './supabase-admin';
 
@@ -98,6 +98,12 @@ const QUOTA_WINDOW_DAYS = 30;
 // RPCs about how long a window is.
 const QUOTA_TTL_SECONDS = QUOTA_WINDOW_DAYS * 24 * 60 * 60;
 
+/**
+ * Postgres `insufficient_privilege`. The only error class quota() treats as
+ * permanent rather than transient — see the fail-closed branch below.
+ */
+const PG_INSUFFICIENT_PRIVILEGE = '42501';
+
 /** THE in-memory fallback, used when Redis is unavailable. Exactly one instance. */
 const fallbackQuota = new Map<string, { count: number; resetAt: number }>();
 
@@ -165,17 +171,29 @@ async function quota(ip: string, consume: boolean): Promise<{ allowed: boolean; 
     // Failing OPEN here is deliberate and matches the Redis path: a database
     // blip must not lock every try-it user out mid-session.
     //
-    // But a *configured* backend erroring is not a blip, and the worst case —
-    // a missing `grant execute ... to service_role` — makes every call error
-    // forever, turning "degrade during an outage" into a permanent, silent
-    // quota bypass. So it is logged loudly rather than swallowed. Whether a
-    // permission error should instead fail CLOSED is a policy call, flagged in
-    // PR #155 and not taken unilaterally.
+    // The ONE exception is insufficient_privilege. Every other error class is
+    // plausibly transient; 42501 is not. It means the grants are wrong, which
+    // is permanent, affects every caller, and would turn "degrade during an
+    // outage" into a silent, total quota bypass that nothing ever recovers
+    // from. Graham ruled 2026-08-25: fail CLOSED on 42501 only.
+    //
+    // Deliberately NOT extended to 42883 (undefined_function). That is exactly
+    // the window between merging this PR and applying migration 013, and
+    // failing closed there converts a merge-ordering cushion into a hard
+    // outage for every try-it user.
     if (error) {
-      console.error('[quota] RPC failed — falling back to in-memory counter.', {
-        rpc: consume ? 'increment_tryit' : 'peek_tryit',
-        message: error.message,
-      });
+      const failClosed = error.code === PG_INSUFFICIENT_PRIVILEGE;
+      console.error(
+        failClosed
+          ? '[quota] RPC not permitted — failing CLOSED. Check grants in migration 013.'
+          : '[quota] RPC failed — falling back to in-memory counter.',
+        {
+          rpc: consume ? 'increment_tryit' : 'peek_tryit',
+          code: error.code,
+          message: error.message,
+        },
+      );
+      if (failClosed) return { allowed: false, remaining: 0 };
       return fallback(ip, consume);
     }
 
@@ -201,11 +219,21 @@ async function quota(ip: string, consume: boolean): Promise<{ allowed: boolean; 
  * IP because a Redis key is not a stored record. A row in Postgres is, so the
  * raw address does not go in.
  *
- * Unsalted SHA-256, and that is a real limit worth naming: the IPv4 space is
- * small enough to enumerate, so this defeats casual reading of the table, not a
- * determined attacker with dump access. A salt would fix that at the cost of one
- * more required env var whose absence silently rehashes every IP (resetting all
- * quotas). Not taken unilaterally — flagged for Graham.
+ * HMAC-SHA256 keyed on SUPABASE_SERVICE_ROLE_KEY, not a bare digest. Bare
+ * SHA-256 is only obfuscation: the IPv4 space is small enough to enumerate, so
+ * anyone with a dump can recover every address. The keyed construction makes
+ * that infeasible without also holding the service-role secret — and by then
+ * the hashes are the least of the problem.
+ *
+ * Keyed on an EXISTING required secret rather than a new IP_HASH_SALT var, and
+ * that is the whole point: a dedicated salt var would introduce a fresh silent
+ * failure mode, where forgetting it rehashes every IP and resets all quotas.
+ * SUPABASE_SERVICE_ROLE_KEY cannot be absent here — quota() has already
+ * returned via fallback() at the guard above if it is, so this is never
+ * reached with an empty key. Graham ruled 2026-08-25.
+ *
+ * Consequence, accepted: rotating the service-role key re-keys every hash and
+ * resets all outstanding quotas. Rollout does the same, once.
  *
  * `getClientIp` yields 'unknown' when the header is absent, so all header-less
  * callers share one bucket. That was equally true of the Redis key; preserved
@@ -213,7 +241,7 @@ async function quota(ip: string, consume: boolean): Promise<{ allowed: boolean; 
  * storage-backend one.
  */
 function hashIp(ip: string): string {
-  return createHash('sha256').update(ip).digest('hex');
+  return createHmac('sha256', process.env.SUPABASE_SERVICE_ROLE_KEY!).update(ip).digest('hex');
 }
 
 function fallback(ip: string, consume: boolean): { allowed: boolean; remaining: number } {

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 
 // In-memory stand-in for the try-it quota backend (chunk 2).
 //
@@ -23,6 +23,12 @@ export const quotaBackend = {
   throws: false,
   /** Backend reachable but the call failed: `{data: null, error}`. Same requirement. */
   errors: false,
+  /**
+   * Postgres SQLSTATE returned alongside `errors`. Defaults to a transient class
+   * so the existing degrade-to-fallback tests keep their meaning; set '42501' to
+   * exercise the fail-CLOSED branch.
+   */
+  errorCode: '08006',
 
   reset() {
     this.rows.clear();
@@ -30,6 +36,7 @@ export const quotaBackend = {
     this.peekCalls = 0;
     this.throws = false;
     this.errors = false;
+    this.errorCode = '08006';
   },
 
   /** Total RPC calls. The BYOA path must leave this at 0 — no I/O on that branch. */
@@ -54,8 +61,12 @@ export const quotaBackend = {
   },
 };
 
+// Mirrors lib/agent-key.ts's hashIp: HMAC keyed on the service-role secret, NOT
+// a bare digest. Read from process.env at call time, not module load — the
+// suites set the var in beforeEach, and capturing it at import would key every
+// seed with `undefined` and silently miss every row.
 function hash(ip: string): string {
-  return createHash('sha256').update(ip).digest('hex');
+  return createHmac('sha256', process.env.SUPABASE_SERVICE_ROLE_KEY ?? '').update(ip).digest('hex');
 }
 
 /**
@@ -78,7 +89,7 @@ export function supabaseAdminMock() {
 
         if (quotaBackend.throws) throw new Error('ECONNREFUSED');
         if (quotaBackend.errors) {
-          return { data: null, error: { message: 'rpc failed' } };
+          return { data: null, error: { message: 'rpc failed', code: quotaBackend.errorCode } };
         }
 
         const ipHash = args.p_ip_hash as string;
