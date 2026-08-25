@@ -2,9 +2,10 @@
 
 Status: **PRE-CODEX. Do not build to this text until it has been through review
 and Graham has given the go.**
-Version: **v1.2** (v1 = pre-Codex, v1.1 = Q3 ruled + §9 tombstones,
+Version: **v1.3** (v1 = pre-Codex, v1.1 = Q3 ruled + §9 tombstones,
 **v1.2 = Codex R1 High folded — §1.3's unreachability proof was unsound; see
-§1.3a**)
+§1.3a**, **v1.3 = Q1 CLOSED on measurement — 0 Google-native rows; §4.1 ruled,
+no data migration**)
 Scope: `app/api/drive/*`, `app/api/auth/google/*`, `lib/drive.ts`, the Drive
 branches in `lib/chart-cache.ts` / `lib/pdf-viewer.ts` / `lib/chart-converter.ts`,
 the `googleToken` plumbing and Drive section in `app/[owner]/[show]/page.tsx`,
@@ -56,7 +57,11 @@ from shows;
 | `page.tsx:5937` | `// Drive-era only. Supabase shows resolve charts from the library on every GET` |
 | `page.tsx:5939` | that effect bails: `if (showId) return;` |
 
-### 1.3 ★ The gate is NOT what its comment claims — and it is still unreachable
+### 1.3 ★ The gate is NOT what its comment claims
+
+**⚠ Read §1.3a before relying on anything in this section.** Its conclusion was
+retracted at v1.2; the analysis of *why the gate is misnamed* stands, the
+unreachability claim does not.
 
 **`!showId` does not mean "not a Supabase show."** `setShowId` is called in
 exactly one place, `page.tsx:526`, inside `if (user && data.show_id)` — so
@@ -237,32 +242,65 @@ serve. The comment at `lib/chart-converter.ts:62-68` records that as a retractio
 renderable bytes, so *"does not flag it as unsupported"* becomes **wrong** — the
 viewer would promise a render it cannot perform, violating invariant 2.
 
-**PROPOSED RULING:** delete `EXPORT_MIME_TYPES` with `lib/drive.ts`, delete the
-exemption at `chart-converter.ts:82`, and **invert** the three test cases: a
-Google-native MIME must now be flagged **unsupported**, with the reason naming
-that the Drive export path was retired. This is a **deliberate behaviour change**
-and the only one in this document.
+**RULING (Q1 CLOSED — see below):** delete `EXPORT_MIME_TYPES` with
+`lib/drive.ts` and delete the exemption line at `chart-converter.ts:82`. This is
+a **deliberate behaviour change** and the only one in this document.
+
+**★ The code change is one line, because the function is already default-deny:**
+
+```ts
+export function isUnsupportedChartMime(mimeType?: string): boolean {
+  if (!mimeType) return false;
+  if (mimeType === PDF_MIME) return false;
+  if (EXPORT_MIME_TYPES[mimeType]) return false; // ← delete this line
+  return true;                                   // ← everything else is unsupported
+}
+```
+
+Removing the exemption makes a Google-native MIME fall through to `return true`
+— **exactly the post-retirement-correct answer**. No positive rule is needed, and
+nothing else in the function moves.
+
+**The three Tier-1 cases do NOT all get the same treatment:**
+
+| Case | Fate | Why |
+|---|---|---|
+| `:41` *"stays in agreement with the export map as it grows"* | **delete** | tests a map that no longer exists |
+| `:52` *"pins the exportable types by NAME"* | **delete** | same — its subject is the map |
+| `:30` *"★★ does NOT flag a Google-native type"* | **INVERT** | its subject is the *behaviour*, which survives and reverses |
+
+`:30` becomes a single case asserting a literal
+`'application/vnd.google-apps.document'` **is** unsupported. It must hardcode the
+literal rather than iterate the map, and it is a **tombstone test** in the §9
+sense: it proves the retirement changed the answer, and it will fail loudly if
+someone reinstates the exemption without reinstating the proxy.
 
 *Open question Q1 (§7): is inverting correct, or should a Google-native MIME be
 impossible-by-construction instead — i.e. can a `chart_library` row even hold
 one? If the upload guard already rejects them, the cases should be deleted
 rather than inverted.*
 
-**Partially answered by Codex R1 (2026-08-25):** the surviving **creation** paths
-— upload and builder — persist `application/pdf`, so a Google-native MIME cannot
-enter through them. **What remains unmeasured is existing DATA**: whether any
-`chart_library` row already carries a Google MIME from the Drive era. Codex
-confirmed Q1 is correctly a build gate rather than a review blocker.
+**★ Q1 IS CLOSED — both halves measured 2026-08-25.**
 
-**⇒ The measurement that closes Q1 is a query, not a code read:**
+1. **Creation paths** — answered by Codex R1: upload and builder both persist
+   `application/pdf`, so a Google-native MIME cannot enter through any surviving
+   path.
+2. **Existing data** — measured by Graham:
 
 ```sql
 select count(*) from chart_library
 where mime_type like 'application/vnd.google-apps.%';
+-- → 0
 ```
 
-Zero → **delete** the cases (impossible by construction *and* by data).
-Non-zero → **invert** them, and those rows need a stated fate before chunk 2.
+**⇒ No Google-native chart exists and none can be created.** The ruling above is
+therefore safe on data as well as on code, and **chunk 2 carries no data
+migration** — there are no rows needing a fate.
+
+*Note the ruling still INVERTS `:30` rather than deleting it, even though the
+input is now impossible. An impossible input is exactly what a regression test is
+for: the case exists to fail if someone restores the exemption without restoring
+the proxy that justified it.*
 
 ### 4.2 `lib/pdf-viewer.ts`'s `else` is a catch-all, not a Drive branch
 
@@ -365,9 +403,10 @@ written on purpose.
 
 ## 7. Open questions
 
-- **Q1 — §4.1: invert the Tier-1 cases, or delete them?** Depends on whether the
-  chart upload guard can even accept a Google-native MIME. **Unmeasured.** Needs
-  measuring before chunk 2, not before review.
+- ~~**Q1 — §4.1: invert the Tier-1 cases, or delete them?**~~ **CLOSED
+  2026-08-25.** Both halves measured: creation paths persist `application/pdf`
+  (Codex R1), and `chart_library` holds **0** Google-native rows (Graham).
+  Ruling in §4.1 — delete `:41` and `:52`, invert `:30`. **No data migration.**
 - **Q2 — §5.1: does auto-cache actually work?** Graham's 20-second browser check.
   Gates the `OfflineSection` deletion only.
 - ~~**Q3 — the dormant OAuth client.**~~ **RULED by Graham 2026-08-25: PRESERVE
