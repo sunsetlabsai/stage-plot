@@ -1,8 +1,12 @@
 # Design — one backend: retire Redis, consolidate on Supabase
 
-Status: **PRE-CODEX. Do not build to this text until it has been reviewed and
-Graham has given the go.**
-Version: **v1**
+Status: **APPROVED AND MERGED to `main` at `dc56c8e` (PR #150, 2026-08-24) after
+Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
+*(Superseded status: "PRE-CODEX, do not build". Corrected the moment building
+started — a status line that still forbids the work in progress is the same
+class of stale claim as §2.1's three unexecuted supersessions, and this document
+does not get to exempt itself from its own subject.)*
+Version: **v1.1**
 Scope: `lib/admin-config.ts`, `lib/agent-key.ts`, **deletion of `/admin` and
 `app/api/admin/settings`**, deletion of `app/api/show`, `user_secrets`,
 `tryit_quota`, new `admin_config` + `profiles.is_platform_admin`, Supabase Vault
