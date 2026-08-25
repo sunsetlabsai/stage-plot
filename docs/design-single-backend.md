@@ -6,7 +6,9 @@ Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
 started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
 does not get to exempt itself from its own subject.)*
-Version: **v1.2**
+Version: **v1.3** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
+Q5 reversed, **v1.3 = Codex R1 on #152: Q5 reversal propagated to the paired doc,
+`ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**)
 Scope:
 
 - `lib/admin-config.ts`, `lib/agent-key.ts` — Redis → Supabase + Vault
@@ -15,6 +17,8 @@ Scope:
 - ~~`app/api/show`~~ — **deleted, chunk 0 shipped** (PR #151, `c24ef4f`)
 - **`/admin` RE-AUTHED, not deleted** (§8 Q5, reversed) — `ADMIN_SECRET` →
   super-admin session-email check. **Platform config stays here.**
+- **all FOUR `ADMIN_SECRET` route consumers re-authed** (§3.3b, new at v1.3) —
+  `settings`, `owners`, `migrate-setlists`, `backfill-chart-overlays`
 - new **`/dashboard/settings`** — **owner-scoped only**, v1 content is the
   owner's own agent API key (§4)
 
@@ -214,8 +218,17 @@ valid env fallback is still `ok`/`env`, never `error`*. Four callers
 
 **⇒ §13 requires ONE change, not zero: the discriminant rename.** Stating it as
 zero was the overclaim. The paired document is updated in the same commit so the
-two cannot diverge, and §6's admin-state display there is corrected for both the
-rename and the `/admin` deletion ruled in §8 Q5.
+two cannot diverge, and §6's admin-state display there is corrected for the
+rename.
+
+**⚠ Corrected at v1.3 (Codex R1 on PR #152, High).** The sentence above
+previously also said that display was corrected for *"the `/admin` deletion
+ruled in §8 Q5."* **Q5 was reversed the same day it was ruled** — `/admin`
+survives (§8 Q5, §3.3a). The admin-state display is **not relocated**; it stays
+on the surface that already renders it, and only the discriminant it reads
+changes. *(This is the exact failure mode §2.1 names: an amendment propagated to
+the sections that argue the ruling, and missed the sentence that merely cites
+it.)*
 
 **The `__DISABLED__` sentinel is DELETED.** It exists because Redis has no way to
 express "explicitly off" other than a magic value, and it caused a real
@@ -317,6 +330,53 @@ for that day rather than deleted.
 
 **`ADMIN_SECRET` retires; `/admin` does NOT.** The shared bearer secret is
 replaced by the session-email check on the same route (§8 Q5, reversed).
+
+### 3.3b ★ `ADMIN_SECRET` retirement — every consumer, ruled
+
+**Added at v1.3 (Codex R1 on PR #152, High).** v1.2 said `ADMIN_SECRET` retires
+while discussing only `/api/admin/settings`. **`ADMIN_SECRET` has four route
+consumers, not one** — measured, not recalled:
+
+```
+$ grep -rn "authenticate(request)" app lib
+app/api/admin/settings/route.ts:11              (GET)
+app/api/admin/settings/route.ts:33              (PUT)
+app/api/admin/owners/route.ts:11
+app/api/admin/backfill-chart-overlays/route.ts:113
+app/api/admin/migrate-setlists/route.ts:24
+```
+
+Retiring the env var without ruling on all four leaves three routes calling
+`authenticate()`, which returns `false` the moment `ADMIN_SECRET` is unset
+(`lib/admin-rate-limit.ts:45-46`) — they would fail closed, which is safe, but
+they would be **silently dead**, which is the §2.1 pattern again.
+
+**RULING: all four are re-authed with the identical super-admin email check.**
+One boundary, one implementation, no per-route variation. Deleting the two
+one-shot ops routes is defensible but is **not** this chunk — a dead route is
+cheaper to carry than a second auth path is to reason about.
+
+| Route | Ruling | Note |
+|---|---|---|
+| `admin/settings` GET+PUT | **re-auth** | the `/admin` page's own backend |
+| `admin/owners` | **re-auth** | see the degradation note below |
+| `admin/migrate-setlists` | **re-auth** | one-shot ops tool; deletion is separate work |
+| `admin/backfill-chart-overlays` | **re-auth** | one-shot ops tool; deletion is separate work |
+
+**The check is normative and identical in all four:** server-side
+`supabase.auth.getUser()`; require a non-empty user email **and** a non-empty
+`PLATFORM_ADMIN_EMAIL`; trim and lowercase both; compare; fail closed on any
+missing input; enforce **before** any service-role work. Never a client-supplied
+email, never a browser-decoded JWT, never `getSession()`, never UI hiding.
+
+**⚠ One designed behaviour dies with `ADMIN_SECRET`, deliberately.**
+`design-owner-onboarding.md:61` specifies that `/api/admin/owners` validates the
+secret *independently of KV*, so that when settings 503s on an unreachable store
+the owner list still renders. **That rationale retires with Redis.** Both routes
+now read the same Postgres: if it is unreachable neither can serve, so there is
+no partial-availability case left to preserve. The split was a workaround for
+two stores, not a requirement. Recorded here because deleting a degradation path
+silently is how the next reader concludes it was never wanted.
 
 ---
 
@@ -564,7 +624,12 @@ table nothing reads.
 
 **§13 of `design-ai-key-availability.md` is independent of every chunk here** and
 may ship before, during or after — it resolves through `readAdminConfig`'s
-interface, which §3.2 preserves exactly.
+**STATUS contract**, which §3.2 preserves.
+
+*(v1.3: this read "which §3.2 preserves exactly" — contradicting §3.2's own v1.1
+correction two hundred lines above it, where "preserved exactly" was retracted as
+the overclaim. §3.2 makes exactly one interface change, the `source` discriminant
+rename, and it is carried in both documents and in `tests/agent-key.test.ts:78`.)*
 
 ---
 
@@ -692,15 +757,26 @@ quoted from notes** (`feedback_report_test_delta`).
 
 ## 10. Documents this supersedes
 
-Both are corrected **in this PR** (supersession notices only; full rewrites are
-separate work):
+All three are corrected **in this PR** (supersession notices only; full rewrites
+are separate work). *(v1.3: "Both" — the list was two. `design-owner-onboarding.md`
+was found by the §3.3b sweep, not by review of this section.)*
 
 1. **`design-kv-admin-settings.md`** — its *"Why Redis over Postgres"* rationale
    and its **instance-per-customer hosting model** ("Model C") are both dead.
    Graham ruled multi-tenant SaaS 2026-08-24, and the code already agreed:
    `app/api/profiles/route.ts:12` is `POST /api/profiles — claim owner slug
    (onboarding)` — self-serve owners on one deployment.
-2. **`design-supabase-backend.md`** — its `user_secrets` policy block specifies
+   **Also dead: its auth model.** `:130` makes `ADMIN_SECRET` *"the root of
+   trust… never stored in KV — it stays in `process.env`."* §3.3b retires it
+   outright; the root of trust becomes the Supabase session plus
+   `PLATFORM_ADMIN_EMAIL`. `:213`/`:219` still specify `Authorization: Bearer
+   {ADMIN_SECRET}` as the route contract.
+2. **`design-owner-onboarding.md`** — `:55`, `:61` and `:82` specify
+   `/api/admin/owners` as `ADMIN_SECRET`-gated, with the KV-independent
+   validation whose rationale §3.3b retires. Its *"Registered Owners"* section
+   and the `/admin` surface it hangs on are **unaffected** — only the gate
+   changes.
+3. **`design-supabase-backend.md`** — its `user_secrets` policy block specifies
    two write policies that **were** created (`001_initial_schema.sql:149`,
    `:153`) and are now **dropped** by §4.2, because Vault requires server-side
    writes and no DELETE policy exists for the Remove action. *(v1 of this

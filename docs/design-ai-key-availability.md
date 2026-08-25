@@ -6,7 +6,9 @@ Version: **v11** (v1 = pre-Codex, v2 = R1, v3 = R2, v4 = R3, v5 = R4, v6 = R5, v
 registry, v8 = review-closure bookkeeping, v9 = Q3 ruled: prompt cache + mid-stream error,
 v9.1 = Codex R1 on #137 folded + scope split, v10 = §8 bullet 3 promoted: key resolution
 unified across all three AI surfaces, and key ENTRY relocated to a settings overlay,
-**v11 = §14 REMOVED, pending re-spec in a document not yet written** — see the v11 changelog)
+**v11 = §14 REMOVED, pending re-spec in a document not yet written** — see the v11 changelog,
+v11.1 = `source` discriminant renamed to `'store'`,
+**v11.2 = §6's `/admin` relocation RETRACTED — Q5 was reversed, `/admin` survives**)
 Scope: AI tab (`AgentChat`), `/api/agent/chat`, `/admin` key status, and — new at v10 —
 `/api/charts/roadmap/parse` and `/api/charts/convert`.
 **`/dashboard/settings` is NO LONGER in this document's scope (v11).**
@@ -907,10 +909,16 @@ Requirements:
    computed separately.
    *(v11.1: the discriminant is `'store'`, not `'redis'` — it names a role, not a
    vendor, so it survives the backend change specified in
-   `design-single-backend.md` §3.2. **That document also rules `/admin` DELETED**
-   — this display moves to the flag-gated platform section of
-   `/dashboard/settings`. The gap and its fix are unchanged; only the surface
-   that renders it moves.)* Without it, §1's three cases stay indistinguishable from
+   `design-single-backend.md` §3.2.)*
+   *(**v11.2 — CORRECTED.** v11.1 continued: *"That document also rules `/admin`
+   DELETED — this display moves to the flag-gated platform section of
+   `/dashboard/settings`."* **That is no longer true.** `design-single-backend.md`
+   §8 Q5 was **reversed** on 2026-08-24: `/admin` survives as its own surface,
+   re-authed from `ADMIN_SECRET` to a super-admin session-email check (§3.3a,
+   §3.3b there). **This display does not move** — it stays on `/admin`, where it
+   already renders. `/dashboard/settings` is **owner-scoped only** and nothing
+   global joins it, consistent with `:12` of this document. There is no
+   flag-gated platform section, and no flag.)* Without it, §1's three cases stay indistinguishable from
    the UI, which is exactly the hole this whole document exists to close — and
    the `'error'` member is what §4.1 makes expressible for the first time.
 
