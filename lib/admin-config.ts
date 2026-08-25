@@ -29,7 +29,15 @@ export type ConfigRead =
  * call-site rewrite.
  */
 export async function readAdminConfig(key: string): Promise<ConfigRead> {
-  const value = process.env[key.toUpperCase()];
+  // Trimmed, and this is load-bearing rather than tidiness. A key pasted into
+  // the Vercel dashboard with a trailing newline is indistinguishable from a
+  // correct one by eye and by `/admin` (which only tests non-empty) — it ships
+  // straight to Anthropic and 401s. Every consumer degrades silently on that,
+  // so it surfaces as "the AI is bad at charts", not as an error. Cost us a
+  // debugging session on 2026-08-25. `admin-auth.ts:31` already trims; this
+  // closes the asymmetry.
+  const value = process.env[key.toUpperCase()]?.trim();
+  // Whitespace-only is unconfigured, not a value — `''` is falsy after trim.
   return value ? { status: 'ok', value, source: 'env' } : { status: 'none' };
 }
 

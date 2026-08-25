@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -116,5 +116,37 @@ describe('the capabilities wire shape is ONE union, and the doc describes it', (
     // any one left behind is a branch that cannot run.
     expect(KEY_SRC).not.toContain("mode: 'error'");
     expect(KEY_SRC).not.toContain("tryit: 'error'");
+  });
+});
+
+// A key pasted with a trailing newline is invisible in the Vercel dashboard and
+// on /admin (which only tests non-empty), ships to Anthropic, and 401s — while
+// every consumer degrades silently. Pinning the trim so it cannot regress.
+describe('readAdminConfig trims surrounding whitespace', () => {
+  const ENV = { ...process.env };
+  afterEach(() => {
+    process.env = { ...ENV };
+    vi.resetModules();
+  });
+
+  it('strips a trailing newline from a pasted value', async () => {
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-real-key\n';
+    const { readAdminConfig } = await import('@/lib/admin-config');
+    const read = await readAdminConfig('claude_tryit_key');
+    expect(read).toEqual({ status: 'ok', value: 'sk-ant-real-key', source: 'env' });
+  });
+
+  it('strips carriage returns and surrounding spaces too', async () => {
+    process.env.CLAUDE_TRYIT_KEY = '  sk-ant-real-key\r\n';
+    const { readAdminConfig } = await import('@/lib/admin-config');
+    const read = await readAdminConfig('claude_tryit_key');
+    if (read.status !== 'ok') throw new Error('expected ok');
+    expect(read.value).toBe('sk-ant-real-key');
+  });
+
+  it('treats a whitespace-only value as unconfigured, not as a value', async () => {
+    process.env.CLAUDE_TRYIT_KEY = '   \n';
+    const { readAdminConfig } = await import('@/lib/admin-config');
+    expect(await readAdminConfig('claude_tryit_key')).toEqual({ status: 'none' });
   });
 });
