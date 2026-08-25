@@ -2,10 +2,11 @@
 
 Status: **PRE-CODEX. Do not build to this text until it has been through review
 and Graham has given the go.**
-Version: **v1.3** (v1 = pre-Codex, v1.1 = Q3 ruled + §9 tombstones,
+Version: **v1.4** (v1 = pre-Codex, v1.1 = Q3 ruled + §9 tombstones,
 **v1.2 = Codex R1 High folded — §1.3's unreachability proof was unsound; see
 §1.3a**, **v1.3 = Q1 CLOSED on measurement — 0 Google-native rows; §4.1 ruled,
-no data migration**)
+no data migration**, v1.4 = Codex R2 nit — the §1.3a entry-path enumeration
+missed `router.replace` from `/`; conclusion unchanged)
 Scope: `app/api/drive/*`, `app/api/auth/google/*`, `lib/drive.ts`, the Drive
 branches in `lib/chart-cache.ts` / `lib/pdf-viewer.ts` / `lib/chart-converter.ts`,
 the `googleToken` plumbing and Drive section in `app/[owner]/[show]/page.tsx`,
@@ -107,12 +108,24 @@ exactly the state §1.3 called impossible.
 **Two facts found while verifying, which bound the severity without rescuing the
 argument:**
 
-1. **No show → show navigation exists today.** Every entry into a show is
-   `router.push` from `/dashboard` (`app/dashboard/page.tsx:74`, `:124`, `:233`,
-   `:252`, `:267`) — a different route segment, so the page unmounts and `tab`
-   re-initialises. The show page's own outbound links are `/`, `/sign-in`,
-   `/dashboard`, `/library` and chart URLs. *Scope: `router.push` and `href=`
-   across `app/` and `components/`.*
+1. **No show → show navigation exists today.** There are **two** entry paths into
+   a show, and neither is show-to-show:
+   - `router.push` from `/dashboard` (`app/dashboard/page.tsx:74`, `:124`,
+     `:233`, `:252`, `:267`)
+   - `router.replace(lastShow)` from `/` (`app/page.tsx:41-43`), the offline PWA
+     launch that reads `showrunr-last-show`
+
+   Both mount from a **different page**, so the show component unmounts and `tab`
+   re-initialises to `'perform'`. The show page's own outbound links are `/`,
+   `/sign-in`, `/dashboard`, `/library` and chart URLs.
+
+   *(v1.4, Codex R2 nit: v1.2 asserted "every entry into a show is `router.push`
+   from `/dashboard`" — a universal claim from an incomplete sweep. The
+   `router.replace` path was missed because the scope was `router.push` and
+   `href=`, which cannot match it. **The conclusion survives; the enumeration did
+   not.** This is the same defect class as the §1.3 proof it appears inside —
+   a negative stated from a search that could not have found the counterexample.
+   See `feedback_empty_search_is_not_proof`.)*
 2. **The wipe cannot persist even if reached.** The save effect is gated
    `if (showId)` (`:554-558`), null in precisely that window, and `setConfig`
    then replaces the state with the incoming show's config. The damage is a
@@ -275,10 +288,10 @@ literal rather than iterate the map, and it is a **tombstone test** in the §9
 sense: it proves the retirement changed the answer, and it will fail loudly if
 someone reinstates the exemption without reinstating the proxy.
 
-*Open question Q1 (§7): is inverting correct, or should a Google-native MIME be
-impossible-by-construction instead — i.e. can a `chart_library` row even hold
-one? If the upload guard already rejects them, the cases should be deleted
-rather than inverted.*
+*The question this ruling answered — kept for the reasoning, not as an open item:
+was inverting correct, or was a Google-native MIME impossible by construction —
+i.e. could a `chart_library` row even hold one? Both halves are now measured
+below.*
 
 **★ Q1 IS CLOSED — both halves measured 2026-08-25.**
 
