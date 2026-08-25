@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { quotaBackend, supabaseAdminMock } from './helpers/quota-backend';
+
 import { NextRequest } from 'next/server';
 import { TRYIT_QUOTA } from '../lib/agent-key';
 import { PROBE_RATE_LIMIT_MAX } from '../lib/admin-rate-limit';
@@ -33,6 +35,10 @@ const redis = {
 
 /** Quota keys read this test — the assertion Codex's note asked for. */
 const quotaReads = () => redis.getKeys.filter((k) => k.startsWith('quota:'));
+
+
+// Quota moved off Redis onto two Supabase RPCs (chunk 2).
+vi.mock('@/lib/supabase-admin', () => supabaseAdminMock());
 
 vi.mock('redis', () => ({
   createClient: () => ({
@@ -73,6 +79,9 @@ beforeEach(() => {
   redis.expireCalls = 0;
   redis.getKeys = [];
   redis.getThrowsFor.clear();
+  quotaBackend.reset();
+  process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-test';
   process.env.REDIS_URL = 'redis://test';
   delete process.env.CLAUDE_TRYIT_KEY;
   vi.resetModules();
@@ -137,8 +146,8 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
     // other three cannot cover — a GET creates no key, so §4's "do not touch the
     // store" would have passed while the route round-tripped to Redis for nothing.
     expect(quotaReads()).toEqual([]);
-    expect(redis.store.has(`quota:${IP}`)).toBe(false);
-    expect(redis.incrCalls).toBe(0);
+    expect(quotaBackend.countFor(IP)).toBe(0);
+    expect(quotaBackend.incrCalls).toBe(0);
     expect(redis.expireCalls).toBe(0);
   });
 
@@ -149,12 +158,12 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
 
     await probe();
 
-    expect(quotaReads()).toEqual([`quota:${IP}`]);
+    expect(quotaBackend.peekCalls).toBe(1);
   });
 
   it('reports available with remaining reflecting an existing count (test 2)', async () => {
     keyConfigured();
-    redis.store.set(`quota:${IP}`, '3');
+    quotaBackend.seed(IP, 3);
 
     const body = await (await probe()).json();
 
@@ -164,7 +173,7 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
 
   it('reports exhausted once usage reaches the quota constant (test 3)', async () => {
     keyConfigured();
-    redis.store.set(`quota:${IP}`, String(TRYIT_QUOTA));
+    quotaBackend.seed(IP, TRYIT_QUOTA);
 
     const body = await (await probe()).json();
 
@@ -174,7 +183,7 @@ describe('GET /api/agent/capabilities — the four states (§9 tests 1–3)', ()
 
   it('reports exhausted past the quota too, never a negative remaining', async () => {
     keyConfigured();
-    redis.store.set(`quota:${IP}`, String(TRYIT_QUOTA + 5));
+    quotaBackend.seed(IP, TRYIT_QUOTA + 5);
 
     const body = await (await probe()).json();
 
@@ -200,7 +209,7 @@ describe('GET /api/agent/capabilities — the probe carries no key material (§9
     process.env.CLAUDE_TRYIT_KEY = KEY_IN_ENV;
 
     for (const count of ['0', String(TRYIT_QUOTA)]) {
-      redis.store.set(`quota:${IP}`, count);
+      quotaBackend.seed(IP, Number(count));
       vi.resetModules();
       const res = await probe();
       const raw = await res.text();
@@ -225,15 +234,15 @@ describe('GET /api/agent/capabilities — the probe carries no key material (§9
 describe('GET /api/agent/capabilities — a probe must not cost a message (§9 test 5)', () => {
   it('does not increment: probing twice leaves the count untouched', async () => {
     keyConfigured();
-    redis.store.set(`quota:${IP}`, '4');
+    quotaBackend.seed(IP, 4);
 
     const first = await (await probe()).json();
     const second = await (await probe()).json();
 
     expect(first.tryitRemaining).toBe(TRYIT_QUOTA - 4);
     expect(second.tryitRemaining).toBe(TRYIT_QUOTA - 4);
-    expect(redis.store.get(`quota:${IP}`)).toBe('4');
-    expect(redis.incrCalls).toBe(0);
+    expect(quotaBackend.countFor(IP)).toBe(4);
+    expect(quotaBackend.incrCalls).toBe(0);
     // A peek must not set a TTL either — that would silently extend an allowance.
     expect(redis.expireCalls).toBe(0);
   });
@@ -245,7 +254,7 @@ describe('GET /api/agent/capabilities — a probe must not cost a message (§9 t
 
     expect(body.tryit).toBe('available');
     expect(body.tryitRemaining).toBe(TRYIT_QUOTA);
-    expect(redis.store.has('quota:198.51.100.22')).toBe(false);
+    expect(quotaBackend.countFor('198.51.100.22')).toBe(0);
   });
 });
 

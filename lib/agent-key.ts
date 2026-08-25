@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { readAdminConfig } from './admin-config';
-import { createClient } from 'redis';
+import { getSupabaseAdmin } from './supabase-admin';
 
 // Capability resolution for the AI Show Designer — owned in ONE place.
 //
@@ -28,7 +29,12 @@ export const BYOA_MAX_TOKENS = 4096;
 export const DEFAULT_AGENT_MODEL = 'claude-sonnet-4-6';
 
 /**
- * Environment variables, read synchronously. **NOT Redis — see below.**
+ * Environment variables, read synchronously. **No I/O on this path — see below.**
+ *
+ * The argument below was written against Redis. The quota backend is now Supabase
+ * and it survives the swap unchanged, because it never depended on *which* store —
+ * only on there being a network hop. The test it cites is the invariant, not a
+ * Redis artifact: **no I/O on the BYOA path.** Keep it, whatever the backend is.
  *
  * > ★ The first cut of this resolved through `readAdminConfig` (Redis, then env),
  * > which would have allowed changing the model with no deploy at all. An
@@ -82,7 +88,15 @@ export function resolveAgentModel(envVar: string): string {
   const configured = (process.env[envVar] ?? '').trim();
   return isUsableModelId(configured) ? configured : DEFAULT_AGENT_MODEL;
 }
-const QUOTA_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
+// The quota window. Fixed, not sliding — a deliberate acceptance carried over
+// from the Redis retirement: `increment_tryit` resets window_start when the row
+// ages out, so an IP gets TRYIT_QUOTA per 30-day window rather than per rolling
+// 30 days. Cheaper to reason about and matches what the RPC already did.
+const QUOTA_WINDOW_DAYS = 30;
+
+// Derived, not restated: the in-memory fallback must never disagree with the
+// RPCs about how long a window is.
+const QUOTA_TTL_SECONDS = QUOTA_WINDOW_DAYS * 24 * 60 * 60;
 
 /** THE in-memory fallback, used when Redis is unavailable. Exactly one instance. */
 const fallbackQuota = new Map<string, { count: number; resetAt: number }>();
@@ -120,44 +134,73 @@ export type KeyMode =
  * reuse the consuming path.
  */
 async function quota(ip: string, consume: boolean): Promise<{ allowed: boolean; remaining: number }> {
-  const url = process.env.REDIS_URL;
-  if (!url) return fallback(ip, consume);
-
-  let client;
-  try {
-    client = createClient({ url });
-    await client.connect();
-    const key = `quota:${ip}`;
-
-    if (!consume) {
-      const raw = await client.get(key);
-      await client.disconnect();
-      const count = raw ? Number(raw) : 0;
-      // A non-numeric value is treated as no usage rather than NaN-propagating.
-      const used = Number.isSafeInteger(count) && count > 0 ? count : 0;
-      const remaining = Math.max(0, TRYIT_QUOTA - used);
-      return { allowed: remaining > 0, remaining };
-    }
-
-    const count = await client.incr(key);
-
-    // Always set TTL — idempotent, ensures TTL is present even if a prior EXPIRE
-    // failed. Isolated so EXPIRE failure doesn't discard the successful INCR.
-    try {
-      await client.expire(key, QUOTA_TTL_SECONDS);
-    } catch {
-      // TTL not set — key persists without expiry. Acceptable: worst case is this
-      // IP's quota never resets, which is conservative.
-    }
-
-    await client.disconnect();
-
-    if (count > TRYIT_QUOTA) return { allowed: false, remaining: 0 };
-    return { allowed: true, remaining: Math.max(0, TRYIT_QUOTA - count) };
-  } catch {
-    try { await client?.disconnect(); } catch { /* ignore */ }
+  // Same guard shape as the REDIS_URL check this replaces: no backend configured
+  // is a fallback, not an error. getSupabaseAdmin() asserts both are set.
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
     return fallback(ip, consume);
   }
+
+  try {
+    const ipHash = hashIp(ip);
+    const supabase = getSupabaseAdmin();
+
+    // Two RPCs, one shape: both return the IP's message count within the current
+    // window. `increment_tryit` writes and returns the post-increment count;
+    // `peek_tryit` reads and returns the current one. The allowed/remaining
+    // arithmetic below is therefore identical — only the cap comparison differs,
+    // because a consume that lands ON the cap has spent the last message whereas
+    // a peek at the cap has not.
+    const { data, error } = consume
+      ? await supabase.rpc('increment_tryit', {
+          p_ip_hash: ipHash,
+          p_limit: TRYIT_QUOTA,
+          p_window_days: QUOTA_WINDOW_DAYS,
+        })
+      : await supabase.rpc('peek_tryit', {
+          p_ip_hash: ipHash,
+          p_window_days: QUOTA_WINDOW_DAYS,
+        });
+
+    // An RPC error is an unreachable backend, which is what fallback() is for.
+    // Failing OPEN here is deliberate and matches the Redis path: a database
+    // blip must not lock every try-it user out mid-session.
+    if (error) return fallback(ip, consume);
+
+    // A null/non-numeric return is treated as no usage rather than NaN-propagating.
+    const count = typeof data === 'number' && Number.isSafeInteger(data) && data > 0 ? data : 0;
+
+    if (consume) {
+      if (count > TRYIT_QUOTA) return { allowed: false, remaining: 0 };
+      return { allowed: true, remaining: Math.max(0, TRYIT_QUOTA - count) };
+    }
+
+    const remaining = Math.max(0, TRYIT_QUOTA - count);
+    return { allowed: remaining > 0, remaining };
+  } catch {
+    return fallback(ip, consume);
+  }
+}
+
+/**
+ * IP → `tryit_quota.ip_hash`.
+ *
+ * The column has always been named for a hash; the Redis path keyed on the raw
+ * IP because a Redis key is not a stored record. A row in Postgres is, so the
+ * raw address does not go in.
+ *
+ * Unsalted SHA-256, and that is a real limit worth naming: the IPv4 space is
+ * small enough to enumerate, so this defeats casual reading of the table, not a
+ * determined attacker with dump access. A salt would fix that at the cost of one
+ * more required env var whose absence silently rehashes every IP (resetting all
+ * quotas). Not taken unilaterally — flagged for Graham.
+ *
+ * `getClientIp` yields 'unknown' when the header is absent, so all header-less
+ * callers share one bucket. That was equally true of the Redis key; preserved
+ * rather than changed, because fixing it is a quota-policy decision, not a
+ * storage-backend one.
+ */
+function hashIp(ip: string): string {
+  return createHash('sha256').update(ip).digest('hex');
 }
 
 function fallback(ip: string, consume: boolean): { allowed: boolean; remaining: number } {
