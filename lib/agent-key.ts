@@ -268,16 +268,67 @@ function fallback(ip: string, consume: boolean): { allowed: boolean; remaining: 
 }
 
 /**
+ * Read this account's stored BYOA key (§4.5's "Save to my account").
+ *
+ * Returns null for "no key" AND for "could not tell" — the caller treats both
+ * the same, falling through to try-it. Failing OPEN matches `quota()`'s
+ * reasoning: a database blip must degrade, not lock a user out mid-session.
+ * There is no fail-closed exception here because, unlike the quota, an
+ * unavailable account key cannot be used to BYPASS anything.
+ *
+ * `get_user_secret` is the only path in the system that returns plaintext, so
+ * nothing here logs `data` — only whether a key was found.
+ */
+async function readAccountKey(userId: string): Promise<string | null> {
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    return null;
+  }
+
+  try {
+    const { data, error } = await getSupabaseAdmin().rpc('get_user_secret', {
+      p_user_id: userId,
+    });
+
+    if (error) {
+      console.error('[agent-key] get_user_secret failed — falling through to try-it.', {
+        code: error.code,
+        message: error.message,
+      });
+      return null;
+    }
+
+    return typeof data === 'string' && data.length > 0 ? data : null;
+  } catch (e) {
+    console.error('[agent-key] get_user_secret threw — falling through to try-it.', {
+      message: e instanceof Error ? e.message : 'unknown',
+    });
+    return null;
+  }
+}
+
+/**
  * Resolve how a request to the agent should be authorized.
  *
  * BYOA wins over try-it unconditionally, matching the behavior this replaces.
  * `unconfigured` and `error` are propagated OUTWARD rather than flattened to "no
  * key" — the distinction §5 depends on is made here or not at all (§0 invariant 2).
+ *
+ * ★ Precedence between the two BYOA backends — Graham's ruling 2026-08-26:
+ * the DEVICE key wins over the ACCOUNT key. Both can exist at once (saving to
+ * the account does not reach into another browser's localStorage), so this is a
+ * real decision, not a theoretical one. Device-first keeps the property §4.4
+ * cares about: a request that carries its own key resolves without touching
+ * Supabase at all, so BYOA still works for that user during a database outage.
+ *
+ * `userId` is optional and callers pass it only when there is no client key —
+ * see `app/api/agent/chat/route.ts`. That is what stops an anonymous try-it
+ * request paying for a session lookup it cannot use.
  */
 export async function resolveKeyMode(
   clientKey: string | undefined,
   ip: string,
   opts: { consume: boolean },
+  userId?: string | null,
 ): Promise<KeyMode> {
   if (clientKey) {
     // Synchronous env read — this branch still consults NOTHING external, which
@@ -288,6 +339,18 @@ export async function resolveKeyMode(
       model: resolveAgentModel(BYOA_MODEL_ENV),
       maxTokens: BYOA_MAX_TOKENS,
     };
+  }
+
+  if (userId) {
+    const accountKey = await readAccountKey(userId);
+    if (accountKey) {
+      return {
+        mode: 'byoa',
+        apiKey: accountKey,
+        model: resolveAgentModel(BYOA_MODEL_ENV),
+        maxTokens: BYOA_MAX_TOKENS,
+      };
+    }
   }
 
   const read = await readAdminConfig('claude_tryit_key');
