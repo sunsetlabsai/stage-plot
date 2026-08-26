@@ -588,7 +588,8 @@ to **9**.
 | 5 (Codex R3) | — | 12 | — |
 | 6 | Claimed "enumerate, then read". **Actually enumerated, then FILTERED (print-regex), then read** | 12 | 4 |
 | 7 | Claimed "all hits, no filter". **Actually appended `grep -v` excluding the doc being edited** — 180 of 270 lines | 12 | 3 |
-| **8 (Codex R5 + full read)** | `grep -rniE "collaborator\|editor" docs/*.md`, **270 lines, nothing excluded**, every line read | **12 docs, all sites** | — |
+| **8 (Codex R5 + full read)** | `grep -rniE "collaborator\|editor" docs/*.md`, **nothing excluded**, every returned line read | **12 docs, all sites** | — |
+| 9 (Codex R6) | Same command, independently re-run | **clean — no non-owner write claim survives** | — |
 
 **Each of passes 1–4 raised confidence while the blind spot stayed roughly the
 same size.** Pass 4's regex — the one this section previously held up as the
@@ -657,12 +658,16 @@ never could.
 **no filter of any kind**, and every line read:
 
 ```
-grep -rniE "collaborator|editor" docs/*.md      # 270 lines, 26 files
+grep -rniE "collaborator|editor" docs/*.md      # 26 files
 ```
 
-**270**, not the *"180"* pass 7 claimed — that number came from a command with
-`grep -v "^docs/design-single-backend.md"` appended, i.e. it **excluded the very
-document being edited** (90 lines). Corrected by Codex R5.
+**No line count is quoted here on purpose.** Pass 7 claimed *"180 hits"*; the real
+figure was 270, because that command had `grep -v "^docs/design-single-backend.md"`
+appended — it **excluded the very document being edited** (90 lines). Codex R5
+caught it; Codex R6 then measured **272**, because *amending these docs adds lines
+containing the words*. **The count drifts with every edit and is therefore not the
+check** — the check is running the bare command and reading everything it returns.
+A quoted total invites the next reader to compare numbers instead of reading.
 
 **14 of the 26 files are false positives** — "calibration editor", "setlist
 editor", "text editor", "AI collaborator" as a feature name — which is exactly why
