@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
-import Link from 'next/link';
+// No useRouter, deliberately: every exit from this page must be a document
+// load. See the comment on the post-claim redirect below.
 
 export default function ClaimPage() {
   const [handle, setHandle] = useState('');
@@ -12,7 +12,6 @@ export default function ClaimPage() {
   const [checking, setChecking] = useState(true);
   const [alreadyClaimed, setAlreadyClaimed] = useState<string | null>(null);
   const [claimed, setClaimed] = useState(false);
-  const router = useRouter();
 
   const slug = handle.toLowerCase().replace(/[^a-z0-9-]/g, '');
   const isValid = /^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$/.test(slug);
@@ -26,7 +25,11 @@ export default function ClaimPage() {
           const data = await res.json();
           setAlreadyClaimed(data.owner_slug);
         } else if (res.status === 401) {
-          router.push('/sign-in?redirect=/claim');
+          // Document load, not router.push, for the same cache reason — and
+          // note this branch `return`s without clearing `checking`, so if the
+          // navigation does not land the page is pinned on "Loading..."
+          // forever. A document load cannot fail to land.
+          window.location.assign('/sign-in?redirect=/claim');
           return;
         }
         // 404 = no profile, show form
@@ -36,7 +39,7 @@ export default function ClaimPage() {
       setChecking(false);
     }
     checkProfile();
-  }, [router]);
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -53,7 +56,18 @@ export default function ClaimPage() {
 
     if (res.ok) {
       setClaimed(true);
-      setTimeout(() => router.push('/dashboard'), 1500);
+      // A FULL DOCUMENT LOAD, not router.push. Claiming a handle changes the
+      // answer middleware.ts:86 gives for /dashboard, but the client router
+      // cached the pre-claim answer — a 307 to /claim — when sign-in pushed
+      // here. /dashboard builds as a STATIC route, and static routes are held
+      // in the client cache (staleTimes.static, 5 min), so router.push replays
+      // that redirect without ever asking the server and the user is pinned on
+      // this page. Measured: with push, ZERO requests for /dashboard are made.
+      // router.refresh() does not help — it clears the cache for the CURRENT
+      // route only (next/docs use-router.md:46); measured, it changed nothing.
+      // A document load is the one documented reset: "The client cache is
+      // cleared on page refresh" (next/docs glossary.md:45).
+      setTimeout(() => window.location.assign('/dashboard'), 1500);
     } else {
       const data = await res.json();
       // Handle 409 gracefully — user already has a profile, fetch real handle
@@ -98,12 +112,19 @@ export default function ClaimPage() {
               Your handle is <span className="font-mono text-white">showrunr.ai/{alreadyClaimed}</span>
             </p>
           )}
-          <Link
+          {/* Plain <a>, not <Link>: see the comment on the redirect above.
+              <Link> is a client navigation and replays the same cached
+              redirect, which is why this CTA appeared dead in UAT.
+              no-html-link-for-pages assumes a client navigation is always
+              preferable. Here it is the defect, so the rule is wrong for these
+              two links specifically — suppressed per-line, not per-file. */}
+          {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+          <a
             href="/dashboard"
             className="inline-block px-6 py-2.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition-colors"
           >
             Go to Dashboard
-          </Link>
+          </a>
         </div>
       </div>
     );
@@ -118,12 +139,14 @@ export default function ClaimPage() {
             Claimed <span className="font-mono">{slug}</span>!
           </h1>
           <p className="text-zinc-400">Redirecting to your dashboard...</p>
-          <Link
+          {/* Plain <a> for the same reason as the CTA above. */}
+          {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+          <a
             href="/dashboard"
             className="text-sm text-blue-400 hover:text-blue-300 transition-colors"
           >
             Go to Dashboard
-          </Link>
+          </a>
         </div>
       </div>
     );

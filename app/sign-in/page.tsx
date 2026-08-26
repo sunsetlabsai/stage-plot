@@ -1,8 +1,11 @@
 'use client';
 
 import { Suspense, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+// No useRouter: every exit from this page must be a document load, because
+// signing in changes the identity that middleware routes on. See below.
+import { useSearchParams } from 'next/navigation';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
+import { internalRedirect } from '@/lib/safe-redirect';
 import { LogoFull } from '@/components/Logo';
 
 export default function SignInPage() {
@@ -19,11 +22,8 @@ function SignInForm() {
   const [step, setStep] = useState<'email' | 'otp'>('email');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const router = useRouter();
   const searchParams = useSearchParams();
-  const rawRedirect = searchParams.get('redirect') || '/dashboard';
-  // Prevent open redirect — only allow internal paths
-  const redirect = rawRedirect.startsWith('/') && !rawRedirect.startsWith('//') ? rawRedirect : '/dashboard';
+  const rawRedirect = searchParams.get('redirect');
 
   async function handleSendOtp(e: React.FormEvent) {
     e.preventDefault();
@@ -62,7 +62,16 @@ function SignInForm() {
     // Activate any pending collaborator invites
     await fetch('/api/auth/activate-invites', { method: 'POST' });
 
-    router.push(redirect);
+    // A DOCUMENT LOAD, not router.push — same reason as app/claim/page.tsx.
+    // verifyOtp has just changed who this browser is, and the destination is
+    // usually /dashboard or /library, both gated by middleware.ts:62 on
+    // exactly that answer. Any cached routing decision made under the previous
+    // identity is now stale, and a client navigation would replay it.
+    //
+    // Resolved HERE and not at render time: internalRedirect needs the real
+    // origin, and this page is statically prerendered, where `window` does not
+    // exist. See lib/safe-redirect.ts for why a startsWith guard is not enough.
+    window.location.assign(internalRedirect(rawRedirect, window.location.origin));
   }
 
   return (
