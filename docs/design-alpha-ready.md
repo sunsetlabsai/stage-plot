@@ -159,10 +159,16 @@ const LEGACY_REDIRECTS: Record<string, string> = {
 
 Show slugs are now unique per-owner (not globally). Two different users can both have `/friday-night`. The collision check in `POST /api/shows` and `PUT /api/shows/update` changes from global to per-owner.
 
-**Important (Codex finding #2):** Editors can update shows they don't own (via RLS
-`is_show_collaborator` policy). The collision scope must always be `show.owner_id`,
-NOT `auth.uid()` — otherwise an editor's collision check would search the wrong
-owner's namespace.
+**Important (Codex finding #2):** The collision scope must always be
+`show.owner_id`, NOT `auth.uid()`.
+
+*(Amended 2026-08-25 — see `design-single-backend.md` §3.3c. This read "Editors can
+update shows they don't own (via RLS `is_show_collaborator` policy) … otherwise an
+editor's collision check would search the wrong owner's namespace." **Collaborators
+are VIEW ONLY and the `editor` role is deleted**, so no non-owner updates a show
+and the premise is gone. **The RULE still stands and must not be relaxed:**
+resolving from `show.owner_id` is what makes the check correct independent of who
+is acting — which is exactly why it survives the principal it was written for.)*
 
 ```typescript
 // POST /api/shows (create) — caller is always the owner, no existing id to exclude

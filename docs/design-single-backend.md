@@ -574,35 +574,74 @@ This PR deliberately does not touch them — §10's rule is that one document do
 not silently amend another, and v1.8's changelog records that exact defect. They
 are listed so the ruling does not have to be rediscovered later:
 
-**⛔ The first draft of this table listed TWO documents. A repo-wide sweep found
-SIX.** Recorded as a process note, not just a correction: the first pass grepped
-`editor` and eyeballed the hits; the complete pass grepped the *concept* — `editors
-`, `an editor`, `show editor` — across all of `docs/`. **Enumerating by keyword
-found less than enumerating by claim.**
+**⛔⛔ THIS TABLE'S COMPLETENESS CLAIM FAILED TWICE. Read the process note before
+trusting it.** Draft 1 listed **2** documents. Draft 2 swept harder, found **6**,
+and called that a "complete pass". Codex R2 then found **3 more** — bringing it
+to **9**.
+
+| Pass | Search used | Found | Still missed |
+|---|---|---|---|
+| 1 | `grep editor`, eyeballed | 2 | 8 |
+| 2 | `grep 'editors \|an editor\|show editor'` | 6 | 4 |
+| 3 (Codex R2) | read the docs for the **claim** | 9 | 1 |
+| 4 | **regex on the CLAIM**, not the word — `collaborators? (can\|may) (edit\|write\|modify\|update)`, `owner[ -/]?or[ -/]?editor`, `can edit .*someone else` | **10** | — |
+
+**Pass 4 was written only after pass 3 proved the method wrong, and it immediately
+found three more sites** — including `design-alpha-ready.md:162`, which drafts 1
+and 2 had both explicitly cleared as *"CHECKED, UNAFFECTED"*. **A disposition of
+"checked" is worth no more than the search behind it.**
+
+**★ Why pass 2 still missed three.** Every variant it searched contains the *word*
+`editor`. The three it missed do not say it where it matters:
+- `design-payments.md:49` — *"Authenticated **collaborators can edit**"*
+- `design-payments.md:195` — *"a **collaborator editing** someone else's show"*
+- `design-song-library.md:43, 529, 580` — *"**owner or editor**"*, *"owner-or-editor"*,
+  which the `editors `/`an editor`/`show editor` patterns all miss on spacing alone
+
+**⇒ THE LESSON, and it generalises past this table: a concept sweep cannot be a
+keyword sweep.** The claim being hunted was *"someone other than the owner can
+write"*. That claim is expressible without the word `editor` at all, so any
+enumeration built from `editor` was structurally incapable of completeness — and
+each pass's confidence rose while its blind spot stayed exactly the same size.
+**A negative claim must name the search that establishes it** (§2) — and then the
+search must be shown to be able to *find the counterexample*, which `grep editor`
+never could.
+
+**The ten below are what four passes plus an adversarial review produced.** That
+is evidence of diligence, not proof of completeness. **The reproducible search is
+pass 4's regex — re-run it, do not trust this list.**
 
 | Document | What it assumes | Disposition |
 |---|---|---|
 | `design-conductor-ux-polish.md:93-97, 140-141` | A **deliberate owner-vs-editor asymmetry** for BPM-in-show: *"editors keep per-show `key`/`lead`, but song-level tempo stays owner-only"* | **✅ AMENDED IN THIS PR.** The asymmetry collapses; the `isOwner` gate itself was already correct. See below |
-| `design-supabase-backend.md:262, 352, 912` | The most direct contradiction: *"Editor has full show update access, same as owner minus collaborator management and deletion … editors are trusted collaborators (bandmates, sound engineers), not restricted guests. RLS is correct as-is."* | **⚠ STALE, but already subordinated** — it carries a `⚠ PARTIALLY BUILT — read design-single-backend.md first` banner and a §10 supersession notice. **Not edited here.** Its tier table is now wrong in substance and should be corrected when that doc is next opened |
-| `design-song-library.md:40` | *"All collaborators (editor + viewer): Read-only … If an editor needs a song that doesn't exist, they ask the owner"* | **⚠ SUBSTANCE IS ALREADY CORRECT** — it says collaborators are read-only, which is exactly the new model. Only the `(editor + viewer)` enumeration is stale. **One-line fix, deferred** — no behavioural claim changes |
-| `uat-readiness-gaps.md:195, 244` | Two gap scenarios framed on editors: *"locks an editor out of saving anything"*, *"Two editors at soundcheck: last write wins"* | **⚠ AFFECTED — the second may DISSOLVE.** Concurrent-editor write contention cannot occur if only the owner writes. **Not edited here** (a gaps list is not a spec), but gap 244 should be re-evaluated rather than carried forward |
-| `design-alpha-ready.md:164, 389` | *"an editor's collision check would search the wrong namespace"* | **✅ CHECKED, UNAFFECTED.** It resolves `owner_id` from the show row precisely so it does not depend on who is editing |
+| `design-supabase-backend.md:262, 352, 912` | The most direct contradiction: *"Editor has full show update access … editors are trusted collaborators (bandmates, sound engineers), not restricted guests. RLS is correct as-is."* | **✅ AMENDED IN THIS PR.** Tier table rewritten (Editor → Collaborator, view-only); the `"Editor update"` SQL block replaced with a **do-not-copy** warning, since it is a policy body a builder could paste into a migration; the R2-2 round-2 resolution marked superseded — it reconciled doc-to-RLS by *widening the doc*, where the ruling removes both |
+| `design-song-library.md:40, 43, 45, 529, 580, 599, 627, 636, 642, 644` | **⛔ Draft 2's disposition here was MATERIALLY WRONG** (Codex R2). It said *"only line 40 is stale, substance is already correct"*. Line 40 was indeed fine — but the doc **also** said *"**Owner + editors** can add/remove/reorder songs"* (`:43`), *"verifying caller is **owner or editor**"* (`:529`), *"`/api/shows/update`: **owner-or-editor** verification"* (`:580`), plus an owner-vs-editor gate and four editor test cases | **✅ ALL TEN AMENDED IN THIS PR.** Checking one line and generalising to the document is the same error as keyword-sweeping — see the process note above |
+| `design-payments.md:49, 195` | *"Authenticated collaborators can edit"*; the whole write-gate rationale is built on *"a collaborator editing someone else's show is gated by the owner's plan"* | **✅ AMENDED IN THIS PR.** The scenario **cannot occur** — the acting user on any write IS the owner. The *rule* ("resolve against the show owner") is kept, since it is now trivially true rather than wrong and is the right invariant if delegated writes ever return; the *justification* is deleted |
+| `design-retire-drive.md:86` | An `Owner / editor` principal row in the Config-tab reachability table | **✅ AMENDED IN THIS PR** — row narrowed to `Owner`. Its `isOwner`/`isEditor` references at `:79, :89, :101` are **left intact deliberately**: they cite a live code variable that chunk 6 removes, and falsifying a code citation to match an unbuilt state would make the table wrong about the current tree |
+| `uat-readiness-gaps.md:195, 244` | Two gap scenarios framed on editors | **✅ AMENDED IN THIS PR — and one of them REFRAMED, not dissolved.** Gap 11 genuinely narrows: the editor-specific half is gone, a residual (`songKey`-less entries still 400 the whole save) survives. **Gap 16 does NOT dissolve** — see the correction below |
+| `design-alpha-ready.md:162, 164, 389` | **⛔ Marked "CHECKED, UNAFFECTED" by drafts 1 AND 2 — WRONG BOTH TIMES.** `:162` asserts outright: *"**Editors can update shows they don't own** (via RLS `is_show_collaborator` policy)"* | **✅ AMENDED IN THIS PR.** The premise is deleted; **the RULE it justified is kept and must not be relaxed** — resolving collision scope from `show.owner_id` rather than `auth.uid()` is what makes the check correct *independent of who acts*, which is exactly why it outlives the principal it was written for |
 | `design-roadmap-key-resolution.md:302` | *"an editor action on the chart itself … a builder-editor concern"* | **✅ CHECKED, FALSE POSITIVE.** "Editor" here means the chart-editing **UI**, not the collaborator role. Listed so the next sweep does not re-flag it |
 
-**⇒ Only `design-conductor-ux-polish.md` is amended in this PR.** The first draft
-deferred even that on §10 grounds. That was wrong: §10's rule exists so a document
-is not *silently* amended, and the defect v1.8 records is an amendment **claimed
-but never made**. Shipping v1.9 while knowingly leaving a contradicting document
-would be the §2.1 pattern again.
+**⇒ ALL FOUR affected documents are amended in this PR. Nothing is deferred.**
 
-**The other three affected documents are deliberately NOT edited**, and the line
-is drawn on **blast radius, not effort**: the conductor doc's asymmetry is
-reasoning that a builder would *act on*, so a stale version misdirects work.
-`design-supabase-backend.md` is already banner-flagged and superseded;
-`design-song-library.md`'s substance is already right; `uat-readiness-gaps.md` is
-a findings list, not a spec. **Each is named above with its disposition so this
-is a scoping decision on record rather than an omission.** They are Graham's call
-whether to fold into chunk 6 or leave until those documents are next opened.
+Two earlier drafts got this wrong in the same direction and are recorded because
+the pattern is the point. The first deferred every cross-doc edit on §10 grounds;
+the second amended one and deferred three on "blast radius". **Graham ruled
+2026-08-25: *"let's not wait. Waiting always bites us and costs us more down the
+road."*** He is right, and §2.1 is the evidence — every supersession this document
+was written to correct was a deferral that looked reasonable at the time.
+
+§10's rule is that a document must not be **silently** amended. Amending it
+loudly, in the same PR, with the ruling cited, is the opposite of the defect.
+
+**★ CORRECTION found only by doing the work.** The deferred-list entry for
+`uat-readiness-gaps.md` gap 16 claimed concurrent-write contention *"may
+DISSOLVE"* once only owners write. **It does not.** `rpc_save_show` is keyed on
+the **show** and carries nothing per-session, so **one owner on two devices**
+(phone and laptop at soundcheck) collides identically. Deleting the editor tier
+changes *how many people* can trigger it, not whether it happens. **A deferred fix
+would have carried that wrong claim forward as the reason to deprioritise a real
+gap** — which is precisely the cost Graham's ruling avoids.
 
 **The conductor ruling itself, Graham 2026-08-25:**
 
