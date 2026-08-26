@@ -392,7 +392,7 @@ Add a small "Add to Home Screen" prompt on Perform tab for eligible browsers:
 | # | Severity | Finding | Fix |
 |---|----------|---------|-----|
 | 1 | CRITICAL | Legacy redirect used global slug query after dropping uniqueness; also mixed anon-key client into admin-only resolution path | Replaced with hardcoded 3-entry redirect map — no DB query, no auth boundary crossing |
-| 2 | HIGH | Editor collision check scoped to `auth.uid()` instead of `show.owner_id` — wrong namespace for shows the editor doesn't own | Collision check now resolves `owner_id` from the show row, not the session |
+| 2 | HIGH | ~~Editor collision check scoped to `auth.uid()` instead of `show.owner_id` — wrong namespace for shows the editor doesn't own~~ **PREMISE SUPERSEDED 2026-08-25** — no non-owner updates a show (`design-single-backend.md` §3.3c). See the amendment at §Owner namespacing above. | Collision check now resolves `owner_id` from the show row, not the session. **The FIX STANDS and must not be reverted** — resolving from the show row is what makes it correct independent of who acts, which is why it outlives the principal that motivated it |
 | 3 | HIGH | `start_url: '/dashboard'` fails offline (requires auth API fetch) | Keep `start_url: '/'`, add offline branch that redirects to last-viewed show from localStorage |
 | 4 | HIGH | SW registration only triggered on chart download — too late for install prompt and app shell precache | Global SW registration via `SwRegister` component in `layout.tsx` |
 | 5 | MEDIUM | Migration seed with hardcoded UUIDs not reproducible across environments | Seed moved to `supabase/seeds/seed_profiles.sql` (manual, env-specific), UUIDs documented in vault not code |

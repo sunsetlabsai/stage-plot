@@ -586,8 +586,9 @@ to **9**.
 | 3 (Codex R2) | read the docs for the **claim** | 9 | 3 |
 | 4 | regex on the CLAIM, not the word | 10 | 2 |
 | 5 (Codex R3) | — | 12 | — |
-| 6 | Claimed "enumerate, then read". **Actually enumerated, then FILTERED, then read** | 12 | 4 |
-| **7 (Codex R4 + full manual read)** | **Enumerate, then read — actually.** All **180 hits** across 26 files, dumped with **no filter** and read in full | **12 docs, all sites** | — |
+| 6 | Claimed "enumerate, then read". **Actually enumerated, then FILTERED (print-regex), then read** | 12 | 4 |
+| 7 | Claimed "all hits, no filter". **Actually appended `grep -v` excluding the doc being edited** — 180 of 270 lines | 12 | 3 |
+| **8 (Codex R5 + full read)** | `grep -rniE "collaborator\|editor" docs/*.md`, **270 lines, nothing excluded**, every line read | **12 docs, all sites** | — |
 
 **Each of passes 1–4 raised confidence while the blind spot stayed roughly the
 same size.** Pass 4's regex — the one this section previously held up as the
@@ -619,12 +620,22 @@ enumeration. The print-filter dropped it.
 filter, read every one. It found `:49`, plus two sites Codex did not report
 (`design-supabase-backend.md:319`, `design-song-library.md:688`).
 
-**★ THE RULE, stated so it is not re-learned an eighth time: a filter applied
-AFTER enumeration is part of the search, and it inherits every blind spot of the
-pattern it is built from. "Enumerate then read" means READ — including the lines
-that look boring.** For a bounded corpus, that is affordable; 26 files and 180
-lines is one careful pass, and it is the only method here whose completeness does
-not depend on having guessed the phrasing in advance.
+**★★ THREE CONSECUTIVE PASSES NAMED THIS DEFECT AND THEN COMMITTED IT AGAIN.**
+Pass 4 excluded lines containing `cannot`. Pass 6 filtered which hits to print.
+Pass 7 excluded a whole file — *the one being edited* — while the commit message
+claimed "no filter". Each time the exclusion looked like noise-reduction and each
+time it removed real findings.
+
+**THE RULE: any narrowing applied AFTER enumeration is part of the search and
+inherits every blind spot of the pattern behind it.** "Enumerate then read" means
+**read** — every line, including the boring ones, including the file you are
+editing. For a bounded corpus that is affordable: 26 files, 270 lines, one careful
+pass.
+
+**⇒ Prose cannot be gated by a test, so this method IS the gate.** Anyone
+re-running this audit runs the bare `grep -rniE` above with nothing appended, and
+reads all 270. If the command in a future commit has a pipe in it, that commit did
+not do the audit it claims.
 
 **★ Why pass 2 still missed three.** Every variant it searched contains the *word*
 `editor`. The three it missed do not say it where it matters:
@@ -642,12 +653,21 @@ each pass's confidence rose while its blind spot stayed exactly the same size.
 search must be shown to be able to *find the counterexample*, which `grep editor`
 never could.
 
-**The twelve below survived pass 6.** The reproducible check is pass 6's method,
-not a pattern: `for f in docs/*.md; do grep -ciE 'collaborator|editor' $f; done`,
-then read every hit in every file that returns non-zero. **14 of the 26 files are
-false positives** — "calibration editor", "setlist editor", "text editor", "AI
-collaborator" as a feature name — which is exactly why keyword counts could never
-settle this.
+**The twelve below survived pass 8.** The reproducible check is one command with
+**no filter of any kind**, and every line read:
+
+```
+grep -rniE "collaborator|editor" docs/*.md      # 270 lines, 26 files
+```
+
+**270**, not the *"180"* pass 7 claimed — that number came from a command with
+`grep -v "^docs/design-single-backend.md"` appended, i.e. it **excluded the very
+document being edited** (90 lines). Corrected by Codex R5.
+
+**14 of the 26 files are false positives** — "calibration editor", "setlist
+editor", "text editor", "AI collaborator" as a feature name — which is exactly why
+keyword *counts* could never settle this, and why the 270 must be read rather than
+narrowed.
 
 | Document | What it assumes | Disposition |
 |---|---|---|

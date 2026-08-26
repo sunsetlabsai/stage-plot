@@ -37,7 +37,9 @@ This distinction matters for import: if an imported song has no key but the libr
 
 **Songs:**
 - **Owner:** Full CRUD (create, read, update, delete).
-- **All collaborators:** Read-only. Can browse the owner's song library for autocomplete when adding songs to setlists. Cannot create, edit, or delete songs. If a collaborator needs a song that doesn't exist, they ask the owner to create it (or they type a title inline, which the *owner's* next save will persist — see "Add from Library" below). Collaborator read access is intentional — if you can see the show, you can see the song catalog. *(Amended 2026-08-25: this read "All collaborators (editor + viewer)". There is no editor tier — collaborators are view-only per `design-single-backend.md` §3.3c. **The rule here was already correct** and is unchanged; only the tier enumeration was stale.)*
+- **All collaborators:** **Read-only, and they do not participate in setlist editing at all.** They can browse the owner's song library (autocomplete is an owner-side affordance; the underlying `GET /api/songs` read is collaborator-visible so the catalog renders). They cannot create, edit or delete songs, and they cannot add songs to a setlist. Collaborator read access to the catalog is intentional — if you can see the show, you can see the song catalog.
+
+  *(⛔ Amended TWICE. First on 2026-08-25 to drop the stale "(editor + viewer)" enumeration, with the disposition **"the rule here was already correct"** — **that was wrong, and Codex R5 caught it.** The sentence went on to describe collaborators "adding songs to setlists" and typing "a title inline, which the *owner's* next save will persist": a collaborator participating in a setlist mutation flow. Read-only in the first clause, co-authoring by the third. Setlist editing is **owner-only** — `design-single-backend.md` §3.3c.)*
 
 **Setlist entries:**
 - **Owner only:** Can add/remove/reorder songs in a show's setlist and set per-show overrides. *(Amended 2026-08-25: read "Owner + editors … Matches existing `shows` editor permissions". The `editor` collaborator role is deleted — collaborators are VIEW ONLY per `design-single-backend.md` §3.3c. The cross-reference still holds; what it points at changed.)*
@@ -560,7 +562,7 @@ New top-level route, authenticated only.
 
 ### Config tab: "Add from Library" autocomplete
 
-- "+ Add Song" opens a text input with typeahead against the owner's song library (via `GET /api/songs`, available to collaborators via admin client with auth check)
+- "+ Add Song" **(owner only)** opens a text input with typeahead against the owner's song library (via `GET /api/songs`; that READ is collaborator-visible via the admin client with an auth check, which is what lets a collaborator see the catalog — it does not let them add). *(Amended 2026-08-25 per §3.3c: the whole Add-from-Library flow is an owner affordance. A collaborator never reaches it.)*
 - Selecting a library song adds the `songId` to local setlist state (persisted on next save via `rpc_save_show`)
 - Typing a new title that doesn't match any library song: **owner sees "Create & Add"** button (calls `POST /api/songs` to create the song, then adds the returned `songId` to local setlist state — persisted on next save). **Collaborators cannot create** — they see "Song not found. Ask the show owner to add it to the library." *(amended 2026-08-25: was "Editors cannot create"; §3.3c)*
 - Inline editing of key/lead/notes in the setlist sets per-show overrides
