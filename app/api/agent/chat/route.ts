@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { SYSTEM_PROMPT, TOOLS } from '@/lib/agent';
 import { parseContentLength } from '@/lib/http-headers';
 import { resolveKeyMode, getClientIp } from '@/lib/agent-key';
+import { getSupabaseServer } from '@/lib/supabase-server';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MAX_BODY_SIZE = 100_000; // 100KB
@@ -45,7 +46,33 @@ export async function POST(request: NextRequest) {
   // Determine auth mode
   const clientKey = request.headers.get('authorization')?.replace('Bearer ', '');
   const ip = getClientIp(request.headers);
-  const resolved = await resolveKeyMode(clientKey, ip, { consume: true });
+
+  // The account-stored key (§4.5) is only consulted when the request did not
+  // bring its own. Two reasons, both deliberate:
+  //   1. Device-first precedence — Graham's ruling 2026-08-26.
+  //   2. This route serves ANONYMOUS try-it traffic. getUser() is a network
+  //      call to Supabase auth, so resolving it unconditionally would put a
+  //      round trip in front of every free message to answer a question that
+  //      request cannot use.
+  //
+  // Wrapped because this route must not acquire a hard dependency on auth.
+  // Before chunk 3 a try-it send touched no session at all; resolving one
+  // unguarded would mean a Supabase auth blip — or any caller outside a request
+  // scope — turns a working free message into a 500 for someone who never
+  // needed to be signed in. Failing to identify a user means exactly one thing
+  // here: no account key. That is anonymous, not broken.
+  let userId: string | null = null;
+  if (!clientKey) {
+    try {
+      const supabase = await getSupabaseServer();
+      const { data: { user } } = await supabase.auth.getUser();
+      userId = user?.id ?? null;
+    } catch {
+      userId = null;
+    }
+  }
+
+  const resolved = await resolveKeyMode(clientKey, ip, { consume: true }, userId);
 
   if (resolved.mode === 'exhausted') {
     return Response.json(

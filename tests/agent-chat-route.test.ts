@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { quotaBackend, supabaseAdminMock } from './helpers/quota-backend';
+import { quotaBackend, secretsBackend, supabaseAdminMock } from './helpers/quota-backend';
 
 import { NextRequest } from 'next/server';
 
@@ -20,6 +20,25 @@ const redis = {
 
 // Quota moved off Redis onto two Supabase RPCs (chunk 2).
 vi.mock('@/lib/supabase-admin', () => supabaseAdminMock());
+
+// Chunk 3: a keyless send now resolves the session to look for an ACCOUNT key
+// (§4.5). These cases are anonymous try-it traffic, so getUser returns nobody.
+//
+// ⚠ This mock is load-bearing, not scaffolding. The route wraps the lookup in
+// try/catch so an auth outage cannot 500 an anonymous send — which means that
+// WITHOUT this mock these tests would still pass, via the catch, while proving
+// nothing about the path they claim to cover. `sessionUser` lets a test opt
+// into a signed-in caller instead.
+const session: { user: { id: string } | null; throws: boolean } = { user: null, throws: false };
+
+vi.mock('@/lib/supabase-server', () => ({
+  getSupabaseServer: async () => {
+    if (session.throws) throw new Error('auth unreachable');
+    return {
+      auth: { getUser: async () => ({ data: { user: session.user } }) },
+    };
+  },
+}));
 
 vi.mock('redis', () => ({
   createClient: () => ({
@@ -64,6 +83,9 @@ beforeEach(() => {
   redis.store.clear();
   redis.incrCalls = 0;
   quotaBackend.reset();
+  secretsBackend.reset();
+  session.user = null;
+  session.throws = false;
   process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co';
   process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-test';
   sent = null;
@@ -196,5 +218,53 @@ describe('POST /api/agent/chat — no key available', () => {
     const res = await post();
     expect(res.status).toBe(200);
     expect(proxiedKey()).toBe('sk-ant-env');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chunk 3 — the account-stored key reaches the send path (§4.5).
+// ─────────────────────────────────────────────────────────────────────────────
+describe('POST /api/agent/chat — the account key', () => {
+  it('proxies a signed-in user\'s stored key instead of spending the try-it quota', async () => {
+    session.user = { id: 'owner-1' };
+    secretsBackend.keys.set('owner-1', 'sk-ant-account-stored');
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-shared';
+
+    const res = await post();
+    expect(res.status).toBe(200);
+    expect(proxiedKey()).toBe('sk-ant-account-stored');
+    // The whole point: BYOA does not consume the shared allowance.
+    expect(quotaBackend.calls).toBe(0);
+  });
+
+  it('spends the try-it quota when the signed-in user has stored no key', async () => {
+    session.user = { id: 'owner-nokey' };
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-shared';
+
+    const res = await post();
+    expect(res.status).toBe(200);
+    expect(proxiedKey()).toBe('sk-ant-shared');
+    expect(quotaBackend.calls).toBeGreaterThan(0);
+  });
+
+  // ★ THE REGRESSION GUARD. Before chunk 3 this route touched no session at
+  // all, so an anonymous free message could not be broken by an auth problem.
+  // Resolving the session unguarded would hand every keyless send a new way to
+  // 500 — for users who are not signed in and never needed to be.
+  it('still serves an anonymous send when session resolution throws', async () => {
+    session.throws = true;
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-shared';
+
+    const res = await post();
+    expect(res.status).toBe(200);
+    expect(proxiedKey()).toBe('sk-ant-shared');
+  });
+
+  it('does not resolve a session at all when the request brings its own key', async () => {
+    session.throws = true; // would blow up if consulted
+    const res = await post({ authorization: 'Bearer sk-ant-device' });
+    expect(res.status).toBe(200);
+    expect(proxiedKey()).toBe('sk-ant-device');
+    expect(secretsBackend.calls).toBe(0);
   });
 });

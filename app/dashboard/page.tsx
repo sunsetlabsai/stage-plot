@@ -175,6 +175,12 @@ export default function DashboardPage() {
             Library
           </button>
           <button
+            onClick={() => router.push('/dashboard/settings')}
+            className="text-sm text-zinc-500 hover:text-zinc-300"
+          >
+            Settings
+          </button>
+          <button
             onClick={handleSignOut}
             className="text-sm text-zinc-500 hover:text-zinc-300"
           >

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHash, createHmac } from 'node:crypto';
-import { quotaBackend, supabaseAdminMock } from './helpers/quota-backend';
+import { quotaBackend, secretsBackend, supabaseAdminMock } from './helpers/quota-backend';
 
 // Design docs/design-ai-key-availability.md §4/§4.1, chunk 1.
 //
@@ -62,6 +62,7 @@ beforeEach(() => {
   redis.incrCalls = 0;
   redis.getCalls = 0;
   quotaBackend.reset();
+  secretsBackend.reset();
   process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co';
   process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-test';
   delete process.env.CLAUDE_TRYIT_KEY;
@@ -151,20 +152,93 @@ describe('getAdminConfig — unchanged for its callers', () => {
 });
 
 describe('resolveKeyMode — precedence and states', () => {
-  it('lets a caller-supplied key win, without reading config or quota at all', async () => {
+  // ★ RENAMED AND RE-JUSTIFIED at chunk 3 (design-single-backend §4.4).
+  //
+  // This assertion used to be justified as an ESCAPE HATCH: BYOA kept working
+  // when the config store was down, so one vendor failing did not take the
+  // agent with it. That justification is DEAD. Graham's construction-vs-show
+  // argument (§1) retired it, and chunk 3 adds a BYOA branch that deliberately
+  // DOES do I/O — the account-stored key. The assertion still passes, which is
+  // exactly why it needed rewriting rather than deleting: an assertion whose
+  // stated reason is false is worse than no assertion, because the next reader
+  // checks the reason, finds it obsolete, and deletes a live guarantee.
+  //
+  // The surviving reason: a request that brings its OWN key must not be slowed
+  // by, or coupled to, config infrastructure it does not need.
+  //
+  // ⚠ Note the narrowing. "No I/O on the BYOA branch" is no longer true of
+  // `mode: 'byoa'` in general — the account-key branch below reads the
+  // database. It is true of the DEVICE-key branch specifically, and that is
+  // the whole content of Graham's device-first precedence ruling.
+  it('resolves a device-supplied key without touching config or quota', async () => {
     const { resolveKeyMode } = await agentKey();
     const r = await resolveKeyMode('sk-ant-mine', '1.2.3.4', { consume: true });
     expect(r.mode).toBe('byoa');
-    // BYOA wins unconditionally, so nothing else should even be consulted.
     expect(redis.getCalls).toBe(0);
-    // The invariant that outlived Redis: NO I/O on the BYOA branch, whatever
-    // the quota backend happens to be.
     expect(quotaBackend.calls).toBe(0);
   });
 
   it('propagates unconfigured rather than flattening it to "no key"', async () => {
     const { resolveKeyMode } = await agentKey();
     expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('unconfigured');
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Chunk 3: the ACCOUNT-stored key (§4.5). Graham ruled 2026-08-26 that the
+  // DEVICE key wins. Both can exist simultaneously — saving to your account
+  // cannot reach into another browser's localStorage — so this is a live
+  // decision, not a theoretical one.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  it('falls back to the account key when the request brings none', async () => {
+    secretsBackend.keys.set('owner-1', 'sk-ant-account-key-value');
+    const { resolveKeyMode } = await agentKey();
+    const r = await resolveKeyMode(undefined, 'ip', { consume: true }, 'owner-1');
+    expect(r.mode).toBe('byoa');
+    if (r.mode === 'byoa') expect(r.apiKey).toBe('sk-ant-account-key-value');
+  });
+
+  // ★ THE PRECEDENCE ASSERTION. Note it checks the RESOLVED KEY, not just the
+  // mode — both branches produce `mode: 'byoa'`, so asserting the mode alone
+  // would pass no matter which one won and would pin nothing at all.
+  it('prefers the device key over the account key when BOTH exist', async () => {
+    secretsBackend.keys.set('owner-1', 'sk-ant-account-key-value');
+    const { resolveKeyMode } = await agentKey();
+    const r = await resolveKeyMode('sk-ant-device', 'ip', { consume: true }, 'owner-1');
+    expect(r.mode).toBe('byoa');
+    if (r.mode === 'byoa') expect(r.apiKey).toBe('sk-ant-device');
+    // §4.4's surviving guarantee: a request carrying its own key does no I/O.
+    expect(secretsBackend.calls).toBe(0);
+    expect(quotaBackend.calls).toBe(0);
+  });
+
+  it('does not look up an account key for an anonymous request', async () => {
+    secretsBackend.keys.set('owner-1', 'sk-ant-account-key-value');
+    const { resolveKeyMode } = await agentKey();
+    await resolveKeyMode(undefined, 'ip', { consume: true });
+    expect(secretsBackend.getCalls).toBe(0);
+  });
+
+  it('falls through to try-it when the signed-in user has no stored key', async () => {
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-shared';
+    const { resolveKeyMode } = await agentKey();
+    const r = await resolveKeyMode(undefined, 'ip', { consume: true }, 'owner-nokey');
+    expect(r.mode).toBe('tryit');
+  });
+
+  // Failing OPEN, matching quota()'s reasoning: a database blip must degrade
+  // rather than lock a user out. There is deliberately NO fail-closed branch
+  // here — unlike the quota, an unreadable account key cannot bypass anything.
+  it.each([
+    ['the RPC errors', 'errors'],
+    ['the RPC rejects', 'throws'],
+  ] as const)('falls through to try-it when %s', async (_label, failure) => {
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-shared';
+    secretsBackend.keys.set('owner-1', 'sk-ant-account-key-value');
+    secretsBackend[failure] = true;
+    const { resolveKeyMode } = await agentKey();
+    const r = await resolveKeyMode(undefined, 'ip', { consume: true }, 'owner-1');
+    expect(r.mode).toBe('tryit');
   });
 
   it('resolves try-it with a remaining count derived from the quota constant', async () => {

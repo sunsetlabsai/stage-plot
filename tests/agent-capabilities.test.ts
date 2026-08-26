@@ -40,6 +40,16 @@ const quotaReads = () => redis.getKeys.filter((k) => k.startsWith('quota:'));
 // Quota moved off Redis onto two Supabase RPCs (chunk 2).
 vi.mock('@/lib/supabase-admin', () => supabaseAdminMock());
 
+// Chunk 3: the shared-counter cases drive the CHAT route, which now resolves a
+// session on the keyless path to look for an account key (§4.5). Anonymous
+// here. See agent-chat-route.test.ts for why this mock is load-bearing rather
+// than scaffolding — the route's try/catch would otherwise hide its absence.
+vi.mock('@/lib/supabase-server', () => ({
+  getSupabaseServer: async () => ({
+    auth: { getUser: async () => ({ data: { user: null } }) },
+  }),
+}));
+
 vi.mock('redis', () => ({
   createClient: () => ({
     isOpen: true,
