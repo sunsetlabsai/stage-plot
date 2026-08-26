@@ -6,7 +6,13 @@ Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
 started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
 does not get to exempt itself from its own subject.)*
-Version: **v1.7** (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
+Version: **v1.9** (**v1.9 = ★ the ROLES MODEL, ruled 2026-08-25: collaborators are
+VIEW ONLY and the `editor` role is DELETED (new §3.3c); BYOA is owner-only in
+practice, so §4.1's "every user, owner or collaborator" is corrected; the §8.1
+spike is RESCOPED to owner-count cardinality; and two previously unrecorded facts
+about the live system are written down — link-viewing is a service-role bypass
+rather than RLS, and collaborator membership buys discoverability rather than
+access**) (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
 Q5 reversed, **v1.3 = Codex R1 on #152: Q5 reversal propagated to the paired doc,
 `ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**, **v1.5 = ⛔ §3 `admin_config` RULED OUT 2026-08-25 — marker only**, **v1.6 = Codex R4 High: §9 chunk-1 tests were still an obsolete contract; rewritten, plus a blast-radius index**, **v1.7 = ⛔ THE RULED-OUT CONTENT IS DELETED, not marked**, **v1.8 = fold Codex R5: the chunk-5 completion check was an unscoped repo-wide `grep` that could never pass (§6.3, §9); and two claims that this one-file PR amends other files — the paired doc (§3.2, §7, §9) and `design-owner-onboarding.md`, which was listed as "corrected" at v1.3 and never was (§10)**)
 
@@ -268,6 +274,10 @@ schema** — `profiles` is `id, owner_slug, display_name, created_at`
 roles. `/admin` authenticates today with the shared bearer secret `ADMIN_SECRET`
 (`lib/admin-rate-limit.ts:44-49`), entirely outside Supabase auth.
 
+*(This paragraph records the state measured on 2026-08-24 and stays accurate as
+history. **`show_collaborators.role` is DELETED by §3.3c** — do not read it here
+as a current-state claim.)*
+
 *(§3.3 — the deleted `profiles.is_platform_admin` analysis — is at the SHA above.
 This section keeps the number `3.3a`: it is cited 6× below and once cross-file at
 `design-ai-key-availability.md:917`, already on `main`.)*
@@ -279,7 +289,8 @@ than answering it:**
 |---|---|---|---|
 | **Platform super-admin** | Graham, and only Graham | The platform itself: try-it key, Google OAuth secrets | **Env var identity check.** No column, no role, no migration |
 | **Owner** (tenant) | Anyone who claims a slug | Their own shows, library, and **their own BYOA key** | Existing `profiles` + `auth.uid() = user_id`. Unchanged |
-| **Collaborator** | A bandmate invited by an owner | One show, `editor` or `viewer` | Existing `show_collaborators.role`. Unchanged |
+| **Collaborator** | A bandmate invited by an owner | One show, **VIEW ONLY** | `show_collaborators` membership. **No role.** See §3.3c |
+| **Anyone with the link** | No account required | Views any show by `owner/show` slug pair | The route, **not RLS**. See §3.3c |
 
 > *"if admin = me … and is the super-admin for the platform itself, and NOT
 > related to owner (i.e., a tenant) or a user/collaborator (i.e., a bandmate
@@ -394,6 +405,135 @@ silently is how the next reader concludes it was never wanted.
 
 ---
 
+### 3.3c ★★ Collaborators are VIEW ONLY — the `editor` role is DELETED
+
+**Ruled by Graham 2026-08-25.** §3.3a's collaborator row previously read
+*"`editor` or `viewer` … Existing `show_collaborators.role`. Unchanged"*. That is
+now wrong in both halves: the role is deleted, and the schema does change.
+
+> *"Collaborators are the band members or sound engineers who 'view' the show
+> details. They don't create or modify show details. … I don't see a need at the
+> moment for a role for collaborators. And they're definitely NOT owners, i.e.,
+> owner != collaborator. Though indeed an owner could collaborate in someone
+> else's (some other owner's) show."*
+
+**Why, in his words:** *"The original thinking was that collaborators could
+upload their charts but this seems like a bad idea and of little value given they
+can email or share charts for the owner to upload. And if they want to use it to
+'create' their own charts, they can become an owner."* The upgrade path costs
+nothing — `POST /api/profiles` gates only on slug format (§3.3a above), so
+becoming an owner is self-serve.
+
+**⚠ This is a PRIVILEGE REMOVAL, not a cleanup.** `editor` is live today, **in
+three layers — schema, RLS, and application code.** Enumerated in full, because
+the failure mode this document exists to end (§2.1) is a change that lands in one
+layer and is called done:
+
+| Layer | Site | What an `editor` can do now |
+|---|---|---|
+| Schema | `001_initial_schema.sql:39` | `role text not null check (role in ('editor','viewer'))` |
+| RLS | `002_fix_rls_recursion.sql:39` `"Editor update"` | **UPDATE `shows`** |
+| RLS | `002_fix_rls_recursion.sql:53` `"Chart insert"` | create charts |
+| RLS | `002_fix_rls_recursion.sql:57` `"Chart update"` | modify charts |
+| RLS | `002_fix_rls_recursion.sql:61` `"Chart delete"` | **DELETE charts** |
+| **Code** | `app/api/shows/update/route.ts:61` | `if (!collab \|\| collab.role !== 'editor') → 403`. **A service-role route** — it reads via `getSupabaseAdmin()`, so RLS is bypassed and **this check IS the control.** Dropping the RLS policies alone does NOT close this path. |
+| **Code** | `app/[owner]/[show]/page.tsx:521` | `if (collab?.role === 'editor') isEditorFlag = true` → drives `setIsEditor`, which gates edit affordances in the show UI |
+
+**★ The application layer is the one that matters most, and it is the one a
+migration-only reading of this section would miss.** `POST /api/shows/update`
+authorizes through the *service role*, not RLS. If the migration drops `role`
+while that route still reads `collab.role`, the comparison evaluates against
+`undefined`, the guard returns 403 for every collaborator — which is the *correct*
+outcome by accident, but leaves dead code asserting a concept that no longer
+exists. **Both code sites are part of chunk 6, not follow-up work.**
+
+**Measured before ruling, 2026-08-25:** `select role, count(*) … from
+show_collaborators group by role` returned **NO ROWS** — the table is *entirely
+empty*, not merely free of editors. **Zero users lose access; no data migration
+is required.** Re-measure before the migration runs; this claim is a measurement
+with a date on it, not a standing fact.
+
+**Migration shape** (build chunk, not this PR). `role` is `NOT NULL` with a check
+constraint, so a narrowed constraint would be rejected by any surviving `'editor'`
+row — convert first, then narrow, even though the count is currently zero:
+
+1. **Code first, schema last** — the reverse order leaves a window where the
+   route reads a column that no longer exists.
+   - `app/api/shows/update/route.ts:61` — the whole `if (show.owner_id !==
+     user.id)` block collapses to a 403. A non-owner cannot update a show.
+   - `app/[owner]/[show]/page.tsx:521` — the collaborator lookup goes away and
+     `isEditorFlag` derives from ownership alone. **Check whether `isEditor`
+     survives as a distinct flag at all** — if it becomes `=== isOwner`
+     everywhere, collapse the two rather than leaving a synonym.
+2. `update show_collaborators set role = 'viewer' where role = 'editor';`
+   (Currently a no-op — the table is empty — but the migration must not *assume*
+   that; see the measurement note above.)
+3. Drop the four `'editor'` RLS policies. **`"Chart insert/update/delete"` must be
+   RECREATED owner-only, not merely dropped** — each is `is_show_owner(show_id) or
+   is_show_collaborator(show_id, 'editor')`, so dropping alone removes **the
+   owner's own grant**, which rides the same policy. This is the single most
+   likely way to break this migration.
+4. Then either narrow the check to `('viewer')` or **drop `role` entirely**.
+   **Recommendation: drop the column.** A `NOT NULL` column with one legal value
+   carries no information, and leaving it invites a future `'editor'` to be
+   re-added by someone reading the constraint as a menu.
+
+**Tests this chunk must ship** (§0 invariant 3 — nothing is settled without
+something exercising it):
+- A collaborator **cannot** update a show via `POST /api/shows/update` → 403.
+- An **owner** still can → 200. *(The counterexample: a migration that drops the
+  chart policies without recreating them passes the first test and fails this
+  one. Without it, over-deletion reads as success.)*
+- An owner still can insert/update/delete charts on their own show.
+- The show UI exposes no edit affordance to a collaborator.
+
+**★ Two facts about the current system that this document has never recorded.**
+Both were verified 2026-08-25 by reading the code, and both change what the
+tier table above means.
+
+**(1) Link-viewing is real, and it comes from a SERVICE-ROLE BYPASS — not RLS.**
+`app/api/shows/[owner]/[show]/route.ts:50` is commented *"anonymous show
+resolution by owner + slug (no auth required)"* and reads through
+`getSupabaseAdmin()`, which bypasses row-level security entirely. There is **no
+anon SELECT policy on `shows`** — `"Owner read own shows"` (`001:96`) and
+`"Collaborator read"` (`001:100`) both require an `auth.uid()`, and both are
+therefore **dead on the public path**.
+
+> **⛔ NORMATIVE CONSEQUENCE.** If private or unlisted shows are ever wanted,
+> **RLS will not deliver them — that route will.** Anyone who reads the `shows`
+> policies as the access-control model will draw the wrong conclusion. Any future
+> privacy work starts at
+> `app/api/shows/[owner]/[show]/route.ts`, not at a migration.
+
+**(2) Collaborator membership buys DISCOVERABILITY, not access.** Because
+link-viewing is already public, a `show_collaborators` row grants no read
+capability the link did not already grant. What it grants is placement:
+`app/api/shows/route.ts:42` lists *"shows I collaborate on"* separately from
+*"shows I own"*, so an invited show appears on the collaborator's dashboard.
+
+**That IS the feature, and it is the whole answer to "why keep the table at
+all".** Stated here because it is non-obvious from the schema — a reader who
+assumes membership is an access grant will conclude the table is redundant with
+the public route and propose deleting it.
+
+**Owner ≠ collaborator, but the sets overlap.** An owner may hold a
+`show_collaborators` row on another owner's show; `show_collaborators.user_id`
+references `auth.users` with no owner exclusion, so this already works and needs
+no change. "Owner" is a property of a *show*, not a badge on a *person*.
+
+**⚠ TWO OTHER DESIGN DOCS ASSUME `editor` EXISTS. Enumerated, NOT edited here.**
+This PR deliberately does not touch them — §10's rule is that one document does
+not silently amend another, and v1.8's changelog records that exact defect. They
+are listed so the ruling does not have to be rediscovered later:
+
+| Document | What it assumes | Effect of §3.3c |
+|---|---|---|
+| `design-conductor-ux-polish.md:93-97, 140-141` | Builds a **deliberate owner-vs-editor asymmetry** for BPM-in-show: *"A show editor can edit the in-show … the BPM control is gated on `isOwner` — editors do not see it … editors keep per-show `key`/`lead`"* | The asymmetry **collapses**. With no editors, "gated on `isOwner`" and "not gated" describe the same population. The reasoning is not wrong, it is **moot** — and it SIMPLIFIES that design rather than blocking it |
+| `design-alpha-ready.md:164, 389` | *"an editor's collision check would search the wrong namespace"*; owner-namespacing collision resolves `owner_id` from the show row, not the session | **Already correct and unaffected.** It resolves from `show.owner_id` precisely so it does not depend on who is editing. Listed only to record that it was checked, not to imply a change |
+
+**⇒ Only `design-conductor-ux-polish.md` needs an edit, and only if that design
+is still unbuilt.** Graham's call whether that rides chunk 6 or a separate doc PR.
+
 ## 4. BYOA → `user_secrets` — the §14 re-spec
 
 ### 4.1 Why it moved off `localStorage`
@@ -406,9 +546,28 @@ gone. For a commercial product that is a support burden, not a v1 shortcut.
 
 **No RBAC is required for this and none should be added.** `user_secrets.user_id`
 is the primary key referencing `auth.users`; the entire authorization rule is
-`auth.uid() = user_id`. Collaborator roles are **show-scoped**, and a BYOA key is
-not attached to a show — so owner-vs-collaborator does not apply. Every user,
-owner or collaborator, has exactly one key that is theirs.
+`auth.uid() = user_id`. A BYOA key is not attached to a show, so it is not
+show-scoped and no collaborator check belongs in this path.
+
+**★ BYOA is OWNER-ONLY in practice — corrected at v1.9.** This section previously
+ended *"Every user, owner or collaborator, has exactly one key that is theirs."*
+**That is wrong**, and the reason matters more than the correction:
+
+- **Not because collaborators are restricted.** Adding an "is an owner" test to
+  `auth.uid() = user_id` would be exactly the RBAC this section forbids — and
+  worse, "is an owner" is *derived* (it changes as shows are created and deleted),
+  so it is not a stable predicate to authorize against.
+- **But because collaborators have no AI surface to spend a key on.** §3.3c
+  ruled them **view only**. AI is construction-mode, and construction is what
+  owners do. A view-only principal has nothing to call Anthropic *for*.
+
+**⇒ The authorization rule is UNCHANGED — still `auth.uid() = user_id`, still no
+role check.** What changes is the expected *population*: rows in `user_secrets`
+track the number of **owners**, not the number of users. Nothing needs to
+enforce that; it falls out of who has a reason to set a key.
+
+**This is the load-bearing input to the §8.1 spike** — it moves the cardinality
+question by an order of magnitude. See §8.1.
 
 ### 4.2 `user_secrets`' actual RLS state — and why the write policies must GO
 
@@ -663,6 +822,7 @@ table nothing reads.
 | 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display, **and the `/dashboard/settings` surface itself** | **independent** — see the note below |
 | 4 | **Settings overlay** (§4.3) | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated | depends on chunk 3 |
 | 5 | **Remove `redis`** | dependency removal, `REDIS_URL` retirement | depends on **0–2** |
+| 6 | **Collaborator view-only** (§3.3c) | migration: convert any `'editor'` row to `'viewer'`, drop the four `'editor'` RLS policies, **recreate chart insert/update/delete owner-only**, then drop `role`. Plus tests pinning that a collaborator cannot write | **independent** — touches no Redis and no `user_secrets` |
 
 **⛔ Two dependency corrections at v1.7.** (1) **Chunk 3 no longer depends on
 chunk 1** — revised chunk 1 does not create `/dashboard/settings`; it re-auths
@@ -768,19 +928,44 @@ settings at all times."*
   the single strongest privacy control available here.
 
 **⚠ One uncertainty that must be spiked before chunk 3 commits to this:** Vault's
-documented design centre is a *small number of app-level secrets*. Using it for
-**one row per user, unbounded**, is beyond the documented examples. The docs
-state no limit, but "no documented limit" is not "verified to scale". A spike
-must confirm per-user secrets behave under realistic row counts before chunk 3
+documented design centre is a *small number of app-level secrets*. The docs state
+no limit, but "no documented limit" is not "verified to scale". A spike must
+confirm per-account secrets behave under realistic row counts before chunk 3
 builds on it.
 
-**⚠⚠ v1.7 — the spike now carries MORE weight.** The deleted sentence
+**⚠⚠ v1.7 — the spike carries MORE weight than it looks.** The deleted sentence
 (*"`admin_config` has no such doubt — three named secrets is exactly Vault's
 design centre"*) was the reassuring half: one Vault use inside the documented
 envelope, one outside it. **With `admin_config` gone, the only remaining use of
-Vault in this design is the unbounded per-user case — the very one the spike
-exists to doubt.** If the spike fails, **nothing here uses Vault at all** and
-chunk 3 needs a different encryption-at-rest answer.
+Vault in this design is the per-account case.** If the spike fails, **nothing
+here uses Vault at all** and chunk 3 needs a different encryption-at-rest answer
+— with pgsodium and TCE already ruled out above, that is a genuinely open
+question, not a fallback.
+
+**★★ RESCOPED at v1.9 — the bar is much lower than v1.7 assumed.** v1.7 framed
+this as *"one row per user, **unbounded***". §4.1 now establishes that BYOA is
+**owner-only in practice** — collaborators are view-only (§3.3c) and have no AI
+surface to spend a key on. So the row count tracks **owners, not users**:
+
+| | v1.7 framing | v1.9, corrected |
+|---|---|---|
+| Population | Every signed-in user, unbounded | Owners — those who create shows |
+| Order of magnitude | Speculative, no ceiling | **6 shows exist today** (§2, measured); hundreds is a generous ceiling |
+| Question the spike answers | *"Is Vault safe outside its documented envelope?"* | *"Is Vault fine at hundreds of secrets?"* |
+
+**Hundreds of secrets is arguably INSIDE documented usage**, so the likely
+outcome flips from "this may not work" to "confirm it works and move on." **Run
+the spike anyway** — the cost is low, the claim is currently unmeasured, and
+§0's invariant 3 is that nothing is declared settled without something exercising
+it. But scope it to owner-count cardinality; a spike sized for unbounded per-user
+rows would be measuring a population this design does not create.
+
+**Spike definition, normative:** provision N `vault.secrets` rows for N synthetic
+accounts at N ∈ {100, 1000}; measure single-secret read latency through
+`vault.decrypted_secrets` at each N; record any ceiling, quota or error the
+platform returns. **Pass** = read latency stays flat enough to sit in a request
+path and no limit is hit at 1000. **Fail** = any hard limit below 1000, or read
+latency that scales with row count. Report the measured numbers, not a verdict.
 
 ---
 
