@@ -11,13 +11,28 @@ import { resolve, join } from 'node:path';
 // with no test is how the next one survives fifteen months too.
 //
 // SCOPE, stated because the design's own rule is that a negative claim names its
-// scope: this asserts DIRECT imports under app/api/ only. lib/agent-key.ts and
-// lib/admin-config.ts still import redis legitimately until chunk 5 retires the
-// dependency, so a transitive check would fail today and would be asserting a
-// different (later) invariant. Chunk 5 replaces this with the repo-wide version.
+// scope: this asserts DIRECT imports across ALL production source — app/, lib/,
+// components/ — as of chunk 5. It was app/api/ only through chunks 0–2, because
+// lib/agent-key.ts and lib/admin-config.ts still imported redis legitimately
+// until chunk 2 moved the quota onto Supabase RPCs.
+//
+// Still DIRECT, not transitive. A dependency that itself imports redis would not
+// be caught here — but chunk 5 also removes redis from package.json, so no
+// specifier resolves at all and that case is a build error, not a test's job.
+//
+// tests/ is deliberately NOT scanned: :239 below holds redis import strings as
+// scanner FIXTURES. Including it would make the suite fail on its own test data.
+// This is also why `grep -rn "from 'redis'"` can never be the gate — the fixtures
+// and docs/ prose both match. AST over the production roots is the only form of
+// this check that can pass while remaining meaningful.
 
 const REPO = resolve(__dirname, '..');
 const API_DIR = join(REPO, 'app', 'api');
+
+// Every production root. Named individually rather than globbed from the repo
+// root so that adding a new top-level source directory is a deliberate edit here
+// — a glob would silently pick up (or miss) directories as the tree changes.
+const SOURCE_ROOTS = ['app', 'lib', 'components'] as const;
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -225,8 +240,8 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     expect(existsSync(join(API_DIR, 'shows'))).toBe(true);
   });
 
-  it('no route under app/api/ imports redis directly', () => {
-    const offenders = walk(API_DIR).filter((file) => {
+  it('no production source under app/, lib/ or components/ imports redis directly', () => {
+    const offenders = SOURCE_ROOTS.flatMap((root) => walk(join(REPO, root))).filter((file) => {
       // Filename passed so .tsx parses as TSX — see importSpecifiers.
       const specs = importSpecifiers(readFileSync(file, 'utf8'), file);
       return [...specs].some((s) => s === 'redis' || s.startsWith('redis/'));
@@ -234,6 +249,23 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
 
     // Named, not just counted — a failure should say which file to look at.
     expect(offenders.map((f) => f.slice(REPO.length + 1))).toEqual([]);
+  });
+
+  it('redis is gone from package.json — the guarantee the walker cannot give', () => {
+    // The walker defends against ACCIDENTAL reintroduction only; it cannot catch
+    // a computed specifier. Removing the dependency is what makes every form
+    // fail, including the ones the AST walk documents as out of reach.
+    const pkg = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8'));
+    expect(pkg.dependencies?.redis).toBeUndefined();
+    expect(pkg.devDependencies?.redis).toBeUndefined();
+  });
+
+  it('redis is absent from the lockfile too, not just package.json', () => {
+    // package.json alone would still pass if the dep were merely orphaned in the
+    // lock — npm ci would reinstall it and a computed specifier would resolve.
+    const lock = JSON.parse(readFileSync(join(REPO, 'package-lock.json'), 'utf8'));
+    const entries = Object.keys(lock.packages ?? {});
+    expect(entries.filter((p) => p === 'node_modules/redis')).toEqual([]);
   });
 
   it.each([
@@ -346,5 +378,29 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     const files = walk(API_DIR);
     expect(files.length).toBeGreaterThan(10);
     expect(files.some((f) => f.endsWith(join('shows', 'route.ts')))).toBe(true);
+  });
+
+  // PER-ROOT, deliberately not an aggregate count. app/ alone clears any total
+  // threshold, so a mistyped or emptied lib/ or components/ would contribute
+  // zero files and the repo-wide claim above would silently narrow back to
+  // roughly what it asserted before chunk 5 — passing the whole time.
+  it.each(SOURCE_ROOTS)('the walker reaches %s/ (per-root positive control)', (root) => {
+    expect(walk(join(REPO, root)).length).toBeGreaterThan(0);
+  });
+
+  it('every declared source root exists on disk', () => {
+    // walk() throws on a missing directory, but only once something calls it.
+    // Asserting existence directly makes a renamed directory fail HERE, with a
+    // readable message, rather than as an ENOENT inside an unrelated test.
+    const missing = SOURCE_ROOTS.filter((r) => !existsSync(join(REPO, r)));
+    expect(missing).toEqual([]);
+  });
+
+  it('scans the file that held the last prod redis import', () => {
+    // lib/agent-key.ts:2 was the final production import, removed in chunk 2.
+    // Naming it pins that the widened scan actually covers the file the whole
+    // retirement was about — not merely that lib/ is non-empty.
+    const scanned = SOURCE_ROOTS.flatMap((r) => walk(join(REPO, r)));
+    expect(scanned.some((f) => f.endsWith(join('lib', 'agent-key.ts')))).toBe(true);
   });
 });
