@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { quotaBackend, supabaseAdminMock } from './helpers/quota-backend';
+
 import { NextRequest } from 'next/server';
 
 // Design §9 test 14 — the send path verified BEHAVIORALLY, not by byte-equivalence
@@ -14,6 +16,10 @@ const redis = {
   store: new Map<string, string>(),
   incrCalls: 0,
 };
+
+
+// Quota moved off Redis onto two Supabase RPCs (chunk 2).
+vi.mock('@/lib/supabase-admin', () => supabaseAdminMock());
 
 vi.mock('redis', () => ({
   createClient: () => ({
@@ -57,6 +63,9 @@ beforeEach(() => {
   redis.connectThrows = false;
   redis.store.clear();
   redis.incrCalls = 0;
+  quotaBackend.reset();
+  process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-test';
   sent = null;
   process.env.REDIS_URL = 'redis://test';
   delete process.env.CLAUDE_TRYIT_KEY;
@@ -97,7 +106,7 @@ describe('POST /api/agent/chat — BYOA wins over try-it', () => {
   it('spends no try-it quota on a BYOA send', async () => {
     process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     await post({ authorization: 'Bearer sk-ant-mine' });
-    expect(redis.incrCalls).toBe(0);
+    expect(quotaBackend.incrCalls).toBe(0);
   });
 
   it('uses the BYOA token ceiling, not the try-it one', async () => {
@@ -113,7 +122,7 @@ describe('POST /api/agent/chat — try-it', () => {
     const res = await post();
     expect(res.status).toBe(200);
     expect(proxiedKey()).toBe('sk-ant-server');
-    expect(redis.incrCalls).toBe(1);
+    expect(quotaBackend.incrCalls).toBe(1);
   });
 
   it('uses the try-it token ceiling', async () => {
@@ -142,7 +151,7 @@ describe('POST /api/agent/chat — try-it', () => {
   it('429s with tryitExhausted once the allowance is spent', async () => {
     process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { TRYIT_QUOTA } = await import('../lib/agent-key');
-    redis.store.set('quota:unknown', String(TRYIT_QUOTA));
+    quotaBackend.seed('unknown', TRYIT_QUOTA);
     const res = await post();
     expect(res.status).toBe(429);
     const body = await res.json();
@@ -155,7 +164,7 @@ describe('POST /api/agent/chat — try-it', () => {
   it('never calls Anthropic on an exhausted send', async () => {
     process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { TRYIT_QUOTA } = await import('../lib/agent-key');
-    redis.store.set('quota:unknown', String(TRYIT_QUOTA));
+    quotaBackend.seed('unknown', TRYIT_QUOTA);
     await post();
     expect(sent).toBeNull();
   });

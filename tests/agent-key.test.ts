@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash, createHmac } from 'node:crypto';
+import { quotaBackend, supabaseAdminMock } from './helpers/quota-backend';
 
 // Design docs/design-ai-key-availability.md §4/§4.1, chunk 1.
 //
@@ -46,6 +48,11 @@ vi.mock('redis', () => ({
   }),
 }));
 
+// Quota moved off Redis onto two Supabase RPCs (chunk 2). The `redis` mock above
+// stays only to keep the admin-config assertions honest — those prove config does
+// not consult a store, and a test that mocks nothing proves nothing.
+vi.mock('@/lib/supabase-admin', () => supabaseAdminMock());
+
 const ENV = { ...process.env };
 
 beforeEach(() => {
@@ -54,7 +61,9 @@ beforeEach(() => {
   redis.store.clear();
   redis.incrCalls = 0;
   redis.getCalls = 0;
-  process.env.REDIS_URL = 'redis://test';
+  quotaBackend.reset();
+  process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-test';
   delete process.env.CLAUDE_TRYIT_KEY;
   // admin-config caches its client at module scope and agent-key's fallback map is
   // module state; both must be fresh per test or results leak across cases.
@@ -148,7 +157,9 @@ describe('resolveKeyMode — precedence and states', () => {
     expect(r.mode).toBe('byoa');
     // BYOA wins unconditionally, so nothing else should even be consulted.
     expect(redis.getCalls).toBe(0);
-    expect(redis.incrCalls).toBe(0);
+    // The invariant that outlived Redis: NO I/O on the BYOA branch, whatever
+    // the quota backend happens to be.
+    expect(quotaBackend.calls).toBe(0);
   });
 
   it('propagates unconfigured rather than flattening it to "no key"', async () => {
@@ -168,7 +179,7 @@ describe('resolveKeyMode — precedence and states', () => {
   it('reports exhausted once usage reaches the quota constant', async () => {
     process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
     const { resolveKeyMode, TRYIT_QUOTA } = await agentKey();
-    redis.store.set('quota:ip', String(TRYIT_QUOTA));
+    quotaBackend.seed('ip', TRYIT_QUOTA);
     expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('exhausted');
   });
 });
@@ -179,13 +190,15 @@ describe('resolveKeyMode — a peek must not cost a message (§4 hard requiremen
     const { resolveKeyMode } = await agentKey();
     await resolveKeyMode(undefined, 'ip', { consume: false });
     await resolveKeyMode(undefined, 'ip', { consume: false });
-    expect(redis.incrCalls).toBe(0);
-    expect(redis.store.get('quota:ip')).toBeUndefined();
+    expect(quotaBackend.incrCalls).toBe(0);
+    expect(quotaBackend.peekCalls).toBe(2);
+    // A peek on an unseen IP must not seed a row.
+    expect(quotaBackend.countFor('ip')).toBe(0);
   });
 
   it('reports the same remaining across repeated peeks', async () => {
     process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
-    redis.store.set('quota:ip', '3');
+    quotaBackend.seed('ip', 3);
     const { resolveKeyMode, TRYIT_QUOTA } = await agentKey();
     const a = await resolveKeyMode(undefined, 'ip', { consume: false });
     const b = await resolveKeyMode(undefined, 'ip', { consume: false });
@@ -203,7 +216,125 @@ describe('resolveKeyMode — a peek must not cost a message (§4 hard requiremen
     await resolveKeyMode(undefined, 'ip', { consume: true });
     const after = await resolveKeyMode(undefined, 'ip', { consume: false });
     if (after.mode === 'tryit') expect(after.remaining).toBe(TRYIT_QUOTA - 1);
-    expect(redis.incrCalls).toBe(1);
+    expect(quotaBackend.incrCalls).toBe(1);
+  });
+});
+
+// ── Chunk 2: the Supabase quota backend ────────────────────────────────────
+//
+// New surface, so new coverage. The window and degradation cases below were
+// untestable under Redis (TTL expiry is not observable in a fake) and are
+// exactly where a quota backend goes wrong: silently locking users out.
+describe('quota — Supabase backend (chunk 2)', () => {
+  const tryit = async () => {
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-server';
+    return agentKey();
+  };
+
+  // Graham ruled 2026-08-25: keyed HMAC, not a bare digest — an unsalted sha256
+  // of an IPv4 is enumerable from a dump. Keyed on the ALREADY-required
+  // service-role secret, so there is no new env var whose absence would
+  // silently rehash every IP and reset every quota.
+  it('keys the row by HMAC — not the raw IP, and not an unsalted sha256', async () => {
+    const { resolveKeyMode } = await tryit();
+    await resolveKeyMode(undefined, '198.51.100.7', { consume: true });
+    const keys = [...quotaBackend.rows.keys()];
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).not.toContain('198.51.100.7');
+    expect(keys[0]).toMatch(/^[0-9a-f]{64}$/);
+    // THE counterexample. Without this line the assertions above pass on the
+    // exact bare-sha256 construction that was ruled insufficient — both are
+    // 64 hex chars and neither contains the address.
+    expect(keys[0]).not.toBe(createHash('sha256').update('198.51.100.7').digest('hex'));
+    expect(keys[0]).toBe(createHmac('sha256', 'service-role-test').update('198.51.100.7').digest('hex'));
+  });
+
+  it('re-keys when the service-role secret rotates — the accepted quota reset', async () => {
+    const { resolveKeyMode, TRYIT_QUOTA } = await tryit();
+    quotaBackend.seed('ip', TRYIT_QUOTA);
+    expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('exhausted');
+
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'rotated-secret';
+    // Same IP, new key: the seeded row is unreachable, so the quota resets
+    // rather than the lookup erroring. Documented consequence, not a bug.
+    expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('tryit');
+  });
+
+  it('treats a window-expired row as fresh allowance on peek', async () => {
+    const { resolveKeyMode, TRYIT_QUOTA } = await tryit();
+    quotaBackend.seed('ip', TRYIT_QUOTA, 31); // spent, but 31 days ago
+    const r = await resolveKeyMode(undefined, 'ip', { consume: false });
+    expect(r.mode).toBe('tryit');
+    if (r.mode === 'tryit') expect(r.remaining).toBe(TRYIT_QUOTA);
+  });
+
+  it('resets the count on consume once the window has aged out', async () => {
+    const { resolveKeyMode, TRYIT_QUOTA } = await tryit();
+    quotaBackend.seed('ip', TRYIT_QUOTA, 31);
+    const r = await resolveKeyMode(undefined, 'ip', { consume: true });
+    expect(r.mode).toBe('tryit');
+    if (r.mode === 'tryit') expect(r.remaining).toBe(TRYIT_QUOTA - 1);
+    expect(quotaBackend.countFor('ip')).toBe(1);
+  });
+
+  it('still counts a row inside the window', async () => {
+    const { resolveKeyMode, TRYIT_QUOTA } = await tryit();
+    quotaBackend.seed('ip', TRYIT_QUOTA, 29); // 29 days: window not yet over
+    expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('exhausted');
+  });
+
+  it('falls back rather than locking out when the RPC returns a transient error', async () => {
+    const { resolveKeyMode, TRYIT_QUOTA } = await tryit();
+    quotaBackend.errors = true;
+    quotaBackend.errorCode = '08006'; // connection_failure — plausibly a blip
+    const r = await resolveKeyMode(undefined, 'ip', { consume: true });
+    expect(r.mode).toBe('tryit');
+    if (r.mode === 'tryit') expect(r.remaining).toBe(TRYIT_QUOTA - 1);
+  });
+
+  // Graham's ruling, 2026-08-25. 42501 means the grants are wrong: permanent,
+  // total, and silent if it fell back. Everything else stays fail-open.
+  it('fails CLOSED on 42501 rather than falling back', async () => {
+    const { resolveKeyMode } = await tryit();
+    quotaBackend.errors = true;
+    quotaBackend.errorCode = '42501'; // insufficient_privilege
+    expect((await resolveKeyMode(undefined, 'ip', { consume: true })).mode).toBe('exhausted');
+  });
+
+  it('fails CLOSED on 42501 for a peek too, not just a consume', async () => {
+    const { resolveKeyMode } = await tryit();
+    quotaBackend.errors = true;
+    quotaBackend.errorCode = '42501';
+    expect((await resolveKeyMode(undefined, 'ip', { consume: false })).mode).toBe('exhausted');
+  });
+
+  // The counterexample that would prove fail-closed was written too broadly:
+  // 42883 is exactly the state between merging and applying migration 013, and
+  // it MUST still degrade or that window becomes a total outage.
+  it('still falls back on 42883 — a missing RPC is a deploy-ordering gap, not a bypass', async () => {
+    const { resolveKeyMode, TRYIT_QUOTA } = await tryit();
+    quotaBackend.errors = true;
+    quotaBackend.errorCode = '42883'; // undefined_function
+    const r = await resolveKeyMode(undefined, 'ip', { consume: true });
+    expect(r.mode).toBe('tryit');
+    if (r.mode === 'tryit') expect(r.remaining).toBe(TRYIT_QUOTA - 1);
+  });
+
+  it('falls back rather than throwing when the backend is unreachable', async () => {
+    const { resolveKeyMode } = await tryit();
+    quotaBackend.throws = true;
+    await expect(resolveKeyMode(undefined, 'ip', { consume: true })).resolves.toMatchObject({
+      mode: 'tryit',
+    });
+  });
+
+  it('falls back when the backend is not configured at all', async () => {
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const { resolveKeyMode } = await tryit();
+    const r = await resolveKeyMode(undefined, 'ip', { consume: true });
+    expect(r.mode).toBe('tryit');
+    // Nothing was attempted — an absent backend is not an unreachable one.
+    expect(quotaBackend.calls).toBe(0);
   });
 });
 
