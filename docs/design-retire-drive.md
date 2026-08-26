@@ -83,10 +83,17 @@ reach the tab, and nothing else sets `tab` to `'config'`.
 
 | Principal | `showId` | Config tab | Branch reached? |
 |---|---|---|---|
-| Owner / editor | set (authenticated, row exists) | visible | **no** — `showId` truthy |
+| Owner | set (authenticated, row exists) | visible | **no** — `showId` truthy |
 | Anonymous viewer | null | hidden (`isReadOnly`) | **no** — tab unreachable |
 | Read-only collaborator | set | hidden | **no** — both |
 | Offline fallback | null | hidden (`isOwner`/`isEditor` false) | **no** — tab unreachable |
+
+*(Amended 2026-08-25: row 1 read "Owner / editor". The `editor` collaborator role
+is deleted — see `design-single-backend.md` §3.3c. **The `isEditor` references
+above are left as-is because they name a live code variable**
+(`page.tsx:683`, `:423-429`) that chunk 6 removes; falsifying a code citation to
+match a not-yet-built state would make this table wrong about the current tree.
+When chunk 6 lands, `isEditor` collapses into `isOwner`.)*
 
 ### 1.3a ★★ CORRECTED at v1.2 — the table above is NOT a proof
 

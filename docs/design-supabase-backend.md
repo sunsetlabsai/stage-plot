@@ -46,7 +46,9 @@ ShowRunr has four storage systems that each solve one piece:
 | Google Drive | Charts (PDFs) | OAuth setup hell, folder structure conventions, batch resolution complexity, download proxy for CORS |
 | Cache API | Offline chart blobs | Fine — stays |
 
-The sharing model is also incomplete. A slug URL loads a snapshot, but there's no concept of "this is Graham's show and Rachel can add her charts to it." The owner/collaborator relationship lives nowhere.
+The sharing model is also incomplete. A slug URL loads a snapshot, but there's no concept of "this is Graham's show, and Rachel is on it." The owner/collaborator relationship lives nowhere.
+
+*(Amended 2026-08-25: the original read "…and **Rachel can add her charts to it**." That is a non-owner WRITE, which the roles ruling removed — see `design-single-backend.md` §3.3c. **The problem statement still stands**; what changed is what solving it grants. Rachel gets the show on her dashboard and read access to the owner's library — not upload rights. If she needs a chart added, she sends it to the owner, or becomes an owner herself.)*
 
 **Goal:** One backend (Supabase) that handles identity, shows, charts, permissions, and sharing. Kill Redis. Kill the Google Drive dependency. Make sharing durable and collaborative.
 
@@ -131,6 +133,10 @@ create table show_collaborators (
   show_id uuid not null references shows(id) on delete cascade,
   user_id uuid references auth.users(id),  -- null until invite is accepted
   email text not null,                      -- invite target
+  -- ⛔ `role` is DELETED by chunk 6 — see design-single-backend.md §3.3c (v1.9).
+  -- It shipped as below and is still live on `main`; collaborators are now VIEW
+  -- ONLY, so a column whose only legal value would be 'viewer' carries no
+  -- information. Shown as-shipped, NOT as a target state.
   role text not null check (role in ('editor', 'viewer')),
   invited_at timestamptz default now(),
   accepted_at timestamptz,
@@ -141,6 +147,8 @@ alter table show_collaborators enable row level security;
 ```
 
 Owner is implicit (shows.owner_id). Collaborators are invited by email. `user_id` is null until they accept the OTP and a Supabase Auth user is created/linked. RLS checks `user_id` after acceptance, `email` during the invite-pending window.
+
+**What a collaborator row buys, restated 2026-08-25:** not access — **discoverability**. Any holder of the show link can already view it (the public route reads via the service role and bypasses RLS entirely), so membership grants no additional read capability. What it does is put the show on that person's dashboard. That is the reason to keep this table once `role` is gone.
 
 ### `user_secrets` (R2 Finding #1)
 
@@ -240,7 +248,7 @@ Public bucket means chart URLs are directly loadable — no proxy, no signed URL
 
 **Storage write security (Finding #2):** The browser client never writes to Storage directly. All chart uploads go through a Next.js API route (`POST /api/charts/upload`) that:
 1. Validates the user's Supabase session (JWT from cookie)
-2. Verifies the user is owner or editor of the target show (DB query)
+2. Verifies the user is **the owner** of the target show (DB query) *(amended 2026-08-25: was "owner or editor" — §3.3c)*
 3. Constructs the Storage path server-side (prevents path traversal)
 4. Uploads to Storage using the service role key
 5. Inserts the `charts` row
@@ -256,10 +264,23 @@ This prevents any authenticated user from writing to arbitrary paths. The browse
 | Tier | Who | How They Get In | What They Can Do |
 |---|---|---|---|
 | **Anonymous** | Anyone with a slug URL | Just open the link | View show details, view/download charts, use at the gig |
-| **Editor** | Invited collaborators | Email OTP (6-digit code) → session | Everything anonymous can do + **full show editing** (config, stage plot, inputs, charts, notes) |
-| **Owner** | Show creator | Email OTP or Google OAuth → dashboard | Everything editor can do + manage collaborators, delete show |
+| **Collaborator** | Invited by an owner | Email OTP (6-digit code) → session | **View only** — same as anonymous, plus the show appears on their dashboard |
+| **Owner** | Show creator | Email OTP or Google OAuth → dashboard | Everything: full show editing, manage collaborators, delete show |
 
-**R2 Finding #2 note:** Editor has full show update access, same as owner minus collaborator management and deletion. The RLS `Editor update` policy grants UPDATE on the whole `shows` row intentionally — editors are trusted collaborators (bandmates, sound engineers), not restricted guests.
+**⛔ AMENDED 2026-08-25 — the `Editor` tier is DELETED.** See
+`design-single-backend.md` §3.3c (v1.9), which is authoritative.
+
+This table previously carried an **Editor** tier with *"full show editing (config,
+stage plot, inputs, charts, notes)"*, and a note reading *"editors are trusted
+collaborators (bandmates, sound engineers), not restricted guests … RLS is correct
+as-is."* **Graham ruled that out on 2026-08-25:** collaborators view, they do not
+modify. The original intent was collaborator chart upload, judged a bad trade —
+charts can be emailed to the owner, and anyone wanting to create their own can
+become an owner (self-serve).
+
+**What a collaborator row now buys is DISCOVERABILITY, not access.** Because any
+holder of the link can already view, membership adds no read capability — it puts
+the show on their dashboard. That is the reason to keep the table.
 
 ### Why Email OTP (Not Magic Links)
 
@@ -296,9 +317,9 @@ For Graham specifically, Google OAuth is also available (you're already signed i
 4. Session persists in browser (Supabase handles refresh)
 
 **Collaborator (invited):**
-1. Owner enters collaborator's email + role (editor/viewer) in show settings
-   → Inserts `show_collaborators` row with `email`, `role`, `user_id = null`, `accepted_at = null`
-2. Collaborator opens the show's slug URL → sees read-only view → "Sign in to edit" prompt
+1. Owner enters collaborator's email in show settings *(amended 2026-08-25: was "email + role (editor/viewer)" — there is no role to choose; §3.3c)*
+   → Inserts `show_collaborators` row with `email`, `user_id = null`, `accepted_at = null` *(amended 2026-08-25: `role` removed from the insert — the column is dropped by chunk 6; §3.3c)*
+2. Collaborator opens the show's slug URL → sees the show *(amended 2026-08-25: was "read-only view → 'Sign in to edit' prompt". Signing in does NOT grant editing — it makes the show appear on their dashboard; §3.3c)*
 3. Enters email → OTP sent → enters code → Supabase Auth user created (if new) → session established
 4. **Invite activation (R3 Finding #2/5):** After successful OTP verification, the app calls a server-side API route (`POST /api/auth/activate-invites`) that:
    ```sql
@@ -310,13 +331,13 @@ For Graham specifically, Google OAuth is also available (you're already signed i
      and user_id is null;
    ```
    This runs via the admin client (service role) because the collaborator can't update their own row via RLS until `user_id` is set (chicken-and-egg). Runs once at sign-in time, idempotent.
-5. RLS policies now match on `user_id = auth.uid()` → collaborator has editor/viewer access
+5. RLS policies now match on `user_id = auth.uid()` → collaborator has **read access, and the show lists on their dashboard** *(amended 2026-08-25: was "editor/viewer access"; §3.3c)*
 6. Collaborator is associated with that show permanently (until owner removes them)
 
 **Anonymous viewer (shared link):**
 1. Owner shares slug URL: `showrunr.app/loosely-covered`
 2. Recipient opens link → no auth required → show loads read-only
-3. If they want to edit, they sign in → if they're a listed collaborator, they get edit access
+3. Signing in does not confer editing. **Only the owner writes** *(amended 2026-08-25: was "If they want to edit, they sign in → if they're a listed collaborator, they get edit access"; §3.3c)*
 
 ### RLS Policies
 
@@ -349,95 +370,34 @@ create policy "Owner update"
   on shows for update
   using (auth.uid() = owner_id);
 
--- shows: editors can update shows they collaborate on
-create policy "Editor update"
-  on shows for update
-  using (
-    exists (
-      select 1 from show_collaborators
-      where show_id = shows.id
-        and user_id = auth.uid()
-        and role = 'editor'
-    )
-  );
+-- ⛔ DELETED 2026-08-25 — see design-single-backend.md §3.3c (v1.9).
+-- This block previously created an "Editor update" policy granting UPDATE on
+-- shows to collaborators with role = 'editor'. Collaborators are now VIEW ONLY,
+-- and `show_collaborators.role` is dropped entirely. The policy shipped and is
+-- live on `main`; chunk 6 removes it. Do NOT copy this block into a migration.
+--
+-- Only "Owner update" above governs writes to shows.
 
 -- shows: owner can delete
 create policy "Owner delete"
   on shows for delete
   using (auth.uid() = owner_id);
 
--- charts: owner or collaborator can read charts for their shows
-create policy "Chart read"
-  on charts for select
-  using (
-    exists (
-      select 1 from shows
-      where shows.id = charts.show_id
-        and (
-          shows.owner_id = auth.uid()
-          or exists (
-            select 1 from show_collaborators
-            where show_id = shows.id
-              and user_id = auth.uid()
-          )
-        )
-    )
-  );
-
--- charts: owner or editor can insert/update/delete
-create policy "Chart write"
-  on charts for insert
-  with check (
-    exists (
-      select 1 from shows
-      where shows.id = charts.show_id
-        and (
-          shows.owner_id = auth.uid()
-          or exists (
-            select 1 from show_collaborators
-            where show_id = shows.id
-              and user_id = auth.uid()
-              and role = 'editor'
-          )
-        )
-    )
-  );
-
-create policy "Chart update"
-  on charts for update
-  using (
-    exists (
-      select 1 from shows
-      where shows.id = charts.show_id
-        and (
-          shows.owner_id = auth.uid()
-          or exists (
-            select 1 from show_collaborators
-            where show_id = shows.id
-              and user_id = auth.uid()
-              and role = 'editor'
-          )
-        )
-    )
-  );
-
-create policy "Chart delete"
-  on charts for delete
-  using (
-    exists (
-      select 1 from shows
-      where shows.id = charts.show_id
-        and (
-          shows.owner_id = auth.uid()
-          or exists (
-            select 1 from show_collaborators
-            where show_id = shows.id
-              and user_id = auth.uid()
-              and role = 'editor'
-          )
-        )
-    )
-  );
+-- ⛔ DELETED 2026-08-25 — this ENTIRE charts policy block is doubly obsolete.
+-- See design-single-backend.md §3.3c (v1.9).
+--
+-- 1. WRONG TABLE. `charts` was dropped in 003_chart_library.sql:13 and replaced
+--    by owner-scoped `chart_library`. These policies exist in no live database
+--    and cannot be recreated — their table is gone.
+-- 2. WRONG MODEL. Chart write granted insert/update/delete to collaborators
+--    with role = 'editor'. Collaborators are now VIEW ONLY, and `role` is
+--    dropped entirely by chunk 6.
+--
+-- chart_library's live policies are owner-only from creation
+-- (003_chart_library.sql:58-68): auth.uid() = owner_id on insert, update and
+-- delete, plus a read policy for collaborators of that owner's shows.
+--
+-- ⚠ DO NOT COPY THIS BLOCK INTO A MIGRATION.
 ```
 
 ### Collaborator Table RLS (Finding #7)
@@ -560,7 +520,7 @@ This is the "not bound to one local system" solve. Graham signs in on any device
 
 Owner clicks "Share" on a show → modal with:
 1. **Slug URL** (copy to clipboard): `showrunr.app/loosely-covered` — anyone can view
-2. **Invite collaborator**: email + role (editor/viewer) → collaborator signs in via OTP when they open the show
+2. **Invite collaborator**: email → collaborator signs in via OTP when they open the show *(amended 2026-08-25: was "email + role (editor/viewer)"; §3.3c)*
 3. **Current collaborators**: list with remove option
 
 No publish step. The show is always live at its slug URL. Every save is instantly visible to anyone who loads the slug.
@@ -640,7 +600,7 @@ The cache key changes slightly:
 
 **Collaborator chart upload:**
 
-An editor collaborator can upload charts to any song in a show they're invited to. Same UX as the owner. The `uploaded_by` column tracks who added what.
+**⛔ DELETED 2026-08-25 — collaborator chart upload is exactly what the roles ruling removed.** This read: *"An editor collaborator can upload charts to any song in a show they're invited to. Same UX as the owner."* Graham ruled it a bad trade — a collaborator emails the chart to the owner, or becomes an owner themselves (§3.3c). **Only the owner uploads.** The `uploaded_by` column still tracks who added what, and becomes trivially the owner.
 
 ### What Gets Deleted (Drive Integration)
 
@@ -820,9 +780,9 @@ You won't touch these limits before the product generates revenue.
 - Remove `redis` package dependency
 
 ### Phase 3: Collaborators
-- Invite flow: owner enters email + role → collaborator signs in via OTP when they open the show
+- Invite flow: owner enters email → collaborator signs in via OTP when they open the show *(amended 2026-08-25: was "email + role" — there is no role to pick; §3.3c)*
 - Collaborator list: show settings panel with add/remove
-- RLS enforcement: editor can update config + upload charts, viewer is read-only
+- RLS enforcement: **all collaborators are read-only** *(amended 2026-08-25: was "editor can update config + upload charts, viewer is read-only" — §3.3c)*
 - Collaborator dashboard: shows I'm invited to (separate section on dashboard)
 - BYOA key storage: `user_secrets` table + server-side API routes
 
@@ -895,7 +855,7 @@ Net dependency count: unchanged (add 2, remove 1, but Google OAuth was hand-roll
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
 | 1 | **CRITICAL** | RLS `using (true)` on shows/charts exposes full-table enumeration to anonymous clients | Anonymous slug lookups moved to a Next.js API route using the service role admin client server-side. RLS on `shows` and `charts` now scoped to owner + collaborators only. No anonymous browser-to-Supabase queries. |
-| 2 | **CRITICAL** | Storage write security underspecified — any authenticated user could write to any path | Chart uploads go through a server-side API route that validates ownership/editor role, constructs the Storage path server-side, and uploads using the service role key. Browser never writes to Storage directly. |
+| 2 | **CRITICAL** | Storage write security underspecified — any authenticated user could write to any path | Chart uploads go through a server-side API route that validates **ownership**, constructs the Storage path server-side, and uploads using the service role key. Browser never writes to Storage directly. *(Amended 2026-08-25: was "ownership/editor role"; §3.3c.)* |
 | 3 | **HIGH** | `updated_at` set from client clock — clock skew can lose data in offline merge | `updated_at` now set by database trigger (`moddatetime`), never by client. Save operation returns server timestamp via `.select('updated_at')`. Offline conflict detection compares server-issued timestamps only. |
 | 4 | **HIGH** | Chart linkage on `song_title` is brittle — titles are mutable and can repeat | Charts now link via `song_id` (stable UUID from `withStableIds()`). With Supabase as primary storage, song IDs are persisted and never regenerated. Unique constraint is `(show_id, song_id, role)`. |
 | 5 | **HIGH** | Cache invalidation key references `updatedAt` but charts table had no such column | Added `updated_at` column to charts table with `moddatetime` trigger. Cache key is `{chartId}/{updatedAt}`. |
@@ -909,7 +869,7 @@ Codex also recommended auto-cleanup on show deletion (vs. lazy orphaning). Agree
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
 | R2-1 | **CRITICAL** | BYOA key in Auth `user_metadata` is exposed in JWTs and client-accessible surfaces | Moved to dedicated `user_secrets` table with strict RLS. Key is only ever read/written via server-side API routes. Never in JWTs, never in client metadata. |
-| R2-2 | **HIGH** | Editor tier description ("upload charts + edit notes") doesn't match RLS policy (full config UPDATE) | Corrected tier table: editors have full show editing access. They're trusted collaborators (bandmates, engineers), not restricted guests. RLS is correct as-is. |
+| R2-2 | **HIGH** | Editor tier description ("upload charts + edit notes") doesn't match RLS policy (full config UPDATE) | ~~Corrected tier table: editors have full show editing access.~~ **SUPERSEDED 2026-08-25** — the Editor tier is deleted outright; collaborators are view-only (`design-single-backend.md` §3.3c). This round-2 resolution reconciled the doc to the RLS by widening the doc; the ruling instead removes both. |
 | R2-3 | **HIGH** | Song ID stability conflicts with YAML export (currently strips IDs) — re-import orphans chart linkage | YAML format bumped to `showrunr/v2` — includes `id` field in setlist entries. IDs preserved on round-trip. Legacy v1 imports still work (IDs regenerated, charts require manual re-association). |
 | R2-4 | **MEDIUM** | Slug collisions with static routes (`/dashboard`, `/sign-in`) not handled | Added `RESERVED_SLUGS` blocklist enforced at creation time. Colliding names get the standard random suffix appended. |
 

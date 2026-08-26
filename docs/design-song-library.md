@@ -37,12 +37,14 @@ This distinction matters for import: if an imported song has no key but the libr
 
 **Songs:**
 - **Owner:** Full CRUD (create, read, update, delete).
-- **All collaborators (editor + viewer):** Read-only. Can browse the owner's song library for autocomplete when adding songs to setlists. Cannot create, edit, or delete songs. If an editor needs a song that doesn't exist, they ask the owner to create it (or they type a title inline, which the *owner's* next save will persist — see "Add from Library" below). Viewer access is intentional — if you can see the show, you can see the song catalog.
+- **All collaborators:** **Read-only, and they do not participate in setlist editing at all.** They can browse the owner's song library (autocomplete is an owner-side affordance; the underlying `GET /api/songs` read is collaborator-visible so the catalog renders). They cannot create, edit or delete songs, and they cannot add songs to a setlist. Collaborator read access to the catalog is intentional — if you can see the show, you can see the song catalog.
+
+  *(⛔ Amended TWICE. First on 2026-08-25 to drop the stale "(editor + viewer)" enumeration, with the disposition **"the rule here was already correct"** — **that was wrong, and Codex R5 caught it.** The sentence went on to describe collaborators "adding songs to setlists" and typing "a title inline, which the *owner's* next save will persist": a collaborator participating in a setlist mutation flow. Read-only in the first clause, co-authoring by the third. Setlist editing is **owner-only** — `design-single-backend.md` §3.3c.)*
 
 **Setlist entries:**
-- **Owner + editors:** Can add/remove/reorder songs in a show's setlist and set per-show overrides. Matches existing `shows` editor permissions.
+- **Owner only:** Can add/remove/reorder songs in a show's setlist and set per-show overrides. *(Amended 2026-08-25: read "Owner + editors … Matches existing `shows` editor permissions". The `editor` collaborator role is deleted — collaborators are VIEW ONLY per `design-single-backend.md` §3.3c. The cross-reference still holds; what it points at changed.)*
 
-**Implementation:** All song and setlist writes go through server-side API routes using the admin (service_role) client. The API verifies the caller is the owner (for song CRUD) or owner/editor (for setlist mutations) before writing.
+**Implementation:** All song and setlist writes go through server-side API routes using the admin (service_role) client. The API verifies the caller is **the owner** before writing — for song CRUD and setlist mutations alike. *(Amended 2026-08-25: the setlist branch read "owner/editor". §3.3c.)*
 
 ---
 
@@ -526,7 +528,7 @@ Admin client, after verifying caller is owner. If request body includes `setlist
 
 ### `PUT /api/shows/update` — Save show (updated)
 
-Calls `rpc_save_show` via admin client, after verifying caller is owner or editor. Passes config + setlist entries + inline setlist JSON (for dual-write).
+Calls `rpc_save_show` via admin client, after verifying caller is **the owner**. *(Amended 2026-08-25: was "owner or editor" — see `design-single-backend.md` §3.3c. Chunk 6 removes the editor branch at `app/api/shows/update/route.ts:61`.)* Passes config + setlist entries + inline setlist JSON (for dual-write).
 
 ---
 
@@ -560,9 +562,9 @@ New top-level route, authenticated only.
 
 ### Config tab: "Add from Library" autocomplete
 
-- "+ Add Song" opens a text input with typeahead against the owner's song library (via `GET /api/songs`, available to collaborators via admin client with auth check)
+- "+ Add Song" **(owner only)** opens a text input with typeahead against the owner's song library (via `GET /api/songs`; that READ is collaborator-visible via the admin client with an auth check, which is what lets a collaborator see the catalog — it does not let them add). *(Amended 2026-08-25 per §3.3c: the whole Add-from-Library flow is an owner affordance. A collaborator never reaches it.)*
 - Selecting a library song adds the `songId` to local setlist state (persisted on next save via `rpc_save_show`)
-- Typing a new title that doesn't match any library song: **owner sees "Create & Add"** button (calls `POST /api/songs` to create the song, then adds the returned `songId` to local setlist state — persisted on next save). **Editors cannot create** — they see "Song not found. Ask the show owner to add it to the library."
+- Typing a new title that doesn't match any library song: **owner sees "Create & Add"** button (calls `POST /api/songs` to create the song, then adds the returned `songId` to local setlist state — persisted on next save). **Collaborators cannot create** — they see "Song not found. Ask the show owner to add it to the library." *(amended 2026-08-25: was "Editors cannot create"; §3.3c)*
 - Inline editing of key/lead/notes in the setlist sets per-show overrides
 - "Reset to default" clears overrides
 
@@ -577,7 +579,7 @@ Add "Library" link.
 - `/library`: redirect to `/sign-in` if not authenticated.
 - `/api/songs` GET: admin client, explicit owner-or-collaborator verification.
 - `/api/songs` POST/PUT/DELETE: admin client, owner-only verification.
-- `/api/shows/update`: admin client, owner-or-editor verification.
+- `/api/shows/update`: admin client, **owner-only** verification. *(Amended 2026-08-25 — was "owner-or-editor"; §3.3c. Note the method is PUT.)*
 
 ---
 
@@ -596,7 +598,7 @@ Add "Library" link.
 | `lib/show-file.ts` | Strip songId on export (all formats), strip on import (all formats) |
 | `app/library/page.tsx` | New song library page |
 | `app/dashboard/page.tsx` | Add "Library" nav link |
-| `app/[owner]/[show]/page.tsx` | Config tab autocomplete, override UI, owner-vs-editor gate |
+| `app/[owner]/[show]/page.tsx` | Config tab autocomplete, override UI, **owner-vs-collaborator** gate *(was "owner-vs-editor"; §3.3c)* |
 | `middleware.ts` | Add `/library` auth protection |
 | `scripts/migrate-setlists.ts` | Seed songs, convert inline setlists, set migrated flag |
 
@@ -624,7 +626,7 @@ Add "Library" link.
 
 ### Song CRUD
 - [ ] Create song (owner) — verify in library
-- [ ] Create song (editor) — verify 403
+- [ ] Create song (collaborator) — verify 403 *(was "(editor)"; §3.3c)*
 - [ ] Duplicate title — verify 409
 - [ ] Edit title — verify song_key cascades to chart_library
 - [ ] Edit key/lead/notes — verify shows reflect updated defaults
@@ -633,15 +635,15 @@ Add "Library" link.
 
 ### Library page
 - [ ] Load (owner) — verify songs with correct chart_count and show_count (no inflation)
-- [ ] Load (editor collaborator) — verify read-only (no create/edit/delete)
+- [ ] Load (collaborator) — verify read-only (no create/edit/delete) *(was "editor collaborator"; §3.3c — ALL collaborators are read-only now)*
 - [ ] Search — instant filter
 - [ ] Upload/delete chart from library
 
 ### Setlist (reference-based)
 - [ ] Add library song (owner) — verify songId in local state, persisted on save
-- [ ] Add library song (editor) — verify songId in local state, persisted on save
+- [ ] ~~Add library song (editor)~~ — **REMOVED 2026-08-25.** No editor principal exists (§3.3c). Replace with: collaborator CANNOT add a library song (expect 403)
 - [ ] Add new song (owner) — POST /api/songs creates song, songId added to state, persisted on save
-- [ ] Add new song (editor) — verify blocked with guidance message
+- [ ] Add new song (collaborator) — verify blocked with guidance message *(was "(editor)"; §3.3c)*
 - [ ] Reorder — verify positions updated
 - [ ] Set override — verify stored, library default unchanged
 - [ ] Set override to blank — verify '' stored (not null), renders as empty
@@ -685,7 +687,7 @@ Add "Library" link.
 - [ ] RPCs not callable by authenticated/anon clients (REVOKE verified)
 - [ ] setlist_entries not readable/writable by authenticated client (RLS enabled, no policies)
 - [ ] songs not directly writable by authenticated owner (RLS is SELECT-only)
-- [ ] songs readable by collaborators (any role) via RLS
+- [ ] songs readable by collaborators via RLS *(amended 2026-08-25: was "(any role)" — there are no roles; §3.3c)*
 - [ ] GET /api/songs — admin client, rejects unauthenticated, returns correct counts
 - [ ] rpc_save_show — rejects entry with song_id from different owner
 - [ ] rpc_save_show — rejects entry with missing/deleted song_id

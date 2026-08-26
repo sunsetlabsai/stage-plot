@@ -310,7 +310,7 @@ Each song row shows:
 - `[+ Chart]` button — **owner only** — file picker → auto-detect role from filename → upload → pill appears
 - `[x]` on each pill — **owner only** — delete chart from library
 
-**Collaborator visibility (Finding #2):** Editors and viewers see chart pills (read-only) but NOT the upload/delete controls. The chart library is owner-managed. Collaborators benefit from the owner's charts but don't modify the library. The `[+ Chart]` button and `[x]` delete buttons are conditionally rendered based on `isOwner`. This is enforced in both UI (hide controls) and backend (RLS: only owner can insert/update/delete).
+**Collaborator visibility (Finding #2):** Collaborators see chart pills (read-only) but NOT the upload/delete controls. *(Amended 2026-08-25: was "Editors and viewers" — there is one collaborator kind now, and it is read-only; §3.3c. **The rule was already correct** — this doc had chart writes owner-only from the start, which is why migration 003's `chart_library` policies are owner-only and the old `charts` editor grants died with that table.)* The chart library is owner-managed. Collaborators benefit from the owner's charts but don't modify the library. The `[+ Chart]` button and `[x]` delete buttons are conditionally rendered based on `isOwner`. This is enforced in both UI (hide controls) and backend (RLS: only owner can insert/update/delete).
 
 **What this replaces:**
 - The standalone `ChartUploadSection` component (separate list of songs)

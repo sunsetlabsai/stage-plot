@@ -46,7 +46,7 @@ Monetize ShowRunr with a simple, low-friction subscription model. Cover infrastr
 ## Team / Collaboration Model
 
 - **One owner per show**. The owner holds the subscription.
-- **Collaborators are free**. Anyone with a show link can view. Authenticated collaborators can edit (subject to show freeze rules — see `backlog-show-freeze.md`).
+- **Collaborators are free**. Anyone with a show link can view. **Collaborators are VIEW ONLY** — they do not edit. *(Amended 2026-08-25: read "Authenticated collaborators can edit (subject to show freeze rules)". The `editor` role is deleted — see `design-single-backend.md` §3.3c. **This SIMPLIFIES the billing model**: only the owner writes, so there is no acting-user-vs-owner divergence to reconcile. Show-freeze rules still apply, but to the owner alone.)*
 - No seat-based pricing. No team/org entity.
 - Cross-team collaboration: share show files (YAML export/import). Keep it simple.
 
@@ -192,7 +192,11 @@ ALTER TABLE billing_events ENABLE ROW LEVEL SECURITY;
 
 ### Enforcement Points
 
-All write gates resolve against the **show owner's** billing state, not the acting user's. A collaborator editing someone else's show is gated by the owner's plan. This prevents a free collaborator from being incorrectly blocked on a paid owner's show, and prevents a paid collaborator from bypassing limits on an expired owner's show.
+All write gates resolve against the **show owner's** billing state.
+
+**⛔ Amended 2026-08-25 — the scenario this rule was written for CANNOT OCCUR.** This read: *"not the acting user's. A collaborator editing someone else's show is gated by the owner's plan. This prevents a free collaborator from being incorrectly blocked on a paid owner's show, and prevents a paid collaborator from bypassing limits on an expired owner's show."* **Collaborators are VIEW ONLY** (`design-single-backend.md` §3.3c), so the acting user on any write **is** the show owner and the two can no longer diverge.
+
+**Keep the rule as written anyway** — "resolve against the show owner" is now trivially true rather than wrong, and it is the correct invariant if delegated writes ever return (see the conductor-delegate backlog note in §3.3c). What is deleted is the *justification*, which described a principal that no longer exists.
 
 | Gate | Check (against show owner) | Behavior |
 |---|---|---|

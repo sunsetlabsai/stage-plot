@@ -192,13 +192,22 @@ AI tabs (`page.tsx:758`, `:770`); and the read-only banner is gated on `showId`
 (`page.tsx:722`) so **nothing renders to explain it**. Same path when the
 ownership check throws (`page.tsx:542-544`).
 
-### 11. One unresolvable setlist row locks an editor out of saving anything
+### 11. One unresolvable setlist row aborts the whole save
 `route.ts:148-153` returns 400 for any unresolvable entry and aborts the **whole**
-save, including unrelated stage-plot and monitor work. The auto-create fallback is
-owner-only (`route.ts:107`), and `shouldSendEntries` is unconditional for editors
-once migrated (`lib/overrides.ts:25`). The AI `update_setlist` and CSV import both
-introduce rows with no `songId`. The AddSong widget warns about this
-(`page.tsx:4508-4511`); the AI and import paths do not.
+save, including unrelated stage-plot and monitor work. The AI `update_setlist` and
+CSV import both introduce rows with no `songId`. The AddSong widget warns about
+this (`page.tsx:4508-4511`); the AI and import paths do not.
+
+**⚠ Narrowed 2026-08-25 — see `design-single-backend.md` §3.3c.** This was titled
+*"locks an **editor** out of saving anything"* and turned on the auto-create
+fallback being owner-only (`route.ts:107`) while `shouldSendEntries` was
+unconditional for editors (`lib/overrides.ts:25`). **With collaborators view-only,
+the editor half of this gap is gone** — only owners save, and owners have the
+fallback. **What survives is narrower but real:** the auto-create requires a
+`songKey` (`route.ts:107` — `show.owner_id === user.id && songKey`), so an entry
+with neither a resolvable `songId` nor a `songKey` still 400s and still discards
+unrelated stage-plot work. **Re-verify the residual before actioning this gap** —
+its original severity was measured against a principal that no longer exists.
 
 ### 12. Chart upload blocks up to ~60s with no progress, no cancel, and often no message
 - `lib/chart-upload.ts:87` awaits the converter inline; the route ceiling is 60s
@@ -241,8 +250,15 @@ files a pile of bogus bugs.
     At the gig the bar transport has silently vanished for that song.
 16. **No concurrency control at all.** `rpc_save_show` updates unconditionally;
     `setlist_entries` is deleted and re-inserted every save
-    (`migrations/007:51`). Two editors at soundcheck: last write wins, whole
-    setlist wiped, no warning. `lib/use-show.ts:92` writes a
+    (`migrations/007:51`). Last write wins, whole setlist wiped, no warning.
+    **⚠ Reframed 2026-08-25, NOT dissolved.** This read *"Two editors at
+    soundcheck"*. There are no editors — collaborators are view-only
+    (`design-single-backend.md` §3.3c). **The gap survives intact**, because
+    `rpc_save_show` is keyed on the SHOW and carries nothing per-session: **one
+    owner on two devices** — phone and laptop at soundcheck, a thoroughly normal
+    setup — collides exactly the same way. Removing the editor tier reduces *how
+    many people* can trigger this; it does not reduce the gap.
+    `lib/use-show.ts:92` writes a
     `showrunr-last-saved-` timestamp commented "for offline conflict detection"
     that is **never read anywhere in the repo**. The roadmap builder *does* have
     optimistic concurrency (`migrations/011`); the show path has no equivalent.
