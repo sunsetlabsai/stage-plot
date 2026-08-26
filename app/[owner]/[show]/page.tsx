@@ -342,7 +342,54 @@ function initGoogleToken(): GoogleToken | null {
   return getGoogleToken();
 }
 
+/**
+ * Route entry point. Its ONLY job is to give the workspace a remount key.
+ *
+ * ★ THIS IS INSURANCE, NOT A FIX FOR A LIVE BUG. Be honest about that before
+ * reasoning from it.
+ *
+ * /[owner]/[show] is one route, so a client-side navigation between two shows
+ * would change the params WITHOUT remounting — the show data would swap while
+ * every piece of UI state rode along. PR #158 treated that as live and fixed
+ * three instances of it (`tab`, `reorderMode`, `calMode`, all derived from
+ * `isOwner`).
+ *
+ * ⚠ MEASURED 2026-08-26, against a production build: that navigation DOES NOT
+ * EXIST in this app. Nothing links show → show. The show page links only to /
+ * and /dashboard, and /library likewise, so every route between two shows goes
+ * via another page and UNMOUNTS this component. Driving the real UI, an owner
+ * on CONFIG in show A who reaches show B through the dashboard lands on
+ * PERFORM — state already resets, with or without this key.
+ *
+ * So the key changes nothing reachable today. It is here because the defect
+ * arrives fully formed the moment anyone adds the obvious feature — a "jump to
+ * another show" switcher — and at that point it is a one-line prevention rather
+ * than a fourth round of instance-by-instance fixes. When the key changes React
+ * discards the old tree and builds a fresh one, so every piece of state returns
+ * to its initial value exactly as if the URL had been typed.
+ *
+ * ⚠ If you add a show-switcher, VERIFY this actually fires — a `key` only helps
+ * on a real Next router navigation. `history.pushState` does not drive the
+ * router, and a test built on it proves nothing (I made exactly that mistake).
+ *
+ * The key is the ROUTE PARAMS, deliberately, not the loaded show's `id` — the id
+ * does not exist until the fetch resolves, so keying on it would remount midway
+ * through loading. The params ARE the show's identity at the only moment that
+ * matters, which is before anything renders.
+ *
+ * The `isOwner` derivations stay. This is the runtime guarantee; they are the
+ * compile-time one, and deleting them would re-open the class the moment
+ * anything about routing changes.
+ */
 export default function Page() {
+  const params = useParams();
+  const owner = params.owner as string;
+  const slug = params.show as string;
+
+  return <ShowWorkspace key={`${owner}/${slug}`} />;
+}
+
+function ShowWorkspace() {
   const params = useParams();
   const owner = params.owner as string;
   const slug = params.show as string;
