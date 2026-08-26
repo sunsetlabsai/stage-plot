@@ -39,7 +39,7 @@ afterEach(() => {
 
 /** Owner on a real show — the only combination that saves at all. */
 function renderUseShow() {
-  return renderHook(() => useShow('show-1', 'my-show', true, false, false));
+  return renderHook(() => useShow('show-1', 'my-show', true, false));
 }
 
 /**

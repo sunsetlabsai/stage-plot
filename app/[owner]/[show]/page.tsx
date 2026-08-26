@@ -367,13 +367,12 @@ export default function Page() {
   const [showId, setShowId] = useState<string | null>(null);
   const [showOwnerId, setShowOwnerId] = useState<string | null>(null);
   const [isOwner, setIsOwner] = useState(false);
-  const [isEditor, setIsEditor] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [chartCacheProgress, setChartCacheProgress] = useState<DownloadProgress | null>(null);
   const [setlistMigrated, setSetlistMigrated] = useState(false);
 
-  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor, setlistMigrated);
+  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, setlistMigrated);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
@@ -424,7 +423,6 @@ export default function Page() {
       setLoadedPath(null);
       setShowId(null);
       setIsOwner(false);
-      setIsEditor(false);
       setLoadError('');
       setChartCacheProgress(null);
 
@@ -498,31 +496,17 @@ export default function Page() {
           }).catch(() => {});
         }
 
-        // Check ownership/editor status using IDs from API response
+        // Check ownership using IDs from API response
         // Wrapped separately so auth failures don't hide already-loaded show content
         try {
           const supabase = getSupabaseBrowser();
           const { data: { user } } = await supabase.auth.getUser();
           if (cancelled) return;
           if (user && data.show_id) {
-            let isOwnerFlag = false;
-            let isEditorFlag = false;
-            if (data.owner_id === user.id) {
-              isOwnerFlag = true;
-              isEditorFlag = true;
-            } else {
-              const { data: collab } = await supabase
-                .from('show_collaborators')
-                .select('role')
-                .eq('show_id', data.show_id)
-                .eq('user_id', user.id)
-                .single();
-
-              if (collab?.role === 'editor') isEditorFlag = true;
-            }
-            if (cancelled) return;
-            setIsOwner(isOwnerFlag);
-            setIsEditor(isEditorFlag);
+            // Ownership is the whole write gate. Collaborators are view-only
+            // (§3.3c), so the show_collaborators lookup that used to run here is
+            // gone — membership grants placement on the dashboard, not access.
+            setIsOwner(data.owner_id === user.id);
             setShowId(data.show_id);
             setShowOwnerId(data.owner_id ?? null);
             setSetlistMigrated(!!data.setlist_migrated);
@@ -680,7 +664,7 @@ export default function Page() {
   }, [owner, slug]);
 
   const band = configToBand(config);
-  const isReadOnly = !isOwner && !isEditor;
+  const isReadOnly = !isOwner;
 
   if (loadError) {
     const isNetworkError = loadError.includes('network');
@@ -807,7 +791,7 @@ export default function Page() {
           </button>
           {/* Undo import — one level, in-memory, alongside the save status (§7).
               Cleared by the next mutation (updateConfig) or a tab change. */}
-          {importUndo && (isOwner || isEditor) && (
+          {importUndo && isOwner && (
             <button
               onClick={undoImport}
               className="text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors"
@@ -816,7 +800,7 @@ export default function Page() {
             </button>
           )}
           {/* Save status */}
-          {(isOwner || isEditor) && (
+          {isOwner && (
             <span role="status" aria-live="polite" title={showContext.saveError ?? undefined} className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 max-w-[16rem] truncate ${
               showContext.saveError
                 ? 'text-red-600 bg-red-50'
@@ -851,7 +835,7 @@ export default function Page() {
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
       {tab === 'config' && (
-        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} onImportApply={applyImportMerge} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
+        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} onImportApply={applyImportMerge} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} />
       )}
       {tab === 'ai' && (
         <div className="p-4 md:p-8">
@@ -4377,12 +4361,10 @@ export function AddSongFromLibrary({
   onAddSong,
   isOwner,
   ownerId,
-  isEditor,
 }: {
   onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; bpm?: number | null; charts?: Chart[] }) => void;
   isOwner: boolean;
   ownerId: string | null;
-  isEditor?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -4398,7 +4380,7 @@ export function AddSongFromLibrary({
     async function loadLibrary() {
       setLoading(true);
       try {
-        // Browse the show owner's library (editors must target the owner, not themselves)
+        // Browse the show owner's library (a collaborator must target the owner, not themselves)
         const r = await fetch(ownerId ? `/api/songs?owner_id=${encodeURIComponent(ownerId)}` : '/api/songs');
         const data = r.ok ? await r.json() : { songs: [] };
         if (!cancelled) setSongs(data.songs || []);
@@ -4531,13 +4513,9 @@ export function AddSongFromLibrary({
                   <div className="px-3 py-1.5 text-xs text-red-500 border-t border-gray-100">{createError}</div>
                 )}
               </>
-            ) : isEditor ? (
-              <div className="px-3 py-2 text-sm text-gray-400 border-t border-gray-100">
-                Song not found. Ask the show owner to add it to the library.
-              </div>
             ) : null
           )}
-          {filtered.length === 0 && exactMatch === undefined && !isOwner && !isEditor && (
+          {filtered.length === 0 && exactMatch === undefined && !isOwner && (
             <div className="px-3 py-2 text-sm text-gray-400">No matches</div>
           )}
         </div>
@@ -4551,7 +4529,7 @@ export function AddSongFromLibrary({
 // ════════════════════════════════════════════════════════════════════════════
 
 export function SetupSetlistTable({
-  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, onBpmChange, isOwner, ownerId, isEditor, onManageCharts,
+  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, onBpmChange, isOwner, ownerId, onManageCharts,
 }: {
   setlist: SetlistSong[];
   canResolveCharts: boolean;
@@ -4563,7 +4541,6 @@ export function SetupSetlistTable({
   onBpmChange: (songId: string, bpm: number | null) => void;
   isOwner: boolean;
   ownerId: string | null;
-  isEditor?: boolean;
   onManageCharts?: (songTitle: string) => void;
 }) {
   const sensors = useSensors(
@@ -4622,7 +4599,7 @@ export function SetupSetlistTable({
           </div>
         </SortableContext>
       </DndContext>
-      <AddSongFromLibrary onAddSong={onAddSong} isOwner={isOwner} ownerId={ownerId} isEditor={isEditor} />
+      <AddSongFromLibrary onAddSong={onAddSong} isOwner={isOwner} ownerId={ownerId} />
     </>
   );
 }
@@ -5831,7 +5808,6 @@ function ConfigTab({
   showId,
   ownerId,
   isOwner,
-  isEditor,
 }: {
   config: AppConfig;
   // `automatic` marks a write that is a consequence of another change rather than a
@@ -5847,7 +5823,6 @@ function ConfigTab({
   onDisconnectGoogle: () => void;
   showId: string | null;
   ownerId: string | null;
-  isEditor?: boolean;
   isOwner: boolean;
 }) {
   const [sheetUrl, setSheetUrl] = useState('');
@@ -6538,7 +6513,6 @@ function ConfigTab({
               }
             }}
             onBpmChange={onBpmChange}
-            isEditor={isEditor}
             onManageCharts={(songTitle) => setManageChartsSong(songTitle)}
           />
           {manageChartsSong && (

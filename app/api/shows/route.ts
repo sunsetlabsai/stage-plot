@@ -42,7 +42,7 @@ export async function GET() {
   // Get shows user collaborates on (include owner's profile for URL)
   const { data: collabs } = await supabase
     .from('show_collaborators')
-    .select('show_id, role, shows(id, slug, name, venue, show_date, updated_at, owner_id)')
+    .select('show_id, shows(id, slug, name, venue, show_date, updated_at, owner_id)')
     .eq('user_id', user.id);
 
   // Resolve owner slugs for collaborated shows
@@ -71,7 +71,6 @@ export async function GET() {
       const show = c.shows as unknown as Record<string, unknown>;
       return {
         ...show,
-        role: c.role,
         owner_slug: ownerSlugsMap[show.owner_id as string] || '',
       };
     }),

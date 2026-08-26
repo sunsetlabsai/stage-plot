@@ -13,7 +13,6 @@ interface ShowSummary {
   venue: string | null;
   show_date: string | null;
   updated_at: string;
-  role?: string;
   owner_slug: string;
 }
 
@@ -287,7 +286,7 @@ function ShowCard({
       <button onClick={onOpen} className="flex-1 text-left">
         <div className="font-medium">{show.name}</div>
         <div className="text-sm text-zinc-400 mt-0.5">
-          {[show.venue, show.show_date, show.role && `(${show.role})`]
+          {[show.venue, show.show_date]
             .filter(Boolean)
             .join(' · ') || 'No details'}
         </div>

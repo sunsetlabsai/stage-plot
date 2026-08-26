@@ -39,7 +39,12 @@ export async function PUT(request: NextRequest) {
   if (entries !== undefined) {
     const admin = getSupabaseAdmin();
 
-    // Verify caller is owner or editor
+    // Verify the caller OWNS the show. Collaborators are view-only (§3.3c) —
+    // no membership grants a non-owner write access.
+    //
+    // ★ This check is the control, not a belt-and-braces duplicate of RLS: the
+    // client below is the service role, which bypasses row-level security
+    // entirely. Dropping the "Editor update" grant does not close this path.
     const { data: show } = await admin
       .from('shows')
       .select('owner_id')
@@ -51,16 +56,7 @@ export async function PUT(request: NextRequest) {
     }
 
     if (show.owner_id !== user.id) {
-      const { data: collab } = await admin
-        .from('show_collaborators')
-        .select('role')
-        .eq('show_id', id)
-        .eq('user_id', user.id)
-        .single();
-
-      if (!collab || collab.role !== 'editor') {
-        return Response.json({ error: 'Not authorized' }, { status: 403 });
-      }
+      return Response.json({ error: 'Not authorized' }, { status: 403 });
     }
 
     const entryList = entries as EntryInput[];
