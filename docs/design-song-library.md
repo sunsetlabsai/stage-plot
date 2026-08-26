@@ -685,7 +685,7 @@ Add "Library" link.
 - [ ] RPCs not callable by authenticated/anon clients (REVOKE verified)
 - [ ] setlist_entries not readable/writable by authenticated client (RLS enabled, no policies)
 - [ ] songs not directly writable by authenticated owner (RLS is SELECT-only)
-- [ ] songs readable by collaborators (any role) via RLS
+- [ ] songs readable by collaborators via RLS *(amended 2026-08-25: was "(any role)" — there are no roles; §3.3c)*
 - [ ] GET /api/songs — admin client, rejects unauthenticated, returns correct counts
 - [ ] rpc_save_show — rejects entry with song_id from different owner
 - [ ] rpc_save_show — rejects entry with missing/deleted song_id

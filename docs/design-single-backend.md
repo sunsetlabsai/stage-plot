@@ -586,7 +586,8 @@ to **9**.
 | 3 (Codex R2) | read the docs for the **claim** | 9 | 3 |
 | 4 | regex on the CLAIM, not the word | 10 | 2 |
 | 5 (Codex R3) | — | 12 | — |
-| **6** | **ENUMERATE, then READ.** Every `docs/*.md` containing `collaborator\|editor` (**26 files**), every hit triaged by hand | **12 confirmed** | — |
+| 6 | Claimed "enumerate, then read". **Actually enumerated, then FILTERED, then read** | 12 | 4 |
+| **7 (Codex R4 + full manual read)** | **Enumerate, then read — actually.** All **180 hits** across 26 files, dumped with **no filter** and read in full | **12 docs, all sites** | — |
 
 **Each of passes 1–4 raised confidence while the blind spot stayed roughly the
 same size.** Pass 4's regex — the one this section previously held up as the
@@ -601,10 +602,29 @@ lesson — still missed two, and for instructive reasons:
   search; an exclusion tuned to hide known-good text will eventually hide
   unknown-bad text.
 
-**⇒ Pass 6 stopped pattern-matching.** For a bounded corpus — 26 files — the
-reliable method is *enumerate the surface, then read every hit*. Slower than a
-regex, and the first method here whose completeness does not depend on having
-guessed the phrasing in advance.
+**⛔ PASS 6 CLAIMED TO BE THIS METHOD AND WAS NOT.** It enumerated all 26 files,
+then ran the hits through a regex to decide *which to print*, and read only the
+survivors. **That is a filtered search wearing the name of an exhaustive one** —
+and it was committed in the same change that wrote up "an exclusion tuned to hide
+known-good text will eventually hide unknown-bad text". The defect was described
+and re-committed in one step.
+
+What it cost: `design-supabase-backend.md:49` — *"there's no concept of 'this is
+Graham's show and **Rachel can add her charts to it**'"* — a plain non-owner write
+claim, **in the opening problem statement of a doc this table already listed as
+amended.** The line contains the word `collaborator`, so it WAS in the
+enumeration. The print-filter dropped it.
+
+**⇒ Pass 7 is the method, executed literally:** dump all **180** hits with no
+filter, read every one. It found `:49`, plus two sites Codex did not report
+(`design-supabase-backend.md:319`, `design-song-library.md:688`).
+
+**★ THE RULE, stated so it is not re-learned an eighth time: a filter applied
+AFTER enumeration is part of the search, and it inherits every blind spot of the
+pattern it is built from. "Enumerate then read" means READ — including the lines
+that look boring.** For a bounded corpus, that is affordable; 26 files and 180
+lines is one careful pass, and it is the only method here whose completeness does
+not depend on having guessed the phrasing in advance.
 
 **★ Why pass 2 still missed three.** Every variant it searched contains the *word*
 `editor`. The three it missed do not say it where it matters:
@@ -638,12 +658,12 @@ settle this.
 | `design-retire-drive.md:86` | An `Owner / editor` principal row in the Config-tab reachability table | **✅ AMENDED IN THIS PR** — row narrowed to `Owner`. Its `isOwner`/`isEditor` references at `:79, :89, :101` are **left intact deliberately**: they cite a live code variable that chunk 6 removes, and falsifying a code citation to match an unbuilt state would make the table wrong about the current tree |
 | `backlog-show-freeze.md:7, 13` | *"Collaborators … **can keep editing** the same show indefinitely"*; *"Collaborators also cannot edit after the show date"* | **✅ AMENDED IN THIS PR.** ★ **The backlog item itself is unchanged** — a single owner editing one show forever IS the entire loophole; removing collaborators narrows who triggers it, not whether it happens. The freeze rule for collaborators is now **moot**: they cannot edit at any time |
 | `design-chart-library.md:313` | *"**Editors and viewers** see chart pills (read-only) but NOT the upload/delete controls"* | **✅ AMENDED IN THIS PR** — one collaborator kind, read-only. ★ **This doc had chart writes owner-only from the start**, which is precisely why `003`'s `chart_library` policies are owner-only and the old `charts` editor grants died with that table |
-| `design-supabase-backend.md:318, 320, 331-338, 521, 601, 856` | **A second, deeper wave in an already-listed doc**: invite copy *"email + role (editor/viewer)"*, *"Sign in to edit"*, *"they get edit access"*, and **collaborator chart upload** — *"An editor collaborator can upload charts to any song in a show they're invited to. Same UX as the owner."* | **✅ ALL AMENDED IN THIS PR.** The chart-upload line is the single clearest statement of the capability Graham ruled out — **and it sat in a document this table had already marked handled.** Listing a doc as "amended" is not the same as having amended all of it |
+| `design-supabase-backend.md:49, 249, 265-279, 318-338, 372-396, 521, 601, 856, 870` | **A second, deeper wave in an already-listed doc**: invite copy *"email + role (editor/viewer)"*, *"Sign in to edit"*, *"they get edit access"*, and **collaborator chart upload** — *"An editor collaborator can upload charts to any song in a show they're invited to. Same UX as the owner."* | **✅ ALL AMENDED IN THIS PR.** The chart-upload line is the single clearest statement of the capability Graham ruled out — **and it sat in a document this table had already marked handled.** Listing a doc as "amended" is not the same as having amended all of it |
 | `uat-readiness-gaps.md:195, 244` | Two gap scenarios framed on editors | **✅ AMENDED IN THIS PR — and one of them REFRAMED, not dissolved.** Gap 11 genuinely narrows: the editor-specific half is gone, a residual (`songKey`-less entries still 400 the whole save) survives. **Gap 16 does NOT dissolve** — see the correction below |
 | `design-alpha-ready.md:162, 164, 389` | **⛔ Marked "CHECKED, UNAFFECTED" by drafts 1 AND 2 — WRONG BOTH TIMES.** `:162` asserts outright: *"**Editors can update shows they don't own** (via RLS `is_show_collaborator` policy)"* | **✅ AMENDED IN THIS PR.** The premise is deleted; **the RULE it justified is kept and must not be relaxed** — resolving collision scope from `show.owner_id` rather than `auth.uid()` is what makes the check correct *independent of who acts*, which is exactly why it outlives the principal it was written for |
 | `design-roadmap-key-resolution.md:302` | *"an editor action on the chart itself … a builder-editor concern"* | **✅ CHECKED, FALSE POSITIVE.** "Editor" here means the chart-editing **UI**, not the collaborator role. Listed so the next sweep does not re-flag it |
 
-**⇒ ALL FOUR affected documents are amended in this PR. Nothing is deferred.**
+**⇒ ALL TWELVE affected documents are amended in this PR. Nothing is deferred.**
 
 Two earlier drafts got this wrong in the same direction and are recorded because
 the pattern is the point. The first deferred every cross-doc edit on §10 grounds;

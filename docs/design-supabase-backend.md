@@ -46,7 +46,9 @@ ShowRunr has four storage systems that each solve one piece:
 | Google Drive | Charts (PDFs) | OAuth setup hell, folder structure conventions, batch resolution complexity, download proxy for CORS |
 | Cache API | Offline chart blobs | Fine — stays |
 
-The sharing model is also incomplete. A slug URL loads a snapshot, but there's no concept of "this is Graham's show and Rachel can add her charts to it." The owner/collaborator relationship lives nowhere.
+The sharing model is also incomplete. A slug URL loads a snapshot, but there's no concept of "this is Graham's show, and Rachel is on it." The owner/collaborator relationship lives nowhere.
+
+*(Amended 2026-08-25: the original read "…and **Rachel can add her charts to it**." That is a non-owner WRITE, which the roles ruling removed — see `design-single-backend.md` §3.3c. **The problem statement still stands**; what changed is what solving it grants. Rachel gets the show on her dashboard and read access to the owner's library — not upload rights. If she needs a chart added, she sends it to the owner, or becomes an owner herself.)*
 
 **Goal:** One backend (Supabase) that handles identity, shows, charts, permissions, and sharing. Kill Redis. Kill the Google Drive dependency. Make sharing durable and collaborative.
 
@@ -316,7 +318,7 @@ For Graham specifically, Google OAuth is also available (you're already signed i
 
 **Collaborator (invited):**
 1. Owner enters collaborator's email in show settings *(amended 2026-08-25: was "email + role (editor/viewer)" — there is no role to choose; §3.3c)*
-   → Inserts `show_collaborators` row with `email`, `role`, `user_id = null`, `accepted_at = null`
+   → Inserts `show_collaborators` row with `email`, `user_id = null`, `accepted_at = null` *(amended 2026-08-25: `role` removed from the insert — the column is dropped by chunk 6; §3.3c)*
 2. Collaborator opens the show's slug URL → sees the show *(amended 2026-08-25: was "read-only view → 'Sign in to edit' prompt". Signing in does NOT grant editing — it makes the show appear on their dashboard; §3.3c)*
 3. Enters email → OTP sent → enters code → Supabase Auth user created (if new) → session established
 4. **Invite activation (R3 Finding #2/5):** After successful OTP verification, the app calls a server-side API route (`POST /api/auth/activate-invites`) that:
