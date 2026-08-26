@@ -11,13 +11,46 @@ import { resolve, join } from 'node:path';
 // with no test is how the next one survives fifteen months too.
 //
 // SCOPE, stated because the design's own rule is that a negative claim names its
-// scope: this asserts DIRECT imports under app/api/ only. lib/agent-key.ts and
-// lib/admin-config.ts still import redis legitimately until chunk 5 retires the
-// dependency, so a transitive check would fail today and would be asserting a
-// different (later) invariant. Chunk 5 replaces this with the repo-wide version.
+// scope: this asserts DIRECT imports across ALL production source — app/, lib/,
+// components/ — as of chunk 5. It was app/api/ only through chunks 0–2, because
+// lib/agent-key.ts and lib/admin-config.ts still imported redis legitimately
+// until chunk 2 moved the quota onto Supabase RPCs.
+//
+// Still DIRECT, not transitive. A dependency that itself imports redis would not
+// be caught here — but chunk 5 also removes redis from package.json, so no
+// specifier resolves at all and that case is a build error, not a test's job.
+//
+// tests/ is deliberately NOT scanned: :239 below holds redis import strings as
+// scanner FIXTURES. Including it would make the suite fail on its own test data.
+// This is also why `grep -rn "from 'redis'"` can never be the gate — the fixtures
+// and docs/ prose both match. AST over the production roots is the only form of
+// this check that can pass while remaining meaningful.
 
 const REPO = resolve(__dirname, '..');
 const API_DIR = join(REPO, 'app', 'api');
+
+// Every production root. Named individually rather than globbed from the repo
+// root so that adding a new top-level source directory is a deliberate edit here
+// — a glob would silently pick up (or miss) directories as the tree changes.
+const SOURCE_ROOTS = ['app', 'lib', 'components'] as const;
+
+/**
+ * THE definition of "a Redis client package", used by all three assertions —
+ * the import scan, package.json and the lockfile.
+ *
+ * Codex flagged (chunk 5 review) that banning `redis` and `redis/*` alone leaves
+ * the SCOPED family open: `@redis/client` is a real, separately-installable
+ * package, and `import { createClient } from '@redis/client'` would have passed
+ * the guard while reintroducing exactly what the retirement removed. The
+ * invariant is "no Redis client family at all", so it is spelled that way.
+ *
+ * One matcher rather than three inline predicates, because the way this fails is
+ * for one site to be widened and the others quietly left behind — which is the
+ * same drift the shared quota-backend helper exists to prevent.
+ */
+function isRedisPackage(name: string): boolean {
+  return name === 'redis' || name.startsWith('redis/') || name === '@redis' || name.startsWith('@redis/');
+}
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -225,15 +258,43 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     expect(existsSync(join(API_DIR, 'shows'))).toBe(true);
   });
 
-  it('no route under app/api/ imports redis directly', () => {
-    const offenders = walk(API_DIR).filter((file) => {
+  it('no production source under app/, lib/ or components/ imports a redis package', () => {
+    const offenders = SOURCE_ROOTS.flatMap((root) => walk(join(REPO, root))).filter((file) => {
       // Filename passed so .tsx parses as TSX — see importSpecifiers.
       const specs = importSpecifiers(readFileSync(file, 'utf8'), file);
-      return [...specs].some((s) => s === 'redis' || s.startsWith('redis/'));
+      return [...specs].some(isRedisPackage);
     });
 
     // Named, not just counted — a failure should say which file to look at.
     expect(offenders.map((f) => f.slice(REPO.length + 1))).toEqual([]);
+  });
+
+  it('no redis package in package.json — the guarantee the walker cannot give', () => {
+    // The walker defends against ACCIDENTAL reintroduction only; it cannot catch
+    // a computed specifier. Removing the dependency is what makes every form
+    // fail, including the ones the AST walk documents as out of reach.
+    const pkg = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8'));
+    const declared = [
+      ...Object.keys(pkg.dependencies ?? {}),
+      ...Object.keys(pkg.devDependencies ?? {}),
+      ...Object.keys(pkg.optionalDependencies ?? {}),
+      ...Object.keys(pkg.peerDependencies ?? {}),
+    ];
+    expect(declared.filter(isRedisPackage)).toEqual([]);
+  });
+
+  it('no redis package in the lockfile either, direct or transitive', () => {
+    // package.json alone would still pass if the dep were merely orphaned in the
+    // lock — npm ci would reinstall it and a computed specifier would resolve.
+    // The lock also catches a TRANSITIVE reintroduction, which package.json
+    // cannot see at all: some future dependency pulling in @redis/client.
+    const lock = JSON.parse(readFileSync(join(REPO, 'package-lock.json'), 'utf8'));
+    const offenders = Object.keys(lock.packages ?? {})
+      // Only the package name matters; nested paths look like
+      // node_modules/foo/node_modules/@redis/client.
+      .map((p) => p.split('node_modules/').pop() ?? '')
+      .filter(isRedisPackage);
+    expect([...new Set(offenders)]).toEqual([]);
   });
 
   it.each([
@@ -248,6 +309,11 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     ["dynamic, no await", `void import('redis');`],
     ["dynamic backtick", 'const r = await import(`redis`);'],
     ["subpath", `import x from 'redis/dist/thing';`],
+    // The SCOPED family — Codex's chunk 5 note. @redis/client is separately
+    // installable, so these are reintroduction paths, not hypotheticals.
+    ["scoped client", `import { createClient } from '@redis/client';`],
+    ["scoped subpath", `import x from '@redis/client/dist/lib';`],
+    ["scoped bloom", `import x from '@redis/bloom';`],
     // Whitespace and comments between the identifier and the call paren — both
     // valid JS, neither a computed specifier. Codex found these evading the guard.
     ["require with space", `const r = require ('redis');`],
@@ -294,8 +360,11 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     ["optional prop require", `const r = module?.require('redis');`],
     ["export * as ns", `export * as redisNs from 'redis';`],
   ])('detects a redis import written as: %s', (_label, src) => {
+    // isRedisPackage, not an inline copy — this assertion is what proves the
+    // matcher recognises each form, so it must be the SAME matcher the three
+    // real assertions use or the fixtures stop testing anything that ships.
     const specs = [...importSpecifiers(src)];
-    expect(specs.some((s) => s === 'redis' || s.startsWith('redis/'))).toBe(true);
+    expect(specs.some(isRedisPackage)).toBe(true);
   });
 
   it.each([
@@ -346,5 +415,29 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     const files = walk(API_DIR);
     expect(files.length).toBeGreaterThan(10);
     expect(files.some((f) => f.endsWith(join('shows', 'route.ts')))).toBe(true);
+  });
+
+  // PER-ROOT, deliberately not an aggregate count. app/ alone clears any total
+  // threshold, so a mistyped or emptied lib/ or components/ would contribute
+  // zero files and the repo-wide claim above would silently narrow back to
+  // roughly what it asserted before chunk 5 — passing the whole time.
+  it.each(SOURCE_ROOTS)('the walker reaches %s/ (per-root positive control)', (root) => {
+    expect(walk(join(REPO, root)).length).toBeGreaterThan(0);
+  });
+
+  it('every declared source root exists on disk', () => {
+    // walk() throws on a missing directory, but only once something calls it.
+    // Asserting existence directly makes a renamed directory fail HERE, with a
+    // readable message, rather than as an ENOENT inside an unrelated test.
+    const missing = SOURCE_ROOTS.filter((r) => !existsSync(join(REPO, r)));
+    expect(missing).toEqual([]);
+  });
+
+  it('scans the file that held the last prod redis import', () => {
+    // lib/agent-key.ts:2 was the final production import, removed in chunk 2.
+    // Naming it pins that the widened scan actually covers the file the whole
+    // retirement was about — not merely that lib/ is non-empty.
+    const scanned = SOURCE_ROOTS.flatMap((r) => walk(join(REPO, r)));
+    expect(scanned.some((f) => f.endsWith(join('lib', 'agent-key.ts')))).toBe(true);
   });
 });
