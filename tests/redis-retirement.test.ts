@@ -34,6 +34,24 @@ const API_DIR = join(REPO, 'app', 'api');
 // — a glob would silently pick up (or miss) directories as the tree changes.
 const SOURCE_ROOTS = ['app', 'lib', 'components'] as const;
 
+/**
+ * THE definition of "a Redis client package", used by all three assertions —
+ * the import scan, package.json and the lockfile.
+ *
+ * Codex flagged (chunk 5 review) that banning `redis` and `redis/*` alone leaves
+ * the SCOPED family open: `@redis/client` is a real, separately-installable
+ * package, and `import { createClient } from '@redis/client'` would have passed
+ * the guard while reintroducing exactly what the retirement removed. The
+ * invariant is "no Redis client family at all", so it is spelled that way.
+ *
+ * One matcher rather than three inline predicates, because the way this fails is
+ * for one site to be widened and the others quietly left behind — which is the
+ * same drift the shared quota-backend helper exists to prevent.
+ */
+function isRedisPackage(name: string): boolean {
+  return name === 'redis' || name.startsWith('redis/') || name === '@redis' || name.startsWith('@redis/');
+}
+
 function walk(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -240,32 +258,43 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     expect(existsSync(join(API_DIR, 'shows'))).toBe(true);
   });
 
-  it('no production source under app/, lib/ or components/ imports redis directly', () => {
+  it('no production source under app/, lib/ or components/ imports a redis package', () => {
     const offenders = SOURCE_ROOTS.flatMap((root) => walk(join(REPO, root))).filter((file) => {
       // Filename passed so .tsx parses as TSX — see importSpecifiers.
       const specs = importSpecifiers(readFileSync(file, 'utf8'), file);
-      return [...specs].some((s) => s === 'redis' || s.startsWith('redis/'));
+      return [...specs].some(isRedisPackage);
     });
 
     // Named, not just counted — a failure should say which file to look at.
     expect(offenders.map((f) => f.slice(REPO.length + 1))).toEqual([]);
   });
 
-  it('redis is gone from package.json — the guarantee the walker cannot give', () => {
+  it('no redis package in package.json — the guarantee the walker cannot give', () => {
     // The walker defends against ACCIDENTAL reintroduction only; it cannot catch
     // a computed specifier. Removing the dependency is what makes every form
     // fail, including the ones the AST walk documents as out of reach.
     const pkg = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8'));
-    expect(pkg.dependencies?.redis).toBeUndefined();
-    expect(pkg.devDependencies?.redis).toBeUndefined();
+    const declared = [
+      ...Object.keys(pkg.dependencies ?? {}),
+      ...Object.keys(pkg.devDependencies ?? {}),
+      ...Object.keys(pkg.optionalDependencies ?? {}),
+      ...Object.keys(pkg.peerDependencies ?? {}),
+    ];
+    expect(declared.filter(isRedisPackage)).toEqual([]);
   });
 
-  it('redis is absent from the lockfile too, not just package.json', () => {
+  it('no redis package in the lockfile either, direct or transitive', () => {
     // package.json alone would still pass if the dep were merely orphaned in the
     // lock — npm ci would reinstall it and a computed specifier would resolve.
+    // The lock also catches a TRANSITIVE reintroduction, which package.json
+    // cannot see at all: some future dependency pulling in @redis/client.
     const lock = JSON.parse(readFileSync(join(REPO, 'package-lock.json'), 'utf8'));
-    const entries = Object.keys(lock.packages ?? {});
-    expect(entries.filter((p) => p === 'node_modules/redis')).toEqual([]);
+    const offenders = Object.keys(lock.packages ?? {})
+      // Only the package name matters; nested paths look like
+      // node_modules/foo/node_modules/@redis/client.
+      .map((p) => p.split('node_modules/').pop() ?? '')
+      .filter(isRedisPackage);
+    expect([...new Set(offenders)]).toEqual([]);
   });
 
   it.each([
@@ -280,6 +309,11 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     ["dynamic, no await", `void import('redis');`],
     ["dynamic backtick", 'const r = await import(`redis`);'],
     ["subpath", `import x from 'redis/dist/thing';`],
+    // The SCOPED family — Codex's chunk 5 note. @redis/client is separately
+    // installable, so these are reintroduction paths, not hypotheticals.
+    ["scoped client", `import { createClient } from '@redis/client';`],
+    ["scoped subpath", `import x from '@redis/client/dist/lib';`],
+    ["scoped bloom", `import x from '@redis/bloom';`],
     // Whitespace and comments between the identifier and the call paren — both
     // valid JS, neither a computed specifier. Codex found these evading the guard.
     ["require with space", `const r = require ('redis');`],
@@ -326,8 +360,11 @@ describe('chunk 0 — the Redis show route is gone and stays gone', () => {
     ["optional prop require", `const r = module?.require('redis');`],
     ["export * as ns", `export * as redisNs from 'redis';`],
   ])('detects a redis import written as: %s', (_label, src) => {
+    // isRedisPackage, not an inline copy — this assertion is what proves the
+    // matcher recognises each form, so it must be the SAME matcher the three
+    // real assertions use or the fixtures stop testing anything that ships.
     const specs = [...importSpecifiers(src)];
-    expect(specs.some((s) => s === 'redis' || s.startsWith('redis/'))).toBe(true);
+    expect(specs.some(isRedisPackage)).toBe(true);
   });
 
   it.each([
