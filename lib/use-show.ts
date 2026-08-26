@@ -7,7 +7,6 @@ interface ShowContext {
   showId: string | null;
   slug: string | null;
   isOwner: boolean;
-  isEditor: boolean;
   isReadOnly: boolean;
   saving: boolean;
   lastSavedAt: string | null;
@@ -25,7 +24,6 @@ export function useShow(
   showId: string | null,
   slug: string | null,
   isOwner: boolean,
-  isEditor: boolean,
   setlistMigrated: boolean = false,
 ): UseShowReturn {
   const [saving, setSaving] = useState(false);
@@ -37,7 +35,8 @@ export function useShow(
   // Prevents stale setlistMigrated=false from reverting to legacy path after removing all songs.
   const hasSentEntries = useRef(false);
 
-  const isReadOnly = !isOwner && !isEditor;
+  // Collaborators are view-only (§3.3c), so ownership is the whole write gate.
+  const isReadOnly = !isOwner;
 
   const doSave = useCallback(async (config: Record<string, unknown>) => {
     if (!showId || isReadOnly) return;
@@ -57,8 +56,8 @@ export function useShow(
       };
 
       // Decide entries (reference path) vs legacy blob. Owners migrate-on-first-save;
-      // editors stay legacy until owner/seed migrates. Rows with no songId and an
-      // unnormalizable title fall back to legacy so the save can't be blocked.
+      // rows with no songId and an unnormalizable title fall back to legacy so the
+      // save can't be blocked.
       // See shouldSendEntries for the full rule.
       const setlist = config.setlist as Array<{
         songId?: string; position: number; title: string;
@@ -180,7 +179,6 @@ export function useShow(
       showId,
       slug,
       isOwner,
-      isEditor,
       isReadOnly,
       saving,
       lastSavedAt,

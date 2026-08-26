@@ -26,7 +26,6 @@ function tableProps(over: Record<string, unknown> = {}) {
     onBpmChange: vi.fn(),
     isOwner: true,
     ownerId: 'owner1',
-    isEditor: false,
     onManageCharts: vi.fn(),
     ...over,
   };

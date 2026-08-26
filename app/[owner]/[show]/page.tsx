@@ -45,6 +45,7 @@ import SetlistImportPreview from '@/components/SetlistImportPreview';
 import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
 import { resolveAvailability, canSendMessage, effectiveProbe, probeCapabilities, type FetchedProbe } from '@/lib/agent-availability';
 import { rememberPrompt } from '@/lib/prompt-cache';
+import { visibleTab, type ShowTab } from '@/lib/show-tabs';
 import { shouldRestoreComposer, rollbackOptimisticSend, isSavedKeyRejected } from '@/lib/send-recovery';
 import { newStreamState, splitSseData, parseSseEvent, reduceStreamEvent, finalizeTurn, arrivedFrom } from '@/lib/agent-stream';
 import { buildApiMessages, hasPendingTools as transcriptHasPendingTools } from '@/lib/agent-history';
@@ -346,7 +347,7 @@ export default function Page() {
   const owner = params.owner as string;
   const slug = params.show as string;
 
-  const [tab, setTab] = useState<'perform' | 'mix' | 'config' | 'ai'>('perform');
+  const [tab, setTab] = useState<ShowTab>('perform');
   const [config, setConfig] = useState<AppConfig>(initConfig);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [showPrintModal, setShowPrintModal] = useState(false);
@@ -367,13 +368,22 @@ export default function Page() {
   const [showId, setShowId] = useState<string | null>(null);
   const [showOwnerId, setShowOwnerId] = useState<string | null>(null);
   const [isOwner, setIsOwner] = useState(false);
-  const [isEditor, setIsEditor] = useState(false);
+  // Read by updateConfig, which is deliberately ref-stable (deps: []) so that no
+  // mutation callback on the page changes identity. A ref keeps the read-only
+  // gate current without spending that stability. Defaults to refusing: until
+  // the show loads, ownership is unknown, and no edit affordance renders in that
+  // window anyway (every one of them is behind !isReadOnly).
+  const isReadOnlyRef = useRef(true);
+  // Synced in an effect, not written during render — same idiom as bpmConfigRef
+  // below. The one-commit lag is in the SAFE direction: the ref starts refusing
+  // and only relaxes once ownership is known.
+  useEffect(() => { isReadOnlyRef.current = !isOwner; }, [isOwner]);
   const [loadError, setLoadError] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [chartCacheProgress, setChartCacheProgress] = useState<DownloadProgress | null>(null);
   const [setlistMigrated, setSetlistMigrated] = useState(false);
 
-  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, isEditor, setlistMigrated);
+  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, setlistMigrated);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
@@ -424,7 +434,9 @@ export default function Page() {
       setLoadedPath(null);
       setShowId(null);
       setIsOwner(false);
-      setIsEditor(false);
+      // A new show does not inherit the previous show's tab. Deps are
+      // [owner, slug], so this fires only on an actual show change.
+      setTab('perform');
       setLoadError('');
       setChartCacheProgress(null);
 
@@ -498,31 +510,17 @@ export default function Page() {
           }).catch(() => {});
         }
 
-        // Check ownership/editor status using IDs from API response
+        // Check ownership using IDs from API response
         // Wrapped separately so auth failures don't hide already-loaded show content
         try {
           const supabase = getSupabaseBrowser();
           const { data: { user } } = await supabase.auth.getUser();
           if (cancelled) return;
           if (user && data.show_id) {
-            let isOwnerFlag = false;
-            let isEditorFlag = false;
-            if (data.owner_id === user.id) {
-              isOwnerFlag = true;
-              isEditorFlag = true;
-            } else {
-              const { data: collab } = await supabase
-                .from('show_collaborators')
-                .select('role')
-                .eq('show_id', data.show_id)
-                .eq('user_id', user.id)
-                .single();
-
-              if (collab?.role === 'editor') isEditorFlag = true;
-            }
-            if (cancelled) return;
-            setIsOwner(isOwnerFlag);
-            setIsEditor(isEditorFlag);
+            // Ownership is the whole write gate. Collaborators are view-only
+            // (§3.3c), so the show_collaborators lookup that used to run here is
+            // gone — membership grants placement on the dashboard, not access.
+            setIsOwner(data.owner_id === user.id);
             setShowId(data.show_id);
             setShowOwnerId(data.owner_id ?? null);
             setSetlistMigrated(!!data.setlist_migrated);
@@ -588,6 +586,18 @@ export default function Page() {
     // drag-and-drop (design-ai-op-contract §9.4). The ordering inside
     // withStableIds is deliberate and preserved: slot ids first, so input
     // id-minting runs on top of any cleared slotIds.
+    // ★ §3.3c, the LAST line of defence. Every edit affordance on this page
+    // funnels through here (the comment above already calls this the single
+    // mutation chokepoint), so a read-only viewer who reaches ANY of them —
+    // one missed today, one added tomorrow — mutates nothing. Two affordance
+    // leaks were found in review by walking the UI; this one does not depend on
+    // that walk being complete.
+    //
+    // Refuse rather than apply-then-fail-to-save: useShow blocks persistence for
+    // a read-only viewer, so mutating local state here would show the change
+    // landing and then silently discard it — the app claiming a save it did not
+    // make (§1.1).
+    if (isReadOnlyRef.current) return;
     setConfig((prev) => withStableIds(fn(prev)));
     // §7: undo survives only until the next mutation. Because updateConfig is the
     // single mutation chokepoint, clearing here covers every writer in the app
@@ -680,7 +690,12 @@ export default function Page() {
   }, [owner, slug]);
 
   const band = configToBand(config);
-  const isReadOnly = !isOwner && !isEditor;
+  const isReadOnly = !isOwner;
+  // ★ `tab` survives a show change (same route, new params → no remount), so an
+  // owner sitting on Config who navigates to a show they only collaborate on
+  // would otherwise keep the editor. Hiding the buttons is not enough — the
+  // panels render from this value. See lib/show-tabs.
+  const shownTab = visibleTab(tab, isReadOnly);
 
   if (loadError) {
     const isNetworkError = loadError.includes('network');
@@ -739,7 +754,7 @@ export default function Page() {
           <button
             onClick={() => goToTab('perform')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
-              tab === 'perform'
+              shownTab === 'perform'
                 ? 'border-b-2 border-black text-black'
                 : 'text-gray-400 hover:text-gray-600'
             }`}
@@ -749,7 +764,7 @@ export default function Page() {
           <button
             onClick={() => goToTab('mix')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
-              tab === 'mix'
+              shownTab === 'mix'
                 ? 'border-b-2 border-black text-black'
                 : 'text-gray-400 hover:text-gray-600'
             }`}
@@ -760,7 +775,7 @@ export default function Page() {
           <button
             onClick={() => goToTab('config')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
-              tab === 'config'
+              shownTab === 'config'
                 ? 'border-b-2 border-black text-black'
                 : 'text-gray-400 hover:text-gray-600'
             }`}
@@ -772,7 +787,7 @@ export default function Page() {
           <button
             onClick={() => goToTab('ai')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
-              tab === 'ai'
+              shownTab === 'ai'
                 ? 'border-b-2 border-black text-black'
                 : 'text-gray-400 hover:text-gray-600'
             }`}
@@ -807,7 +822,7 @@ export default function Page() {
           </button>
           {/* Undo import — one level, in-memory, alongside the save status (§7).
               Cleared by the next mutation (updateConfig) or a tab change. */}
-          {importUndo && (isOwner || isEditor) && (
+          {importUndo && isOwner && (
             <button
               onClick={undoImport}
               className="text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors"
@@ -816,7 +831,7 @@ export default function Page() {
             </button>
           )}
           {/* Save status */}
-          {(isOwner || isEditor) && (
+          {isOwner && (
             <span role="status" aria-live="polite" title={showContext.saveError ?? undefined} className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 max-w-[16rem] truncate ${
               showContext.saveError
                 ? 'text-red-600 bg-red-50'
@@ -844,16 +859,16 @@ export default function Page() {
       )}
 
       {/* ── Content ────────────────────────────────────────────────────── */}
-      {tab === 'perform' && (
+      {shownTab === 'perform' && (
         <PerformTab setlist={config.setlist} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} chartCacheProgress={chartCacheProgress} />
       )}
-      {tab === 'mix' && (
+      {shownTab === 'mix' && (
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
-      {tab === 'config' && (
-        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} onImportApply={applyImportMerge} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} isEditor={isEditor} />
+      {shownTab === 'config' && (
+        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} onImportApply={applyImportMerge} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} />
       )}
-      {tab === 'ai' && (
+      {shownTab === 'ai' && (
         <div className="p-4 md:p-8">
           <div className="max-w-4xl mx-auto">
             <AgentChat config={config} updateConfig={updateConfig} owner={owner} slug={slug} />
@@ -1367,7 +1382,10 @@ function DraggableStagePlotView({
   );
 }
 
-function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken, slug, owner, isOwner, onReorder }: { band: BandConfig; setlist: SetlistSong[]; printSections: Record<string, boolean>; showInfo: { bandName: string; eventDate: string; venue: string; showName?: string }; isOffline: boolean; accessToken?: string; slug: string; owner: string; isOwner: boolean; onReorder: (from: number, to: number) => void }) {
+// Exported for tests only — same precedent as SetupSetlistTable below. The
+// view-only gate here has no other executable home: Page is a 6800-line client
+// route that cannot be rendered in isolation.
+export function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken, slug, owner, isOwner, onReorder }: { band: BandConfig; setlist: SetlistSong[]; printSections: Record<string, boolean>; showInfo: { bandName: string; eventDate: string; venue: string; showName?: string }; isOffline: boolean; accessToken?: string; slug: string; owner: string; isOwner: boolean; onReorder: (from: number, to: number) => void }) {
   const colorMap = new Map<string, string>();
   if (band.setlist?.length) {
     band.setlist.forEach((s) => {
@@ -1390,6 +1408,12 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
 
   // Reorder mode
   const [reorderMode, setReorderMode] = useState(false);
+  // ★ EXACTLY the `tab` trap again (see lib/show-tabs): this state survives a
+  // show change, because /[owner]/[show] re-renders rather than remounting. An
+  // owner who leaves Mix in reorder mode and opens a show they only collaborate
+  // on would otherwise keep the drag-and-drop table. Derived rather than reset,
+  // so the guarantee does not depend on remembering to clear it.
+  const reordering = reorderMode && isOwner;
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
@@ -1526,16 +1550,21 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
                     {allRoles.map((r) => <option key={r} value={r}>My Charts: {r}</option>)}
                   </select>
                 )}
+                {/* Owner-only: reordering the run order is an EDIT. §3.3c —
+                    collaborators are view only, and the Mix tab is a surface
+                    they can reach, so the gate lives here and not on the tab. */}
+                {isOwner && (
                 <button
                   onClick={() => setReorderMode(!reorderMode)}
                   className={`px-3 py-1.5 text-xs font-bold rounded transition-colors ${
-                    reorderMode
+                    reordering
                       ? 'bg-black text-white hover:bg-gray-800'
                       : 'bg-gray-100 border border-gray-300 hover:bg-gray-200'
                   }`}
                 >
-                  {reorderMode ? 'Done' : 'Reorder'}
+                  {reordering ? 'Done' : 'Reorder'}
                 </button>
+                )}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2 mb-4 print:hidden">
@@ -1548,7 +1577,7 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
                 </span>
               )}
             </div>
-            {reorderMode ? (
+            {reordering ? (
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                 <SortableContext items={songIds} strategy={verticalListSortingStrategy}>
                   <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden print:hidden">
@@ -2744,7 +2773,18 @@ function ChartNavigator({
   const prevPageNumRef = useRef(1);
 
   // ── Chart calibration (realtime chart control, step 1: section rail) ──
-  const [calMode, setCalMode] = useState<'perform' | 'calibrate'>('perform');
+  const [calModeState, setCalMode] = useState<'perform' | 'calibrate'>('perform');
+  // ★ Third instance of ONE defect: /[owner]/[show] re-renders rather than
+  // remounting on a show change, so component state survives it. `tab` and
+  // `reorderMode` were the first two; this is the same trap one level deeper.
+  // An owner in Calibrate who opens a show they only collaborate on kept the
+  // calibration toolbar and overlay, because the entry button is gated on
+  // `calibratable` but every render below reads `calMode` alone.
+  //
+  // Derived under the ORIGINAL name on purpose: it closes all 17 read sites at
+  // once, including the `=== 'perform'` branches, which is what keeps the
+  // navigator rendering normally for a collaborator instead of going blank.
+  const calMode = isOwner ? calModeState : 'perform';
   const [calibration, setCalibration] = useState<ChartCalibration | null>(null);
   // Latest-value mirror of calibration: the async snap reads this AFTER its
   // offscreen render so it matches+applies against the freshest geometry, never
@@ -3413,6 +3453,11 @@ function ChartNavigator({
   }, [drivenBarId, barCal, pageNum]);
 
   const saveCalibration = async (promote: boolean) => {
+    // §3.3c. The overlay that reaches this is now owner-only, but the write is
+    // guarded independently: this is the ONE edit path on the show page that
+    // does not funnel through updateConfig, so the chokepoint refusal there
+    // cannot cover it.
+    if (!isOwner) return;
     if (!calibration || !chartFileId || !sourceHash) return;
     const payload = promote ? verify(calibration) : calibration;
     setSaveState('saving');
@@ -4377,12 +4422,10 @@ export function AddSongFromLibrary({
   onAddSong,
   isOwner,
   ownerId,
-  isEditor,
 }: {
   onAddSong: (song: { songId?: string; title: string; key?: string; lead?: string; notes?: string; bpm?: number | null; charts?: Chart[] }) => void;
   isOwner: boolean;
   ownerId: string | null;
-  isEditor?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -4398,7 +4441,7 @@ export function AddSongFromLibrary({
     async function loadLibrary() {
       setLoading(true);
       try {
-        // Browse the show owner's library (editors must target the owner, not themselves)
+        // Browse the show owner's library (a collaborator must target the owner, not themselves)
         const r = await fetch(ownerId ? `/api/songs?owner_id=${encodeURIComponent(ownerId)}` : '/api/songs');
         const data = r.ok ? await r.json() : { songs: [] };
         if (!cancelled) setSongs(data.songs || []);
@@ -4531,13 +4574,9 @@ export function AddSongFromLibrary({
                   <div className="px-3 py-1.5 text-xs text-red-500 border-t border-gray-100">{createError}</div>
                 )}
               </>
-            ) : isEditor ? (
-              <div className="px-3 py-2 text-sm text-gray-400 border-t border-gray-100">
-                Song not found. Ask the show owner to add it to the library.
-              </div>
             ) : null
           )}
-          {filtered.length === 0 && exactMatch === undefined && !isOwner && !isEditor && (
+          {filtered.length === 0 && exactMatch === undefined && !isOwner && (
             <div className="px-3 py-2 text-sm text-gray-400">No matches</div>
           )}
         </div>
@@ -4551,7 +4590,7 @@ export function AddSongFromLibrary({
 // ════════════════════════════════════════════════════════════════════════════
 
 export function SetupSetlistTable({
-  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, onBpmChange, isOwner, ownerId, isEditor, onManageCharts,
+  setlist, canResolveCharts, onReorder, onUpdate, onDelete, onAddSong, onBpmChange, isOwner, ownerId, onManageCharts,
 }: {
   setlist: SetlistSong[];
   canResolveCharts: boolean;
@@ -4563,7 +4602,6 @@ export function SetupSetlistTable({
   onBpmChange: (songId: string, bpm: number | null) => void;
   isOwner: boolean;
   ownerId: string | null;
-  isEditor?: boolean;
   onManageCharts?: (songTitle: string) => void;
 }) {
   const sensors = useSensors(
@@ -4622,7 +4660,7 @@ export function SetupSetlistTable({
           </div>
         </SortableContext>
       </DndContext>
-      <AddSongFromLibrary onAddSong={onAddSong} isOwner={isOwner} ownerId={ownerId} isEditor={isEditor} />
+      <AddSongFromLibrary onAddSong={onAddSong} isOwner={isOwner} ownerId={ownerId} />
     </>
   );
 }
@@ -5831,7 +5869,6 @@ function ConfigTab({
   showId,
   ownerId,
   isOwner,
-  isEditor,
 }: {
   config: AppConfig;
   // `automatic` marks a write that is a consequence of another change rather than a
@@ -5847,7 +5884,6 @@ function ConfigTab({
   onDisconnectGoogle: () => void;
   showId: string | null;
   ownerId: string | null;
-  isEditor?: boolean;
   isOwner: boolean;
 }) {
   const [sheetUrl, setSheetUrl] = useState('');
@@ -6538,7 +6574,6 @@ function ConfigTab({
               }
             }}
             onBpmChange={onBpmChange}
-            isEditor={isEditor}
             onManageCharts={(songTitle) => setManageChartsSong(songTitle)}
           />
           {manageChartsSong && (
