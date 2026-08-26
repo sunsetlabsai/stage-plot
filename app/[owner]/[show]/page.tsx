@@ -45,6 +45,7 @@ import SetlistImportPreview from '@/components/SetlistImportPreview';
 import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
 import { resolveAvailability, canSendMessage, effectiveProbe, probeCapabilities, type FetchedProbe } from '@/lib/agent-availability';
 import { rememberPrompt } from '@/lib/prompt-cache';
+import { visibleTab, type ShowTab } from '@/lib/show-tabs';
 import { shouldRestoreComposer, rollbackOptimisticSend, isSavedKeyRejected } from '@/lib/send-recovery';
 import { newStreamState, splitSseData, parseSseEvent, reduceStreamEvent, finalizeTurn, arrivedFrom } from '@/lib/agent-stream';
 import { buildApiMessages, hasPendingTools as transcriptHasPendingTools } from '@/lib/agent-history';
@@ -346,7 +347,7 @@ export default function Page() {
   const owner = params.owner as string;
   const slug = params.show as string;
 
-  const [tab, setTab] = useState<'perform' | 'mix' | 'config' | 'ai'>('perform');
+  const [tab, setTab] = useState<ShowTab>('perform');
   const [config, setConfig] = useState<AppConfig>(initConfig);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [showPrintModal, setShowPrintModal] = useState(false);
@@ -423,6 +424,9 @@ export default function Page() {
       setLoadedPath(null);
       setShowId(null);
       setIsOwner(false);
+      // A new show does not inherit the previous show's tab. Deps are
+      // [owner, slug], so this fires only on an actual show change.
+      setTab('perform');
       setLoadError('');
       setChartCacheProgress(null);
 
@@ -665,6 +669,11 @@ export default function Page() {
 
   const band = configToBand(config);
   const isReadOnly = !isOwner;
+  // ★ `tab` survives a show change (same route, new params → no remount), so an
+  // owner sitting on Config who navigates to a show they only collaborate on
+  // would otherwise keep the editor. Hiding the buttons is not enough — the
+  // panels render from this value. See lib/show-tabs.
+  const shownTab = visibleTab(tab, isReadOnly);
 
   if (loadError) {
     const isNetworkError = loadError.includes('network');
@@ -723,7 +732,7 @@ export default function Page() {
           <button
             onClick={() => goToTab('perform')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
-              tab === 'perform'
+              shownTab === 'perform'
                 ? 'border-b-2 border-black text-black'
                 : 'text-gray-400 hover:text-gray-600'
             }`}
@@ -733,7 +742,7 @@ export default function Page() {
           <button
             onClick={() => goToTab('mix')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
-              tab === 'mix'
+              shownTab === 'mix'
                 ? 'border-b-2 border-black text-black'
                 : 'text-gray-400 hover:text-gray-600'
             }`}
@@ -744,7 +753,7 @@ export default function Page() {
           <button
             onClick={() => goToTab('config')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
-              tab === 'config'
+              shownTab === 'config'
                 ? 'border-b-2 border-black text-black'
                 : 'text-gray-400 hover:text-gray-600'
             }`}
@@ -756,7 +765,7 @@ export default function Page() {
           <button
             onClick={() => goToTab('ai')}
             className={`flex-1 py-3 text-center font-bold text-sm uppercase tracking-wide transition-colors ${
-              tab === 'ai'
+              shownTab === 'ai'
                 ? 'border-b-2 border-black text-black'
                 : 'text-gray-400 hover:text-gray-600'
             }`}
@@ -828,16 +837,16 @@ export default function Page() {
       )}
 
       {/* ── Content ────────────────────────────────────────────────────── */}
-      {tab === 'perform' && (
+      {shownTab === 'perform' && (
         <PerformTab setlist={config.setlist} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} chartCacheProgress={chartCacheProgress} />
       )}
-      {tab === 'mix' && (
+      {shownTab === 'mix' && (
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
-      {tab === 'config' && (
+      {shownTab === 'config' && (
         <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} onImportApply={applyImportMerge} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} />
       )}
-      {tab === 'ai' && (
+      {shownTab === 'ai' && (
         <div className="p-4 md:p-8">
           <div className="max-w-4xl mx-auto">
             <AgentChat config={config} updateConfig={updateConfig} owner={owner} slug={slug} />

@@ -111,6 +111,39 @@ describe('migration 014 — the order Postgres actually requires', () => {
   });
 });
 
+describe('migration 014 — the recreated policy is the RIGHT policy', () => {
+  // Codex R1 medium: the ordering assertions above prove only that a statement
+  // named "Collaborator read" appears in the right place. `using (true)` would
+  // satisfy every one of them while exposing every show on the platform, and
+  // `using (is_show_owner(id))` would satisfy them while silently costing
+  // collaborators the read access §3.3c exists to preserve. Name and position
+  // are not the contract; the predicate is.
+
+  /** The `using (...)` predicate attached to the recreated policy. */
+  const predicate = (): string => {
+    const m = STMTS.match(
+      /create policy "Collaborator read"\s+on shows for select\s+using \(([^)]*\([^)]*\)[^)]*|[^)]*)\)/i,
+    );
+    if (!m) throw new Error('could not parse the "Collaborator read" predicate');
+    return m[1].trim();
+  };
+
+  it('gates on collaborator membership, not on ownership and not on true', () => {
+    expect(predicate()).toBe('is_show_collaborator(id)');
+  });
+
+  it('is not the unrestricted predicate', () => {
+    expect(predicate()).not.toMatch(/^true$/i);
+  });
+
+  it('calls the NEW single-argument signature', () => {
+    // A predicate still passing 'editor' would reference a function that no
+    // longer exists, and the policy would fail to create.
+    expect(predicate()).not.toMatch(/editor/i);
+    expect(predicate()).not.toContain(',');
+  });
+});
+
 describe('§3.3c — the chart role is a DIFFERENT concept and must survive', () => {
   it('touches no chart_library / chart role', () => {
     // `chart_library.role` is guitar/lyrics/keys/... and the RPCs in 009 and 011

@@ -18,6 +18,9 @@ const db = {
   ownerId: 'owner-1',
   showExists: true,
   rpcCalled: false,
+  userScopedWrite: false,
+  /** What RLS says about the user-scoped write. 'deny' mimics post-014 for a collaborator. */
+  rls: 'allow' as 'allow' | 'deny',
 };
 
 let currentUserId = 'owner-1';
@@ -25,6 +28,23 @@ let currentUserId = 'owner-1';
 vi.mock('@/lib/supabase-server', () => ({
   getSupabaseServer: async () => ({
     auth: { getUser: async () => ({ data: { user: { id: currentUserId } } }) },
+    // The LEGACY write path. Deliberately user-scoped: RLS is its control, and
+    // after migration 014 the only surviving UPDATE grant on `shows` is
+    // "Owner update".
+    from: () => ({
+      update: () => ({
+        eq: () => ({
+          select: () => ({
+            single: async () => {
+              db.userScopedWrite = true;
+              return db.rls === 'deny'
+                ? { data: null, error: { message: 'new row violates row-level security policy for table "shows"' } }
+                : { data: { updated_at: '2026-08-25T00:00:00Z', slug: 'my-show' }, error: null };
+            },
+          }),
+        }),
+      }),
+    }),
   }),
 }));
 
@@ -75,6 +95,8 @@ beforeEach(() => {
   db.ownerId = 'owner-1';
   db.showExists = true;
   db.rpcCalled = false;
+  db.userScopedWrite = false;
+  db.rls = 'allow';
 });
 
 describe('§3.3c — a collaborator cannot write', () => {
@@ -111,6 +133,64 @@ describe('§3.3c — the counterexample: the owner still can', () => {
 
     expect(res.status).toBe(200);
     expect(db.rpcCalled).toBe(true);
+  });
+});
+
+describe('§3.3c — the LEGACY path stays user-scoped, so RLS is its control', () => {
+  // Codex R1 medium: every test above sends `entries`, which exercises only the
+  // service-role path. The route has a SECOND write path at the bottom
+  // (no `entries` → direct `.update()` through the user-scoped client), and it
+  // is closed by a different mechanism: migration 014 dropping "Editor update",
+  // leaving only "Owner update".
+  //
+  // ★ That split is load-bearing and easy to destroy silently. If someone
+  // "simplified" the legacy branch to use the admin client, it would bypass RLS
+  // and reopen non-owner writes — with no owner check anywhere on that path,
+  // before OR after 014 — and every other test here would still pass.
+
+  function legacyRequest() {
+    return new NextRequest('http://localhost/api/shows/update', {
+      method: 'PUT',
+      body: JSON.stringify({
+        id: 'show-1',
+        config: { showInfo: { showName: 'Friday Night' } },
+        // no `entries` → legacy path
+      }),
+    });
+  }
+
+  it('routes the write through the USER-SCOPED client, never the service role', async () => {
+    currentUserId = 'collaborator-1';
+    db.rls = 'deny';
+
+    await PUT(legacyRequest());
+
+    expect(db.userScopedWrite).toBe(true);
+    // The service-role client must not appear on this path at all.
+    expect(db.rpcCalled).toBe(false);
+  });
+
+  it('surfaces an RLS denial as 403 rather than a silent success', async () => {
+    // Post-014, a collaborator's legacy write is refused by row-level security.
+    // The route must report that, not swallow it — §1.1's rule that the app
+    // never claims a save it did not achieve.
+    currentUserId = 'collaborator-1';
+    db.rls = 'deny';
+
+    const res = await PUT(legacyRequest());
+
+    expect(res.status).toBe(403);
+  });
+
+  it('COUNTEREXAMPLE: the owner still succeeds on the legacy path', async () => {
+    // Without this, closing the legacy path to EVERYONE reads as success.
+    currentUserId = 'owner-1';
+    db.rls = 'allow';
+
+    const res = await PUT(legacyRequest());
+
+    expect(res.status).toBe(200);
+    expect(db.userScopedWrite).toBe(true);
   });
 });
 
