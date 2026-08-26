@@ -2773,7 +2773,18 @@ function ChartNavigator({
   const prevPageNumRef = useRef(1);
 
   // ── Chart calibration (realtime chart control, step 1: section rail) ──
-  const [calMode, setCalMode] = useState<'perform' | 'calibrate'>('perform');
+  const [calModeState, setCalMode] = useState<'perform' | 'calibrate'>('perform');
+  // ★ Third instance of ONE defect: /[owner]/[show] re-renders rather than
+  // remounting on a show change, so component state survives it. `tab` and
+  // `reorderMode` were the first two; this is the same trap one level deeper.
+  // An owner in Calibrate who opens a show they only collaborate on kept the
+  // calibration toolbar and overlay, because the entry button is gated on
+  // `calibratable` but every render below reads `calMode` alone.
+  //
+  // Derived under the ORIGINAL name on purpose: it closes all 17 read sites at
+  // once, including the `=== 'perform'` branches, which is what keeps the
+  // navigator rendering normally for a collaborator instead of going blank.
+  const calMode = isOwner ? calModeState : 'perform';
   const [calibration, setCalibration] = useState<ChartCalibration | null>(null);
   // Latest-value mirror of calibration: the async snap reads this AFTER its
   // offscreen render so it matches+applies against the freshest geometry, never
@@ -3442,6 +3453,11 @@ function ChartNavigator({
   }, [drivenBarId, barCal, pageNum]);
 
   const saveCalibration = async (promote: boolean) => {
+    // §3.3c. The overlay that reaches this is now owner-only, but the write is
+    // guarded independently: this is the ONE edit path on the show page that
+    // does not funnel through updateConfig, so the chokepoint refusal there
+    // cannot cover it.
+    if (!isOwner) return;
     if (!calibration || !chartFileId || !sourceHash) return;
     const payload = promote ? verify(calibration) : calibration;
     setSaveState('saving');
