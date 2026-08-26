@@ -368,6 +368,16 @@ export default function Page() {
   const [showId, setShowId] = useState<string | null>(null);
   const [showOwnerId, setShowOwnerId] = useState<string | null>(null);
   const [isOwner, setIsOwner] = useState(false);
+  // Read by updateConfig, which is deliberately ref-stable (deps: []) so that no
+  // mutation callback on the page changes identity. A ref keeps the read-only
+  // gate current without spending that stability. Defaults to refusing: until
+  // the show loads, ownership is unknown, and no edit affordance renders in that
+  // window anyway (every one of them is behind !isReadOnly).
+  const isReadOnlyRef = useRef(true);
+  // Synced in an effect, not written during render — same idiom as bpmConfigRef
+  // below. The one-commit lag is in the SAFE direction: the ref starts refusing
+  // and only relaxes once ownership is known.
+  useEffect(() => { isReadOnlyRef.current = !isOwner; }, [isOwner]);
   const [loadError, setLoadError] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [chartCacheProgress, setChartCacheProgress] = useState<DownloadProgress | null>(null);
@@ -576,6 +586,18 @@ export default function Page() {
     // drag-and-drop (design-ai-op-contract §9.4). The ordering inside
     // withStableIds is deliberate and preserved: slot ids first, so input
     // id-minting runs on top of any cleared slotIds.
+    // ★ §3.3c, the LAST line of defence. Every edit affordance on this page
+    // funnels through here (the comment above already calls this the single
+    // mutation chokepoint), so a read-only viewer who reaches ANY of them —
+    // one missed today, one added tomorrow — mutates nothing. Two affordance
+    // leaks were found in review by walking the UI; this one does not depend on
+    // that walk being complete.
+    //
+    // Refuse rather than apply-then-fail-to-save: useShow blocks persistence for
+    // a read-only viewer, so mutating local state here would show the change
+    // landing and then silently discard it — the app claiming a save it did not
+    // make (§1.1).
+    if (isReadOnlyRef.current) return;
     setConfig((prev) => withStableIds(fn(prev)));
     // §7: undo survives only until the next mutation. Because updateConfig is the
     // single mutation chokepoint, clearing here covers every writer in the app
@@ -1360,7 +1382,10 @@ function DraggableStagePlotView({
   );
 }
 
-function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken, slug, owner, isOwner, onReorder }: { band: BandConfig; setlist: SetlistSong[]; printSections: Record<string, boolean>; showInfo: { bandName: string; eventDate: string; venue: string; showName?: string }; isOffline: boolean; accessToken?: string; slug: string; owner: string; isOwner: boolean; onReorder: (from: number, to: number) => void }) {
+// Exported for tests only — same precedent as SetupSetlistTable below. The
+// view-only gate here has no other executable home: Page is a 6800-line client
+// route that cannot be rendered in isolation.
+export function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken, slug, owner, isOwner, onReorder }: { band: BandConfig; setlist: SetlistSong[]; printSections: Record<string, boolean>; showInfo: { bandName: string; eventDate: string; venue: string; showName?: string }; isOffline: boolean; accessToken?: string; slug: string; owner: string; isOwner: boolean; onReorder: (from: number, to: number) => void }) {
   const colorMap = new Map<string, string>();
   if (band.setlist?.length) {
     band.setlist.forEach((s) => {
@@ -1383,6 +1408,12 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
 
   // Reorder mode
   const [reorderMode, setReorderMode] = useState(false);
+  // ★ EXACTLY the `tab` trap again (see lib/show-tabs): this state survives a
+  // show change, because /[owner]/[show] re-renders rather than remounting. An
+  // owner who leaves Mix in reorder mode and opens a show they only collaborate
+  // on would otherwise keep the drag-and-drop table. Derived rather than reset,
+  // so the guarantee does not depend on remembering to clear it.
+  const reordering = reorderMode && isOwner;
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
@@ -1519,16 +1550,21 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
                     {allRoles.map((r) => <option key={r} value={r}>My Charts: {r}</option>)}
                   </select>
                 )}
+                {/* Owner-only: reordering the run order is an EDIT. §3.3c —
+                    collaborators are view only, and the Mix tab is a surface
+                    they can reach, so the gate lives here and not on the tab. */}
+                {isOwner && (
                 <button
                   onClick={() => setReorderMode(!reorderMode)}
                   className={`px-3 py-1.5 text-xs font-bold rounded transition-colors ${
-                    reorderMode
+                    reordering
                       ? 'bg-black text-white hover:bg-gray-800'
                       : 'bg-gray-100 border border-gray-300 hover:bg-gray-200'
                   }`}
                 >
-                  {reorderMode ? 'Done' : 'Reorder'}
+                  {reordering ? 'Done' : 'Reorder'}
                 </button>
+                )}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2 mb-4 print:hidden">
@@ -1541,7 +1577,7 @@ function MixTab({ band, setlist, printSections, showInfo, isOffline, accessToken
                 </span>
               )}
             </div>
-            {reorderMode ? (
+            {reordering ? (
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                 <SortableContext items={songIds} strategy={verticalListSortingStrategy}>
                   <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden print:hidden">
