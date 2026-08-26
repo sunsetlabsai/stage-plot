@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+// No useRouter, deliberately: every exit from this page must be a document
+// load. See the comment on the post-claim redirect below.
 
 export default function ClaimPage() {
   const [handle, setHandle] = useState('');
@@ -11,7 +12,6 @@ export default function ClaimPage() {
   const [checking, setChecking] = useState(true);
   const [alreadyClaimed, setAlreadyClaimed] = useState<string | null>(null);
   const [claimed, setClaimed] = useState(false);
-  const router = useRouter();
 
   const slug = handle.toLowerCase().replace(/[^a-z0-9-]/g, '');
   const isValid = /^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$/.test(slug);
@@ -39,7 +39,7 @@ export default function ClaimPage() {
       setChecking(false);
     }
     checkProfile();
-  }, [router]);
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();

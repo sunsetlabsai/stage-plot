@@ -1,7 +1,9 @@
 'use client';
 
 import { Suspense, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+// No useRouter: every exit from this page must be a document load, because
+// signing in changes the identity that middleware routes on. See below.
+import { useSearchParams } from 'next/navigation';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { LogoFull } from '@/components/Logo';
 
@@ -19,7 +21,6 @@ function SignInForm() {
   const [step, setStep] = useState<'email' | 'otp'>('email');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const router = useRouter();
   const searchParams = useSearchParams();
   const rawRedirect = searchParams.get('redirect') || '/dashboard';
   // Prevent open redirect — only allow internal paths
@@ -62,7 +63,14 @@ function SignInForm() {
     // Activate any pending collaborator invites
     await fetch('/api/auth/activate-invites', { method: 'POST' });
 
-    router.push(redirect);
+    // A DOCUMENT LOAD, not router.push — same reason as app/claim/page.tsx.
+    // verifyOtp has just changed who this browser is, and `redirect` is
+    // usually /dashboard or /library, both gated by middleware.ts:62 on
+    // exactly that answer. Any cached routing decision made under the previous
+    // identity is now stale, and a client navigation would replay it. `redirect`
+    // is already constrained to an internal path above, so this cannot be an
+    // open redirect.
+    window.location.assign(redirect);
   }
 
   return (
