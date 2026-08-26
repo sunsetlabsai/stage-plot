@@ -67,6 +67,30 @@ describe('internalRedirect', () => {
     });
   });
 
+  describe('schemes that carry an inner origin', () => {
+    // A same-origin blob: passes an origin check — url.origin IS ours — and
+    // then url.pathname is the entire "https://showrunr.ai/id", not a path.
+    // Codex found this on PR #159; without the protocol gate the function
+    // returns an absolute URL while claiming it never does.
+    it('refuses a SAME-ORIGIN blob: URL', () => {
+      expect(internalRedirect(`blob:${ORIGIN}/id`, ORIGIN)).toBe(DEFAULT_REDIRECT);
+    });
+
+    it('refuses an off-origin blob: URL', () => {
+      expect(internalRedirect('blob:https://evil.example/id', ORIGIN)).toBe(DEFAULT_REDIRECT);
+    });
+
+    it('refuses filesystem:', () => {
+      expect(internalRedirect(`filesystem:${ORIGIN}/temporary/x`, ORIGIN)).toBe(DEFAULT_REDIRECT);
+    });
+
+    it.each(['javascript:alert(1)', 'data:text/html,<script>1</script>', 'file:///etc/passwd'])(
+      'refuses %p', (raw) => {
+        expect(internalRedirect(raw, ORIGIN)).toBe(DEFAULT_REDIRECT);
+      },
+    );
+  });
+
   describe('absent or malformed input', () => {
     it.each([null, undefined, ''])('falls back for %p', (raw) => {
       expect(internalRedirect(raw, ORIGIN)).toBe(DEFAULT_REDIRECT);
@@ -79,6 +103,10 @@ describe('internalRedirect', () => {
     const inputs = [
       '/dashboard', '//evil.example', 'https://evil.example', '/\\evil.example',
       '/\t/evil.example', `${ORIGIN}/library`, null, '',
+      // The blob: case belongs HERE specifically — this invariant is the one it
+      // violated, and it was passing for the wrong reason by being absent.
+      `blob:${ORIGIN}/id`, 'blob:https://evil.example/id',
+      `filesystem:${ORIGIN}/temporary/x`, 'javascript:alert(1)',
     ];
     for (const raw of inputs) {
       const out = internalRedirect(raw, ORIGIN);

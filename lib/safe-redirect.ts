@@ -41,6 +41,16 @@ export function internalRedirect(raw: string | null | undefined, origin: string)
     return DEFAULT_REDIRECT;
   }
 
+  // Navigable schemes only, checked BEFORE the origin comparison.
+  //
+  // `blob:` and `filesystem:` URLs carry an inner origin, so a same-origin
+  // `blob:https://showrunr.ai/id` PASSES an origin check — and then its
+  // `pathname` is the whole string `"https://showrunr.ai/id"`, not a path. That
+  // is not an escape (it is still our origin), but it would return an absolute
+  // URL from a function whose contract is "always a path", and a future caller
+  // concatenating it would be the real bug. Found by Codex on PR #159.
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return DEFAULT_REDIRECT;
+
   // The whole check. `url.origin` is what the browser would actually navigate
   // to, so anything that disagrees with ours is off-origin however it was spelt.
   if (url.origin !== origin) return DEFAULT_REDIRECT;
