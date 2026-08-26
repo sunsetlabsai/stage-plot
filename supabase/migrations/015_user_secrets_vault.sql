@@ -100,8 +100,31 @@ begin
 
   v_hint := left(p_key, 7) || '…' || right(p_key, 4);
 
+  -- ── FOR UPDATE is about lock ORDER, not about this read ─────────────────
+  -- The advisory lock above serializes the two RPC paths against each other,
+  -- but it cannot help against a path that never takes it — and the
+  -- `auth.users` CASCADE is exactly that. It arrives as plain SQL and locks
+  -- the user_secrets row directly, then its AFTER DELETE trigger goes for the
+  -- vault row.
+  --
+  -- So without this, the two paths grab the same two objects in OPPOSITE
+  -- order: this function would hold the vault row (from update_secret) and
+  -- want the user_secrets row, while the cascade holds the user_secrets row
+  -- and wants the vault row. That is a cycle, and Postgres resolves cycles by
+  -- killing one side — a deadlock error on a user saving their key.
+  --
+  -- Taking the user_secrets row FIRST makes both paths agree on the order
+  -- (user_secrets, then vault), so the cycle cannot form. On a first-time
+  -- save there is no row and this locks nothing, which is correct: there is
+  -- also nothing for a cascade to be deleting.
+  --
+  -- ⚠ Deliberately NOT a BEFORE DELETE trigger taking the advisory lock, which
+  -- is the obvious-looking fix. A BEFORE DELETE *row* trigger fires after the
+  -- row is already locked, making that path `row -> advisory` while this one
+  -- is `advisory -> row`. That REINTRODUCES the deadlock it was meant to cure.
   select vault_secret_id into v_existing
-    from user_secrets where user_id = p_user_id;
+    from user_secrets where user_id = p_user_id
+    for update;
 
   -- Reuse the existing vault row on Replace so no orphan is created.
   if v_existing is not null
@@ -158,6 +181,16 @@ as $fn$
 declare
   v_count int;
 begin
+  -- SAME lock, SAME order as set_user_secret: advisory first, then the row.
+  -- Without this, Remove and Replace were not serialized against each other at
+  -- all — the advisory lock in set_user_secret only excluded other setters,
+  -- which is half a mutual exclusion and therefore none.
+  --
+  -- Taken BEFORE the delete statement, not in a trigger, precisely so the
+  -- order stays `advisory -> row`. See the note in set_user_secret for why a
+  -- BEFORE DELETE trigger would invert that and deadlock.
+  perform pg_advisory_xact_lock(hashtextextended('user_secrets:' || p_user_id::text, 0));
+
   delete from user_secrets where user_id = p_user_id;
   get diagnostics v_count = row_count;
   return v_count > 0;

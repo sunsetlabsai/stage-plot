@@ -76,10 +76,14 @@ export async function middleware(request: NextRequest) {
     if (!user) {
       const url = request.nextUrl.clone();
       url.pathname = '/sign-in';
-      // Return them where they were going, not to a hardcoded /dashboard.
-      // `pathname` is server-derived and same-origin by construction, so it
+      // Return them where they were going, not to a hardcoded /dashboard —
+      // INCLUDING the query string. Path-only would have quietly dropped it,
+      // which is the difference between honouring the claim this comment makes
+      // and merely appearing to.
+      //
+      // Both parts are server-derived and same-origin by construction, so this
       // cannot carry the off-origin payloads lib/safe-redirect.ts exists for.
-      url.searchParams.set('redirect', pathname);
+      url.searchParams.set('redirect', pathname + request.nextUrl.search);
       return NextResponse.redirect(url);
     }
   }

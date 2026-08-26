@@ -65,6 +65,17 @@ describe('middleware — signed-out visitors are kept out of /dashboard and its 
     expect(location.searchParams.get('redirect')).toBe('/dashboard/settings');
   });
 
+  // Codex R2 Low: the first cut set `pathname` alone, silently dropping the
+  // query string. Nothing under /dashboard reads query params today, so this
+  // broke no feature — it broke the CLAIM, and a comment that says "preserves
+  // the intended destination" while dropping half of it is worse than no
+  // comment, because the next person believes it.
+  it('preserves the query string too, not just the path', async () => {
+    const res = await visit('/dashboard/settings?tab=key&from=email');
+    const location = new URL(res.headers.get('location')!);
+    expect(location.searchParams.get('redirect')).toBe('/dashboard/settings?tab=key&from=email');
+  });
+
   // The redirect param is server-derived here, so it cannot carry the
   // off-origin payloads lib/safe-redirect.ts exists to defeat. Pinned anyway:
   // this is the value that gets handed to that guard downstream.
