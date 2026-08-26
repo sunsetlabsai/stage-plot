@@ -562,7 +562,7 @@ New top-level route, authenticated only.
 
 - "+ Add Song" opens a text input with typeahead against the owner's song library (via `GET /api/songs`, available to collaborators via admin client with auth check)
 - Selecting a library song adds the `songId` to local setlist state (persisted on next save via `rpc_save_show`)
-- Typing a new title that doesn't match any library song: **owner sees "Create & Add"** button (calls `POST /api/songs` to create the song, then adds the returned `songId` to local setlist state — persisted on next save). **Editors cannot create** — they see "Song not found. Ask the show owner to add it to the library."
+- Typing a new title that doesn't match any library song: **owner sees "Create & Add"** button (calls `POST /api/songs` to create the song, then adds the returned `songId` to local setlist state — persisted on next save). **Collaborators cannot create** — they see "Song not found. Ask the show owner to add it to the library." *(amended 2026-08-25: was "Editors cannot create"; §3.3c)*
 - Inline editing of key/lead/notes in the setlist sets per-show overrides
 - "Reset to default" clears overrides
 

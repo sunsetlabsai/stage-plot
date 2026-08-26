@@ -569,7 +569,7 @@ the public route and propose deleting it.
 references `auth.users` with no owner exclusion, so this already works and needs
 no change. "Owner" is a property of a *show*, not a badge on a *person*.
 
-**⚠ TWO OTHER DESIGN DOCS ASSUME `editor` EXISTS. Enumerated, NOT edited here.**
+**⚠ TWELVE OTHER DOCUMENTS ASSUMED `editor` EXISTS. ALL ARE AMENDED.**
 This PR deliberately does not touch them — §10's rule is that one document does
 not silently amend another, and v1.8's changelog records that exact defect. They
 are listed so the ruling does not have to be rediscovered later:
@@ -581,15 +581,30 @@ to **9**.
 
 | Pass | Search used | Found | Still missed |
 |---|---|---|---|
-| 1 | `grep editor`, eyeballed | 2 | 8 |
-| 2 | `grep 'editors \|an editor\|show editor'` | 6 | 4 |
-| 3 (Codex R2) | read the docs for the **claim** | 9 | 1 |
-| 4 | **regex on the CLAIM**, not the word — `collaborators? (can\|may) (edit\|write\|modify\|update)`, `owner[ -/]?or[ -/]?editor`, `can edit .*someone else` | **10** | — |
+| 1 | `grep editor`, eyeballed | 2 | 10 |
+| 2 | `grep 'editors \|an editor\|show editor'` | 6 | 6 |
+| 3 (Codex R2) | read the docs for the **claim** | 9 | 3 |
+| 4 | regex on the CLAIM, not the word | 10 | 2 |
+| 5 (Codex R3) | — | 12 | — |
+| **6** | **ENUMERATE, then READ.** Every `docs/*.md` containing `collaborator\|editor` (**26 files**), every hit triaged by hand | **12 confirmed** | — |
 
-**Pass 4 was written only after pass 3 proved the method wrong, and it immediately
-found three more sites** — including `design-alpha-ready.md:162`, which drafts 1
-and 2 had both explicitly cleared as *"CHECKED, UNAFFECTED"*. **A disposition of
-"checked" is worth no more than the search behind it.**
+**Each of passes 1–4 raised confidence while the blind spot stayed roughly the
+same size.** Pass 4's regex — the one this section previously held up as the
+lesson — still missed two, and for instructive reasons:
+
+- `backlog-show-freeze.md:7` says *"Collaborators … **can keep editing**"*. Pass 4
+  matched `collaborators? (can|may) (edit|...)` and **assumed adjacency**; one
+  word between `can` and `editing` defeated it.
+- `design-song-library.md:565` says *"**Editors cannot create**"*. Pass 4 **filtered
+  out lines containing `cannot`** to suppress already-amended text — and that
+  noise filter **deleted a real finding**. ★ A search's exclusions are part of the
+  search; an exclusion tuned to hide known-good text will eventually hide
+  unknown-bad text.
+
+**⇒ Pass 6 stopped pattern-matching.** For a bounded corpus — 26 files — the
+reliable method is *enumerate the surface, then read every hit*. Slower than a
+regex, and the first method here whose completeness does not depend on having
+guessed the phrasing in advance.
 
 **★ Why pass 2 still missed three.** Every variant it searched contains the *word*
 `editor`. The three it missed do not say it where it matters:
@@ -607,9 +622,12 @@ each pass's confidence rose while its blind spot stayed exactly the same size.
 search must be shown to be able to *find the counterexample*, which `grep editor`
 never could.
 
-**The ten below are what four passes plus an adversarial review produced.** That
-is evidence of diligence, not proof of completeness. **The reproducible search is
-pass 4's regex — re-run it, do not trust this list.**
+**The twelve below survived pass 6.** The reproducible check is pass 6's method,
+not a pattern: `for f in docs/*.md; do grep -ciE 'collaborator|editor' $f; done`,
+then read every hit in every file that returns non-zero. **14 of the 26 files are
+false positives** — "calibration editor", "setlist editor", "text editor", "AI
+collaborator" as a feature name — which is exactly why keyword counts could never
+settle this.
 
 | Document | What it assumes | Disposition |
 |---|---|---|
@@ -618,6 +636,9 @@ pass 4's regex — re-run it, do not trust this list.**
 | `design-song-library.md:40, 43, 45, 529, 580, 599, 627, 636, 642, 644` | **⛔ Draft 2's disposition here was MATERIALLY WRONG** (Codex R2). It said *"only line 40 is stale, substance is already correct"*. Line 40 was indeed fine — but the doc **also** said *"**Owner + editors** can add/remove/reorder songs"* (`:43`), *"verifying caller is **owner or editor**"* (`:529`), *"`/api/shows/update`: **owner-or-editor** verification"* (`:580`), plus an owner-vs-editor gate and four editor test cases | **✅ ALL TEN AMENDED IN THIS PR.** Checking one line and generalising to the document is the same error as keyword-sweeping — see the process note above |
 | `design-payments.md:49, 195` | *"Authenticated collaborators can edit"*; the whole write-gate rationale is built on *"a collaborator editing someone else's show is gated by the owner's plan"* | **✅ AMENDED IN THIS PR.** The scenario **cannot occur** — the acting user on any write IS the owner. The *rule* ("resolve against the show owner") is kept, since it is now trivially true rather than wrong and is the right invariant if delegated writes ever return; the *justification* is deleted |
 | `design-retire-drive.md:86` | An `Owner / editor` principal row in the Config-tab reachability table | **✅ AMENDED IN THIS PR** — row narrowed to `Owner`. Its `isOwner`/`isEditor` references at `:79, :89, :101` are **left intact deliberately**: they cite a live code variable that chunk 6 removes, and falsifying a code citation to match an unbuilt state would make the table wrong about the current tree |
+| `backlog-show-freeze.md:7, 13` | *"Collaborators … **can keep editing** the same show indefinitely"*; *"Collaborators also cannot edit after the show date"* | **✅ AMENDED IN THIS PR.** ★ **The backlog item itself is unchanged** — a single owner editing one show forever IS the entire loophole; removing collaborators narrows who triggers it, not whether it happens. The freeze rule for collaborators is now **moot**: they cannot edit at any time |
+| `design-chart-library.md:313` | *"**Editors and viewers** see chart pills (read-only) but NOT the upload/delete controls"* | **✅ AMENDED IN THIS PR** — one collaborator kind, read-only. ★ **This doc had chart writes owner-only from the start**, which is precisely why `003`'s `chart_library` policies are owner-only and the old `charts` editor grants died with that table |
+| `design-supabase-backend.md:318, 320, 331-338, 521, 601, 856` | **A second, deeper wave in an already-listed doc**: invite copy *"email + role (editor/viewer)"*, *"Sign in to edit"*, *"they get edit access"*, and **collaborator chart upload** — *"An editor collaborator can upload charts to any song in a show they're invited to. Same UX as the owner."* | **✅ ALL AMENDED IN THIS PR.** The chart-upload line is the single clearest statement of the capability Graham ruled out — **and it sat in a document this table had already marked handled.** Listing a doc as "amended" is not the same as having amended all of it |
 | `uat-readiness-gaps.md:195, 244` | Two gap scenarios framed on editors | **✅ AMENDED IN THIS PR — and one of them REFRAMED, not dissolved.** Gap 11 genuinely narrows: the editor-specific half is gone, a residual (`songKey`-less entries still 400 the whole save) survives. **Gap 16 does NOT dissolve** — see the correction below |
 | `design-alpha-ready.md:162, 164, 389` | **⛔ Marked "CHECKED, UNAFFECTED" by drafts 1 AND 2 — WRONG BOTH TIMES.** `:162` asserts outright: *"**Editors can update shows they don't own** (via RLS `is_show_collaborator` policy)"* | **✅ AMENDED IN THIS PR.** The premise is deleted; **the RULE it justified is kept and must not be relaxed** — resolving collision scope from `show.owner_id` rather than `auth.uid()` is what makes the check correct *independent of who acts*, which is exactly why it outlives the principal it was written for |
 | `design-roadmap-key-resolution.md:302` | *"an editor action on the chart itself … a builder-editor concern"* | **✅ CHECKED, FALSE POSITIVE.** "Editor" here means the chart-editing **UI**, not the collaborator role. Listed so the next sweep does not re-flag it |

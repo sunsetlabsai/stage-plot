@@ -315,9 +315,9 @@ For Graham specifically, Google OAuth is also available (you're already signed i
 4. Session persists in browser (Supabase handles refresh)
 
 **Collaborator (invited):**
-1. Owner enters collaborator's email + role (editor/viewer) in show settings
+1. Owner enters collaborator's email in show settings *(amended 2026-08-25: was "email + role (editor/viewer)" — there is no role to choose; §3.3c)*
    → Inserts `show_collaborators` row with `email`, `role`, `user_id = null`, `accepted_at = null`
-2. Collaborator opens the show's slug URL → sees read-only view → "Sign in to edit" prompt
+2. Collaborator opens the show's slug URL → sees the show *(amended 2026-08-25: was "read-only view → 'Sign in to edit' prompt". Signing in does NOT grant editing — it makes the show appear on their dashboard; §3.3c)*
 3. Enters email → OTP sent → enters code → Supabase Auth user created (if new) → session established
 4. **Invite activation (R3 Finding #2/5):** After successful OTP verification, the app calls a server-side API route (`POST /api/auth/activate-invites`) that:
    ```sql
@@ -329,13 +329,13 @@ For Graham specifically, Google OAuth is also available (you're already signed i
      and user_id is null;
    ```
    This runs via the admin client (service role) because the collaborator can't update their own row via RLS until `user_id` is set (chicken-and-egg). Runs once at sign-in time, idempotent.
-5. RLS policies now match on `user_id = auth.uid()` → collaborator has editor/viewer access
+5. RLS policies now match on `user_id = auth.uid()` → collaborator has **read access, and the show lists on their dashboard** *(amended 2026-08-25: was "editor/viewer access"; §3.3c)*
 6. Collaborator is associated with that show permanently (until owner removes them)
 
 **Anonymous viewer (shared link):**
 1. Owner shares slug URL: `showrunr.app/loosely-covered`
 2. Recipient opens link → no auth required → show loads read-only
-3. If they want to edit, they sign in → if they're a listed collaborator, they get edit access
+3. Signing in does not confer editing. **Only the owner writes** *(amended 2026-08-25: was "If they want to edit, they sign in → if they're a listed collaborator, they get edit access"; §3.3c)*
 
 ### RLS Policies
 
@@ -518,7 +518,7 @@ This is the "not bound to one local system" solve. Graham signs in on any device
 
 Owner clicks "Share" on a show → modal with:
 1. **Slug URL** (copy to clipboard): `showrunr.app/loosely-covered` — anyone can view
-2. **Invite collaborator**: email + role (editor/viewer) → collaborator signs in via OTP when they open the show
+2. **Invite collaborator**: email → collaborator signs in via OTP when they open the show *(amended 2026-08-25: was "email + role (editor/viewer)"; §3.3c)*
 3. **Current collaborators**: list with remove option
 
 No publish step. The show is always live at its slug URL. Every save is instantly visible to anyone who loads the slug.
@@ -598,7 +598,7 @@ The cache key changes slightly:
 
 **Collaborator chart upload:**
 
-An editor collaborator can upload charts to any song in a show they're invited to. Same UX as the owner. The `uploaded_by` column tracks who added what.
+**⛔ DELETED 2026-08-25 — collaborator chart upload is exactly what the roles ruling removed.** This read: *"An editor collaborator can upload charts to any song in a show they're invited to. Same UX as the owner."* Graham ruled it a bad trade — a collaborator emails the chart to the owner, or becomes an owner themselves (§3.3c). **Only the owner uploads.** The `uploaded_by` column still tracks who added what, and becomes trivially the owner.
 
 ### What Gets Deleted (Drive Integration)
 
@@ -853,7 +853,7 @@ Net dependency count: unchanged (add 2, remove 1, but Google OAuth was hand-roll
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
 | 1 | **CRITICAL** | RLS `using (true)` on shows/charts exposes full-table enumeration to anonymous clients | Anonymous slug lookups moved to a Next.js API route using the service role admin client server-side. RLS on `shows` and `charts` now scoped to owner + collaborators only. No anonymous browser-to-Supabase queries. |
-| 2 | **CRITICAL** | Storage write security underspecified — any authenticated user could write to any path | Chart uploads go through a server-side API route that validates ownership/editor role, constructs the Storage path server-side, and uploads using the service role key. Browser never writes to Storage directly. |
+| 2 | **CRITICAL** | Storage write security underspecified — any authenticated user could write to any path | Chart uploads go through a server-side API route that validates **ownership**, constructs the Storage path server-side, and uploads using the service role key. Browser never writes to Storage directly. *(Amended 2026-08-25: was "ownership/editor role"; §3.3c.)* |
 | 3 | **HIGH** | `updated_at` set from client clock — clock skew can lose data in offline merge | `updated_at` now set by database trigger (`moddatetime`), never by client. Save operation returns server timestamp via `.select('updated_at')`. Offline conflict detection compares server-issued timestamps only. |
 | 4 | **HIGH** | Chart linkage on `song_title` is brittle — titles are mutable and can repeat | Charts now link via `song_id` (stable UUID from `withStableIds()`). With Supabase as primary storage, song IDs are persisted and never regenerated. Unique constraint is `(show_id, song_id, role)`. |
 | 5 | **HIGH** | Cache invalidation key references `updatedAt` but charts table had no such column | Added `updated_at` column to charts table with `moddatetime` trigger. Cache key is `{chartId}/{updatedAt}`. |
