@@ -7,12 +7,19 @@ started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
 does not get to exempt itself from its own subject.)*
 Version: **v1.9** (**v1.9 = ★ the ROLES MODEL, ruled 2026-08-25: collaborators are
-VIEW ONLY and the `editor` role is DELETED (new §3.3c); BYOA is owner-only in
-practice, so §4.1's "every user, owner or collaborator" is corrected; the §8.1
-spike is RESCOPED to owner-count cardinality; and two previously unrecorded facts
-about the live system are written down — link-viewing is a service-role bypass
-rather than RLS, and collaborator membership buys discoverability rather than
-access**) (v1 = pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
+VIEW ONLY and the `editor` role is DELETED (new §3.3c); **conductor == owner for
+now**, delegate deferred to backlog as session state rather than a role;
+BYOA is owner-only in practice, so §4.1's "every user, owner or collaborator" is
+corrected; the §8.1 spike is RESCOPED to owner-count cardinality; and two
+previously unrecorded facts about the live system are written down — link-viewing
+is a service-role bypass rather than RLS, and collaborator membership buys
+discoverability rather than access. **v1.9 folded THREE Codex R1 findings on its
+own first draft: (a) the chart RLS policies it called "live" died with `drop table
+charts` in migration 003 — a "live today" claim verified against the migration
+that CREATED a table rather than the latest one that touched it; (b) the role
+inventory missed 3 sites (`is_show_collaborator`'s body, the dashboard list
+select, the `(role)` badge); (c) `/api/shows/update` is PUT, not POST**) (v1 =
+pre-Codex, v1.1 = Codex R1–R8 on #150, v1.2 = RBAC shelved +
 Q5 reversed, **v1.3 = Codex R1 on #152: Q5 reversal propagated to the paired doc,
 `ADMIN_SECRET` retirement specified for all four consumers (§3.3b)**, **v1.4 = Codex R2 residual: per-route reject AND accept cases for all four**, **v1.5 = ⛔ §3 `admin_config` RULED OUT 2026-08-25 — marker only**, **v1.6 = Codex R4 High: §9 chunk-1 tests were still an obsolete contract; rewritten, plus a blast-radius index**, **v1.7 = ⛔ THE RULED-OUT CONTENT IS DELETED, not marked**, **v1.8 = fold Codex R5: the chunk-5 completion check was an unscoped repo-wide `grep` that could never pass (§6.3, §9); and two claims that this one-file PR amends other files — the paired doc (§3.2, §7, §9) and `design-owner-onboarding.md`, which was listed as "corrected" at v1.3 and never was (§10)**)
 
@@ -429,23 +436,40 @@ three layers — schema, RLS, and application code.** Enumerated in full, becaus
 the failure mode this document exists to end (§2.1) is a change that lands in one
 layer and is called done:
 
-| Layer | Site | What an `editor` can do now |
+| Layer | Site | What it does with `role` |
 |---|---|---|
 | Schema | `001_initial_schema.sql:39` | `role text not null check (role in ('editor','viewer'))` |
-| RLS | `002_fix_rls_recursion.sql:39` `"Editor update"` | **UPDATE `shows`** |
-| RLS | `002_fix_rls_recursion.sql:53` `"Chart insert"` | create charts |
-| RLS | `002_fix_rls_recursion.sql:57` `"Chart update"` | modify charts |
-| RLS | `002_fix_rls_recursion.sql:61` `"Chart delete"` | **DELETE charts** |
-| **Code** | `app/api/shows/update/route.ts:61` | `if (!collab \|\| collab.role !== 'editor') → 403`. **A service-role route** — it reads via `getSupabaseAdmin()`, so RLS is bypassed and **this check IS the control.** Dropping the RLS policies alone does NOT close this path. |
-| **Code** | `app/[owner]/[show]/page.tsx:521` | `if (collab?.role === 'editor') isEditorFlag = true` → drives `setIsEditor`, which gates edit affordances in the show UI |
+| RLS | `002_fix_rls_recursion.sql:39` `"Editor update"` | **UPDATE `shows`.** The ONLY surviving `'editor'` grant — see the correction below |
+| RLS helper | `002_fix_rls_recursion.sql:15` | `is_show_collaborator(p_show_id uuid, p_role text default null)` — the function **body reads `role`**. Dropping the column breaks it, and BOTH policies that call it |
+| **Code** | `app/api/shows/update/route.ts:61` | `if (!collab \|\| collab.role !== 'editor') → 403`. **A service-role route** (`getSupabaseAdmin()`), so RLS is bypassed and **this check IS the control** |
+| **Code** | `app/[owner]/[show]/page.tsx:521` | `if (collab?.role === 'editor') isEditorFlag = true` → drives `setIsEditor`, gating edit affordances |
+| **Code** | `app/api/shows/route.ts:45, :74` | Dashboard list **selects and returns** `role` |
+| **Code** | `app/dashboard/page.tsx:16, :290` | Types it (`role?: string`) and **renders it as a visible badge** — `(editor)` / `(viewer)` next to the show |
 
-**★ The application layer is the one that matters most, and it is the one a
-migration-only reading of this section would miss.** `POST /api/shows/update`
-authorizes through the *service role*, not RLS. If the migration drops `role`
-while that route still reads `collab.role`, the comparison evaluates against
-`undefined`, the guard returns 403 for every collaborator — which is the *correct*
-outcome by accident, but leaves dead code asserting a concept that no longer
-exists. **Both code sites are part of chunk 6, not follow-up work.**
+**⛔ CORRECTION, Codex R1 on this PR — the first draft of this table was STALE and
+listed four chart policies that no longer exist.** `002_fix_rls_recursion.sql:53-64`
+does create `"Chart insert/update/delete"` with `is_show_collaborator(show_id,
+'editor')` — but **`003_chart_library.sql:13` does `drop table charts`**, and
+dropping a table drops its policies with it. The replacement, `chart_library`, was
+created **owner-only from the start** (`003:58-68`, all three write policies are
+`auth.uid() = owner_id`). **There is no editor grant on charts and has not been
+since migration 003.** A chunk-6 migration following the first draft literally
+would have targeted a table that does not exist.
+
+★ This is the §2.1 defect committed inside the document that exists to end it: the
+inventory was built by reading 001 and 002 and **never checking whether a later
+migration superseded them.** The rule that would have caught it — *state the
+search that establishes a negative* (§2) — applies to positives too. **Any claim
+that a policy is "live today" must be verified against the LATEST migration that
+touches its table, not the one that created it.**
+
+**★ The application layer matters most, and a migration-only reading misses it.**
+`PUT /api/shows/update` authorizes through the *service role*, not RLS — so
+dropping the RLS grant alone does **not** close that path. If the migration drops
+`role` while the route still reads `collab.role`, the comparison evaluates against
+`undefined` and returns 403 for every collaborator: the *correct* outcome by
+accident, on dead code asserting a concept that no longer exists. **All four code
+sites are chunk 6, not follow-up.**
 
 **Measured before ruling, 2026-08-25:** `select role, count(*) … from
 show_collaborators group by role` returned **NO ROWS** — the table is *entirely
@@ -457,34 +481,58 @@ with a date on it, not a standing fact.
 constraint, so a narrowed constraint would be rejected by any surviving `'editor'`
 row — convert first, then narrow, even though the count is currently zero:
 
-1. **Code first, schema last** — the reverse order leaves a window where the
-   route reads a column that no longer exists.
+1. **Code first, schema last** — the reverse order leaves a window where live
+   routes read a column that no longer exists.
    - `app/api/shows/update/route.ts:61` — the whole `if (show.owner_id !==
      user.id)` block collapses to a 403. A non-owner cannot update a show.
    - `app/[owner]/[show]/page.tsx:521` — the collaborator lookup goes away and
      `isEditorFlag` derives from ownership alone. **Check whether `isEditor`
      survives as a distinct flag at all** — if it becomes `=== isOwner`
      everywhere, collapse the two rather than leaving a synonym.
+   - `app/api/shows/route.ts:45, :74` — drop `role` from the select and from the
+     returned object.
+   - `app/dashboard/page.tsx:16, :290` — drop the field from the type and the
+     `(role)` badge from the render. **The badge is the user-visible part of this
+     change**: collaborators currently see `(viewer)` next to shared shows. With
+     one legal value it conveys nothing, so it goes rather than becoming a
+     constant label.
 2. `update show_collaborators set role = 'viewer' where role = 'editor';`
    (Currently a no-op — the table is empty — but the migration must not *assume*
    that; see the measurement note above.)
-3. Drop the four `'editor'` RLS policies. **`"Chart insert/update/delete"` must be
-   RECREATED owner-only, not merely dropped** — each is `is_show_owner(show_id) or
-   is_show_collaborator(show_id, 'editor')`, so dropping alone removes **the
-   owner's own grant**, which rides the same policy. This is the single most
-   likely way to break this migration.
-4. Then either narrow the check to `('viewer')` or **drop `role` entirely**.
-   **Recommendation: drop the column.** A `NOT NULL` column with one legal value
-   carries no information, and leaving it invites a future `'editor'` to be
-   re-added by someone reading the constraint as a menu.
+3. **Drop `"Editor update"` on `shows`** (`002:39`). It is the **only** surviving
+   `'editor'` grant. *(The chart policies died with `drop table charts` in 003 —
+   see the correction above. There is nothing to recreate.)*
+4. **Then fix `is_show_collaborator` — and ORDER MATTERS.** Its body reads `role`
+   (`002:15`), so the column cannot be dropped while it stands. Postgres will not
+   let the function be dropped while a policy depends on it either, so:
+   **drop the dependent policies first → then replace the function → then drop the
+   column.** `p_role` should be removed from the signature rather than left as an
+   ignored parameter; a parameter that silently does nothing is the next reader's
+   trap. Note this is a **signature change**, so `create or replace` is not enough
+   — `drop function is_show_collaborator(uuid, text)` and recreate as `(uuid)`.
+   **`"Collaborator read"` on `shows` calls it and must be recreated against the
+   new signature in the same migration.**
+5. Then **drop `role` entirely.** *(The alternative — narrowing the check to
+   `('viewer')` — is rejected: a `NOT NULL` column with one legal value carries no
+   information, and leaving it invites a future `'editor'` to be re-added by
+   someone reading the constraint as a menu.)*
 
 **Tests this chunk must ship** (§0 invariant 3 — nothing is settled without
 something exercising it):
-- A collaborator **cannot** update a show via `POST /api/shows/update` → 403.
-- An **owner** still can → 200. *(The counterexample: a migration that drops the
-  chart policies without recreating them passes the first test and fails this
-  one. Without it, over-deletion reads as success.)*
-- An owner still can insert/update/delete charts on their own show.
+- A collaborator **cannot** update a show via **`PUT /api/shows/update`** → 403.
+  *(The method is `PUT`, not `POST` — `app/api/shows/update/route.ts:21`. Named
+  because a test written against the wrong verb passes for the wrong reason:
+  the route 405s and the assertion still sees "not 200".)*
+- An **owner** still can → 200. **This is the counterexample test**: a migration
+  that over-deletes — dropping `"Collaborator read"` without recreating it, or
+  breaking the helper — passes the first test and fails this one. Without it,
+  over-deletion reads as success.
+- A collaborator can still **READ** a show they were invited to, and it still
+  appears on their dashboard. *(§3.3c's whole point is that membership survives as
+  discoverability. A migration that removes the role by removing the membership
+  would pass every other test here.)*
+- An owner can still insert/update/delete rows in **`chart_library`** (not
+  `charts` — it does not exist).
 - The show UI exposes no edit affordance to a collaborator.
 
 **★ Two facts about the current system that this document has never recorded.**
@@ -526,13 +574,52 @@ This PR deliberately does not touch them — §10's rule is that one document do
 not silently amend another, and v1.8's changelog records that exact defect. They
 are listed so the ruling does not have to be rediscovered later:
 
-| Document | What it assumes | Effect of §3.3c |
-|---|---|---|
-| `design-conductor-ux-polish.md:93-97, 140-141` | Builds a **deliberate owner-vs-editor asymmetry** for BPM-in-show: *"A show editor can edit the in-show … the BPM control is gated on `isOwner` — editors do not see it … editors keep per-show `key`/`lead`"* | The asymmetry **collapses**. With no editors, "gated on `isOwner`" and "not gated" describe the same population. The reasoning is not wrong, it is **moot** — and it SIMPLIFIES that design rather than blocking it |
-| `design-alpha-ready.md:164, 389` | *"an editor's collision check would search the wrong namespace"*; owner-namespacing collision resolves `owner_id` from the show row, not the session | **Already correct and unaffected.** It resolves from `show.owner_id` precisely so it does not depend on who is editing. Listed only to record that it was checked, not to imply a change |
+**⛔ The first draft of this table listed TWO documents. A repo-wide sweep found
+SIX.** Recorded as a process note, not just a correction: the first pass grepped
+`editor` and eyeballed the hits; the complete pass grepped the *concept* — `editors
+`, `an editor`, `show editor` — across all of `docs/`. **Enumerating by keyword
+found less than enumerating by claim.**
 
-**⇒ Only `design-conductor-ux-polish.md` needs an edit, and only if that design
-is still unbuilt.** Graham's call whether that rides chunk 6 or a separate doc PR.
+| Document | What it assumes | Disposition |
+|---|---|---|
+| `design-conductor-ux-polish.md:93-97, 140-141` | A **deliberate owner-vs-editor asymmetry** for BPM-in-show: *"editors keep per-show `key`/`lead`, but song-level tempo stays owner-only"* | **✅ AMENDED IN THIS PR.** The asymmetry collapses; the `isOwner` gate itself was already correct. See below |
+| `design-supabase-backend.md:262, 352, 912` | The most direct contradiction: *"Editor has full show update access, same as owner minus collaborator management and deletion … editors are trusted collaborators (bandmates, sound engineers), not restricted guests. RLS is correct as-is."* | **⚠ STALE, but already subordinated** — it carries a `⚠ PARTIALLY BUILT — read design-single-backend.md first` banner and a §10 supersession notice. **Not edited here.** Its tier table is now wrong in substance and should be corrected when that doc is next opened |
+| `design-song-library.md:40` | *"All collaborators (editor + viewer): Read-only … If an editor needs a song that doesn't exist, they ask the owner"* | **⚠ SUBSTANCE IS ALREADY CORRECT** — it says collaborators are read-only, which is exactly the new model. Only the `(editor + viewer)` enumeration is stale. **One-line fix, deferred** — no behavioural claim changes |
+| `uat-readiness-gaps.md:195, 244` | Two gap scenarios framed on editors: *"locks an editor out of saving anything"*, *"Two editors at soundcheck: last write wins"* | **⚠ AFFECTED — the second may DISSOLVE.** Concurrent-editor write contention cannot occur if only the owner writes. **Not edited here** (a gaps list is not a spec), but gap 244 should be re-evaluated rather than carried forward |
+| `design-alpha-ready.md:164, 389` | *"an editor's collision check would search the wrong namespace"* | **✅ CHECKED, UNAFFECTED.** It resolves `owner_id` from the show row precisely so it does not depend on who is editing |
+| `design-roadmap-key-resolution.md:302` | *"an editor action on the chart itself … a builder-editor concern"* | **✅ CHECKED, FALSE POSITIVE.** "Editor" here means the chart-editing **UI**, not the collaborator role. Listed so the next sweep does not re-flag it |
+
+**⇒ Only `design-conductor-ux-polish.md` is amended in this PR.** The first draft
+deferred even that on §10 grounds. That was wrong: §10's rule exists so a document
+is not *silently* amended, and the defect v1.8 records is an amendment **claimed
+but never made**. Shipping v1.9 while knowingly leaving a contradicting document
+would be the §2.1 pattern again.
+
+**The other three affected documents are deliberately NOT edited**, and the line
+is drawn on **blast radius, not effort**: the conductor doc's asymmetry is
+reasoning that a builder would *act on*, so a stale version misdirects work.
+`design-supabase-backend.md` is already banner-flagged and superseded;
+`design-song-library.md`'s substance is already right; `uat-readiness-gaps.md` is
+a findings list, not a spec. **Each is named above with its disposition so this
+is a scoping decision on record rather than an omission.** They are Graham's call
+whether to fold into chunk 6 or leave until those documents are next opened.
+
+**The conductor ruling itself, Graham 2026-08-25:**
+
+> *"we either just make that a realtime delegate or we just for now 'presume'
+> it's the 'owner.' The conductor, to some degree, will own the show anyway. Just
+> nice to be able to say 'hey, here you go, you lead/direct this song or set' but
+> not required."*
+
+**⇒ RULED: conductor == owner, for now.** No new principal, no column, nothing
+added to the tier table in §3.3a.
+
+**★ The delegate idea is BACKLOG, and the distinction is load-bearing.** "Hand
+this song to someone to lead" is **session state — transient, per-song — not a
+permission tier.** If it is ever built, it is built as ephemeral realtime
+delegation layered over an existing owner relationship. **Building it as a stored
+`role` column would recreate the exact `editor` mistake this section deletes.**
+Recorded here so the next reader does not reach for the obvious schema.
 
 ## 4. BYOA → `user_secrets` — the §14 re-spec
 
@@ -822,7 +909,7 @@ table nothing reads.
 | 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display, **and the `/dashboard/settings` surface itself** | **independent** — see the note below |
 | 4 | **Settings overlay** (§4.3) | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated | depends on chunk 3 |
 | 5 | **Remove `redis`** | dependency removal, `REDIS_URL` retirement | depends on **0–2** |
-| 6 | **Collaborator view-only** (§3.3c) | migration: convert any `'editor'` row to `'viewer'`, drop the four `'editor'` RLS policies, **recreate chart insert/update/delete owner-only**, then drop `role`. Plus tests pinning that a collaborator cannot write | **independent** — touches no Redis and no `user_secrets` |
+| 6 | **Collaborator view-only** (§3.3c) | **Code first**: 4 sites (`shows/update` guard, show-page `isEditor`, dashboard list select + `(role)` badge). **Then migration**: convert any `'editor'` row, drop `"Editor update"`, drop→recreate `is_show_collaborator` without `p_role` (recreating `"Collaborator read"` with it), then drop `role`. Plus the counterexample tests in §3.3c | **independent** — touches no Redis and no `user_secrets` |
 
 **⛔ Two dependency corrections at v1.7.** (1) **Chunk 3 no longer depends on
 chunk 1** — revised chunk 1 does not create `/dashboard/settings`; it re-auths

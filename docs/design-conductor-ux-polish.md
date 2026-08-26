@@ -90,12 +90,16 @@ existing `TapTempo` component, wired to a song-table write:
   it implements PUT only, and Library writes via `method: 'PUT'`; **not** PATCH) → on success,
   patch the local `SetlistSong.bpm` so Perform reads it immediately (no reload).
 - **Owner-only control (Codex R1 HIGH-1).** `/api/songs/update` is owner-scoped — it verifies
-  `songs.owner_id === user.id` and returns 404 otherwise. A show **editor** can edit the in-show
-  setlist (`key`/`lead`, per-show config) but **cannot** mutate the owner's canonical song row. So
-  the BPM control is **gated on `isOwner`** — editors do not see it (no silent "control shown,
-  write 404s"). This is a deliberate asymmetry: editors keep per-show `key`/`lead`, but song-level
-  tempo stays owner-only. Letting editors mutate canonical owner-library tempo would be a separate,
-  deliberate RBAC widening (endpoint + auth change) — explicitly **out of scope** here (Q4 fence).
+  `songs.owner_id === user.id` and returns 404 otherwise. So the BPM control is **gated on
+  `isOwner`** (no silent "control shown, write 404s").
+
+  **⛔ AMENDED 2026-08-25 by the roles ruling — `design-single-backend.md` §3.3c (v1.9).** This
+  bullet previously described a deliberate owner-vs-**editor** asymmetry: *"editors keep per-show
+  `key`/`lead`, but song-level tempo stays owner-only."* **That asymmetry no longer exists.**
+  Collaborators are **VIEW ONLY** and the `editor` role is deleted, so there is no principal who
+  can edit a show but not the song row. **The `isOwner` gate is unchanged and still correct** — what
+  is deleted is the reasoning that framed it as a *trade-off between two writing populations*. It is
+  now simply: only the owner writes. Nothing to widen, no RBAC fence to hold.
 - **Library-linked songs only** (`songId` present). Inline/legacy setlist songs (no `songId`) have
   no canonical row to write — **omit the control** for them (resolved Q3). They keep falling to the
   `manual` rung (the honest floor).
@@ -137,8 +141,10 @@ covers create/override.
   falling to the `manual` rung.
 - **Q4 — scope fence → confirmed.** This pass is the 3 items only; per-show tempo *override* stays
   out of scope.
-- **Owner-only authorization (Codex R1 HIGH-1).** The BPM control is gated on `isOwner` — editors
-  don't see it. `/api/songs/update` is owner-scoped; widening it to editors is out of scope (§3, Q4).
+- **Owner-only authorization (Codex R1 HIGH-1).** The BPM control is gated on `isOwner`.
+  `/api/songs/update` is owner-scoped. *(Amended 2026-08-25: previously read "editors don't see it
+  … widening it to editors is out of scope". There are no editors — collaborators are view-only per
+  `design-single-backend.md` §3.3c. The gate stands; the editor framing is deleted.)*
 - **Method = PUT (Codex R1 HIGH-2).** The endpoint implements `PUT` only (Library writes via PUT);
   the spec calls `PUT /api/songs/update`, not PATCH.
 - **Add-time bpm threading (Codex R1 MEDIUM).** `AddSongFromLibrary` must thread `bpm` through so an
