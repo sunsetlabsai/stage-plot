@@ -76,6 +76,28 @@ begin
     raise exception 'key is too short to store safely';
   end if;
 
+  -- ── Serialize every mutation of ONE user's secret ────────────────────────
+  -- Transaction-scoped, so it releases on commit or rollback with no unlock
+  -- path to forget. Keyed on the user, so two different users never contend.
+  --
+  -- Without it, read-then-branch below is a check-then-act across two
+  -- concurrent PUTs. The precise damage is NOT what it first looks like:
+  -- `vault.secrets` has a UNIQUE index on `name` (measured:
+  -- `secrets_name_idx UNIQUE (name) WHERE name IS NOT NULL`) and every secret
+  -- here is named `byoa-<user_id>`, so two concurrent FIRST-TIME creates for
+  -- the same user cannot both succeed — the second blocks and then fails,
+  -- turning a legitimate save into a 500 rather than orphaning anything.
+  --
+  -- The path that DOES orphan is Replace racing Remove: the delete fires the
+  -- AFTER DELETE trigger and removes vault row A, while the replace has
+  -- already read A and passed its `exists` check, and then writes a pointer to
+  -- a secret that is gone. This lock closes both.
+  --
+  -- ⚠ Advisory locks require the DIRECT connection or the SESSION-mode pooler.
+  -- They are silently useless on the transaction pooler (port 6543), which is
+  -- the standing reason this project never uses it.
+  perform pg_advisory_xact_lock(hashtextextended('user_secrets:' || p_user_id::text, 0));
+
   v_hint := left(p_key, 7) || '…' || right(p_key, 4);
 
   select vault_secret_id into v_existing
@@ -171,6 +193,32 @@ create trigger user_secrets_cleanup_vault
   after delete on user_secrets
   for each row execute function delete_orphaned_vault_secret();
 
+-- Defense in depth, deliberately NOT redundant with the advisory lock above.
+-- The lock stops the pointer being REPLACED concurrently; this catches a
+-- pointer being replaced AT ALL, by any future code path that swaps
+-- vault_secret_id without deleting the old secret first. `set_user_secret`
+-- reuses the same vault row today, so this fires on no current path — that is
+-- the point. It is the net under the invariant "a vault secret is unreachable
+-- the moment nothing points at it", not under one function's current shape.
+create or replace function delete_replaced_vault_secret()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $fn$
+begin
+  if old.vault_secret_id is not null
+     and old.vault_secret_id is distinct from new.vault_secret_id then
+    delete from vault.secrets where id = old.vault_secret_id;
+  end if;
+  return new;
+end $fn$;
+
+drop trigger if exists user_secrets_cleanup_replaced_vault on user_secrets;
+create trigger user_secrets_cleanup_replaced_vault
+  after update of vault_secret_id on user_secrets
+  for each row execute function delete_replaced_vault_secret();
+
 -- ---------------------------------------------------------------------------
 -- 5. Grants
 -- ---------------------------------------------------------------------------
@@ -186,6 +234,7 @@ revoke execute on function set_user_secret(uuid, text)    from public, anon, aut
 revoke execute on function get_user_secret(uuid)          from public, anon, authenticated;
 revoke execute on function delete_user_secret(uuid)       from public, anon, authenticated;
 revoke execute on function delete_orphaned_vault_secret() from public, anon, authenticated;
+revoke execute on function delete_replaced_vault_secret() from public, anon, authenticated;
 
 grant execute on function set_user_secret(uuid, text) to service_role;
 grant execute on function get_user_secret(uuid)       to service_role;
