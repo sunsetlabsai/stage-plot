@@ -6,7 +6,19 @@ Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
 started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
 does not get to exempt itself from its own subject.)*
-Version: **v1.9** (**v1.9 = ★ the ROLES MODEL, ruled 2026-08-25: collaborators are
+Version: **v2.0** (**v2.0 = ★ MEASUREMENT REPLACES SPECULATION, 2026-08-26.
+Chunk 3 shipped (PR #161, migration 015 in prod), so four things this document
+described as pending or true are rewritten to what was actually measured:
+the **§8.1 spike RAN and PASSED** (flat 0.017→0.018ms to N=1000, `Index Scan`
+reading 1 row — its speculative prose is DELETED, not annotated); **§4.6.4 was
+WRONG** — the FK cascade orphans the Vault secret, and a trigger is required,
+now measured working; **§4.6 gains requirement 8**, lock ORDER, after three
+Codex rounds in which the obvious fix — a `before delete` trigger taking the
+lock — would have recreated the deadlock it was meant to cure; and **§9 records
+that three chunk-3 guarantees are unreachable by the test suite** and were
+proven with parallel `psql` instead. Also flags the one thing chunk 3 shipped
+knowingly broken: the capabilities probe is not account-aware, which chunk 4
+owes.** Previously **v1.9** = ★ the ROLES MODEL, ruled 2026-08-25: collaborators are
 VIEW ONLY and the `editor` role is DELETED (new §3.3c); **conductor == owner for
 now**, delegate deferred to backlog as session state rather than a role;
 BYOA is owner-only in practice, so §4.1's "every user, owner or collaborator" is
@@ -51,8 +63,9 @@ super-admin-only; `/dashboard/settings` is the signed-in owner's own account.
 Nothing global appears on the tenant page.
 
 **All five open questions were ruled by Graham on 2026-08-24 (§8). Nothing in
-this document is waiting on him**; the only unresolved item is the §8.1 spike,
-which gates chunk 3's implementation choice, not the design.
+this document is waiting on him**, and **nothing in it is unresolved**: the §8.1
+spike ran against prod on 2026-08-26 and PASSED, so chunk 3 built on Vault as
+specified and shipped in PR #161. See §8.1 for the measured numbers.
 
 **Lands together with `docs/design-ai-key-availability.md` v11+**, by Graham's
 ruling 2026-08-24. That document carries §13 (unify key resolution) and a §14
@@ -881,8 +894,20 @@ it becomes one of two backends behind one UI.
 3. **Never logged.** Explicit scrubbing on every error path that can carry a
    request body or header. **A key in a Vercel log or an error trace is a far
    likelier leak than a database breach**, and it is the one that gets forgotten.
-4. **Cascade on account delete** — already present via
-   `references auth.users(id) on delete cascade`.
+4. **Cascade on account delete.** ⚠ **The FK cascade is NOT sufficient, and this
+   requirement said it was until 2026-08-26.** `references auth.users(id) on
+   delete cascade` was adequate while the key lived in this table. Once §8.1
+   moved it into Vault, the cascade deletes the **pointer** and orphans the
+   **secret**: a third party's encrypted credential left in `vault.secrets`
+   forever, with `user_secrets` looking perfectly clean and nothing anywhere
+   able to detect it.
+   **⇒ An `after delete` trigger on `user_secrets` must delete the Vault row**
+   (`015_user_secrets_vault.sql`). On the trigger, not inside the delete RPC, so
+   it holds for **every** path: the Remove button, the `auth.users` cascade, and
+   hand-written SQL. **Measured working 2026-08-26** — deleting an auth user
+   took `user_secrets` 1→0 and `vault.secrets` 1→0 in the same transaction.
+   *Any future indirection away from a plain column re-opens this. The question
+   to ask is not "does the row go away" but "does the SECRET go away".*
 5. **Consent at the point of entry.** Plain language stating what is stored, who
    can read it, and how to remove it, plus a privacy-policy line. Table stakes
    for a commercial product.
@@ -891,8 +916,23 @@ it becomes one of two backends behind one UI.
    for laxity; it is context for proportionate controls.
 7. **Encrypted at rest via Supabase Vault** (§8.1). `user_secrets` stores a
    `vault_secret_id`, never the key. **Not** pgsodium, and **not** Transparent
-   Column Encryption — the vendor recommends against both. Gated on the §8.1
-   scale spike.
+   Column Encryption — the vendor recommends against both. **The §8.1 spike ran
+   and passed, so this is built, not gated** (PR #161).
+8. **Every mutation path takes the same per-user advisory lock, in the same
+   order.** Added 2026-08-26 after Codex. Concurrency is a security requirement
+   here, not a performance one: unserialized Replace-vs-Remove leaves a pointer
+   to a deleted secret, or a secret nothing points at.
+   ⚠ **The lock is not enough on its own — the ORDER is the fix.** The
+   `auth.users` cascade can never take an advisory lock, because it arrives as
+   plain SQL with no function to hook. So `set_user_secret` takes the
+   `user_secrets` row `for update` **before** touching Vault, making every path
+   agree on (user_secrets, then vault). Without that the setter holds the vault
+   row and wants the child row while the cascade holds the child row and wants
+   the vault row — a deadlock on a user saving their key.
+   ⛔ **Do NOT "fix" this with a `before delete` trigger taking the lock.** A
+   `before delete` **row** trigger fires after the row is already locked, making
+   that path `row → advisory` against the setter's `advisory → row`, which
+   recreates the exact inversion. Measured clean over 10 contended rounds.
 
 ---
 
@@ -1011,8 +1051,8 @@ table nothing reads.
 | 0 | **Delete `/api/show`** | route deletion + a test asserting no `redis` import remains in `app/api/` | yes — pure removal, no dependency |
 | 1 | **`/admin` re-auth** (§3, §3.3a, §3.3b) | **NO MIGRATION.** `/admin` RE-AUTHED across all four routes from `ADMIN_SECRET` to the super-admin email check; `ADMIN_SECRET` retired; **Redis stripped from `lib/admin-config.ts`**, leaving env-only resolution; **`ConfigRead` narrowed to `source: 'env'` (§3.2); the paired doc's `'store'` spec amended in that same BUILD PR — not in #152** | yes — but **sequenced AFTER Drive retirement** (PR #153 §6.1) |
 | 2 | **Quota** (§5) | `peek_tryit` migration, `quota()` rewritten onto both functions, IP hashing, **fixed window**. **Removes the last `redis` import** (`lib/agent-key.ts:2`, §6.3) | yes — all inputs ruled |
-| 3 | **BYOA storage** (§4) | `user_secrets` server routes, the two-way storage choice, masked display, **and the `/dashboard/settings` surface itself** | **independent** — see the note below |
-| 4 | **Settings overlay** (§4.3) | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated | depends on chunk 3 |
+| 3 | ✅ **BYOA storage** (§4) — **SHIPPED, PR #161** | `user_secrets` server routes, the two-way storage choice, masked display, **and the `/dashboard/settings` surface itself**. Migration 015 applied to prod 2026-08-26 | **independent** — see the note below |
+| 4 | **Settings overlay** (§4.3) — **★ NEXT** | the §14 UI: overlay, §5 states 5–7 affordance, tests 21–24 restated. **⚠ Also owes an account-aware capabilities probe** — see below | depends on chunk 3 ✅ |
 | 5 | **Remove `redis`** | dependency removal, `REDIS_URL` retirement | depends on **0–2** |
 | 6 | **Collaborator view-only** (§3.3c) | **Code first**: 4 sites (`shows/update` guard, show-page `isEditor`, dashboard list select + `(role)` badge). **Then migration**: convert any `'editor'` row, drop `"Editor update"`, drop→recreate `is_show_collaborator` without `p_role` (recreating `"Collaborator read"` with it), then drop `role`. Plus the counterexample tests in §3.3c | **independent** — touches no Redis and no `user_secrets` |
 
@@ -1021,6 +1061,17 @@ chunk 1** — revised chunk 1 does not create `/dashboard/settings`; it re-auths
 `/admin`, a different route for a different principal (§8 Q5). Chunk 3 creates
 that surface itself and may ship in any order. (2) **Chunk 5 depends on 0–2, not
 0–3** — per §6.3, chunk 3 touches no Redis.
+
+**⚠⚠ LIVE INCONSISTENCY SHIPPED BY CHUNK 3 — chunk 4 owes the fix.**
+`resolveKeyMode` gained an account-key branch, but **the capabilities probe was
+deliberately NOT made account-aware**, because §5's states are chunk 4's scope
+and widening them inside chunk 3 would have been a unilateral redesign. The
+consequence is user-visible **today**: someone who saves a key at
+`/dashboard/settings` has it used by `/api/agent/chat`, while the show page
+still shows the inline key affordance as though they had none.
+`capabilitiesFrom` returns `null` for `byoa` on the grounds that *"the probe can
+never produce it because it passes no key"* — **that premise is now false.**
+Chunk 4 must either make the probe account-aware or restate why it should not.
 
 **§13 of `design-ai-key-availability.md` is independent of every chunk here** and
 may ship before, during or after — it resolves through `readAdminConfig`'s
@@ -1119,45 +1170,61 @@ settings at all times."*
   "remember on this device" has no server-side exposure at all**, which remains
   the single strongest privacy control available here.
 
-**⚠ One uncertainty that must be spiked before chunk 3 commits to this:** Vault's
-documented design centre is a *small number of app-level secrets*. The docs state
-no limit, but "no documented limit" is not "verified to scale". A spike must
-confirm per-account secrets behave under realistic row counts before chunk 3
-builds on it.
+**✅ THE SPIKE RAN — 2026-08-26, against prod. PASS. Chunk 3 built on it.**
 
-**⚠⚠ v1.7 — the spike carries MORE weight than it looks.** The deleted sentence
-(*"`admin_config` has no such doubt — three named secrets is exactly Vault's
-design centre"*) was the reassuring half: one Vault use inside the documented
-envelope, one outside it. **With `admin_config` gone, the only remaining use of
-Vault in this design is the per-account case.** If the spike fails, **nothing
-here uses Vault at all** and chunk 3 needs a different encryption-at-rest answer
-— with pgsodium and TCE already ruled out above, that is a genuinely open
-question, not a fallback.
+The uncertainty was real when written: Vault's documented design centre is a
+*small number of app-level secrets*, and "no documented limit" is not "verified
+to scale". It is now verified. Read latency through `vault.decrypted_secrets`,
+server-side, 200 samples per N after 20 discarded warmups:
 
-**★★ RESCOPED at v1.9 — the bar is much lower than v1.7 assumed.** v1.7 framed
-this as *"one row per user, **unbounded***". §4.1 now establishes that BYOA is
-**owner-only in practice** — collaborators are view-only (§3.3c) and have no AI
-surface to spend a key on. So the row count tracks **owners, not users**:
+| N | min | **median** | p95 | max |
+|---|---|---|---|---|
+| 10 | 0.016 | **0.017** | 0.024 | 0.220 |
+| 100 | 0.016 | **0.017** | 0.021 | 0.038 |
+| 1000 | 0.017 | **0.018** | 0.022 | 0.037 |
 
-| | v1.7 framing | v1.9, corrected |
-|---|---|---|
-| Population | Every signed-in user, unbounded | Owners — those who create shows |
-| Order of magnitude | Speculative, no ceiling | **6 shows exist today** (§2, measured); hundreds is a generous ceiling |
-| Question the spike answers | *"Is Vault safe outside its documented envelope?"* | *"Is Vault fine at hundreds of secrets?"* |
+**★ The mechanism matters more than the timings, because it is what makes them
+durable.** `EXPLAIN ANALYZE` at every N: `Index Scan using secrets_pkey`,
+**`Actual Rows: 1`** — one row read with 1000 present.
+`vault.decrypted_secrets` is a plain `select … from vault.secrets` with the AEAD
+decrypt as a per-row expression in the **target list**, not in a `WHERE` clause
+or an aggregate, so the `id` predicate is applied at the index *before* any
+decrypt is evaluated. Exactly one decrypt per read regardless of table size.
+**Flat by construction, not by luck on an idle database.** No error, no quota,
+no ceiling at 1000.
 
-**Hundreds of secrets is arguably INSIDE documented usage**, so the likely
-outcome flips from "this may not work" to "confirm it works and move on." **Run
-the spike anyway** — the cost is low, the claim is currently unmeasured, and
-§0's invariant 3 is that nothing is declared settled without something exercising
-it. But scope it to owner-count cardinality; a spike sized for unbounded per-user
-rows would be measuring a population this design does not create.
+**⚠ What this does NOT establish — do not let it be cited for more than it is:**
+server-side only, excluding network (Vault's decrypt costs ~0.02ms and does not
+grow; a user does not wait 0.018ms); **no limit found below 1000 ≠ no limit
+exists**, since the definition below stopped at 1000 and did not hunt for the
+real ceiling; and reads were serial on one connection, so **concurrency is
+untested** — a shared lock or key-derivation mutex would not appear in this
+design.
 
-**Spike definition, normative:** provision N `vault.secrets` rows for N synthetic
-accounts at N ∈ {100, 1000}; measure single-secret read latency through
-`vault.decrypted_secrets` at each N; record any ceiling, quota or error the
-platform returns. **Pass** = read latency stays flat enough to sit in a request
-path and no limit is hit at 1000. **Fail** = any hard limit below 1000, or read
-latency that scales with row count. Report the measured numbers, not a verdict.
+**How it was scoped, and why that mattered.** v1.7 framed the population as
+*"one row per user, unbounded"*. §4.1 corrected it: BYOA is **owner-only in
+practice** — collaborators are view-only (§3.3c) and have no AI surface to spend
+a key on — so the row count tracks **owners, not users**, and hundreds is a
+generous ceiling against the 6 shows that exist today. That moved the question
+from *"is Vault safe outside its documented envelope?"* to *"is Vault fine at
+hundreds of secrets?"*, which is arguably inside documented usage. It was run
+anyway, because §0's invariant 3 is that nothing is declared settled without
+something exercising it — and the measurement is what turned a confident guess
+into a fact.
+
+**The bar it was held to, stated before it ran:** provision N `vault.secrets`
+rows at N ∈ {100, 1000}; measure single-secret read latency through
+`vault.decrypted_secrets` at each; record any ceiling, quota or error.
+**Pass** = latency flat enough for a request path and no limit at 1000.
+**Fail** = any hard limit below 1000, or latency scaling with row count.
+Neither fail condition was triggered. N=10 was added as a third point because
+two points cannot distinguish flat from linear.
+
+**⇒ Vault stands, and this is the only place the design uses it.** With
+`admin_config` deleted, the per-account case is the whole of it, so a failure
+here would have left nothing using Vault at all — pgsodium and TCE are both
+ruled out above, so that would have been a genuinely open question rather than a
+fallback. It did not fail. **Do not reopen this.**
 
 ---
 
@@ -1223,10 +1290,22 @@ each route also needs the matching accept case.
 does **not** increment; both agree on window expiry at the boundary; a raw IP
 never reaches the database.
 
-**Chunk 3:** no route returns a stored key under any input; a key saved to the
-account is readable by the server and not by an authenticated browser client;
-"remember on this device" writes **nothing** server-side; account deletion
-cascades.
+**Chunk 3** *(built, PR #161)*: no route returns a stored key under any input —
+asserted per-verb AND as one sweep across every verb × signed-in/out × with/
+without-a-key, so a new branch that leaks is caught without anyone remembering
+to test it; a key saved to the account is readable by the server and not by an
+authenticated browser client; "remember on this device" writes **nothing**
+server-side; the device key beats the account key, asserted on the RESOLVED KEY
+rather than the mode, since both branches produce `mode: 'byoa'` and asserting
+the mode alone would pin nothing.
+
+**⚠ Three chunk-3 guarantees are NOT reachable by the vitest suite**, because it
+does not execute SQL: the advisory lock, the lock ORDER, and both triggers.
+They were proven with parallel `psql` sessions against prod instead — lock
+serialization measured by wall clock (2.609s of blocking), Replace-vs-Remove
+over 10 contended rounds at varied offsets, and the `auth.users` cascade taking
+`vault.secrets` 1→0. **Anything added to that SQL needs the same treatment; a
+green suite says nothing about it.**
 
 **Chunk 4:** tests 21–24 from `a624650`, restated against whichever storage the
 user chose.
