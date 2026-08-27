@@ -75,6 +75,11 @@ if (first) {
   no special case.
 - Placement/size stay tunable in implementation; the invariant is "in the gutter, right-aligned
   to the barline," not the exact offsets.
+- **The gutter is ~45pt of usable width, and `section.bars` has no formal upper bound, so an
+  absurdly large `absNumber` could measure wider than the gutter.** These are our own charts,
+  so in practice the count stays well within range — but the invariant is that the number *never
+  enters the staff*: if the measured width ever exceeds the gutter, shrink the point size, clip,
+  or omit the number rather than draw it across the barline.
 
 ### 3.2 Preview (`components/RoadmapBuilder.tsx`)
 
