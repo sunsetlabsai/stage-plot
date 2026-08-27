@@ -309,6 +309,24 @@ async function readAccountKey(userId: string): Promise<string | null> {
 }
 
 /**
+ * Does this user have an account-stored BYOA key? Presence only.
+ *
+ * This exists so the capabilities probe can answer "account key?" for a signed-in
+ * owner WITHOUT running the try-it path — no `readAdminConfig`, no quota RPC. An
+ * account-key owner never touches the shared per-IP try-it quota, so the probe must
+ * be able to report their key BEFORE (and thus without being blocked by) the
+ * anonymous probe rate limiter that guards that quota (design §3.2, §4). Reusing
+ * `resolveKeyMode` here instead would run the quota peek for every non-account
+ * caller, which is exactly the work the limiter is meant to bound.
+ *
+ * Fails open to `false` on any DB error, inheriting `readAccountKey`'s reasoning: an
+ * unavailable account key degrades to try-it, it does not strand the user.
+ */
+export async function hasAccountKey(userId: string): Promise<boolean> {
+  return (await readAccountKey(userId)) !== null;
+}
+
+/**
  * Resolve how a request to the agent should be authorized.
  *
  * BYOA wins over try-it unconditionally, matching the behavior this replaces.

@@ -5611,6 +5611,14 @@ function AgentChat({
   function handleAccountKeyChange() {
     setFetchedProbe('loading');
     setProbeNonce((n) => n + 1);
+    // The SAME stale-send-state reset handleClearKey does, for the same reason (Codex
+    // chunk-4 R1): `sendExhausted`/`sendRemaining` OUTRANK a `loading` probe, so a prior
+    // try-it 429 would keep the panel on "free messages used up" through the whole
+    // re-probe window — and, until the probe returns `{ accountKey: true }`, block a
+    // user who now has a working account key. Saving/removing an account key changes how
+    // a send is authorized, so the try-it send state it invalidates goes with it.
+    setTryitRemaining(null);
+    setTryitExhausted(false);
   }
 
   // §5.2a.2b / test 13m: a failed turn must NOT lock the composer. That holds

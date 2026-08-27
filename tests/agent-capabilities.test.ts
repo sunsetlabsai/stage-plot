@@ -498,4 +498,48 @@ describe('GET /api/agent/capabilities — account-aware probe (§3.2, T22)', () 
     expect(body.accountKey).toBeUndefined();
     expect(secretsBackend.getCalls).toBe(0);
   });
+
+  it('is NOT stranded by an exhausted probe rate limit — the account key bypasses it (R1)', async () => {
+    // Codex chunk-4 R1: the limiter guards the shared try-it quota, which an account-key
+    // owner never touches, so a 429 must not report "no key" at someone who has one.
+    keyConfigured();
+    const { GET } = await import('../app/api/agent/capabilities/route');
+    const req = () =>
+      new NextRequest('http://localhost/api/agent/capabilities', { headers: { 'x-forwarded-for': IP } });
+
+    // Anonymous traffic from this IP exhausts the shared probe limit...
+    session.userId = null;
+    for (let i = 0; i <= PROBE_RATE_LIMIT_MAX; i++) await GET(req());
+    // ...positive control: an anonymous caller on this IP is now 429'd, proving the
+    // limit really is spent (without it, the assertion below would pass vacuously).
+    expect((await GET(req())).status).toBe(429);
+
+    // The signed-in owner with an account key, same exhausted IP, still gets presence.
+    session.userId = USER;
+    secretsBackend.keys.set(USER, ACCOUNT_KEY);
+    const res = await GET(req());
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ accountKey: true });
+  });
+
+  it('does not consume a rate-limit token for an account-key owner', async () => {
+    // The bypass is BEFORE checkRateLimit counts, so an account-key owner's probes
+    // cannot help exhaust the shared limit for the anonymous callers on their IP.
+    keyConfigured();
+    session.userId = USER;
+    secretsBackend.keys.set(USER, ACCOUNT_KEY);
+    const { GET } = await import('../app/api/agent/capabilities/route');
+    const req = () =>
+      new NextRequest('http://localhost/api/agent/capabilities', { headers: { 'x-forwarded-for': IP } });
+
+    // Far more account-key probes than the ceiling...
+    for (let i = 0; i < PROBE_RATE_LIMIT_MAX + 10; i++) {
+      expect((await GET(req())).status).toBe(200);
+    }
+
+    // ...then an anonymous caller on the same IP still has its full allowance.
+    session.userId = null;
+    expect((await GET(req())).status).toBe(200);
+  });
 });

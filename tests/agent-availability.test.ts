@@ -429,6 +429,22 @@ describe('resolveAvailability — the account-key report (§3.2)', () => {
     expect(effectiveProbe('', accountKey)).toEqual(accountKey);
     expect(effectiveProbe('sk-ant-device', accountKey)).toEqual(accountKey);
   });
+
+  it('WHY the save handler must clear stale send state (Codex chunk-4 R1)', () => {
+    // handleAccountKeyChange re-probes (probe → loading) AND resets tryitRemaining/
+    // tryitExhausted, for the same reason handleClearKey does. This pins the hazard the
+    // reset removes: without it, a prior try-it 429 outranks the loading probe and the
+    // panel stays "free messages used up" through the whole re-probe window — blocking a
+    // user who now holds a working account key. The handler is host code; the RULE is here.
+    const stranded = resolve({ probe: 'loading', sendExhausted: true });
+    expect(stranded.state).toBe(4); // the strand, if the flag is NOT cleared
+
+    const reset = resolve({ probe: 'loading', sendExhausted: false, sendRemaining: null });
+    expect(reset.state).toBe(2); // cleared: back to "checking" until the probe answers
+
+    // And once the re-probe returns the account key, precedence lands it at state 1.
+    expect(resolve({ probe: accountKey }).state).toBe(1);
+  });
 });
 
 // Codex R1 medium on #140 — §5.1's clear-and-re-probe contract.
