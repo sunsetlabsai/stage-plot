@@ -1,11 +1,16 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { VisionChart } from './chart-converter';
+import { resolveAgentModel, VISION_MODEL_ENV } from './agent-key';
 
 // Abort the Anthropic call comfortably under the route's maxDuration so the
 // route always returns a clean degrade rather than a platform 504.
 export const VISION_TIMEOUT_MS = 50_000;
 
-const MODEL = 'claude-opus-4-6';
+// Model is env-driven (AGENT_MODEL_VISION), same resolver as the agent path, so
+// it stays reachable by whatever key the workspace grants. Falls back to
+// DEFAULT_AGENT_MODEL when unset. Prefer a vision-strong model for overlay
+// coordinate accuracy.
+const MODEL = resolveAgentModel(VISION_MODEL_ENV);
 
 const SYSTEM_PROMPT = `You are a music-chart structure extractor. You are given a chart/lead-sheet/score PDF.
 Return ONLY a JSON object (no prose, no markdown fences) describing its visual structure.

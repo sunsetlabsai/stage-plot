@@ -10,6 +10,7 @@ import {
   type ChordSpan,
   type StructureOp,
 } from './roadmap-authoring';
+import { resolveAgentModel, ROADMAP_MODEL_ENV } from './agent-key';
 
 // ── Roadmap Builder — chunk 5a: the AI parse boundary (SpanList contract) ─────
 // Natural-language song description → RoadmapSpec, in TWO deterministic stages so
@@ -28,7 +29,10 @@ import {
 // and a thin transport (parseRoadmapSpec) that only adds the Claude call. The
 // route owns key sourcing + timeout; this stays "given a description + key, parse".
 
-const MODEL = 'claude-opus-4-6';
+// Model is env-driven (AGENT_MODEL_ROADMAP), same resolver as the agent path, so
+// it stays reachable by whatever key the workspace grants. Falls back to
+// DEFAULT_AGENT_MODEL when unset.
+const MODEL = resolveAgentModel(ROADMAP_MODEL_ENV);
 
 // Abort the Anthropic call comfortably under the route's maxDuration so the route
 // always returns a clean result rather than a platform 504 (mirrors chart-vision).

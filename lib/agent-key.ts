@@ -60,6 +60,8 @@ export const DEFAULT_AGENT_MODEL = 'claude-sonnet-4-6';
  */
 export const BYOA_MODEL_ENV = 'AGENT_MODEL_BYOA';
 export const TRYIT_MODEL_ENV = 'AGENT_MODEL_TRYIT';
+export const VISION_MODEL_ENV = 'AGENT_MODEL_VISION';
+export const ROADMAP_MODEL_ENV = 'AGENT_MODEL_ROADMAP';
 
 /**
  * Is this usable as a model id?
