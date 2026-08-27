@@ -1,11 +1,17 @@
 # Design — one backend: retire Redis, consolidate on Supabase
 
 Status: **APPROVED AND MERGED to `main` at `dc56c8e` (PR #150, 2026-08-24) after
-Codex R1–R8. IN BUILD — chunk 0 shipped; build against this text.**
+Codex R1–R8. IN BUILD — **chunks 0, 1, 2, 3 and 6 shipped; chunk 4 next; chunk 5
+remains.** The chunk table in §7 (Build order) is the authority on status; this line is a
+pointer to it, not a second copy of it. Build against this text.**
 *(Superseded status: "PRE-CODEX, do not build". Corrected the moment building
 started — a status line that still forbids the work in progress is the same
 class of stale claim as §2.1's three unexecuted supersessions, and this document
-does not get to exempt itself from its own subject.)*
+does not get to exempt itself from its own subject. ⚠ It said "chunk 0 shipped"
+until 2026-08-26, four chunks after that stopped being true — and it survived
+the v2.0 sweep because that sweep grepped `spike|cascade|chunk 3`, a shape
+structurally incapable of matching "chunk 0". **A search that cannot produce the
+counterexample is not evidence there isn't one.**)*
 Version: **v2.0** (**v2.0 = ★ MEASUREMENT REPLACES SPECULATION, 2026-08-26.
 Chunk 3 shipped (PR #161, migration 015 in prod), so four things this document
 described as pending or true are rewritten to what was actually measured:
@@ -1367,7 +1373,7 @@ actually re-authed — the same PR as the paired-doc amendment (§3.2, §9).
    writes and no DELETE policy exists for the Remove action. *(v1 of this
    document claimed they were never created. Retracted — see §4.2.)* Its
    replacement table at `:45` is correct but was never executed for
-   `/api/show`; chunk 0 executes it.
+   `/api/show`; chunk 0 executed it (PR #151, `c24ef4f`).
 
 **Leaving these uncorrected is precisely the failure this document exists to
 end** (§2.1). A superseded document that still reads as current is how
