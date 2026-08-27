@@ -268,3 +268,68 @@ describe('POST /api/agent/chat — the account key', () => {
     expect(secretsBackend.calls).toBe(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// design-account-key-recovery §3 — the server names the rejected key's source.
+//
+// Three of the route's 401s look alike on the wire (a rejected key says "Invalid
+// API key"); only a BYOA rejection is the user's to fix. `keyReject` carries the
+// distinction so the client shows the right recovery — and NEVER for the shared
+// try-it key or the unconfigured case, which the user cannot fix.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('POST /api/agent/chat — keyReject on a rejected key', () => {
+  /** Make Anthropic reject whatever key the route proxies. */
+  function anthropicRejects() {
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      sent = { url, init };
+      return new Response('{"error":{"type":"authentication_error"}}', { status: 401 });
+    }));
+  }
+
+  it('tags a rejected DEVICE key with keyReject: "device"', async () => {
+    anthropicRejects();
+    const res = await post({ authorization: 'Bearer sk-ant-device-bad' });
+    expect(res.status).toBe(401);
+    expect((await res.json()).keyReject).toBe('device');
+  });
+
+  it('tags a rejected ACCOUNT key with keyReject: "account"', async () => {
+    anthropicRejects();
+    session.user = { id: 'owner-bad' };
+    secretsBackend.keys.set('owner-bad', 'sk-ant-account-bad');
+
+    const res = await post();
+    expect(res.status).toBe(401);
+    expect((await res.json()).keyReject).toBe('account');
+  });
+
+  it('does NOT tag a rejected shared try-it key — a platform fault, not the user\'s', async () => {
+    anthropicRejects();
+    process.env.CLAUDE_TRYIT_KEY = 'sk-ant-shared-bad';
+
+    const res = await post();
+    expect(res.status).toBe(401);
+    // Byte-identical error to a BYOA rejection, but the user holds no key to fix, so
+    // the client must get no banner signal.
+    expect((await res.json()).keyReject).toBeUndefined();
+  });
+
+  it('the unconfigured 401 (no key at all) also carries no keyReject', async () => {
+    const res = await post();
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.reason).toBe('unconfigured');
+    expect(body.keyReject).toBeUndefined();
+  });
+
+  it('carries no key material in the keyReject 401 body', async () => {
+    anthropicRejects();
+    const res = await post({ authorization: 'Bearer sk-ant-device-SECRETVALUE-1234' });
+    const raw = await res.text();
+
+    expect(res.status).toBe(401);
+    expect(raw).not.toContain('sk-ant-device-SECRETVALUE-1234');
+    expect(raw).not.toContain('SECRETVALUE');
+    expect(JSON.parse(raw).keyReject).toBe('device');
+  });
+});

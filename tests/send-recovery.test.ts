@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldRestoreComposer, rollbackOptimisticSend, isSavedKeyRejected } from '@/lib/send-recovery';
+import { shouldRestoreComposer, rollbackOptimisticSend, rejectedKeySource } from '@/lib/send-recovery';
 
 // Design docs/design-ai-key-availability.md §9 tests 13a–13d and 13c-i/ii/iii,
 // chunk 4. The predicate and the transcript surgery are tested here because
@@ -95,24 +95,34 @@ describe('13b — the optimistic transcript entry is dropped', () => {
   });
 });
 
-describe('13 — §5.1 stale-key detection', () => {
-  it('a 401 while holding a key is a rejection of that key', () => {
-    expect(isSavedKeyRejected({ status: 401, hasKey: true })).toBe(true);
+describe('§5.1 / account-key-recovery §3 — which key did the server reject', () => {
+  it('returns the source the server named on a 401', () => {
+    // The server sets `keyReject` to the backend it actually used, so recovery can
+    // point at the right place. No inference from what the client sent.
+    expect(rejectedKeySource({ status: 401, keyReject: 'device' })).toBe('device');
+    expect(rejectedKeySource({ status: 401, keyReject: 'account' })).toBe('account');
   });
 
-  it('a 401 with NO key is the try-it-unavailable 401, not a rejection', () => {
-    // The collision that would put "Clear saved key" in front of a user who has
-    // no key to clear. It cannot happen in the route, and it must not happen
-    // here either.
-    expect(isSavedKeyRejected({ status: 401, hasKey: false })).toBe(false);
+  it('is null for a 401 with NO keyReject — the try-it and unconfigured cases', () => {
+    // A rejected shared try-it key and an unconfigured deployment both 401 with no
+    // `keyReject` (the user holds no key to fix). This is the case that must NOT put
+    // a "your key was rejected" banner in front of them.
+    expect(rejectedKeySource({ status: 401 })).toBe(null);
+    expect(rejectedKeySource({ status: 401, keyReject: undefined })).toBe(null);
   });
 
-  it('does not fire on the other failure statuses', () => {
-    // 429 is quota exhaustion and 502 is an upstream/proxy fault. Offering to
-    // clear a working key on either one destroys a good credential and sends
-    // the user hunting for a problem that is not theirs.
+  it('is null for an unrecognised keyReject value, never a guess', () => {
+    // Only the two enum values are honoured; anything else is not a control signal.
+    expect(rejectedKeySource({ status: 401, keyReject: 'tryit' })).toBe(null);
+    expect(rejectedKeySource({ status: 401, keyReject: '' })).toBe(null);
+    expect(rejectedKeySource({ status: 401, keyReject: true })).toBe(null);
+  });
+
+  it('is null on the other failure statuses even if a keyReject rides along', () => {
+    // 429 is quota exhaustion and 502 an upstream/proxy fault. The 401 gate must hold
+    // so a stray field on a non-auth failure cannot offer to clear a working key.
     for (const status of [429, 500, 502, 503]) {
-      expect(isSavedKeyRejected({ status, hasKey: true })).toBe(false);
+      expect(rejectedKeySource({ status, keyReject: 'device' })).toBe(null);
     }
   });
 });

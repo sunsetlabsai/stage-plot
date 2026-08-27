@@ -128,11 +128,20 @@ export async function POST(request: NextRequest) {
 
     if (!anthropicRes.ok) {
       const errText = await anthropicRes.text();
-      const status = anthropicRes.status === 401 ? 401 : 502;
-      const msg = anthropicRes.status === 401
-        ? 'Invalid API key. Check your key and try again.'
-        : `Claude API error: ${errText}`;
-      return Response.json({ error: msg }, { status });
+      if (anthropicRes.status === 401) {
+        // Anthropic rejected the key we used. If it was a BYOA key, tell the client
+        // WHICH backend so recovery points at the right place (design-account-key-
+        // recovery §3): `keyReject` is set ONLY for byoa — a rejected shared try-it
+        // key is a platform fault the user cannot fix, so it carries no keyReject,
+        // exactly like the unconfigured 401. The field is a two-value enum derived
+        // from `resolved.source`, never the key, its length or its prefix.
+        const body: { error: string; keyReject?: 'device' | 'account' } = {
+          error: 'Invalid API key. Check your key and try again.',
+        };
+        if (resolved.mode === 'byoa') body.keyReject = resolved.source;
+        return Response.json(body, { status: 401 });
+      }
+      return Response.json({ error: `Claude API error: ${errText}` }, { status: 502 });
     }
 
     // Stream the response through

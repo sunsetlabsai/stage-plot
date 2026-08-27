@@ -48,7 +48,7 @@ import { SettingsOverlay } from '@/components/SettingsOverlay';
 import { resolveAvailability, canSendMessage, effectiveProbe, probeCapabilities, type FetchedProbe } from '@/lib/agent-availability';
 import { rememberPrompt } from '@/lib/prompt-cache';
 import { visibleTab, type ShowTab } from '@/lib/show-tabs';
-import { shouldRestoreComposer, rollbackOptimisticSend, isSavedKeyRejected } from '@/lib/send-recovery';
+import { shouldRestoreComposer, rollbackOptimisticSend, rejectedKeySource, type KeyRejectSource } from '@/lib/send-recovery';
 import { newStreamState, splitSseData, parseSseEvent, reduceStreamEvent, finalizeTurn, arrivedFrom } from '@/lib/agent-stream';
 import { buildApiMessages, hasPendingTools as transcriptHasPendingTools } from '@/lib/agent-history';
 // No BYOA_KEY here any more: the page no longer touches either store directly,
@@ -5180,11 +5180,12 @@ function AgentChat({
   // on its own by flipping `apiKey`; the account key is invisible to the browser, so
   // only the server-side probe can observe it, and it needs an explicit nudge.
   const [probeNonce, setProbeNonce] = useState(0);
-  // §5.1: a saved key that has been revoked, rotated or mistyped. Detected as
-  // "a 401 while we are holding a key" rather than by matching the error string
-  // — the route's other 401 is the no-key case, which by definition cannot fire
-  // while `apiKey` is set, so the two cannot collide.
-  const [keyRejected, setKeyRejected] = useState(false);
+  // §5.1: a BYOA key Anthropic rejected (revoked, rotated, mistyped) — and WHICH
+  // backend it was, so the banner offers the right recovery (device: clear the
+  // browser key; account: open Settings to Remove/Replace). The server names the
+  // source via `keyReject` on the 401; we do not infer it (design-account-key-recovery
+  // §3). null means no such rejection is showing.
+  const [rejectedKey, setRejectedKey] = useState<KeyRejectSource | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const configRef = useRef(config);
   useEffect(() => { configRef.current = config; }, [config]);
@@ -5237,10 +5238,10 @@ function AgentChat({
     setInput('');
     setError('');
     // Cleared with the error it annotates. A rejection describes ONE response;
-    // left standing it would put "That key was rejected. Clear it" under the
-    // NEXT failure — a 502 or an offline send — and talk the user into deleting
-    // a working credential over a fault that was never theirs.
-    setKeyRejected(false);
+    // left standing it would put "That key was rejected" under the NEXT failure —
+    // a 502 or an offline send — and talk the user into deleting a working
+    // credential over a fault that was never theirs.
+    setRejectedKey(null);
 
     // Declared outside the try so the catch can commit whatever arrived before
     // a transport drop. The rules live in lib/agent-stream.ts.
@@ -5276,11 +5277,12 @@ function AgentChat({
       if (!res.ok) {
         const err = await res.json();
         if (err.tryitExhausted) setTryitExhausted(true);
-        // §5.1: our saved key was rejected. Without this the tester sees only
-        // "Invalid API key" and never learns try-it might work — the app has a
-        // working path and never offers it. The predicate (and why the route's
-        // other 401 cannot collide with it) lives in lib/send-recovery.ts.
-        if (isSavedKeyRejected({ status: res.status, hasKey: !!apiKey })) setKeyRejected(true);
+        // §5.1: Anthropic rejected the BYOA key we used, and the server said which
+        // backend via `keyReject`. Device → the banner clears the browser key and
+        // re-probes; account → it opens Settings to Remove/Replace. A try-it or
+        // unconfigured 401 carries no `keyReject`, so no banner fires for a fault the
+        // user cannot fix. Logic + reasoning live in lib/send-recovery.ts.
+        setRejectedKey(rejectedKeySource({ status: res.status, keyReject: err.keyReject }));
         throw new Error(err.error || 'Request failed');
       }
 
@@ -5570,7 +5572,7 @@ function AgentChat({
     persistKey(localStorage, sessionStorage, '', true);
     setApiKey('');
     // A rejection describes a key we no longer hold.
-    setKeyRejected(false);
+    setRejectedKey(null);
     // Back to state 2 (`checking`) while the probe re-runs, rather than showing
     // whatever a PREVIOUS probe found — plausibly `error` from before the key
     // was pasted — as though it described the request now in flight. Safe
@@ -5599,7 +5601,7 @@ function AgentChat({
     }
     // A rejection described the OLD key; a freshly saved one makes that banner stale.
     setApiKey(next);
-    setKeyRejected(false);
+    setRejectedKey(null);
   }
 
   // An ACCOUNT key change is invisible to the browser — only the server-side probe
@@ -5619,6 +5621,10 @@ function AgentChat({
     // a send is authorized, so the try-it send state it invalidates goes with it.
     setTryitRemaining(null);
     setTryitExhausted(false);
+    // And the account-key rejection banner: Remove/Replace is exactly the fix it asked
+    // for, so it must not survive the action (design-account-key-recovery §4.1). Without
+    // this the "that account key was rejected" banner outlives the key it described.
+    setRejectedKey(null);
   }
 
   // §5.2a.2b / test 13m: a failed turn must NOT lock the composer. That holds
@@ -5755,7 +5761,11 @@ function AgentChat({
               configured the panel drops straight into state 3 and the user
               continues with no key at all. The failed message is NOT
               auto-retried — Send is re-armed and the user presses it. */}
-          {keyRejected && (
+          {/* Which recovery depends on WHICH key the server rejected (design-account-
+              key-recovery §4). A device key lives in this browser, so clearing it here
+              is the fix; an account key lives server-side, so the fix is the Settings
+              overlay's Remove/Replace. */}
+          {rejectedKey === 'device' && (
             <div className="flex items-center gap-3">
               <button
                 onClick={handleClearKey}
@@ -5769,6 +5779,21 @@ function AgentChat({
               <span className="text-xs text-gray-500">
                 That key was rejected. Clearing it lets ShowRunr check whether
                 free try-it mode is available.
+              </span>
+            </div>
+          )}
+          {rejectedKey === 'account' && (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setSettingsOpen(true)}
+                className="px-3 py-2 text-sm font-medium text-white bg-red-600 rounded hover:bg-red-700"
+              >
+                Manage key in Settings
+              </button>
+              {/* Removing or replacing the account key in the overlay clears this
+                  banner via handleAccountKeyChange (§4.1). */}
+              <span className="text-xs text-gray-500">
+                That account key was rejected. Remove or replace it in Settings.
               </span>
             </div>
           )}

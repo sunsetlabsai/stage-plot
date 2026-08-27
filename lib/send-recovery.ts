@@ -7,23 +7,35 @@
 // 6700-line page component for the same reason the storage rules do: a
 // predicate that cannot be exercised in isolation is one nobody can prove.
 
+/** Which BYOA backend a rejected key came from — the server's `keyReject` enum. */
+export type KeyRejectSource = 'device' | 'account';
+
 /**
- * §5.1: did the server reject the key we are holding?
+ * §5.1 / design-account-key-recovery §3: which key did the server say Anthropic
+ * rejected — or none?
  *
- * `/api/agent/chat` has exactly two 401s: Anthropic rejecting a supplied key
- * (`route.ts:104`), and try-it being unavailable when no key was supplied
- * (`route.ts:63-70`). The second cannot fire while we hold a key, because the
- * client only omits the `Authorization` header when `apiKey` is empty
- * (`page.tsx:5111`) and the route resolves to `byoa` whenever that header is
- * present. So "401 while holding a key" identifies the rejection without
- * matching on the error string, which is copy and will change.
+ * The client cannot infer this from what it sent. `/api/agent/chat` returns 401 in
+ * THREE cases, two of them byte-identical on the wire: a rejected **BYOA** key
+ * (device OR account), a rejected shared **try-it** key, and **unconfigured** (no
+ * key at all). Only the first is the user's to fix. An earlier version keyed on
+ * "401 while we hold a key," but chunk 3 broke its premise: the route now resolves a
+ * BYOA key from the session `userId` with **no `Authorization` header**, so "no
+ * header" no longer means "no key," and a headerless send can still be a real key
+ * rejection.
  *
- * A predicate rather than an inline `&&` because the reasoning above is the
- * whole of §5.1's correctness, and an inline condition inside a 6700-line
- * component cannot be exercised by any test in this repo.
+ * So the SERVER names the source. It sets `keyReject: 'device' | 'account'` on the
+ * 401 exactly when it rejected a BYOA key, and omits it for the try-it and
+ * unconfigured 401s. This reads that machine field (an enum the client switches on,
+ * not response copy) and returns the source, or null when the 401 is not a
+ * user-fixable key rejection.
+ *
+ * A function rather than an inline check because this is the whole of §5.1's
+ * correctness and an inline condition inside a 6700-line component cannot be
+ * exercised by any test in this repo.
  */
-export function isSavedKeyRejected(args: { status: number; hasKey: boolean }): boolean {
-  return args.status === 401 && args.hasKey;
+export function rejectedKeySource(args: { status: number; keyReject?: unknown }): KeyRejectSource | null {
+  if (args.status !== 401) return null;
+  return args.keyReject === 'device' || args.keyReject === 'account' ? args.keyReject : null;
 }
 
 /** The shape these rules need from a transcript entry. */

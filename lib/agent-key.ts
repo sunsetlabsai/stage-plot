@@ -115,8 +115,14 @@ export function __resetFallbackQuota() {
 }
 
 export type KeyMode =
-  /** The caller supplied their own key; it wins unconditionally. */
-  | { mode: 'byoa'; apiKey: string; model: string; maxTokens: number }
+  /**
+   * A BYOA key won. `source` records WHICH backend it came from — a `device` key in
+   * the request's `Authorization` header, or an `account` key resolved from the
+   * session `userId` (chunk 3). It is what lets the chat route tell the client which
+   * key Anthropic rejected on a 401, so recovery points at the right place
+   * (design-account-key-recovery §3). It is never the key itself — a two-value enum.
+   */
+  | { mode: 'byoa'; source: 'device' | 'account'; apiKey: string; model: string; maxTokens: number }
   | { mode: 'tryit'; apiKey: string; model: string; maxTokens: number; remaining: number }
   /** Try-it is configured but this IP has spent its allowance. */
   | { mode: 'exhausted' }
@@ -363,6 +369,7 @@ export async function resolveKeyMode(
     // is the property `agent-key.test.ts` pins with `expect(redis.getCalls).toBe(0)`.
     return {
       mode: 'byoa',
+      source: 'device',
       apiKey: clientKey,
       model: resolveAgentModel(BYOA_MODEL_ENV),
       maxTokens: BYOA_MAX_TOKENS,
@@ -374,6 +381,7 @@ export async function resolveKeyMode(
     if (accountKey) {
       return {
         mode: 'byoa',
+        source: 'account',
         apiKey: accountKey,
         model: resolveAgentModel(BYOA_MODEL_ENV),
         maxTokens: BYOA_MAX_TOKENS,
