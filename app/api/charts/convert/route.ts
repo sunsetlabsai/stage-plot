@@ -111,6 +111,9 @@ export async function POST(request: NextRequest) {
   try {
     vision = await extractChartVision(bytes, apiKey, controller.signal);
   } catch (err) {
+    // Log the real cause before degrading — 'failed' on the manual rail otherwise
+    // hides auth/model-access/timeout errors completely.
+    console.error('[charts/convert] vision extract failed', err);
     // An over-limit PDF (too many pages for the vision API) surfaces as a 400 →
     // too_large; anything else (timeout, transport, auth) is a generic failure.
     if (err instanceof Anthropic.BadRequestError) return degrade('too_large');

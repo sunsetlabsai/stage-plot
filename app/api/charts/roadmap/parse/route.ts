@@ -60,7 +60,11 @@ export async function POST(request: NextRequest) {
   try {
     const result = await parseRoadmapSpec(description, apiKey, controller.signal, uiKey);
     return Response.json(result);
-  } catch {
+  } catch (err) {
+    // Log the real cause — the user-facing message is deliberately generic, but a
+    // silent catch is what turned a plain model-access 403 into an undebuggable 502.
+    // The thrown Anthropic error carries status/type, never the key or request body.
+    console.error('[charts/roadmap/parse] parse failed', err);
     return Response.json({ error: 'Parser is temporarily unavailable' }, { status: 502 });
   } finally {
     clearTimeout(timer);
