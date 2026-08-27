@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { renderRoadmap, buildCalibration, voltaLabel, headerBaselinesPt } from '../lib/roadmap-render';
-import { layoutRoadmap, pickBarsPerLine, chunkIntoLines, PAGE_W, PAGE_H, MARGIN_X, MARGIN_TOP, CONTENT_W } from '../lib/roadmap-layout';
+import { layoutRoadmap, pickBarsPerLine, chunkIntoLines, lineStartNumbers, PAGE_W, PAGE_H, MARGIN_X, MARGIN_TOP, CONTENT_W } from '../lib/roadmap-layout';
 import { validateRoadmapSpec, type RoadmapSpec } from '../lib/roadmap-spec';
 import { isValidCalibration, canVerify, resolveRoadmap, CALIBRATION_SCHEMA_VERSION } from '../lib/chart-calibration';
 
@@ -125,6 +125,81 @@ describe('layoutRoadmap / buildCalibration — structural parity', () => {
     const spec = navSpec();
     const cal = buildCalibration(spec, layoutRoadmap(spec));
     expect(cal.sections).toHaveLength(spec.sections.length);
+  });
+});
+
+describe('line-start measure numbers — the one shared rule (design §3.3)', () => {
+  // A 3-section, multi-line, multi-page form; no explicit barsPerLine, so the
+  // responsive override actually takes effect (resolveBarsPerLine: explicit wins).
+  function multiSpec(): RoadmapSpec {
+    return {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'C',
+      sections: [
+        { id: 'a', label: 'A', bars: 40 },
+        { id: 'b', label: 'B', bars: 40 },
+        { id: 'c', label: 'C', bars: 40 },
+      ],
+    };
+  }
+
+  it('labels each resolved line by the absNumber of its first bar', () => {
+    const spec = multiSpec();
+    const layout = layoutRoadmap(spec); // default wrap
+    expect(layout.pageCount).toBeGreaterThan(1); // genuinely multi-page
+
+    const numbers = lineStartNumbers(layout.systems.map((s) => s.bars));
+    // Producer agrees with reading the first bar off each real line…
+    expect(numbers).toEqual(layout.systems.map((s) => s.bars[0].absNumber));
+    // …the first line is bar 1, and numbers strictly increase down the form.
+    expect(numbers[0]).toBe(1);
+    for (let i = 1; i < numbers.length; i += 1) {
+      expect(numbers[i]!).toBeGreaterThan(numbers[i - 1]!);
+    }
+  });
+
+  it('an empty line is never numbered', () => {
+    expect(lineStartNumbers([[]])).toEqual([null]);
+    expect(lineStartNumbers([[{ absNumber: 7 }], []])).toEqual([7, null]);
+  });
+
+  it('same bar → same number under different wraps (no drift), but line-start SETS differ by design', () => {
+    const spec = multiSpec();
+    const wide = layoutRoadmap(spec, { barsPerLine: 8 }); // PDF-ish
+    const narrow = layoutRoadmap(spec, { barsPerLine: 2 }); // responsive preview
+
+    // The producer labels EACH surface's own lines correctly.
+    expect(lineStartNumbers(wide.systems.map((s) => s.bars))).toEqual(
+      wide.systems.map((s) => s.bars[0].absNumber),
+    );
+    expect(lineStartNumbers(narrow.systems.map((s) => s.bars))).toEqual(
+      narrow.systems.map((s) => s.bars[0].absNumber),
+    );
+
+    // The one guarantee: a given bar carries ONE number everywhere, independent of
+    // how each surface wrapped. Compare every shared bar id across the two wraps.
+    const numById = (l: ReturnType<typeof layoutRoadmap>) =>
+      new Map(l.systems.flatMap((s) => s.bars).map((b) => [b.id, b.absNumber]));
+    const wideMap = numById(wide);
+    const narrowMap = numById(narrow);
+    for (const [id, n] of wideMap) expect(narrowMap.get(id)).toBe(n);
+
+    // The line-start SETS are NOT equal — asserting they were would bake in a
+    // WYSIWYG requirement nobody chose (§3.3 item 2).
+    const wideStarts = new Set(lineStartNumbers(wide.systems.map((s) => s.bars)));
+    const narrowStarts = new Set(lineStartNumbers(narrow.systems.map((s) => s.bars)));
+    expect(wideStarts).not.toEqual(narrowStarts);
+  });
+
+  it('the visual number does not perturb the born calibration', () => {
+    // Drawing absNumber is ink only; the structured output must be byte-identical
+    // to the pure layout→calibration projection (the "calibration unchanged" gate).
+    const spec = multiSpec();
+    const cal = buildCalibration(spec, layoutRoadmap(spec));
+    expect(cal.bars?.map((b) => b.absNumber)).toEqual(
+      Array.from({ length: totalBars(spec) }, (_, i) => i + 1),
+    );
   });
 });
 

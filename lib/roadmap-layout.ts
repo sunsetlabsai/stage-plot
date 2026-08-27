@@ -68,6 +68,21 @@ export function chunkIntoLines<T>(items: T[], perLine: number): T[][] {
   return lines;
 }
 
+// ── The one line-start numbering rule (design §3.3 item 1) ────────────────────
+// A resolved line's measure number is the `absNumber` of its FIRST bar — full
+// stop. Both surfaces call this over their OWN resolved lines (LaidSystem[] for
+// the PDF, the preview's chunked lines), so a given bar carries one number
+// everywhere even when the two surfaces wrap at different bars — and therefore
+// show DIFFERENT sets of line-start numbers. That divergence is by design (§3.3
+// item 2), NOT drift: the *rule* is single-sourced here, the visible wrap is not.
+// Reading `absNumber` off each real line's first bar is what keeps the rule one.
+// An empty line is never numbered (null).
+export function lineStartNumbers(
+  lines: ReadonlyArray<ReadonlyArray<{ absNumber: number }>>,
+): (number | null)[] {
+  return lines.map((line) => (line.length > 0 ? line[0].absNumber : null));
+}
+
 // ── Layout result (the shared substrate both projections read) ────────────────
 // Every geometry value here is already normalized 0..1 within its page, so the
 // calibration is a near-direct copy and the PDF draw is a single denormalize.

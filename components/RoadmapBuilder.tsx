@@ -32,7 +32,7 @@ import {
   type ViewNavigation,
 } from '@/lib/roadmap-view';
 import type { RoadmapSpec, SectionRepeat } from '@/lib/roadmap-spec';
-import { pickBarsPerLine, chunkIntoLines } from '@/lib/roadmap-layout';
+import { pickBarsPerLine, chunkIntoLines, lineStartNumbers } from '@/lib/roadmap-layout';
 
 // ── Roadmap Builder — describe a song's structure, render an exact chart ─────
 // Full-screen overlay launched from ManageChartsModal. Compose (big prompt) →
@@ -753,6 +753,17 @@ function ChartSheet({
       : barsWidth > 0
         ? pickBarsPerLine(barsWidth)
         : 4;
+  // Global reading-order bar offset per section, so each preview bar can carry the
+  // same absNumber the PDF layout assigns (section order → bar order from 1). This
+  // lets both surfaces label lines by the ONE shared rule (§3.3 item 1).
+  const sectionBarBase: number[] = [];
+  {
+    let acc = 0;
+    for (const s of sections) {
+      sectionBarBase.push(acc);
+      acc += s.chords.length;
+    }
+  }
   return (
     <div className="w-full max-w-[920px] mx-auto bg-white rounded shadow-2xl p-7 text-black">
       <div className="text-center border-b border-zinc-200 pb-3 mb-3">
@@ -765,41 +776,59 @@ function ChartSheet({
         </div>
       </div>
       <div ref={barsRef} className="mt-5 space-y-5">
-        {sections.map((s) => (
-          <div key={s.id}>
-            <div className="text-[11px] font-bold text-zinc-700 flex items-center gap-2 mb-1">
-              {s.label}
-              {repeatLabel(s.repeat) && <span className="text-[9px] text-blue-600">{repeatLabel(s.repeat)}</span>}
+        {sections.map((s, si) => {
+          // Each preview bar carries its global absNumber; the shared rule then
+          // reads the first bar of each resolved line (§3.3 item 1). The preview
+          // may wrap at a different bars/line than the PDF — that is expected, so
+          // the visible numbers can differ; the per-bar number never does.
+          const lines = chunkIntoLines(
+            s.chords.map((bar, bi) => ({ bar, bi, absNumber: sectionBarBase[si] + bi + 1 })),
+            barsPerLine,
+          );
+          const lineNumbers = lineStartNumbers(lines);
+          return (
+            <div key={s.id}>
+              {/* pl-6 aligns the label above the barline (the grid's left border),
+                  mirroring the PDF where the number sits in the gutter to its left. */}
+              <div className="pl-6 text-[11px] font-bold text-zinc-700 flex items-center gap-2 mb-1">
+                {s.label}
+                {repeatLabel(s.repeat) && <span className="text-[9px] text-blue-600">{repeatLabel(s.repeat)}</span>}
+              </div>
+              {/* One system row per line of `barsPerLine` bars. A muted gutter cell
+                  carries the line-start measure number; the grid keeps constant-width
+                  columns (NOT flex-fill) so a partial last line keeps bar width and
+                  left-aligns, and the trailing barline tracks the last real bar. */}
+              <div className="space-y-1">
+                {lines.map((line, li) => (
+                  <div key={li} className="flex items-stretch">
+                    <div className="w-6 shrink-0 pr-1 pt-0.5 text-right text-[9px] leading-none text-zinc-400 tabular-nums">
+                      {lineNumbers[li]}
+                    </div>
+                    <div
+                      className="grid flex-1 border-l-2 border-black"
+                      style={{ gridTemplateColumns: `repeat(${barsPerLine}, minmax(0, 1fr))` }}
+                    >
+                      {line.map(({ bar, bi }, idx) => (
+                        <Measure
+                          key={bi}
+                          bar={bar}
+                          beats={beats}
+                          mode={mode}
+                          renderKey={renderKey}
+                          trailing={idx === line.length - 1}
+                          isEditing={editing === `${s.id}:${bi}`}
+                          onEdit={() => setEditing(`${s.id}:${bi}`)}
+                          onCommit={(cells) => onCommitBar(s.id, bi, cells)}
+                          onCancel={() => setEditing(null)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
-            {/* One system row per line of `barsPerLine` bars. Constant-width grid
-                columns (NOT flex-fill): a partial last line keeps bar width and
-                left-aligns; the trailing barline tracks the last real bar. */}
-            <div className="space-y-1">
-              {chunkIntoLines(s.chords.map((bar, bi) => ({ bar, bi })), barsPerLine).map((line, li) => (
-                <div
-                  key={li}
-                  className="grid border-l-2 border-black"
-                  style={{ gridTemplateColumns: `repeat(${barsPerLine}, minmax(0, 1fr))` }}
-                >
-                  {line.map(({ bar, bi }, idx) => (
-                    <Measure
-                      key={bi}
-                      bar={bar}
-                      beats={beats}
-                      mode={mode}
-                      renderKey={renderKey}
-                      trailing={idx === line.length - 1}
-                      isEditing={editing === `${s.id}:${bi}`}
-                      onEdit={() => setEditing(`${s.id}:${bi}`)}
-                      onCommit={(cells) => onCommitBar(s.id, bi, cells)}
-                      onCancel={() => setEditing(null)}
-                    />
-                  ))}
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

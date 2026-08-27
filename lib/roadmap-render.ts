@@ -36,6 +36,7 @@ import {
   PAGE_H,
   MARGIN_X,
   layoutRoadmap,
+  lineStartNumbers,
   type LaidBar,
   type RoadmapLayout,
 } from './roadmap-layout';
@@ -236,7 +237,10 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
   drawText(pages[0], font, `Nashville (authored in ${spec.renderKey})`, MARGIN_X, header.key, 10);
 
   const beats = spec.timeSig.beats;
-  for (const sys of layout.systems) {
+  // Line-start measure numbers by the ONE shared rule (design §3.3 item 1): each
+  // system's number is the absNumber of its first bar. Same rule the preview runs.
+  const lineNumbers = lineStartNumbers(layout.systems.map((s) => s.bars));
+  for (const [i, sys] of layout.systems.entries()) {
     const pg = pages[sys.page - 1];
     if (sys.label) {
       drawText(pg, fontBold, sys.label, denormX(sys.xStart), denormYTop(sys.labelYTop) - 12, 11);
@@ -244,6 +248,18 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
     const yTopPt = denormYTop(sys.yTop);
     const yBottomPt = denormYTop(sys.yBottom);
     drawLine(pg, denormX(sys.xStart), yBottomPt, denormX(sys.xEnd), yBottomPt, 1);
+
+    // Measure number in the left gutter (design §3.1): 8pt, right-aligned 3pt clear
+    // of the leading barline so it is subordinate to the 11pt bold label and never
+    // enters the staff. Bound (§3.1): if the glyph would run off the page's left
+    // edge, omit rather than overflow — never draw across the barline.
+    const measureNo = lineNumbers[i];
+    if (measureNo != null) {
+      const label = String(measureNo);
+      const w = font.widthOfTextAtSize(label, 8);
+      const x = denormX(sys.xStart) - w - 3;
+      if (x >= 3) drawText(pg, font, label, x, yTopPt - 8, 8);
+    }
 
     for (const bar of sys.bars) {
       drawLine(pg, denormX(bar.xStart), yTopPt, denormX(bar.xStart), yBottomPt, 1); // leading barline
