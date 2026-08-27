@@ -1253,8 +1253,8 @@ the point of the injectable shape (§5.2a.3) — under jsdom in this repo
 
 **Tests 21–24 (settings overlay) REMOVED at v11** along with §14; their text is
 at `a624650`. They are **carried forward as `design-single-backend.md` §9 chunk
-4's test requirement** (created `894c25c`), which names them but does not
-reproduce their text — the originals remain the reference.
+4's test requirement** (created `894c25c`), which restates them; the originals at
+`a624650` remain the exact-wording reference.
 They are not cancelled — they
 pin the overlay's data-loss property and the no-duplicate-entry requirement, and
 they must be written against whatever storage that document settles on.
