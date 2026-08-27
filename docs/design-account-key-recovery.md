@@ -8,15 +8,21 @@ Scope is one gap chunk 4 left open, flagged there as deliberate.
 
 ## 1. The gap
 
-`/api/agent/chat` returns **401** in two cases (`app/api/agent/chat/route.ts`):
+`/api/agent/chat` returns **401** in three cases (`app/api/agent/chat/route.ts`):
 
-1. **A supplied BYOA key was rejected by Anthropic** (`route.ts:131` → `'Invalid API
-   key. Check your key and try again.'`). No `reason` field.
-2. **No key at all and try-it is unavailable** (`route.ts:90` → `reason: 'unconfigured'`).
+1. **A BYOA key was rejected by Anthropic** — `resolved.mode === 'byoa'`, then Anthropic 401
+   (`route.ts:131` → `'Invalid API key. Check your key and try again.'`). No `reason` field.
+2. **The shared try-it key was rejected by Anthropic** — `resolved.mode === 'tryit'`, same
+   Anthropic-401 path, *same message*. No `reason` field. (Design review R2, Codex Medium:
+   this case is easy to miss because it is byte-identical to case 1 on the wire.)
+3. **No key at all and try-it is unavailable** (`route.ts:90` → `reason: 'unconfigured'`).
 
-Case 1 fires for *either* BYOA backend: a **device** key sent in the `Authorization`
-header, **or** an **account** key the route resolved from the session `userId` with no
-header at all (chunk 3, `resolveKeyMode`).
+Only **case 1** is the user's to fix, and it fires for *either* BYOA backend: a **device**
+key sent in the `Authorization` header, **or** an **account** key the route resolved from the
+session `userId` with no header at all (chunk 3, `resolveKeyMode`). Case 2 is a *platform*
+fault — the user holds no key and can do nothing about the shared one — so it must **not**
+raise the "your key was rejected" banner; case 3 likewise. The whole detection problem is
+telling case 1 apart from cases 2 and 3, which status alone cannot do.
 
 The show page has a recovery affordance for case 1 today — the `keyRejected` banner
 ("Clear saved key") — but it only detects the **device** variant:
@@ -78,11 +84,15 @@ On an Anthropic **401 for a BYOA send**, `/api/agent/chat` includes a stable mac
 { error: 'Invalid API key…', keyReject: 'device' | 'account' }     // status 401
 ```
 
-The unconfigured 401 (no key at all) carries **no** `keyReject` — it already carries
-`reason: 'unconfigured'`. `keyReject` is an **enum the client switches on, not copy**, so
-reading it does not violate `send-recovery.ts`'s "never match on response *text*" rule; it is
-the same kind of machine breadcrumb `reason` already is, promoted to a control signal because
-the client genuinely needs it.
+**`keyReject` is set only when `resolved.mode === 'byoa'`** — it is derived from
+`resolved.source`, which exists on no other mode. So the two 401s the user cannot fix carry
+none: the **try-it** rejection (§1 case 2, `resolved.mode === 'tryit'`) and the
+**unconfigured** 401 (§1 case 3, which already carries `reason: 'unconfigured'`). Its absence
+is meaningful — "no `keyReject`" is exactly "not a key the user can fix," which is why the
+banner keys on presence, not on the 401 status. `keyReject` is an **enum the client switches
+on, not copy**, so reading it does not violate `send-recovery.ts`'s "never match on response
+*text*" rule; it is the same kind of machine breadcrumb `reason` already is, promoted to a
+control signal because the client genuinely needs it.
 
 Detection becomes: **a 401 whose parsed body carries `keyReject`.** `isSavedKeyRejected`
 reads that field and returns the rejected **source** (`'device' | 'account' | null`) instead
@@ -160,11 +170,13 @@ route.ts` (surface `keyReject` on the BYOA 401), `lib/send-recovery.ts` (predica
 
 - **`agent-chat-route.test.ts` — the signal's PRODUCTION**: a send that resolves a **device**
   key which Anthropic 401s returns `keyReject: 'device'`; a send that resolves an **account**
-  key which 401s returns `keyReject: 'account'`; the **unconfigured** 401 (no key) returns
-  **no** `keyReject` (and still `reason: 'unconfigured'`). This is the coverage the R1 design
-  gained by moving detection server-side — it was untestable under the availability scheme.
-  Positive control: the unconfigured case must stay `keyReject`-free, or the banner would
-  fire on a deployment that simply has no try-it key.
+  key which 401s returns `keyReject: 'account'`; the **try-it** key rejected by Anthropic
+  (§1 case 2) returns **no** `keyReject` (design review R2 — this is the case that must not
+  raise a banner despite an identical error message); the **unconfigured** 401 (§1 case 3)
+  returns **no** `keyReject` (and still `reason: 'unconfigured'`). This is the coverage the R1
+  design gained by moving detection server-side — it was untestable under the availability
+  scheme. Positive controls: both the try-it-rejection and the unconfigured cases must stay
+  `keyReject`-free, or the banner would fire on a platform-key fault the user cannot fix.
 - **`send-recovery.test.ts` — `isSavedKeyRejected`**: maps a 401 body carrying `keyReject` to
   its source, and a 401 without it (unconfigured) to "not a key rejection." A non-401 with a
   stray `keyReject` is also not a rejection (status gate holds).
