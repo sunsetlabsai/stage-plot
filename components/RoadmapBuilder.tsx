@@ -747,11 +747,16 @@ function ChartSheet({
   // otherwise pick a bars/line tier from the measured bar area, never letting a
   // line overflow (design §4.3). Default 4 until the first measure lands.
   const [barsRef, barsWidth] = useContentWidth<HTMLDivElement>();
+  // The measured area now includes the w-6 line-number gutter each row carries, so
+  // discount it before the tier decision — otherwise the picker reads ~24px wide
+  // and wraps one step early near the breakpoints (Codex non-blocking note).
+  const LINE_NUMBER_GUTTER_PX = 24; // = w-6
+  const barAreaWidth = barsWidth - LINE_NUMBER_GUTTER_PX;
   const barsPerLine =
     explicitBarsPerLine && explicitBarsPerLine > 0
       ? explicitBarsPerLine
-      : barsWidth > 0
-        ? pickBarsPerLine(barsWidth)
+      : barAreaWidth > 0
+        ? pickBarsPerLine(barAreaWidth)
         : 4;
   // Global reading-order bar offset per section, so each preview bar can carry the
   // same absNumber the PDF layout assigns (section order → bar order from 1). This
