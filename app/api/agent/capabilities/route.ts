@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { checkRateLimit, PROBE_RATE_LIMIT_MAX } from '@/lib/admin-rate-limit';
-import { resolveKeyMode, getClientIp, capabilitiesFrom, hasAccountKey } from '@/lib/agent-key';
+import { resolveTryitMode, getClientIp, capabilitiesFrom, hasAccountKey, type AccountKeyReport } from '@/lib/agent-key';
 import { getSupabaseServer } from '@/lib/supabase-server';
 
 // GET /api/agent/capabilities — design docs/design-ai-key-availability.md §4, chunk 2.
@@ -38,7 +38,8 @@ export async function GET(request: NextRequest) {
   // own secret row, never the quota), and anonymous callers never reach it, so the
   // limiter still fully guards the try-it path below. Presence only — zero key material.
   if (userId && (await hasAccountKey(userId))) {
-    return Response.json({ accountKey: true }, { headers: { 'Cache-Control': 'no-store' } });
+    const body: AccountKeyReport = { accountKey: true };
+    return Response.json(body, { headers: { 'Cache-Control': 'no-store' } });
   }
 
   // A 429 is deliberately NOT one of §4's four states, and the client must not
@@ -53,17 +54,15 @@ export async function GET(request: NextRequest) {
   }
 
   // consume: false is load-bearing, not a default. A tab-open must not cost a free
-  // message (§4 hard requirement), so the probe cannot reuse the sender's path, which
-  // INCRs unconditionally. §4 called for a `peekTryitQuota` sibling; chunk 1 built the
-  // same behavior as a `consume` flag on one private quota() instead — see §12, one
-  // implementation with two modes cannot drift from itself the way two siblings can.
+  // message (§4 hard requirement), so the probe reads the quota rather than INCRing it.
+  // §4 called for a `peekTryitQuota` sibling; chunk 1 built the same behavior as a
+  // `consume` flag on one private quota() instead — one implementation with two modes
+  // cannot drift from itself the way two siblings can.
   //
-  // `userId` is deliberately NOT passed here: the account-key case was fully handled
-  // and returned above, so this path is the try-it path by definition. Passing it would
-  // re-read the caller's secret row for nothing (and, worse, before the limiter counted
-  // it). `capabilitiesFrom` therefore only ever projects a try-it mode here.
-  const resolved = await resolveKeyMode(undefined, ip, { consume: false }, null);
-  const capabilities = capabilitiesFrom(resolved);
+  // The account-key case was fully handled and returned above, so this is the try-it
+  // path by definition — hence `resolveTryitMode`, whose `TryitKeyMode` return can
+  // never be byoa. That is exactly why `capabilitiesFrom` has no byoa case to fake.
+  const capabilities = capabilitiesFrom(await resolveTryitMode(ip, false));
 
   // no-store per §4: a cached "available" would be worse than having no probe at all,
   // because the empty state it suppresses is the one the user needs to see.

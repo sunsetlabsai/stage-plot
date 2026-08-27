@@ -123,6 +123,14 @@ export type KeyMode =
   /** No key available: nothing is set. */
   | { mode: 'unconfigured' };
 
+/**
+ * The subset of `KeyMode` that the try-it path can produce — everything except
+ * `byoa`. `resolveTryitMode` returns exactly this, which is what lets
+ * `capabilitiesFrom` be total over the three try-it states with no phantom `byoa`
+ * case to explain away.
+ */
+export type TryitKeyMode = Exclude<KeyMode, { mode: 'byoa' }>;
+
 // `mode: 'error'` was DELETED with the Redis config client (design-single-backend
 // §3.2). It meant "no key AND the store was unreachable" — a state the only
 // producer, readAdminConfig, can no longer reach now that config resolves from
@@ -373,10 +381,23 @@ export async function resolveKeyMode(
     }
   }
 
+  return resolveTryitMode(ip, opts.consume);
+}
+
+/**
+ * Resolve the try-it path alone: the shared key + per-IP quota, never BYOA.
+ *
+ * Split out of `resolveKeyMode` so the capabilities probe can resolve try-it
+ * capability WITHOUT the BYOA branches — it handles the account key separately, ahead
+ * of its rate limiter (see `hasAccountKey`). The narrow `TryitKeyMode` return is what
+ * keeps `capabilitiesFrom` honest: byoa cannot reach it, so it has no byoa case to
+ * fake. `resolveKeyMode` composes this after its own byoa/account checks.
+ */
+export async function resolveTryitMode(ip: string, consume: boolean): Promise<TryitKeyMode> {
   const read = await readAdminConfig('claude_tryit_key');
   if (read.status === 'none') return { mode: 'unconfigured' };
 
-  const q = await quota(ip, opts.consume);
+  const q = await quota(ip, consume);
   if (!q.allowed) return { mode: 'exhausted' };
 
   return {
@@ -411,28 +432,25 @@ export type Capabilities = {
 /**
  * The probe's account-key signal (design-single-backend §3.2).
  *
- * PRESENCE only — never the key, its length or its prefix. It exists so the show
- * page can drop the inline key affordance for a signed-in owner whose account
- * already carries a key (chunk 3), matching what `/api/agent/chat` already does.
- * The `{ accountKey: true }` payload is the whole body; there is no field that
- * could carry key material, by construction.
+ * PRESENCE only — never the key, its length or its prefix. The capabilities route
+ * emits `{ accountKey: true }` when `hasAccountKey` is true, so a signed-in owner
+ * whose account carries a key (chunk 3) sees the show page drop the inline affordance,
+ * matching what `/api/agent/chat` already does. It is the whole body; there is no
+ * field that could carry key material, and the route builds it from a boolean — the
+ * key never enters that route at all.
  */
 export type AccountKeyReport = { accountKey: true };
 
 /**
- * Project a resolved KeyMode onto the probe's wire shape.
+ * Project a resolved try-it KeyMode onto the probe's wire shape.
  *
- * The probe passes no client key, so a `byoa` result here means a stored ACCOUNT
- * key was resolved for the authenticated user (§3.2) — a real, measured state, not
- * a programming error. It is reported as PRESENCE alone (`{ accountKey: true }`):
- * there is no path from here to a response carrying the key, its length or its
- * prefix (§4 hard requirement, §9 test 4). The try-it enum, when that is what
- * resolved, is likewise the whole payload.
+ * Takes `TryitKeyMode`, not `KeyMode`: the account-key case is handled and returned by
+ * the route before this is reached, so byoa cannot arrive here and there is no byoa
+ * case to invent. The enum is the whole payload — no path carries the key, its length
+ * or its prefix (§4 hard requirement, §9 test 4).
  */
-export function capabilitiesFrom(resolved: KeyMode): Capabilities | AccountKeyReport {
+export function capabilitiesFrom(resolved: TryitKeyMode): Capabilities {
   switch (resolved.mode) {
-    case 'byoa':
-      return { accountKey: true };
     case 'unconfigured':
       return { tryit: 'unconfigured', tryitRemaining: null, quota: TRYIT_QUOTA };
     case 'exhausted':
