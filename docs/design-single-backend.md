@@ -97,8 +97,9 @@ is visible in the repository — an env-var claim can only be settled against Ve
 3. **BYOA extends to every AI surface**, not try-it only — one entry surface
    dissolves the stale-second-input objection.
 
-Chunk 4 ships the §14 UI (the overlay and the states 5–7 affordance) and the
-chunk-4 tests spelled out in §9, run against whichever storage the user chose (§5.1).
+Chunk 4 ships the settings-overlay UI (the overlay and the states 5–7 affordance)
+and the chunk-4 tests spelled out in §9, run against whichever storage the user
+chose (§5.1).
 
 ### 3.2 ⚠ The live inconsistency chunk 4 must close
 
