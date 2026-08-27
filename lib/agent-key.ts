@@ -391,21 +391,30 @@ export type Capabilities = {
 };
 
 /**
+ * The probe's account-key signal (design-single-backend §3.2).
+ *
+ * PRESENCE only — never the key, its length or its prefix. It exists so the show
+ * page can drop the inline key affordance for a signed-in owner whose account
+ * already carries a key (chunk 3), matching what `/api/agent/chat` already does.
+ * The `{ accountKey: true }` payload is the whole body; there is no field that
+ * could carry key material, by construction.
+ */
+export type AccountKeyReport = { accountKey: true };
+
+/**
  * Project a resolved KeyMode onto the probe's wire shape.
  *
- * Returns `null` for `byoa`, which the probe can never produce because it passes no
- * client key. That is a programming error rather than a state to report, and the
- * route fails loud on it — reporting a try-it state we did not measure would be the
- * exact class of lie this design exists to remove (§0 invariant 2).
- *
- * Note the key itself is not in the return type at all: there is no path from here to
- * a response containing the key, its length or its prefix (§4 hard requirement, §9
- * test 4). The enum is the whole payload.
+ * The probe passes no client key, so a `byoa` result here means a stored ACCOUNT
+ * key was resolved for the authenticated user (§3.2) — a real, measured state, not
+ * a programming error. It is reported as PRESENCE alone (`{ accountKey: true }`):
+ * there is no path from here to a response carrying the key, its length or its
+ * prefix (§4 hard requirement, §9 test 4). The try-it enum, when that is what
+ * resolved, is likewise the whole payload.
  */
-export function capabilitiesFrom(resolved: KeyMode): Capabilities | null {
+export function capabilitiesFrom(resolved: KeyMode): Capabilities | AccountKeyReport {
   switch (resolved.mode) {
     case 'byoa':
-      return null;
+      return { accountKey: true };
     case 'unconfigured':
       return { tryit: 'unconfigured', tryitRemaining: null, quota: TRYIT_QUOTA };
     case 'exhausted':

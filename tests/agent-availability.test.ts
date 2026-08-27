@@ -377,6 +377,58 @@ describe('probeCapabilities — status → FetchedProbe (#136)', () => {
     } as unknown as Response;
     expect(await probeCapabilities(async () => broken)).toBe('error');
   });
+
+  it('passes the account-key report through on 200 (§3.2)', async () => {
+    // The account-aware probe answers `{ accountKey: true }` instead of a try-it
+    // enum when a stored account key resolves. It is a fetched probe value like any
+    // other; the mapping must not collapse it to error or invent a try-it shape.
+    expect(await probeCapabilities(async () => res(200, { accountKey: true }))).toEqual({
+      accountKey: true,
+    });
+  });
+});
+
+// design-single-backend §3.2 + §9 T22, chunk 4 — the account-aware probe.
+//
+// A signed-in owner who saved a key to their account has no key in THIS browser,
+// so `apiKey` is empty; the only thing that can tell the show page the key exists
+// is the server-side probe returning `{ accountKey: true }`. That must resolve to
+// state 1 — send enabled, no affordance to add a key — exactly as a device key does.
+describe('resolveAvailability — the account-key report (§3.2)', () => {
+  const accountKey: Probe = { accountKey: true };
+
+  it('reads an account-key report as state 1, with no device key held', () => {
+    const a = resolve({ apiKey: '', probe: accountKey });
+
+    expect(a.state).toBe(1);
+    expect(a.allowsSend).toBe(true);
+    expect(a.showKeyField).toBe(false);
+    expect(a.lead).toBe('none');
+    expect(a.remaining).toBe(null);
+  });
+
+  it('enables sending, so the composer is not disabled for an account-key owner', () => {
+    expect(
+      canSendMessage({ availability: resolve({ probe: accountKey }), streaming: false, hasPendingTools: false }),
+    ).toBe(true);
+  });
+
+  it('outranks a stale exhausted flag — a send for this user carries the account key', () => {
+    // The same freshness argument as a device key: sends resolve to the account key,
+    // never to the shared try-it quota, so an exhausted flag describes a path the
+    // request will not take.
+    const a = resolve({ probe: accountKey, sendExhausted: true });
+
+    expect(a.state).toBe(1);
+    expect(a.allowsSend).toBe(true);
+  });
+
+  it('is carried through effectiveProbe untouched, key or no key', () => {
+    // With no device key it is the live probe; with one, device precedence takes over
+    // in resolveAvailability, but effectiveProbe must not MASK the fetched value.
+    expect(effectiveProbe('', accountKey)).toEqual(accountKey);
+    expect(effectiveProbe('sk-ant-device', accountKey)).toEqual(accountKey);
+  });
 });
 
 // Codex R1 medium on #140 — §5.1's clear-and-re-probe contract.

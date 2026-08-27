@@ -1,4 +1,4 @@
-import type { Capabilities } from './agent-key';
+import type { Capabilities, AccountKeyReport } from './agent-key';
 
 // Design docs/design-ai-key-availability.md §5, chunk 3.
 //
@@ -29,7 +29,14 @@ import type { Capabilities } from './agent-key';
  * error path that strands the caller is not a fix; that is the third instance of this
  * exact class in this project.
  */
-export type Probe = 'skipped' | 'loading' | 'rateLimited' | 'error' | Capabilities;
+/**
+ * `AccountKeyReport` (`{ accountKey: true }`) is the account-aware probe's answer
+ * (design-single-backend §3.2): the signed-in owner has a key stored on their
+ * account, so the show page treats them as state 1 — key present — without the key
+ * ever leaving the server. It is a fetched value, not a derived one, because only
+ * the server can see the account store.
+ */
+export type Probe = 'skipped' | 'loading' | 'rateLimited' | 'error' | AccountKeyReport | Capabilities;
 
 /** What the probe fetch itself can return. `skipped` is not fetchable — see below. */
 export type FetchedProbe = Exclude<Probe, 'skipped'>;
@@ -107,8 +114,16 @@ export function resolveAvailability(args: {
 }): Availability {
   const { apiKey, probe, sendRemaining, sendExhausted } = args;
 
-  // 1. BYOA.
+  // 1. BYOA — a device key held here in the browser, OR a stored account key the
+  //    account-aware probe found (§3.2). Both mean a send will carry a real key, so
+  //    both render as state 1 with no key affordance, and both must win over
+  //    `sendExhausted`: a send for this user resolves to that key, never to the shared
+  //    try-it quota, so a stale exhausted flag describes a path the request will not
+  //    take. Kept as two guards so `probe` narrows cleanly for the switch below.
   if (apiKey) {
+    return { state: 1, allowsSend: true, showKeyField: false, remaining: null, lead: 'none' };
+  }
+  if (typeof probe === 'object' && 'accountKey' in probe) {
     return { state: 1, allowsSend: true, showKeyField: false, remaining: null, lead: 'none' };
   }
 
@@ -208,7 +223,10 @@ export async function probeCapabilities(
     // rather than being collapsed into one it did not measure.
     if (res.status === 429) return 'rateLimited';
     if (!res.ok) return 'error';
-    return (await res.json()) as Capabilities;
+    // The body is a try-it `Capabilities` OR the account-key report `{ accountKey:
+    // true }` (§3.2). Both are fetched probe values; the caller's `resolveAvailability`
+    // routes the account-key case to state 1.
+    return (await res.json()) as Capabilities | AccountKeyReport;
   } catch {
     return 'error';
   }

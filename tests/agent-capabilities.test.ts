@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { quotaBackend, supabaseAdminMock } from './helpers/quota-backend';
+import { quotaBackend, secretsBackend, supabaseAdminMock } from './helpers/quota-backend';
 
 import { NextRequest } from 'next/server';
 import { TRYIT_QUOTA } from '../lib/agent-key';
@@ -40,13 +40,19 @@ const quotaReads = () => redis.getKeys.filter((k) => k.startsWith('quota:'));
 // Quota moved off Redis onto two Supabase RPCs (chunk 2).
 vi.mock('@/lib/supabase-admin', () => supabaseAdminMock());
 
-// Chunk 3: the shared-counter cases drive the CHAT route, which now resolves a
-// session on the keyless path to look for an account key (§4.5). Anonymous
-// here. See agent-chat-route.test.ts for why this mock is load-bearing rather
-// than scaffolding — the route's try/catch would otherwise hide its absence.
+// Chunk 3/4: BOTH the chat route AND the capabilities probe now resolve a session
+// on the keyless path to look for an account key (§4.5, §3.2). `session.userId` is
+// mutable so a test can flip from anonymous (the default, and every pre-chunk-4
+// case) to a signed-in owner. The factory reads it at each getUser() call, so
+// mutating it between tests takes effect. See agent-chat-route.test.ts for why this
+// mock is load-bearing rather than scaffolding — the route's try/catch would
+// otherwise hide its absence.
+const session = { userId: null as string | null };
 vi.mock('@/lib/supabase-server', () => ({
   getSupabaseServer: async () => ({
-    auth: { getUser: async () => ({ data: { user: null } }) },
+    auth: {
+      getUser: async () => ({ data: { user: session.userId ? { id: session.userId } : null } }),
+    },
   }),
 }));
 
@@ -90,6 +96,8 @@ beforeEach(() => {
   redis.getKeys = [];
   redis.getThrowsFor.clear();
   quotaBackend.reset();
+  secretsBackend.reset();
+  session.userId = null;
   process.env.NEXT_PUBLIC_SUPABASE_URL = 'https://test.supabase.co';
   process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-test';
   process.env.REDIS_URL = 'redis://test';
@@ -418,29 +426,76 @@ describe('GET /api/agent/capabilities — caching and rate limiting (§4)', () =
   });
 });
 
-describe('GET /api/agent/capabilities — the unreportable mode fails loud', () => {
-  it('500s rather than inventing a try-it state, if resolution returns byoa', async () => {
-    // Unreachable through the route (it passes no client key), which is exactly why
-    // it is worth pinning: the tempting alternative is a default branch that reports
-    // some state we did not measure.
-    vi.doMock('@/lib/agent-key', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('../lib/agent-key')>();
-      return {
-        ...actual,
-        resolveKeyMode: async () => ({
-          mode: 'byoa' as const,
-          apiKey: KEY_IN_ENV,
-          model: 'm',
-          maxTokens: 1,
-        }),
-      };
-    });
+describe('GET /api/agent/capabilities — account-aware probe (§3.2, T22)', () => {
+  const USER = 'user-abc-123';
+  const ACCOUNT_KEY = 'sk-ant-account-STOREDSECRET-cccc';
+
+  it('reports { accountKey: true } for a signed-in owner with a stored key', async () => {
+    // The live inconsistency chunk 4 closes: before this the probe passed no userId,
+    // so a saved account key was invisible to the show-page affordance while
+    // /api/agent/chat already used it. Now the probe resolves the same key and reports
+    // its PRESENCE.
+    keyConfigured();
+    session.userId = USER;
+    secretsBackend.keys.set(USER, ACCOUNT_KEY);
 
     const res = await probe();
-    const raw = await res.text();
+    const body = await res.json();
 
-    expect(res.status).toBe(500);
-    expect(raw).not.toContain(KEY_IN_ENV);
-    expect(JSON.parse(raw).tryit).toBeUndefined();
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ accountKey: true });
+  });
+
+  it('carries no key material — not the key, its prefix, or its length', async () => {
+    // §0 invariant 2 / §4 hard requirement: the presence signal must never become a
+    // channel for the key. `{ accountKey: true }` is the whole body.
+    keyConfigured();
+    session.userId = USER;
+    secretsBackend.keys.set(USER, ACCOUNT_KEY);
+
+    const raw = await (await probe()).text();
+
+    expect(raw).not.toContain(ACCOUNT_KEY);
+    expect(raw).not.toContain('STOREDSECRET');
+    expect(raw).not.toContain('sk-ant');
+    expect(raw).not.toContain(String(ACCOUNT_KEY.length));
+    expect(Object.keys(JSON.parse(raw))).toEqual(['accountKey']);
+  });
+
+  it('does not touch the try-it quota when an account key resolves', async () => {
+    // Account BYOA wins before the quota branch (device-first precedence excepted),
+    // so a probe for an account-key owner must not peek or consume the shared quota.
+    keyConfigured();
+    session.userId = USER;
+    secretsBackend.keys.set(USER, ACCOUNT_KEY);
+
+    await probe();
+
+    expect(quotaBackend.calls).toBe(0);
+  });
+
+  it('falls back to the try-it report when the signed-in owner has NO account key', async () => {
+    // The positive control: a session alone must not flip the probe. Without a stored
+    // key the answer is still the try-it state, proving the account branch is what
+    // produced { accountKey: true } above, not merely being signed in.
+    keyConfigured();
+    session.userId = USER; // no secret seeded
+
+    const body = await (await probe()).json();
+
+    expect(body.tryit).toBe('available');
+    expect(body.accountKey).toBeUndefined();
+  });
+
+  it('an anonymous visitor is unaffected — no session, no account lookup, try-it as before', async () => {
+    keyConfigured();
+    secretsBackend.keys.set(USER, ACCOUNT_KEY); // present, but for a user nobody is signed in as
+
+    const body = await (await probe()).json();
+
+    expect(session.userId).toBe(null);
+    expect(body.tryit).toBe('available');
+    expect(body.accountKey).toBeUndefined();
+    expect(secretsBackend.getCalls).toBe(0);
   });
 });

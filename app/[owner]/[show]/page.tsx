@@ -43,6 +43,8 @@ import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
 import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
+import { ByoaKeySettings } from '@/components/ByoaKeySettings';
+import { SettingsOverlay } from '@/components/SettingsOverlay';
 import { resolveAvailability, canSendMessage, effectiveProbe, probeCapabilities, type FetchedProbe } from '@/lib/agent-availability';
 import { rememberPrompt } from '@/lib/prompt-cache';
 import { visibleTab, type ShowTab } from '@/lib/show-tabs';
@@ -52,7 +54,11 @@ import { buildApiMessages, hasPendingTools as transcriptHasPendingTools } from '
 // No BYOA_KEY here any more: the page no longer touches either store directly,
 // so the storage-key name is now entirely `lib/byoa-key-storage`'s business.
 // (#133 centralized the literal; this removes the last caller that needed it.)
-import { readKey, initialRemember, persistKey } from '@/lib/byoa-key-storage';
+// `readKey` seeds the device key at mount; `persistKey` is the single storage clear
+// on the recovery path. Everything else about storage is `ByoaKeySettings`'s job now
+// (chunk 4) — the overlay is the sole writer, so `initialRemember`/the persist effect
+// that used to live here are gone.
+import { readKey, persistKey } from '@/lib/byoa-key-storage';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -5157,11 +5163,10 @@ function AgentChat({
     if (typeof window === 'undefined') return '';
     return readKey(localStorage, sessionStorage);
   });
-  const [rememberKey, setRememberKey] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return initialRemember(localStorage, sessionStorage);
-  });
-  const [showKey, setShowKey] = useState(false);
+  // The settings overlay (chunk 4). Opening it renders `ByoaKeySettings` on TOP of
+  // this still-mounted host, so restored composer text and the transcript survive
+  // (§3.1, §9 T21) — a navigation to /dashboard/settings would destroy them.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -5169,6 +5174,12 @@ function AgentChat({
   const [tryitRemaining, setTryitRemaining] = useState<number | null>(null);
   const [tryitExhausted, setTryitExhausted] = useState(false);
   const [fetchedProbe, setFetchedProbe] = useState<FetchedProbe>('loading');
+  // Bumped to force a re-probe when nothing the mount effect already watches has
+  // changed — specifically after an ACCOUNT key is saved or removed in the overlay
+  // while no device key is held (§3.2, §9 T22). A device-key change re-runs the probe
+  // on its own by flipping `apiKey`; the account key is invisible to the browser, so
+  // only the server-side probe can observe it, and it needs an explicit nudge.
+  const [probeNonce, setProbeNonce] = useState(0);
   // §5.1: a saved key that has been revoked, rotated or mistyped. Detected as
   // "a 401 while we are holding a key" rather than by matching the error string
   // — the route's other 401 is the no-key case, which by definition cannot fire
@@ -5197,13 +5208,13 @@ function AgentChat({
       if (live) setFetchedProbe(probe);
     });
     return () => { live = false; };
-  }, [apiKey]);
+  }, [apiKey, probeNonce]);
 
-  // Persist the key to whichever store the Remember choice selects. Unchecked
-  // means session-scoped, NOT discarded — see lib/byoa-key-storage.
-  useEffect(() => {
-    persistKey(localStorage, sessionStorage, apiKey, rememberKey);
-  }, [rememberKey, apiKey]);
+  // No persist effect here any more. The settings overlay (`ByoaKeySettings`) is the
+  // SOLE writer of BYOA storage — one writer, no drift — and the recovery path clears
+  // it explicitly in `handleClearKey`. The old effect wrote on every `apiKey` change,
+  // which fought the overlay's own write the moment the two disagreed about the
+  // Remember choice.
 
   // Auto-scroll chat
   useEffect(() => {
@@ -5539,27 +5550,24 @@ function AgentChat({
     });
   }
 
-  // §5.1: one clear path, shared by the panel's small Clear control and the
-  // prominent recovery button, so the two can never drift. Emptying `apiKey`
-  // re-runs the probe via the effect above — that IS the "re-probe on clear"
-  // requirement; there is no second trigger to keep in sync.
-  // ── The ONE path into "we no longer hold a key" ────────────────────────────
+  // ── The ONE path into "we no longer hold a device key" ─────────────────────
   //
-  // Codex R1 and R2 on #140 were the same defect at two call sites: this
-  // function reset the state derived from the key, and the key field's own
-  // onChange did not — so a user who DELETED the rejected key by hand instead
-  // of pressing Clear kept a stale `tryitExhausted`/`tryitRemaining`, which
-  // overrides a fresh probe and pins them in state 4 with the composer
-  // disabled. Patching the second handler would leave a third to find, so the
-  // handler below routes into this one instead.
+  // The prominent recovery button and the overlay's device-Remove both route
+  // here, so the state derived from the key can never drift between call sites.
   //
-  // Storage is not touched here on purpose. The persist effect above calls
-  // `persistKey(local, session, apiKey, remember)`, and an empty key removes
-  // the entry from BOTH stores (lib/byoa-key-storage.ts, pinned by
-  // tests/byoa-key-storage.test.ts). The explicit removeItem calls that used to
-  // sit here were a second storage path that could drift from the first —
-  // the same class as the finding itself.
+  // Codex R1 and R2 on #140 were the same defect at two call sites: clearing the
+  // key reset the derived state but a second handler did not, so a stale
+  // `tryitExhausted`/`tryitRemaining` overrode a fresh probe and pinned the user
+  // in state 4 with the composer disabled. One function is the fix.
+  //
+  // This DOES clear storage now (chunk 4): the persist effect that used to remove
+  // the entry as a side effect of `apiKey` emptying is gone, because the overlay
+  // is the sole writer. With no effect to lean on, the clear is explicit here — a
+  // single call, not a competing second path. `persistKey(…, '', …)` removes the
+  // entry from BOTH stores regardless of the `remember` flag (lib/byoa-key-storage,
+  // pinned by tests/byoa-key-storage.test.ts).
   function handleClearKey() {
+    persistKey(localStorage, sessionStorage, '', true);
     setApiKey('');
     // A rejection describes a key we no longer hold.
     setKeyRejected(false);
@@ -5580,18 +5588,29 @@ function AgentChat({
     setTryitExhausted(false);
   }
 
-  function handleApiKeyChange(next: string) {
-    // Emptying the field IS clearing the key — same operation, so the same
-    // reset, via the same function (Codex R2 medium).
+  // The overlay's callbacks (chunk 4). A DEVICE key saved in the overlay reaches
+  // the host here so `apiKey` — and therefore Send — updates in place, with no
+  // remount (§9 T22); the overlay already wrote storage, so this only mirrors it
+  // into state. An empty value is a device Remove, which is exactly `handleClearKey`.
+  function handleDeviceKeyChange(next: string) {
     if (!next) {
       handleClearKey();
       return;
     }
-    // A rejection describes the key that was rejected. Typing a different one
-    // makes it stale, and a stale "that key was rejected" banner over a key the
-    // user just fixed is its own small lie.
+    // A rejection described the OLD key; a freshly saved one makes that banner stale.
     setApiKey(next);
     setKeyRejected(false);
+  }
+
+  // An ACCOUNT key change is invisible to the browser — only the server-side probe
+  // can see it — so re-run the probe to pick it up. Reset to `loading` so a prior
+  // verdict (e.g. state 5) does not outlive the save that invalidated it (§9 T22),
+  // and bump the nonce so the mount effect actually re-fetches even though `apiKey`
+  // has not changed. Harmless when a device key is held: the effect early-returns
+  // and device precedence keeps state 1.
+  function handleAccountKeyChange() {
+    setFetchedProbe('loading');
+    setProbeNonce((n) => n + 1);
   }
 
   // §5.2a.2b / test 13m: a failed turn must NOT lock the composer. That holds
@@ -5628,20 +5647,30 @@ function AgentChat({
         Describe your band in plain English. The AI builds your stage plot, input list, and monitors.
       </p>
 
-      {/* Availability lead copy + the key field. The old "Try it free" line rendered
-          under `!apiKey && !tryitExhausted && tryitRemaining === null` — which is
-          exactly the UNCONFIGURED state, so the tab advertised a free trial that was
-          not set up. That claim is gone; the panel only says what the probe measured. */}
+      {/* Availability lead copy + the settings affordance. The old "Try it free" line
+          rendered under `!apiKey && !tryitExhausted && tryitRemaining === null` — which
+          is exactly the UNCONFIGURED state, so the tab advertised a free trial that was
+          not set up. That claim is gone; the panel only says what the probe measured.
+          The inline key input is gone too (chunk 4): every "you need a key" state now
+          opens the settings overlay below, one entry surface. */}
       <AgentAvailabilityPanel
         availability={availability}
-        apiKey={apiKey}
-        rememberKey={rememberKey}
-        showKey={showKey}
-        onApiKeyChange={handleApiKeyChange}
-        onRememberChange={setRememberKey}
-        onRevealKey={() => setShowKey(true)}
-        onClearKey={handleClearKey}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
+
+      {/* The settings overlay (§3.1). Rendered as a sibling of the still-mounted host,
+          so opening it does not unmount the workspace and the composer text survives
+          (§9 T21). Same `ByoaKeySettings` the /dashboard/settings page renders — one
+          route, two presentations (§9 T24) — wired so a saved key reaches the host with
+          no remount (§9 T22). */}
+      {settingsOpen && (
+        <SettingsOverlay onClose={() => setSettingsOpen(false)}>
+          <ByoaKeySettings
+            onDeviceKeyChange={handleDeviceKeyChange}
+            onAccountKeyChange={handleAccountKeyChange}
+          />
+        </SettingsOverlay>
+      )}
 
       {/* Chat messages */}
       {(messages.length > 0 || streaming) && <div className="border border-gray-200 rounded-lg p-3 max-h-[calc(100vh-280px)] overflow-y-auto space-y-3 text-sm bg-white">
@@ -5743,7 +5772,7 @@ function AgentChat({
         <textarea
           className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-black bg-white resize-none"
           rows={2}
-          placeholder={needsKey ? 'Enter API key above to continue...' : hasPendingTools ? 'Apply or reject pending changes first...' : messages.length > 0 ? 'Reply or ask a follow-up...' : 'Describe your band, lineup, and stage layout...'}
+          placeholder={needsKey ? 'Add your API key in Settings to continue...' : hasPendingTools ? 'Apply or reject pending changes first...' : messages.length > 0 ? 'Reply or ask a follow-up...' : 'Describe your band, lineup, and stage layout...'}
           value={input}
           disabled={!canSend}
           onChange={(e) => setInput(e.target.value)}
