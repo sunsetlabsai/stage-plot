@@ -97,9 +97,8 @@ is visible in the repository — an env-var claim can only be settled against Ve
 3. **BYOA extends to every AI surface**, not try-it only — one entry surface
    dissolves the stale-second-input objection.
 
-Chunk 4 ships the §14 UI (the overlay and the states 5–7 affordance) and restates
-tests 21–24 (originals at `a624650:docs/design-ai-key-availability.md`) against
-whichever storage the user chose (§5.1).
+Chunk 4 ships the §14 UI (the overlay and the states 5–7 affordance) and the
+chunk-4 tests spelled out in §9, run against whichever storage the user chose (§5.1).
 
 ### 3.2 ⚠ The live inconsistency chunk 4 must close
 
@@ -152,8 +151,8 @@ The admin identity check is normative: read the email from
 browser-decoded JWT, never `getSession()`); compare case-insensitively, both sides
 trimmed; **fail closed when `PLATFORM_ADMIN_EMAIL` is unset**; enforce in the
 route, not by hiding UI. The same check guards all four former-`ADMIN_SECRET`
-routes: `admin/settings` (GET+PUT), `admin/owners`, `admin/migrate-setlists`,
-`admin/backfill-chart-overlays`.
+routes: `admin/settings` (GET — its PUT was deleted with the Redis config write),
+`admin/owners`, `admin/migrate-setlists`, `admin/backfill-chart-overlays`.
 
 Conductor == owner for now. The "hand this song to someone to lead" delegate idea
 is backlog, and if built must be **ephemeral realtime session state, never a
@@ -219,14 +218,17 @@ held server-side only for users who explicitly chose it.
 
 ### 5.2 `user_secrets` RLS
 
-`select` and `delete` have **no policy** (both denied); `insert`/`update` are
-`auth.uid() = user_id`. The write-only property comes from the **absence of a
-SELECT policy** — a user can write their key and never read it back; `service_role`
-does the server-side read. The insert/update policies are dropped and writes go
-through a server route, because (a) a browser client cannot create a Vault secret,
-and (b) there is no DELETE policy for the mandatory Remove action. Leaving the
-client write path in place would preserve a second, unused path that could store a
-plaintext key into a column the design assumes holds a `vault_secret_id`.
+**No RLS policy grants any client operation.** Migration `015` dropped the two
+former write policies (`insert`/`update`, once `auth.uid() = user_id`); there has
+never been a `select` or `delete` policy. A browser client — even with a valid
+session — can therefore neither read, write, nor delete a row. Every read and write
+goes through the server route and the `set_user_secret` RPC (`service_role`, which
+bypasses RLS). The write-only-to-clients guarantee rests on two things: **no SELECT
+policy** (nothing reads a key back) and **server-only writes** (no client path can
+store a plaintext key into a column the design assumes holds a `vault_secret_id`).
+The client write path was dropped rather than kept because a browser client cannot
+create a Vault secret in the first place, and there is no DELETE policy for the
+mandatory Remove action — so those writes had to move server-side regardless.
 
 ### 5.3 Security requirements — normative
 
@@ -335,4 +337,34 @@ Supersession notices are present in all four; full rewrites are separate work.
 - **`design-ai-key-availability.md`** — the paired doc; its `source: 'store' | 'env'`
   union is amended to env-only. Notice present (SUPERSEDED IN PART, v11.3). It
   carries §13 (unify key resolution) and resolves through `readAdminConfig`'s status
-  contract, which this design preserves.
+  contract, which this design preserves. It also points here for chunk-4 test
+  requirements — see §9.
+
+---
+
+## 9. Tests
+
+Chunks 0–3, 5 and 6 shipped their tests with their code: those live in the vitest
+suite (75 files / 1843 tests at `1700202`) plus the SQL guarantees proven with
+parallel `psql` — the advisory lock, the lock ORDER, and both Vault triggers (§5.3,
+§6), which vitest cannot reach. This section carries only the **unshipped chunk-4
+tests**, restated from tests 21–24 (original wording at
+`a624650:docs/design-ai-key-availability.md`), each run against whichever storage
+the user chose (§5.1):
+
+- **T21 — opening settings from a failure does not unmount the host.** With restored
+  composer text present, open the overlay, close it, and assert the composer still
+  holds the text and the transcript is unchanged. A navigation-based implementation
+  fails this, and no other test here catches the loss.
+- **T22 — a key entered in the overlay reaches the host without a remount.** Send
+  goes from disabled to enabled, and the capabilities probe is not left showing its
+  prior verdict — a stale measurement must not outlive the event that invalidated it.
+- **T23 — states 5, 6 and 7 render the Settings affordance and NO inline key input.**
+  Assert the *absence* of the input, not just the presence of the link: a half-done
+  relocation leaves both, which is the duplicate-entry problem this UI removes.
+- **T24 — `/dashboard/settings` renders standalone** when reached from `/dashboard`,
+  with no host page behind it. Both presentations, one route.
+
+And the account-aware probe fix (§3.2): once the probe passes the authenticated
+`userId`, a saved account key must also flip the show-page affordance — assert the
+inline affordance is absent when an account key exists.
