@@ -396,15 +396,34 @@ function keyRootPc(key: string): number {
   return (pc + 12) % 12;
 }
 
+// Does `key` spell with flats? A key's own accidental decides: a sharp key (name
+// carries #) spells sharp, a flat key (name carries b) spells flat. For a plain
+// natural-letter key it comes down to the key signature — F major and the flat
+// natural minors (Cm/Dm/Fm/Gm) use flats; the sharp naturals (G/D/A/E/B, Bm/Em) and
+// neutral C/Am use sharps. The earlier `/^F/` heuristic was the bug: it matched F#
+// (and F#m) as well as F, so an F# chart spelled from the flat table — tonic F# → Gb.
+function keyPrefersFlat(key: string): boolean {
+  const minor = /m$/.test(key);
+  const bare = key.replace(/m$/, '');
+  if (bare.includes('#')) return false; // explicit sharp key
+  if (bare.includes('b')) return true; // explicit flat key
+  return minor ? 'CDFG'.includes(bare[0]) : bare[0] === 'F'; // natural-letter keys
+}
+
 // Spell a degree as a letter in `key`. `alter` (a ±1 semitone on the ROOT, default
 // 0) rides on whatever pitch the degree resolves to in the active key's scale
 // (MAJOR_STEPS for major, MINOR_STEPS for minor — so alter is mode-agnostic). An
 // altered note prefers the spelling matching its accidental direction (flat for
-// ♭, sharp for ♯); an unaltered note follows the key's default spelling.
+// ♭, sharp for ♯); an unaltered note follows the key's own accidental (keyPrefersFlat).
+//
+// ACCEPTED LIMITATION (Graham 2026-08-29): each pitch class maps to ONE name, so a
+// key whose diatonic spelling needs a "double" name renders its enharmonic instead —
+// F# major's 7th prints F (not E#), Eb minor's 6th prints B (not Cb). Same pitch,
+// and preferred to a strict diatonic speller here. Not a bug.
 export function degreeLetter(degree: number, key: string, alter: -1 | 0 | 1 = 0): string {
   const steps = /m$/.test(key) ? MINOR_STEPS : MAJOR_STEPS;
   const pc = (keyRootPc(key) + (steps[degree - 1] ?? 0) + alter + 12) % 12;
-  const flat = alter !== 0 ? alter < 0 : (/b/.test(key) || /^F/.test(key.replace(/m$/, '')));
+  const flat = alter !== 0 ? alter < 0 : keyPrefersFlat(key);
   return (flat ? CHROM_FLAT : CHROM_SHARP)[pc];
 }
 

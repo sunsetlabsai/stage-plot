@@ -360,6 +360,51 @@ describe('Gap 1 — chromatic roots (alter)', () => {
   });
 });
 
+// Enharmonic key spelling (reported: F# selected → letters rendered "Gb"). A chart's
+// letters must spell in the SELECTED key's own accidental, not its enharmonic twin.
+// The bug was `/^F/` treating F# as a flat key; degreeLetter now decides by the
+// key's actual # / b (and, for natural-letter keys, its signature).
+describe('degreeLetter — spells in the selected key, not its enharmonic equivalent', () => {
+  it('a SHARP key spells with sharps — F# is F#, not Gb (the reported bug)', () => {
+    expect(degreeLetter(1, 'F#')).toBe('F#'); // was 'Gb'
+    expect(degreeLetter(4, 'F#')).toBe('B');
+    expect(degreeLetter(5, 'F#')).toBe('C#'); // was 'Db'
+    expect(renderCell(cell(1, 4), 'letters', 'F#')).toBe('F#');
+  });
+
+  it('the other sharp keys the picker offers stay sharp', () => {
+    expect(degreeLetter(1, 'C#m')).toBe('C#');
+    expect(degreeLetter(1, 'F#m')).toBe('F#');
+    expect(degreeLetter(1, 'G#m')).toBe('G#');
+    expect(degreeLetter(7, 'D')).toBe('C#'); // sharp natural key's leading tone
+  });
+
+  it('spells only the ROOT — the chord QUALITY is untouched (i in F#m is F#m, not F#)', () => {
+    // degreeLetter returns the root note; renderCell appends the chord quality. The
+    // fix re-spells F#’s root (Gb → F#); it must NOT drop or change the minor.
+    expect(renderCell(cell(1, 4, { quality: 'm' }), 'letters', 'F#m')).toBe('F#m');
+    expect(renderCell(cell(4, 4, { quality: 'm' }), 'letters', 'F#m')).toBe('Bm');
+    expect(renderCell(cell(5, 4), 'letters', 'F#m')).toBe('C#');
+  });
+
+  it('the flat keys the picker offers stay flat — Eb, Bb, Db, Ab, and Gb (F#’s twin)', () => {
+    expect(degreeLetter(1, 'Eb')).toBe('Eb');
+    expect(degreeLetter(1, 'Bb')).toBe('Bb');
+    expect(degreeLetter(1, 'Db')).toBe('Db');
+    expect(degreeLetter(1, 'Ab')).toBe('Ab');
+    expect(degreeLetter(1, 'Gb')).toBe('Gb'); // Gb selected really does want Gb
+    expect(degreeLetter(1, 'Ebm')).toBe('Eb');
+  });
+
+  it('natural-letter keys follow their signature — F major and the flat minors use flats', () => {
+    expect(degreeLetter(4, 'F')).toBe('Bb'); // F major: subdominant is Bb, not A#
+    expect(degreeLetter(3, 'Cm')).toBe('Eb'); // Cm: b3/b6/b7 spell flat
+    expect(degreeLetter(6, 'Cm')).toBe('Ab');
+    expect(degreeLetter(7, 'Cm')).toBe('Bb');
+    expect(degreeLetter(3, 'Dm')).toBe('F');
+  });
+});
+
 describe('parseLetterChord — letter chord → degree in a key (inverse of degreeLetter)', () => {
   it('reads a triad to its diatonic degree (key decides)', () => {
     // In D: G=4, A=5, Bm=6m, D=1.
