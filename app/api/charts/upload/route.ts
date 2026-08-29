@@ -90,6 +90,8 @@ export async function POST(request: NextRequest) {
   // source_spec the slot may carry — replacing a builder chart with an ordinary
   // PDF/image in the same (owner, song, role) must not leave the old authored
   // spec behind (otherwise both routes would still classify it as is_builder).
+  // Clear source_prompt in the SAME upsert for the same reason — a de-buildered
+  // file row must not retain the old builder prompt (design §4 touch point 5).
   const { data: chart, error: dbError } = await supabase
     .from('chart_library')
     .upsert(
@@ -103,6 +105,7 @@ export async function POST(request: NextRequest) {
         mime_type: PDF_MIME, // §1.2 part 2b — normalized, not `file.type`
         file_size: file.size,
         source_spec: null,
+        source_prompt: null,
       },
       { onConflict: 'owner_id,song_key,role' },
     )

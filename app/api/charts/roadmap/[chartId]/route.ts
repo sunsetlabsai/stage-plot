@@ -29,7 +29,7 @@ export async function GET(
   const admin = getSupabaseAdmin();
   const { data: row } = await admin
     .from('chart_library')
-    .select('id, owner_id, role, song_title, song_key, updated_at, source_spec')
+    .select('id, owner_id, role, song_title, song_key, updated_at, source_spec, source_prompt')
     .eq('id', chartId)
     .maybeSingle();
 
@@ -61,5 +61,9 @@ export async function GET(
     song_key: row.song_key,
     updated_at: row.updated_at,
     source_spec: validation.spec,
+    // The prompt that authored this chart (may be null: legacy/pre-016 rows, or a
+    // chart that was de-buildered and re-built). The builder seeds its refine box
+    // from it (?? '') so Regenerate works on a re-opened chart.
+    source_prompt: typeof row.source_prompt === 'string' ? row.source_prompt : null,
   });
 }

@@ -116,6 +116,10 @@ export interface EditChart {
   role: string;
   spec: RoadmapSpec;
   updatedAt: string;
+  // The stored authoring prompt (design-roadmap-prompt-persistence.md). Seeds the
+  // refine box so Regenerate is live on a re-opened chart. Undefined/absent for
+  // legacy pre-016 charts → box opens empty, exactly as before.
+  sourcePrompt?: string;
 }
 
 interface Props {
@@ -127,7 +131,9 @@ interface Props {
 }
 
 export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, onSaved }: Props) {
-  const [description, setDescription] = useState('');
+  // Seed the refine box from the chart's stored prompt on re-open (empty for a
+  // fresh build or a legacy chart with no stored prompt).
+  const [description, setDescription] = useState(editChart?.sourcePrompt ?? '');
   const [composeKey, setComposeKey] = useState(''); // '' = Auto (let L0 resolve)
   // Edit mode seeds the view from the saved spec → mounts directly in Review,
   // skipping Compose. A fresh build starts null (Compose first). The refine box
@@ -406,6 +412,9 @@ function Review({
           spec,
           song_title: songTitle,
           role,
+          // Persist the current refine-box text verbatim as the re-prompt seed
+          // (design §5(c)); the route stores null when it's blank.
+          source_prompt: description.trim() || undefined,
           // Edit mode threads the stale-edit precondition (§4.4); a fresh build
           // omits it and the save route applies no precondition.
           ...(editChart
@@ -464,6 +473,7 @@ function Review({
           the chart.
         </p>
         <textarea
+          aria-label="Refine description"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           rows={8}

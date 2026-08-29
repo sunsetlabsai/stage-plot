@@ -19,6 +19,11 @@ interface PostBody {
   spec?: unknown;
   song_title?: string;
   role?: string;
+  // The natural-language prompt that authored/last-refined this chart. Persisted
+  // verbatim as a re-prompt SEED so a re-opened chart pre-fills the refine box
+  // (design: design-roadmap-prompt-persistence.md). Metadata only — never rendered
+  // or hashed. Empty/absent → stored null.
+  source_prompt?: unknown;
   // Optimistic-concurrency precondition, sent ONLY by the edit flow (the values
   // the GET read door returned). Absent on the create flow → no precondition.
   expected_chart_id?: string;
@@ -76,6 +81,11 @@ export async function POST(request: NextRequest) {
   // the GET read door; the client never interprets them.
   const expectedChartId = typeof body.expected_chart_id === 'string' ? body.expected_chart_id : null;
   const expectedUpdatedAt = typeof body.expected_updated_at === 'string' ? body.expected_updated_at : null;
+
+  // Persist the prompt verbatim; a blank/whitespace/absent prompt stores null so a
+  // de-buildered or prompt-less chart matches the "empty box" model on re-open.
+  const sourcePrompt =
+    typeof body.source_prompt === 'string' && body.source_prompt.trim() ? body.source_prompt.trim() : null;
 
   const admin = getSupabaseAdmin();
 
@@ -149,6 +159,7 @@ export async function POST(request: NextRequest) {
     },
     p_expected_chart_id: expectedChartId,
     p_expected_updated_at: expectedUpdatedAt,
+    p_source_prompt: sourcePrompt,
   });
 
   if (rpcError) {

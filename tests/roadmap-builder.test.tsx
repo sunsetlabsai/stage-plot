@@ -196,3 +196,51 @@ describe('RoadmapBuilder — rhythm slashes follow the shared beat→slash rule'
     expect(screen.getAllByText('╱')).toHaveLength(2);
   });
 });
+
+// PR B — persist the prompt (design-roadmap-prompt-persistence.md). Re-opening a
+// saved chart seeds the refine box from the stored prompt so Regenerate is live;
+// a legacy chart (no stored prompt) keeps today's empty-box behavior; and a save
+// round-trips the current box text back as source_prompt.
+describe('RoadmapBuilder — re-open pre-fills the refine box from the stored prompt', () => {
+  function renderEdit(sourcePrompt?: string) {
+    render(
+      <RoadmapBuilder
+        songTitle="9 to 5"
+        charts={[]}
+        editChart={{ chartId: 'c1', role: 'guitar', spec: SPEC, updatedAt: '2026-08-29T00:00:00Z', sourcePrompt }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+  }
+
+  it('seeds the box and ENABLES Regenerate when a prompt was stored', () => {
+    renderEdit('4/4 in F. 4-bar intro, 2-bar turnaround.');
+    expect((screen.getByRole('textbox', { name: /refine description/i }) as HTMLTextAreaElement).value).toBe(
+      '4/4 in F. 4-bar intro, 2-bar turnaround.',
+    );
+    expect(screen.getByRole('button', { name: /regenerate/i })).toBeEnabled();
+  });
+
+  it('opens EMPTY with Regenerate disabled for a legacy chart (no stored prompt)', () => {
+    renderEdit(undefined);
+    expect((screen.getByRole('textbox', { name: /refine description/i }) as HTMLTextAreaElement).value).toBe('');
+    expect(screen.getByRole('button', { name: /regenerate/i })).toBeDisabled();
+  });
+
+  it('sends the current refine-box text as source_prompt on save', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ chart_id: 'c1', role: 'guitar', url: 'u', song_key: 'k' }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderEdit('original prompt');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.source_prompt).toBe('original prompt');
+    // …and the stale-edit precondition still rides along on the edit path.
+    expect(body.expected_chart_id).toBe('c1');
+  });
+});
