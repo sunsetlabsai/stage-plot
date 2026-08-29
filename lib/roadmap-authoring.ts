@@ -294,43 +294,42 @@ export function foldDraft(draft: AuthoringDraft): FoldResult {
 // out with no error anywhere. A key that reads back wrong is worse than one that
 // fails, because nothing tells you to look.
 //
-// SEP admits a HYPHEN as well as whitespace, so "in F-sharp" and "in D-major" are read
-// as what the author obviously meant. This is one half of a pair: the other half adds
-// `-` to END below, so a hyphen that ISN'T a key continuation ("in G-string") fails
-// closed instead of shortening to G. Supporting hyphens without guarding them, or
-// guarding them without supporting them, is wrong in one direction each.
+// SEP admits any DASH as well as whitespace, so "in F-sharp", "in F–sharp" (en) and
+// "in D—major" (em) are read as what the author obviously meant. Smart punctuation
+// makes the non-ASCII dashes routine, not exotic — anything that retypes a hyphen will
+// produce them.
 const ACC_SYMBOL = '#|♯|b|♭';
 const ACC_WORD = '[Ss]harp|[Ff]lat';
-const SEP = '[\\s-]+';
+const DASH = '\\-\\u2010\\u2011\\u2012\\u2013\\u2014\\u2015\\u2212'; // - ‐ ‑ ‒ – — ― −
+const SEP = `[\\s${DASH}]+`;
 const NOTE = `([A-G])(?:(${ACC_SYMBOL})|${SEP}(${ACC_WORD})\\b)?`;
 
-// ⚠ NOT `\\b`. A trailing word boundary cannot match after `#` at end-of-input, so
-// "in F#" backtracked into the shorter match "in F" and resolved to F — silently, a
-// semitone out, with the sharp simply dropped. Flats never showed it (`b` IS a word
-// char) and "in F# major" never showed it (the mode word restored the boundary), so
-// it survived as a sharp-key-at-end-of-phrase bug. What was meant is "the key
-// statement must not run into more word", said in a way that doesn't ALSO demand a
-// word character to its left the way `\\b` does after `#`.
+// ★ END is a WHITELIST of prose boundaries, and that shape is the actual fix.
 //
-// ⚠ It must be `\\w`, not `[A-Za-z]`: a letters-only lookahead lets a DIGIT end the
-// match, so chord prose parses as a key — "verse in Am7" resolved to Am, "in F2" to F,
-// "in Bb2" to Bb. Those are chord symbols, never key statements, and pinning L0 off one
-// mis-authors the whole chart before the deterministic parse ever runs. Caught by Codex
-// on review of the sharp fix above; the two bugs are the same lookahead, tuned twice.
+// It was a blacklist through four rounds — `\b`, then not-a-letter, then not-a-word-char,
+// then adding the accidental symbols, then the hyphen — and each round shipped, was
+// reviewed, and revealed the next character nobody had thought of. Every miss had one
+// signature: THE AUTHOR WROTE A LONGER KEY TOKEN AND THE ENGINE ACCEPTED A SHORTER ONE,
+// silently, a semitone out, with nothing anywhere telling you to look. "in F#" -> F.
+// "in Am7" -> Am. "in C#m7" -> C. "in F-sharp" -> F. "in F–sharp" -> F.
 //
-// ⚠ The accidental SYMBOLS have to be in the set too, and for a subtler reason: they are
-// not word characters, so a lookahead that names only `\\w` lets the engine drop an
-// accidental that is plainly there and still succeed. "in C#m7" backtracked past the `#`
-// and resolved to C — a semitone out, exactly the failure the sharp fix was for, reached
-// from the other side. (`\\b` had the same hole for the same reason.) The rule this
-// encodes: a key statement ends where the key ENDS, not merely where the letters do.
+// A blacklist of "characters that may not follow a key" is unbounded — it is the whole
+// of Unicode minus a few, so it can only ever be discovered one bug report at a time.
+// The whitelist is closed and reviewable: a key statement may be followed ONLY by
+// end-of-input, whitespace, closing punctuation, or a sentence-ending period. Anything
+// else CONTINUES the token, so the match fails and L0 falls back to the UI key — visible
+// and correctable, instead of a wrong key printed with total confidence.
 //
-// ⚠ And `-` for the third instance of that same rule: a hyphen is a separator INSIDE a
-// key token (SEP above), so it can also continue one. Without it here, "in F-sharp"
-// shortened to F and "in G-string" resolved to G — the author wrote a longer token and
-// the engine took the shorter one, which is this bug's whole signature. Three tunings
-// of one lookahead now (letters → \w → symbols → hyphen); each hid the next.
-const END = '(?![\\w#♯♭-])';
+// Two deliberate exclusions, both fail-closed:
+//   - `'` is absent, so "in G's register" does NOT resolve G.
+//   - `/` is absent, so "in D/F#" is read as a chord and not a key. ("in D / 8 bars"
+//     still resolves — the space is the boundary there, not the slash.)
+// A period counts only when it is not followed by a word character, which separates
+// "in Bb. 8-bar verse." (sentence) from "in F.sharp" (token continuation).
+//
+// tests/roadmap-authoring.test.ts sweeps every punctuation/symbol/space codepoint in the
+// BMP against this set. Extend the whitelist there and here together, never one alone.
+const END = '(?=$|[\\s,;:!?)\\]}"\\u201d]|\\.(?!\\w))';
 const RE_KEYED = new RegExp(`(?:[Kk]ey of|\\b[Ii]n)\\s+${NOTE}(m)?(?:${SEP}(minor|min|major|maj))?${END}`);
 const RE_BARE = new RegExp(`\\b${NOTE}${SEP}(minor|major)${END}`);
 

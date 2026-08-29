@@ -548,33 +548,102 @@ describe('resolveRenderKey — spelled accidentals', () => {
     expect(resolveRenderKey('in F#', 'G')).toBe('F#');
   });
 
-  it('reads a HYPHENATED spelled accidental, and fails closed on any other hyphen', () => {
-    // Two halves of one rule. The author who writes "in F-sharp" stated a key as
-    // plainly as the one who wrote "in F sharp", so SEP admits the hyphen...
+  it('reads a spelled accidental after ANY dash, not just the ASCII hyphen', () => {
+    // Smart punctuation makes en/em dashes routine — anything that retypes a hyphen
+    // produces one — so they must separate a key token exactly as the hyphen does.
     expect(resolveRenderKey('in F-sharp', 'G')).toBe('F#');
-    expect(resolveRenderKey('key of B-flat', 'G')).toBe('Bb');
+    expect(resolveRenderKey('in F–sharp', 'G')).toBe('F#');   // en dash
+    expect(resolveRenderKey('in F—sharp', 'G')).toBe('F#');   // em dash
+    expect(resolveRenderKey('key of B–flat', 'G')).toBe('Bb');
     expect(resolveRenderKey('in F-sharp minor', 'G')).toBe('F#m');
     expect(resolveRenderKey('in D-major', 'G')).toBe('D');
     expect(resolveRenderKey('in D-minor', 'G')).toBe('Dm');
-    // ...and because it does, `-` must also END the token, or every other hyphenated
-    // word shortens to its first letter. "in G-string" resolving to G is the same
-    // silent-semitone shape as the F# backtrack, one separator later.
+  });
+
+  it('fails CLOSED on a token continuation rather than resolving the bare note', () => {
+    // The one signature every round of this bug shared: the author wrote a longer key
+    // token and the engine accepted a shorter one. Falling back to the uiKey is visible
+    // and correctable; a confidently-printed wrong key is not.
     expect(resolveRenderKey('in G-string', 'A')).toBe('A');
+    expect(resolveRenderKey('in G–string', 'A')).toBe('A');
     expect(resolveRenderKey('in D-ish somewhere', 'A')).toBe('A');
     expect(resolveRenderKey('in Bb-based riff', 'A')).toBe('A');
-    // A hyphen that is plain prose, well clear of the key, must not be disturbed.
+    expect(resolveRenderKey('in F.sharp', 'G')).toBe('G');          // dot is not a separator
+    expect(resolveRenderKey("in G's register", 'A')).toBe('A');     // possessive, not a key
+    expect(resolveRenderKey('in G’s register', 'A')).toBe('A');
+    expect(resolveRenderKey('in D/F#', 'G')).toBe('G');             // a chord, not a key
+  });
+
+  it('still parses every real ENDING — the whitelist must not cost the true forms', () => {
+    expect(resolveRenderKey('in F#')).toBe('F#');
+    expect(resolveRenderKey('in F#, medium swing')).toBe('F#');
+    expect(resolveRenderKey('in Bb. 8-bar verse.')).toBe('Bb');     // sentence period
+    expect(resolveRenderKey('in Dm, then the bridge')).toBe('Dm');
+    expect(resolveRenderKey('in F sharp')).toBe('F#');
+    expect(resolveRenderKey('(in F#) medium swing')).toBe('F#');
+    expect(resolveRenderKey('in F#; then the bridge')).toBe('F#');
+    expect(resolveRenderKey('tempo 120\nin F#\n8-bar verse')).toBe('F#');
+    expect(resolveRenderKey('in D / 8-bar verse', 'G')).toBe('D');  // space, not the slash
+    // Prose hyphens well clear of the key are untouched.
     expect(resolveRenderKey('bars 1-4 in D', 'G')).toBe('D');
     expect(resolveRenderKey('8-bar verse, in F#', 'G')).toBe('F#');
   });
 
-  it('still parses a key statement that ends in punctuation or a symbol accidental', () => {
-    // The guard above must not cost the real forms: `\\w` is silent about `#`, `♯`,
-    // `,`, `.` and end-of-input, which is every way a key statement actually ends.
-    expect(resolveRenderKey('in F#')).toBe('F#');
-    expect(resolveRenderKey('in F#, medium swing')).toBe('F#');
-    expect(resolveRenderKey('in Bb. 8-bar verse.')).toBe('Bb');
-    expect(resolveRenderKey('in Dm, then the bridge')).toBe('Dm');
-    expect(resolveRenderKey('in F sharp')).toBe('F#');
+  // ★ The test that exists so there is no round five.
+  //
+  // Five times this was fixed by naming one more character that must not follow a key,
+  // and five times review or UAT found the next one — because "characters that may not
+  // follow a key" is the whole of Unicode minus a few, discoverable only one bug report
+  // at a time. END is now a WHITELIST, which is closed, so it can be asserted by
+  // EXHAUSTION instead of by the cases someone happened to imagine.
+  it('sweeps every BMP punctuation/space codepoint: the terminator set is exactly the whitelist', () => {
+    const EXPECTED = new Set([...',;:!?)]}"”']);
+    const shortens: string[] = [];
+    const leaks: string[] = [];
+    let swept = 0;
+
+    for (let cp = 0x20; cp <= 0xffff; cp += 1) {
+      const c = String.fromCharCode(cp);
+      if (/\w/.test(c)) continue;                    // a word char cannot be a separator
+      if (!/[\p{P}\p{S}\p{Z}]/u.test(c)) continue;   // punctuation, symbols, separators
+      swept += 1;
+      const allowed = /\s/.test(c) || EXPECTED.has(c); // whitespace is a boundary by definition
+      const code = `U+${cp.toString(16).padStart(4, '0')}`;
+
+      // Does this character end a key statement, letting "in F<c>sharp" resolve to F?
+      if (resolveRenderKey(`in F${c}sharp`, 'G') === 'F') {
+        shortens.push(c);
+        if (!allowed) leaks.push(`${code} in F${c}sharp -> F`);
+      }
+      // A non-terminator must never yield the bare note by any route.
+      if (!allowed) {
+        if (resolveRenderKey(`in G${c}string`, 'A') === 'G') leaks.push(`${code} in G${c}string -> G`);
+        if (resolveRenderKey(`key of B${c}flat`, 'G') === 'B') leaks.push(`${code} key of B${c}flat -> B`);
+      }
+    }
+
+    expect(swept).toBeGreaterThan(4000);            // the sweep actually swept
+    expect(leaks).toEqual([]);                      // nothing outside the whitelist shortens
+    // ...and the reverse: every intended terminator still works, so a future tightening
+    // can't silently stop a stated key from resolving at all.
+    const nonWs = shortens.filter((c) => !/\s/.test(c)).sort();
+    expect(new Set(nonWs)).toEqual(EXPECTED);
+  });
+
+  // A sweep that cannot fail is the "green for the wrong reason" trap wearing a costume
+  // (Codex R2 caught exactly that in an earlier version of these tests). This pins that
+  // the sweep's own probe strings DO catch a grammar known to be broken: the pre-fix
+  // blacklist accepted an en dash, so the probe string must expose it.
+  it('the sweep is capable of failing — positive control on the old blacklist grammar', () => {
+    const OLD = /(?:[Kk]ey of|\b[Ii]n)\s+([A-G])(?:(#|♯|b|♭)|[\s-]+([Ss]harp|[Ff]lat)\b)?(m)?(?:[\s-]+(minor|min|major|maj))?(?![\w#♯♭-])/;
+    for (const sep of ['–', '—', '.', "'"]) {
+      const m = `in F${sep}sharp`.match(OLD);
+      expect(m?.[1]).toBe('F');        // the old grammar really did shorten here
+      expect(m?.[3]).toBeUndefined();  // and really did drop the spelled accidental
+    }
+    // The shipped grammar must disagree with the old one on every one of them.
+    for (const sep of ['–', '—']) expect(resolveRenderKey(`in F${sep}sharp`, 'G')).toBe('F#');
+    for (const sep of ['.', "'"]) expect(resolveRenderKey(`in F${sep}sharp`, 'G')).toBe('G');
   });
 });
 
