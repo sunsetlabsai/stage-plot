@@ -620,6 +620,14 @@ describe('resolveRenderKey — spelled accidentals', () => {
         if (resolveRenderKey(`in G${c}string`, 'A') === 'G') leaks.push(`${code} in G${c}string -> G`);
         if (resolveRenderKey(`key of B${c}flat`, 'G') === 'B') leaks.push(`${code} key of B${c}flat -> B`);
       }
+      // Whitespace can't be policed by the `in F<c>sharp` probe above: "in F sharp"
+      // forms the SPELLED accidental (F#), so that probe never exercises a space AS a
+      // terminator. Prove it directly with a non-accidental follower — every swept
+      // whitespace char must end the note at F. (Codex R4 #2: the equality claim
+      // overstated the whitespace direction; this makes it measured, not assumed.)
+      if (/\s/.test(c) && resolveRenderKey(`in F${c}verse`, 'G') !== 'F') {
+        leaks.push(`${code} whitespace did not terminate: in F${c}verse`);
+      }
     }
 
     expect(swept).toBeGreaterThan(4000);            // the sweep actually swept
