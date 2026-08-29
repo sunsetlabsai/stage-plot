@@ -29,7 +29,7 @@ export async function GET(
   const admin = getSupabaseAdmin();
   const { data: row } = await admin
     .from('chart_library')
-    .select('id, owner_id, role, song_title, song_key, updated_at, source_spec, source_prompt')
+    .select('id, owner_id, role, song_title, song_key, updated_at, source_spec, source_prompt, source_notation')
     .eq('id', chartId)
     .maybeSingle();
 
@@ -65,5 +65,9 @@ export async function GET(
     // chart that was de-buildered and re-built). The builder seeds its refine box
     // from it (?? '') so Regenerate works on a re-opened chart.
     source_prompt: typeof row.source_prompt === 'string' ? row.source_prompt : null,
+    // The notation this chart's PDF was baked in, so the builder seeds its toggle
+    // on re-open and a save-without-toggling can't silently re-bake numbers over
+    // letters. Null (legacy/pre-017 or de-buildered) → the builder defaults numbers.
+    source_notation: row.source_notation === 'letters' ? 'letters' : 'numbers',
   });
 }

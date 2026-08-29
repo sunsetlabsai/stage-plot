@@ -85,6 +85,41 @@ describe('renderRoadmap — substrate + born-verified calibration', () => {
     expect(Buffer.from(credited.pdfBytes).equals(Buffer.from(plain.pdfBytes))).toBe(false);
   });
 
+  // ── Notation (design-roadmap-notation-toggle.md) ─────────────────────────────
+  // Letters re-spells only the drawn chord text + the header; geometry is
+  // beat-fraction based, so the calibration MUST be byte-identical to numbers.
+  // That invariance is the whole reason the show can render either baked PDF
+  // without disturbing the seek/marker/redline overlay. The letters SPELLING
+  // itself is proven at the shared renderCell seam in roadmap-view.test.ts — the
+  // same function this renderer calls — so here we pin the render-level contract:
+  // the branch is exercised (bytes move) yet the geometry (calibration) does not.
+  it('notation:letters re-spells the body but leaves the calibration invariant', async () => {
+    const spec = linearSpec();
+    const numbers = await renderRoadmap(spec, { notation: 'numbers' });
+    const letters = await renderRoadmap(spec, { notation: 'letters' });
+
+    // The letters branch is reached — same spec, only notation differs, so any
+    // byte movement is the chord/header re-spelling, nothing else.
+    expect(Buffer.from(letters.pdfBytes).equals(Buffer.from(numbers.pdfBytes))).toBe(false);
+    // …and the geometry the overlay depends on is untouched. THE load-bearing claim.
+    expect(letters.calibration).toEqual(numbers.calibration);
+  });
+
+  it('notation omitted renders byte-identically to explicit numbers (default unchanged)', async () => {
+    // Every chart saved before this feature passed no notation. The default MUST
+    // stay numbers and byte-identical, or existing content-addressed charts move.
+    const spec = linearSpec();
+    const bare = await renderRoadmap(spec, { songTitle: 'Song' });
+    const explicit = await renderRoadmap(spec, { songTitle: 'Song', notation: 'numbers' });
+    expect(Buffer.from(bare.pdfBytes).equals(Buffer.from(explicit.pdfBytes))).toBe(true);
+  });
+
+  it('letters render is deterministic — same spec+notation yields byte-identical PDFs', async () => {
+    const a = await renderRoadmap(linearSpec(), { notation: 'letters' });
+    const b = await renderRoadmap(linearSpec(), { notation: 'letters' });
+    expect(Buffer.from(a.pdfBytes).equals(Buffer.from(b.pdfBytes))).toBe(true);
+  });
+
   it('projects repeats and navigation onto resolvable RoadmapMarkers', async () => {
     const spec = navSpec();
     expect(validateRoadmapSpec(spec).ok).toBe(true);

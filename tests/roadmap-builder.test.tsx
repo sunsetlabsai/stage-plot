@@ -202,12 +202,12 @@ describe('RoadmapBuilder — rhythm slashes follow the shared beat→slash rule'
 // a legacy chart (no stored prompt) keeps today's empty-box behavior; and a save
 // round-trips the current box text back as source_prompt.
 describe('RoadmapBuilder — re-open pre-fills the refine box from the stored prompt', () => {
-  function renderEdit(sourcePrompt?: string) {
+  function renderEdit(sourcePrompt?: string, sourceNotation?: 'numbers' | 'letters') {
     render(
       <RoadmapBuilder
         songTitle="9 to 5"
         charts={[]}
-        editChart={{ chartId: 'c1', role: 'guitar', spec: SPEC, updatedAt: '2026-08-29T00:00:00Z', sourcePrompt }}
+        editChart={{ chartId: 'c1', role: 'guitar', spec: SPEC, updatedAt: '2026-08-29T00:00:00Z', sourcePrompt, sourceNotation }}
         onClose={vi.fn()}
         onSaved={vi.fn()}
       />,
@@ -242,5 +242,78 @@ describe('RoadmapBuilder — re-open pre-fills the refine box from the stored pr
     expect(body.source_prompt).toBe('original prompt');
     // …and the stale-edit precondition still rides along on the edit path.
     expect(body.expected_chart_id).toBe('c1');
+  });
+});
+
+// Notation toggle (design-roadmap-notation-toggle.md). The toggle drives the SAVE
+// (one PDF, baked in the chosen notation) and re-open SEEDS the toggle from the
+// stored notation — so a save that never touched the toggle can't silently re-bake
+// numbers over a letters chart. Both assertions read the save body, the boundary
+// that reaches the render route.
+describe('RoadmapBuilder — the notation toggle drives save, and re-open seeds it', () => {
+  function renderEdit(sourceNotation?: 'numbers' | 'letters') {
+    render(
+      <RoadmapBuilder
+        songTitle="9 to 5"
+        charts={[]}
+        editChart={{ chartId: 'c1', role: 'guitar', spec: SPEC, updatedAt: '2026-08-29T00:00:00Z', sourceNotation }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+  }
+  function saveMock() {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ chart_id: 'c1', role: 'guitar', url: 'u', song_key: 'k' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+  const notationOf = (m: ReturnType<typeof vi.fn>) => JSON.parse(m.mock.calls[0][1].body as string).notation;
+
+  it('re-opens a letters chart on Letters and saves letters WITHOUT re-toggling (silent-flip guard)', async () => {
+    const fetchMock = saveMock();
+    renderEdit('letters');
+    // No toggle interaction — the seed alone must carry the notation through save.
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(notationOf(fetchMock)).toBe('letters');
+  });
+
+  it('re-opens a legacy chart (no stored notation) on Numbers', async () => {
+    const fetchMock = saveMock();
+    renderEdit();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(notationOf(fetchMock)).toBe('numbers');
+  });
+
+  it('flipping the toggle to Letters bakes letters on the next save', async () => {
+    const fetchMock = saveMock();
+    renderEdit('numbers');
+    fireEvent.click(screen.getByRole('button', { name: 'Letters' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(notationOf(fetchMock)).toBe('letters');
+  });
+
+  it('hands the baked notation to onSaved so live state is correct before any reload', async () => {
+    // The save route response omits notation; the badge would read undefined→numbers
+    // and print the live song.key over a letters chart until a full show GET. So the
+    // built Chart must carry notation itself (Codex code-review, Medium 1).
+    saveMock();
+    const onSaved = vi.fn();
+    render(
+      <RoadmapBuilder
+        songTitle="9 to 5"
+        charts={[]}
+        editChart={{ chartId: 'c1', role: 'guitar', spec: SPEC, updatedAt: '2026-08-29T00:00:00Z', sourceNotation: 'letters' }}
+        onClose={vi.fn()}
+        onSaved={onSaved}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(onSaved.mock.calls[0][0]).toMatchObject({ is_builder: true, notation: 'letters' });
   });
 });

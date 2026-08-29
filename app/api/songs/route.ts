@@ -70,7 +70,7 @@ export async function GET(request: NextRequest) {
   if (songKeys.length > 0) {
     const { data: charts } = await admin
       .from('chart_library')
-      .select('id, song_key, role, file_name, storage_path, mime_type, updated_at, source_spec')
+      .select('id, song_key, role, file_name, storage_path, mime_type, updated_at, source_spec, source_notation')
       .eq('owner_id', ownerId)
       .in('song_key', songKeys);
 
@@ -89,6 +89,10 @@ export async function GET(request: NextRequest) {
         label: c.file_name,
         is_builder: sourceSpec != null,
         authored_key: sourceSpec?.renderKey ?? null,
+        // Add-from-library copies these charts straight into setlist state, bypassing
+        // the show GET, so notation must ride along here too or a letters chart reverts
+        // to numbers in-memory (design-roadmap-notation-toggle.md §4).
+        notation: c.source_notation === 'letters' ? 'letters' : 'numbers',
         charted_key: null,
       });
     }

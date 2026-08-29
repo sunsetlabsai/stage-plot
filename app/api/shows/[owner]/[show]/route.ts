@@ -104,16 +104,18 @@ export async function GET(
   if (songKeys.length > 0) {
     const { data: charts } = await admin
       .from('chart_library')
-      .select('id, song_key, role, file_name, storage_path, mime_type, file_size, updated_at, source_spec')
+      .select('id, song_key, role, file_name, storage_path, mime_type, file_size, updated_at, source_spec, source_notation')
       .eq('owner_id', showData.owner_id)
       .in('song_key', songKeys);
 
     for (const c of charts || []) {
       if (!chartsBySong[c.song_key]) chartsBySong[c.song_key] = [];
       // Builder origin + authored key (chunk 4). is_builder = a stored source_spec;
-      // authored_key = its renderKey (informational — the live key is resolved in
-      // chrome from the setlist, never this field). charted_key is reserved (null)
-      // until import-time key capture exists.
+      // authored_key = its renderKey. For a NUMBERS chart authored_key is
+      // informational (the live key is resolved in chrome from the setlist). For a
+      // LETTERS chart the body is baked concrete in that key, so the badge shows it
+      // and ignores the live override — hence notation must ride along. charted_key
+      // is reserved (null) until import-time key capture exists.
       const sourceSpec = c.source_spec as { renderKey?: string } | null;
       chartsBySong[c.song_key].push({
         id: c.id,
@@ -126,6 +128,7 @@ export async function GET(
         url: `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/charts/${c.storage_path}`,
         is_builder: sourceSpec != null,
         authored_key: sourceSpec?.renderKey ?? null,
+        notation: c.source_notation === 'letters' ? 'letters' : 'numbers',
         charted_key: null,
       });
     }

@@ -41,6 +41,7 @@ import {
   type RoadmapLayout,
 } from './roadmap-layout';
 import { slashBeats } from './roadmap-rhythm';
+import { renderCell } from './roadmap-view';
 
 // The bar band (SYSTEM_BARS_H = 48pt) splits into a chord row on top and a rhythm
 // strip below, in the SAME 20/28 proportion as the preview's h-5 / h-7 rows, so a
@@ -56,6 +57,11 @@ export interface RenderResult {
 export interface RenderOptions {
   songTitle?: string;  // printed in the header; the spec carries only renderKey
   artist?: string;     // song-level credit under the title (from the songs row)
+  // Which notation the body is BAKED in. 'numbers' (default) = key-invariant
+  // Nashville degrees, live-rekeyable in the show chrome. 'letters' = concrete
+  // chords re-spelled into spec.renderKey — this artifact is locked to that key.
+  // Omitting it renders byte-identically to every chart saved before this feature.
+  notation?: 'numbers' | 'letters';
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -241,7 +247,13 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
   if (opts.artist) {
     drawText(pages[0], font, opts.artist, MARGIN_X, header.artist, 11);
   }
-  drawText(pages[0], font, `Nashville (authored in ${spec.renderKey})`, MARGIN_X, header.key, 10);
+  // Numbers: a demoted provenance note (the live key is resolved in chrome).
+  // Letters: the body IS concrete in this key, so the header states it plainly.
+  const keyLine =
+    opts.notation === 'letters'
+      ? `Key of ${spec.renderKey}`
+      : `Nashville (authored in ${spec.renderKey})`;
+  drawText(pages[0], font, keyLine, MARGIN_X, header.key, 10);
 
   const beats = spec.timeSig.beats;
   // Line-start measure numbers by the ONE shared rule (design §3.3 item 1): each
@@ -275,7 +287,7 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
     for (const bar of sys.bars) {
       drawLine(pg, denormX(bar.xStart), yTopPt, denormX(bar.xStart), yBottomPt, 1); // leading barline
       drawSlashBand(pg, bar, beats, stripTopPt, yBottomPt); // rhythm strip: EVERY bar
-      drawBarContent(pg, font, bar, beats, yTopPt);          // chord labels: sparse
+      drawBarContent(pg, font, bar, beats, yTopPt, opts.notation ?? 'numbers', spec.renderKey); // chord labels: sparse
     }
     drawLine(pg, denormX(sys.xEnd), yTopPt, denormX(sys.xEnd), yBottomPt, 1); // trailing barline
   }
@@ -310,7 +322,15 @@ function drawSlashBand(page: PDFPage, bar: LaidBar, beats: number, stripTopPt: n
 // Per-bar Nashville chord content. Sparse: a bar with no addressed change draws
 // nothing. Split bars place each chord at its beat offset and drop a thin
 // subdividing tick at each interior boundary; held chords get a diamond.
-function drawBarContent(page: PDFPage, font: PDFFont, bar: LaidBar, beats: number, bandTopPt: number): void {
+function drawBarContent(
+  page: PDFPage,
+  font: PDFFont,
+  bar: LaidBar,
+  beats: number,
+  bandTopPt: number,
+  notation: 'numbers' | 'letters',
+  key: string,
+): void {
   const change = bar.section.changes?.find((c) => c.bar === bar.barInSection);
   if (!change) return;
 
@@ -328,14 +348,21 @@ function drawBarContent(page: PDFPage, font: PDFFont, bar: LaidBar, beats: numbe
       const tx = x0 + frac * w;
       drawLine(page, tx, bandTopPt, tx, bandTopPt - 8, 0.5); // interior split tick
     }
-    // A chromatic root accidental (♭/♯) is a VECTOR prefix glyph — Helvetica
-    // (WinAnsi) cannot encode U+266D/U+266F, so it must NOT be interpolated into
-    // the drawText label. It claims a fixed advance (accW) immediately left of the
-    // degree, shifting the alphanumeric label right; alter 0/undefined adds nothing
-    // (existing charts render byte-identically).
-    const accW = c.alter ? 6 : 0;
-    if (c.alter) drawAccidental(page, c.alter, cx, textY, 12);
-    const label = `${c.degree}${c.quality ?? ''}${c.bass ? `/${c.bass}` : ''}`;
+    // Numbers: a chromatic root accidental (♭/♯) is a VECTOR prefix glyph —
+    // Helvetica (WinAnsi) cannot encode U+266D/U+266F, so it must NOT be
+    // interpolated into the drawText label. It claims a fixed advance (accW)
+    // immediately left of the degree, shifting the alphanumeric label right;
+    // alter 0/undefined adds nothing (existing charts render byte-identically).
+    // Letters: renderCell re-spells the whole chord into `key` as ASCII (F#, Bb —
+    // WinAnsi-safe), so there is no vector prefix and the accidental lives inside
+    // the label. renderCell is the ONE shared spelling seam, so this PDF label and
+    // the HTML preview agree by construction (quality coerced to '' per ViewCell).
+    const letters = notation === 'letters';
+    const accW = !letters && c.alter ? 6 : 0;
+    if (!letters && c.alter) drawAccidental(page, c.alter, cx, textY, 12);
+    const label = letters
+      ? renderCell({ degree: c.degree, alter: c.alter, quality: c.quality ?? '', bass: c.bass, beats: 1 }, 'letters', key)
+      : `${c.degree}${c.quality ?? ''}${c.bass ? `/${c.bass}` : ''}`;
     drawText(page, font, label, cx + accW, textY, 12);
     if (c.held) {
       const dx = cx + accW + font.widthOfTextAtSize(label, 12) + 5;
