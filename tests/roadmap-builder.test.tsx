@@ -357,4 +357,21 @@ describe('RoadmapBuilder — Review can Share the saved chart', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument());
   });
+
+  it('hides Share while a save is in flight, then restores it (Codex Low)', async () => {
+    // A re-save moves the content-addressed URL and deletes the old object, so
+    // sharing mid-save could copy a URL about to 404. Share must vanish while saving.
+    let release!: (v: unknown) => void;
+    const fetchMock = vi.fn().mockReturnValue(new Promise((r) => (release = r)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderReviewEdit(STORED_URL);
+    expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Share' })).toBeNull());
+
+    release({ ok: true, json: async () => ({ chart_id: 'c1', role: 'guitar', url: STORED_URL, song_key: '9-to-5' }) });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument());
+  });
 });

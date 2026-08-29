@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import ManageChartsModal from '../components/ManageChartsModal';
+import ManageChartsModal, { chartShareProps } from '../components/ManageChartsModal';
 import type { Chart } from '../lib/types';
 
 // Chart export (reuse the show-mode Share). ManageChartsModal is the editor
@@ -50,5 +50,16 @@ describe('ManageChartsModal — Share on every chart (summary + detail)', () => 
     // row Shares (2) + pane Share (1).
     fireEvent.click(screen.getAllByRole('button', { name: 'Preview' })[0]);
     expect(screen.getAllByRole('button', { name: 'Share' })).toHaveLength(CHARTS.length + 1);
+  });
+
+  it('offers a PDF file for a PDF chart but is URL-only for a legacy image (Codex Medium)', () => {
+    // A PDF chart shares the file (tier 1). A legacy image chart has no getFile, so
+    // it falls through to the URL tier instead of handing over image bytes named .pdf.
+    const pdf = chartShareProps('9 to 5', { role: 'Guitar', url: 'u', mimeType: 'application/pdf', fileId: 'g1' } as Chart);
+    expect(typeof pdf.getFile).toBe('function');
+
+    const image = chartShareProps('9 to 5', { role: 'Art', url: 'u', mimeType: 'image/png', label: 'scan.png', fileId: 'a1' } as Chart);
+    expect(image.getFile).toBeUndefined();
+    expect(image.buildUrl()).toBe('u'); // still shareable, via the public URL
   });
 });

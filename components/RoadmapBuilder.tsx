@@ -637,8 +637,10 @@ function Review({
           {saveError && <p className="text-xs text-amber-400">{saveError}</p>}
           {/* Share the SAVED chart out of the app (design: reuse show-mode share).
               Appears once a stored artifact exists — on re-open, or after a save.
-              Unsaved edits aren't reflected until saved (it shares what's stored). */}
-          {savedUrl && (
+              Unsaved edits aren't reflected until saved (it shares what's stored).
+              Hidden WHILE saving: a re-save moves the content-addressed URL and
+              deletes the old object, so savedUrl is briefly about to 404. */}
+          {savedUrl && !saving && (
             <div className="flex items-center gap-2 pt-1">
               <ShareButton
                 title={`${songTitle} – ${displayRole(canonicalizeRole(role || editChart?.role || ''))}`}

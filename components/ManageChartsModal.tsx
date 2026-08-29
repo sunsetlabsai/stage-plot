@@ -23,17 +23,24 @@ const ACCEPT = '.pdf';
 // show/setlist context here, so the URL tier is the chart's own public storage
 // link rather than a deep link into a show. Available to anyone who can see the
 // chart (viewers included), like Preview.
-function chartShareProps(songTitle: string, chart: Chart) {
+//
+// File tier is offered ONLY for PDFs. chartShareFilename always names `.pdf`, so a
+// legacy non-PDF chart (an old image upload) would otherwise be handed over as
+// image bytes under a .pdf filename — a broken/misleading file. Those fall through
+// to the URL tier (a correct public link to the actual image). Exported for a unit
+// test of exactly that guard.
+export function chartShareProps(songTitle: string, chart: Chart) {
   const role = displayRole(canonicalizeRole(chart.role));
+  const isPdf = (chart.mimeType ?? '').includes('pdf') || (chart.label ?? '').toLowerCase().endsWith('.pdf');
   return {
     title: `${songTitle} – ${role}`,
     buildUrl: () => chart.url,
-    getFile: async () => {
-      const bytes = await fetchChartBytes(chart);
-      return bytes
-        ? new File([bytes], chartShareFilename(songTitle, role), { type: chart.mimeType ?? 'application/pdf' })
-        : null;
-    },
+    getFile: isPdf
+      ? async () => {
+          const bytes = await fetchChartBytes(chart);
+          return bytes ? new File([bytes], chartShareFilename(songTitle, role), { type: 'application/pdf' }) : null;
+        }
+      : undefined,
   };
 }
 
