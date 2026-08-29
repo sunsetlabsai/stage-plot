@@ -39,6 +39,8 @@ import {
 } from '@/lib/roadmap-spec';
 import { pickBarsPerLine, chunkIntoLines, lineStartNumbers } from '@/lib/roadmap-layout';
 import { slashBeats } from '@/lib/roadmap-rhythm';
+import { chartShareFilename } from '@/lib/share';
+import ShareButton from '@/components/ShareButton';
 
 // ── Roadmap Builder — describe a song's structure, render an exact chart ─────
 // Full-screen overlay launched from ManageChartsModal. Compose (big prompt) →
@@ -124,6 +126,9 @@ export interface EditChart {
   // Seeds the Numbers⇄Letters toggle on re-open so a save-without-toggling can't
   // silently re-bake numbers over a letters chart. Absent (legacy/pre-017) → numbers.
   sourceNotation?: 'numbers' | 'letters';
+  // The stored chart's public URL, so Review can Share the SAVED artifact
+  // immediately on re-open (a fresh build gets its URL from the save response).
+  url?: string;
 }
 
 interface Props {
@@ -344,6 +349,10 @@ function Review({
   const [role, setRole] = useState<ChartRole | ''>(editChart ? canonicalizeRole(editChart.role) : '');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
+  // The saved chart's public URL for Share: known up front on re-open, refreshed
+  // after each save (the PDF is content-addressed, so a save moves the URL). Undefined
+  // for a not-yet-saved fresh build → no Share until it exists to share.
+  const [savedUrl, setSavedUrl] = useState<string | undefined>(editChart?.url);
   // Seed from the re-opened chart's baked notation so the toggle reflects what's
   // stored (the silent-flip guard); a fresh build starts on numbers.
   const [mode, setMode] = useState<'numbers' | 'letters'>(editChart?.sourceNotation ?? 'numbers');
@@ -448,6 +457,8 @@ function Review({
         return;
       }
       const canonical = canonicalizeRole(data.role ?? role);
+      // Refresh the Share target to the just-saved artifact (content-addressed URL).
+      if (typeof data.url === 'string') setSavedUrl(data.url);
       const chart: Chart = {
         role: canonical,
         url: data.url,
@@ -624,6 +635,26 @@ function Review({
             </div>
           )}
           {saveError && <p className="text-xs text-amber-400">{saveError}</p>}
+          {/* Share the SAVED chart out of the app (design: reuse show-mode share).
+              Appears once a stored artifact exists — on re-open, or after a save.
+              Unsaved edits aren't reflected until saved (it shares what's stored). */}
+          {savedUrl && (
+            <div className="flex items-center gap-2 pt-1">
+              <ShareButton
+                title={`${songTitle} – ${displayRole(canonicalizeRole(role || editChart?.role || ''))}`}
+                buildUrl={() => savedUrl}
+                getFile={async () => {
+                  const res = await fetch(savedUrl);
+                  if (!res.ok) return null;
+                  const buf = await res.arrayBuffer();
+                  return new File([buf], chartShareFilename(songTitle, displayRole(canonicalizeRole(role || editChart?.role || ''))), {
+                    type: 'application/pdf',
+                  });
+                }}
+              />
+              <span className="text-xs text-zinc-500">Share this chart</span>
+            </div>
+          )}
         </div>
       </aside>
     </div>
