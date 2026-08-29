@@ -136,9 +136,9 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
   const [description, setDescription] = useState(editChart?.sourcePrompt ?? '');
   const [composeKey, setComposeKey] = useState(''); // '' = Auto (let L0 resolve)
   // Edit mode seeds the view from the saved spec → mounts directly in Review,
-  // skipping Compose. A fresh build starts null (Compose first). The refine box
-  // stays empty on re-open (v1): the manual editor is the default, Regenerate is
-  // opt-in (§5).
+  // skipping Compose. A fresh build starts null (Compose first). On re-open the
+  // refine box is pre-filled from the stored prompt (above), so Regenerate is live;
+  // a legacy chart with no stored prompt still opens empty (manual editor default).
   const [view, setView] = useState<ViewModel | null>(editChart ? specToView(editChart.spec) : null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
