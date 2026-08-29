@@ -518,6 +518,39 @@ describe('resolveRenderKey — spelled accidentals', () => {
     expect(resolveRenderKey('in F# major')).toBe('F#');
     expect(resolveRenderKey('in Bb')).toBe('Bb');
   });
+
+  it('does NOT read a CHORD as a key — a digit may not end the key statement', () => {
+    // The first pass at the sharp fix used `(?![A-Za-z])`, which let a digit terminate
+    // the match, so chord prose pinned L0: "in Am7" -> Am, "in F2" -> F, "in Bb2" -> Bb.
+    // `\\b` had rejected these by accident; `(?!\\w)` rejects them on purpose.
+    // The uiKey must survive untouched in every one of them.
+    expect(resolveRenderKey('verse in Am7, chorus in Dm7', 'G')).toBe('G');
+    expect(resolveRenderKey('vamp in F2', 'G')).toBe('G');
+    expect(resolveRenderKey('riff in Bb2', 'G')).toBe('G');
+    expect(resolveRenderKey('turnaround in G7', 'D')).toBe('D');
+    // With no uiKey they must fall to the C default, not to a phantom key.
+    expect(resolveRenderKey('verse in Am7')).toBe('C');
+  });
+
+  it('does NOT drop an accidental symbol to make a shorter match succeed', () => {
+    // Same shape as the F# backtrack, reached from the other side and present in main:
+    // `#` is not a word character, so a lookahead naming only `\\w` (and `\\b` before it)
+    // is happy to end the match at "C" with the `#` still sitting there — "in C#m7"
+    // resolved to C. A semitone out, silently, again.
+    expect(resolveRenderKey('in C#m7', 'A')).toBe('A');
+    expect(resolveRenderKey('vamp on F#7', 'G')).toBe('G');
+    expect(resolveRenderKey('in E♭9', 'G')).toBe('G');
+  });
+
+  it('still parses a key statement that ends in punctuation or a symbol accidental', () => {
+    // The guard above must not cost the real forms: `\\w` is silent about `#`, `♯`,
+    // `,`, `.` and end-of-input, which is every way a key statement actually ends.
+    expect(resolveRenderKey('in F#')).toBe('F#');
+    expect(resolveRenderKey('in F#, medium swing')).toBe('F#');
+    expect(resolveRenderKey('in Bb. 8-bar verse.')).toBe('Bb');
+    expect(resolveRenderKey('in Dm, then the bridge')).toBe('Dm');
+    expect(resolveRenderKey('in F sharp')).toBe('F#');
+  });
 });
 
 describe('resolveRenderKey — precedence', () => {

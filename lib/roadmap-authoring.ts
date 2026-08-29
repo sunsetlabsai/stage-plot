@@ -301,9 +301,23 @@ const NOTE = `([A-G])(?:(${ACC_SYMBOL})|\\s+(${ACC_WORD})\\b)?`;
 // "in F#" backtracked into the shorter match "in F" and resolved to F — silently, a
 // semitone out, with the sharp simply dropped. Flats never showed it (`b` IS a word
 // char) and "in F# major" never showed it (the mode word restored the boundary), so
-// it survived as a sharp-key-at-end-of-phrase bug. A negative lookahead for a letter
-// is what was actually meant: don't match mid-word, and say nothing about symbols.
-const END = '(?![A-Za-z])';
+// it survived as a sharp-key-at-end-of-phrase bug. What was meant is "the key
+// statement must not run into more word", said in a way that doesn't ALSO demand a
+// word character to its left the way `\\b` does after `#`.
+//
+// ⚠ It must be `\\w`, not `[A-Za-z]`: a letters-only lookahead lets a DIGIT end the
+// match, so chord prose parses as a key — "verse in Am7" resolved to Am, "in F2" to F,
+// "in Bb2" to Bb. Those are chord symbols, never key statements, and pinning L0 off one
+// mis-authors the whole chart before the deterministic parse ever runs. Caught by Codex
+// on review of the sharp fix above; the two bugs are the same lookahead, tuned twice.
+//
+// ⚠ The accidental SYMBOLS have to be in the set too, and for a subtler reason: they are
+// not word characters, so a lookahead that names only `\\w` lets the engine drop an
+// accidental that is plainly there and still succeed. "in C#m7" backtracked past the `#`
+// and resolved to C — a semitone out, exactly the failure the sharp fix was for, reached
+// from the other side. (`\\b` had the same hole for the same reason.) The rule this
+// encodes: a key statement ends where the key ENDS, not merely where the letters do.
+const END = '(?![\\w#♯♭])';
 const RE_KEYED = new RegExp(`(?:[Kk]ey of|\\b[Ii]n)\\s+${NOTE}(m)?(?:\\s+(minor|min|major|maj))?${END}`);
 const RE_BARE = new RegExp(`\\b${NOTE}\\s+(minor|major)${END}`);
 
