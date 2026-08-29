@@ -84,6 +84,24 @@ describe('save route — threads source_prompt into save_builder_chart', () => {
   });
 });
 
+// Notation (design-roadmap-notation-toggle.md): the toggle drives BOTH the render
+// and the persisted column through one `notation`, so the baked PDF and
+// source_notation can never disagree. The route fails safe to 'numbers'.
+describe('save route — threads notation into save_builder_chart', () => {
+  it('passes letters when the toggle sent letters', async () => {
+    await POST(saveRequest({ spec: SPEC, song_title: '9 to 5', role: 'guitar', notation: 'letters' }));
+    expect(rpc.args?.p_source_notation).toBe('letters');
+  });
+
+  it('defaults to numbers when absent or anything but the literal "letters"', async () => {
+    await POST(saveRequest({ spec: SPEC, song_title: '9 to 5', role: 'guitar' }));
+    expect(rpc.args?.p_source_notation).toBe('numbers');
+
+    await POST(saveRequest({ spec: SPEC, song_title: '9 to 5', role: 'guitar', notation: 'bogus' }));
+    expect(rpc.args?.p_source_notation).toBe('numbers');
+  });
+});
+
 describe('read door — returns source_prompt for the builder to seed the refine box', () => {
   async function read() {
     const res = await GET(new NextRequest('http://localhost/api/charts/roadmap/chart-1'), {
@@ -104,5 +122,14 @@ describe('read door — returns source_prompt for the builder to seed the refine
     const { status, body } = await read();
     expect(status).toBe(200);
     expect(body.source_prompt).toBeNull();
+  });
+
+  it('returns source_notation so the builder can seed the toggle (silent-flip guard)', async () => {
+    readRow = { id: 'chart-1', owner_id: 'user-1', role: 'guitar', song_title: '9 to 5', song_key: '9-to-5', updated_at: 't', source_spec: SPEC, source_prompt: null, source_notation: 'letters' };
+    expect((await read()).body.source_notation).toBe('letters');
+
+    // Legacy row (pre-017) → numbers, matching the builder's default toggle.
+    readRow = { id: 'chart-1', owner_id: 'user-1', role: 'guitar', song_title: '9 to 5', song_key: '9-to-5', updated_at: 't', source_spec: SPEC, source_prompt: null, source_notation: null };
+    expect((await read()).body.source_notation).toBe('numbers');
   });
 });

@@ -121,6 +121,8 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
         updatedAt: data.updated_at,
         // Pre-fill the refine box on re-open (null for legacy charts → empty box).
         sourcePrompt: typeof data.source_prompt === 'string' ? data.source_prompt : undefined,
+        // Seed the notation toggle from the chart's baked notation (silent-flip guard).
+        sourceNotation: data.source_notation === 'letters' ? 'letters' : 'numbers',
       });
     } catch {
       setError('Could not open this chart for editing.');

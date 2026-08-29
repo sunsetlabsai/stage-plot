@@ -120,6 +120,10 @@ export interface EditChart {
   // refine box so Regenerate is live on a re-opened chart. Undefined/absent for
   // legacy pre-016 charts → box opens empty, exactly as before.
   sourcePrompt?: string;
+  // The notation this chart's PDF was baked in (design-roadmap-notation-toggle.md).
+  // Seeds the Numbers⇄Letters toggle on re-open so a save-without-toggling can't
+  // silently re-bake numbers over a letters chart. Absent (legacy/pre-017) → numbers.
+  sourceNotation?: 'numbers' | 'letters';
 }
 
 interface Props {
@@ -340,7 +344,9 @@ function Review({
   const [role, setRole] = useState<ChartRole | ''>(editChart ? canonicalizeRole(editChart.role) : '');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
-  const [mode, setMode] = useState<'numbers' | 'letters'>('numbers');
+  // Seed from the re-opened chart's baked notation so the toggle reflects what's
+  // stored (the silent-flip guard); a fresh build starts on numbers.
+  const [mode, setMode] = useState<'numbers' | 'letters'>(editChart?.sourceNotation ?? 'numbers');
   const [editing, setEditing] = useState<string | null>(null); // `${sectionId}:${barIndex}`
 
   const beats = view.timeSig.beats;
@@ -415,6 +421,9 @@ function Review({
           // Persist the current refine-box text verbatim as the re-prompt seed
           // (design §5(c)); the route stores null when it's blank.
           source_prompt: description.trim() || undefined,
+          // Bake the toggle's notation into the PDF and persist it (the show renders
+          // this artifact as-is). design-roadmap-notation-toggle.md.
+          notation: mode,
           // Edit mode threads the stale-edit precondition (§4.4); a fresh build
           // omits it and the save route applies no precondition.
           ...(editChart

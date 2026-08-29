@@ -133,13 +133,15 @@ describe('test 3a — a successful sniff NORMALIZES what we persist', () => {
     expect(body.mime_type).toBe('application/pdf');
   });
 
-  it('de-builders the slot: clears BOTH source_spec and source_prompt', async () => {
-    // Replacing a builder chart with a file must strand neither the authored spec
-    // NOR the authoring prompt in the row, or a file chart keeps a stale builder
-    // prompt (design-roadmap-prompt-persistence.md §4 touch point 5).
+  it('de-builders the slot: clears source_spec, source_prompt AND source_notation', async () => {
+    // Replacing a builder chart with a file must strand neither the authored spec,
+    // the authoring prompt, NOR the baked notation in the row, or a file chart
+    // keeps stale builder metadata (design-roadmap-prompt-persistence.md §4 tp5;
+    // design-roadmap-notation-toggle.md §6).
     await POST(uploadRequest(PDF_BYTES, 'chart.pdf', 'application/pdf'));
 
     expect(stored.upsertRow?.source_spec).toBeNull();
     expect(stored.upsertRow?.source_prompt).toBeNull();
+    expect(stored.upsertRow?.source_notation).toBeNull();
   });
 });

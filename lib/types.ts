@@ -66,6 +66,11 @@ export interface Chart {
   // back to authored_key when there is no song context (standalone library view).
   is_builder?: boolean;       // source_spec present = authored in the builder
   authored_key?: string | null; // the spec's renderKey (informational; not the live key)
+  // Notation the builder PDF was baked in (design-roadmap-notation-toggle.md).
+  // 'numbers' (default/absent) = key-invariant degrees, live-rekeyed by the setlist.
+  // 'letters' = chords baked concrete in authored_key → the badge shows authored_key
+  // and ignores the live override (the chart can't be re-keyed without re-rendering).
+  notation?: 'numbers' | 'letters';
   charted_key?: string | null;  // reserved for import-time key capture (null for now)
 }
 

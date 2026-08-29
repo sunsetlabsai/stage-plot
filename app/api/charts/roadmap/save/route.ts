@@ -24,6 +24,10 @@ interface PostBody {
   // (design: design-roadmap-prompt-persistence.md). Metadata only — never rendered
   // or hashed. Empty/absent → stored null.
   source_prompt?: unknown;
+  // Which notation the toggle was on at save. Bakes into the ONE stored PDF and is
+  // persisted so re-open seeds the toggle (no silent re-bake). Anything but the
+  // literal 'letters' → 'numbers' (fail-safe to today's key-invariant default).
+  notation?: unknown;
   // Optimistic-concurrency precondition, sent ONLY by the edit flow (the values
   // the GET read door returned). Absent on the create flow → no precondition.
   expected_chart_id?: string;
@@ -87,6 +91,10 @@ export async function POST(request: NextRequest) {
   const sourcePrompt =
     typeof body.source_prompt === 'string' && body.source_prompt.trim() ? body.source_prompt.trim() : null;
 
+  // Notation of record for this artifact. Drives BOTH the render below and the
+  // persisted column, so the baked PDF and source_notation can never disagree.
+  const notation: 'numbers' | 'letters' = body.notation === 'letters' ? 'letters' : 'numbers';
+
   const admin = getSupabaseAdmin();
 
   // Artist is song-level metadata owned by the library, so we read it from the
@@ -102,7 +110,7 @@ export async function POST(request: NextRequest) {
   const artist = typeof songRow?.artist === 'string' ? songRow.artist : '';
 
   // Render server-side: spec → {pdfBytes, born-verified calibration}.
-  const { pdfBytes, calibration } = await renderRoadmap(spec, { songTitle, artist });
+  const { pdfBytes, calibration } = await renderRoadmap(spec, { songTitle, artist, notation });
 
   // Renderer-bug guard: prove the calibration faithfully describes the spec before
   // it is ever hashed or persisted (a renderer regression that drops/miscounts a
@@ -160,6 +168,7 @@ export async function POST(request: NextRequest) {
     p_expected_chart_id: expectedChartId,
     p_expected_updated_at: expectedUpdatedAt,
     p_source_prompt: sourcePrompt,
+    p_source_notation: notation,
   });
 
   if (rpcError) {
