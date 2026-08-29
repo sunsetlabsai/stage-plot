@@ -184,6 +184,16 @@ differently. You change notation by re-saving.
 
 ---
 
+## Known limitation (accepted)
+
+`degreeLetter` spells by pitch class into fixed sharp/flat chromatic arrays, so an
+off-menu enharmonic renderKey prints its enharmonic equivalent in letters (e.g.
+`Cb` → tonic `B`, `B#` → `C`). This is **pre-existing** — the builder's HTML letters
+preview already spells this way; baking it into the PDF does not change it. The key
+pickers offer only the 24 standard majors/minors, so this can only arise from a
+hand-crafted or AI-authored spec (the validator's `KEY_PATTERN` is permissive).
+Proper enharmonic-aware spelling is a separate feature, out of this PR's scope.
+
 ## Open questions for review
 
 1. **`cellFromBar` shape.** `drawBarContent` iterates the bar's chord objects; confirm

@@ -460,6 +460,11 @@ function Review({
         // renderKey (informational). Persisted source_spec rehydrates the same on reload.
         is_builder: true,
         authored_key: spec.renderKey,
+        // Carry the just-baked notation into live state so the show badge is correct
+        // BEFORE any reload — otherwise it reads undefined→numbers and can show the
+        // live song.key over a letters chart baked in authored_key. Matches the show
+        // GET mapping (design-roadmap-notation-toggle.md §4).
+        notation: mode,
         charted_key: null,
       };
       onSaved(chart);

@@ -296,4 +296,24 @@ describe('RoadmapBuilder — the notation toggle drives save, and re-open seeds 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(notationOf(fetchMock)).toBe('letters');
   });
+
+  it('hands the baked notation to onSaved so live state is correct before any reload', async () => {
+    // The save route response omits notation; the badge would read undefined→numbers
+    // and print the live song.key over a letters chart until a full show GET. So the
+    // built Chart must carry notation itself (Codex code-review, Medium 1).
+    saveMock();
+    const onSaved = vi.fn();
+    render(
+      <RoadmapBuilder
+        songTitle="9 to 5"
+        charts={[]}
+        editChart={{ chartId: 'c1', role: 'guitar', spec: SPEC, updatedAt: '2026-08-29T00:00:00Z', sourceNotation: 'letters' }}
+        onClose={vi.fn()}
+        onSaved={onSaved}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(onSaved.mock.calls[0][0]).toMatchObject({ is_builder: true, notation: 'letters' });
+  });
 });
