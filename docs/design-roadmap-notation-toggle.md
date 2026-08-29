@@ -1,55 +1,34 @@
-# Design: Numbers ⇄ Letters in the Show View
+# Design: Numbers ⇄ Letters — bake the toggle into the saved chart
 
-**Status:** Draft v1 — for Codex adversarial review
-**Depends on:** roadmap builder (renderRoadmap, roadmap-view), chart_library
-**Scope:** Let a performer see a builder roadmap chart as **letters** (real chords in
-the designated key) or **Nashville numbers** on stage, as a sticky per-show setting.
-Default: **Letters.** No change to the pdf.js performance viewer, the calibration
-system, or the marker/darkness overlay.
+**Status:** Draft v2 — simplified after Codex R1 (two-artifact design dropped)
+**Depends on:** roadmap builder (renderRoadmap, roadmap-view, save route), chart_library
+**Scope:** The builder's existing Numbers⇄Letters preview toggle becomes the chart's
+notation of record: **save renders the PDF in the selected notation, and the show
+renders that one PDF.** No per-show setting, no second artifact. Change notation by
+re-opening and re-saving (it re-renders — that's already how the builder works).
 
 ---
 
 ## The Problem
 
-The Numbers⇄Letters toggle already exists — but **only in the builder's Review
-preview** (`RoadmapBuilder.tsx:747`, HTML), where you author. The performer on stage
-never sees it, because:
+The toggle already exists in the builder's Review preview
+(`RoadmapBuilder.tsx:747`, `mode: 'numbers' | 'letters'`), but it only re-spells the
+**HTML preview**. Two things ignore it:
 
-1. The **baked PDF is Nashville-numbers only.** `lib/roadmap-render.ts:338` hardcodes
-   the label as `${c.degree}${c.quality}${c.bass}` and the header (`:244`) prints
-   `Nashville (authored in {key})`. It never calls `renderCell`/`degreeLetter`.
-2. The **show view renders that baked PDF** via pdf.js (`loadPdfDoc`/`renderPage`) —
-   it does not render `source_spec` natively. There is nothing on stage to re-spell.
+1. **Save always bakes Nashville numbers.** `renderRoadmap` → `drawBarContent`
+   (`roadmap-render.ts:338`) hardcodes `${c.degree}${c.quality}${c.bass}`, and the
+   header (`:244`) prints `Nashville (authored in {key})`. So previewing in Letters and
+   saving produces a **numbers** PDF — a silent mismatch between what you saw and what
+   you stored.
+2. **The show renders the stored PDF** via pdf.js. Because that PDF is numbers-only,
+   the stage is numbers-only.
 
-Graham's call: if we pick one for the stage, pick **Letters** (actual chords in the
-designated key). "Both" is the real goal, as long as the squeeze is worth it.
-
----
-
-## The one fact that makes this cheap
-
-Numbers and Letters differ **only in the text drawn inside each bar.** They share:
-
-- the same `layoutRoadmap` output (bar/system geometry),
-- the same `buildCalibration(spec, layout)` projection (marker coords),
-- the same header/section/volta furniture.
-
-Bar x-positions in `drawBarContent` are **beat-fraction based**
-(`cx = x0 + 4 + frac * w`), not text-width based — the label content cannot shift a
-bar. So the two PDFs are **calibration-identical**. Swapping which PDF the show loads
-therefore **cannot** disturb the section-marker / seek / held-band-darkness overlay —
-the expensive part of the performance view is untouched. This is the load-bearing
-claim; it gets its own test (§Tests, T2).
-
-`degreeLetter` also emits **ASCII** accidentals (`F#`, `Bb` — see `CHROM_SHARP`/
-`CHROM_FLAT`, `roadmap-view.ts:385`), which Helvetica/WinAnsi encodes directly. So
-the letters path in the PDF is a plain `drawText` — it does **not** need the
-vector-accidental glyph machinery (`drawAccidental`/`accW`) that numbers mode needs
-for `♭`/`♯`. Letters is the simpler of the two render branches.
+Graham's call: one PDF per chart, baked in the toggle's notation, rendered as-is on
+stage. Flexible *per edit*, not per show.
 
 ---
 
-## Design (Option A — bake both, lazily; default show to Letters)
+## Design (one artifact, bake-on-save)
 
 ### 1. Make `renderRoadmap` notation-aware
 
@@ -63,136 +42,109 @@ export interface RenderOptions {
 
 In `drawBarContent`, branch on notation:
 
-- **numbers** (today, byte-identical): vector accidental via `accW`/`drawAccidental`,
-  label `${c.degree}${c.quality}${c.bass?'/'+c.bass:''}`.
+- **numbers** (today, byte-identical when notation omitted/`'numbers'`): vector
+  accidental via `accW`/`drawAccidental`, label `${c.degree}${c.quality}${c.bass?…}`.
 - **letters**: `const label = renderCell(cellFromBar(c), 'letters', spec.renderKey)`
-  — plain ASCII, single `drawText`, no `accW`, no `drawAccidental`. (The bar's chord
-  object already carries `degree/alter/quality/bass`; `renderCell` is the one shared
-  spelling seam, so numbers-in-preview and letters-in-PDF agree by construction.)
+  — plain ASCII (`degreeLetter` emits `F#`/`Bb`, WinAnsi-encodable; see `CHROM_*`
+  `roadmap-view.ts:385`), a single `drawText`, no `accW`/`drawAccidental`. `renderCell`
+  (`roadmap-view.ts:489`) is the one shared spelling seam, so the preview and the PDF
+  agree by construction.
 
-Header line (`:244`) branches too:
-- numbers → `Nashville (authored in {renderKey})`
-- letters → `Key of {renderKey}` — it's real chords now.
+Header (`:244`) branches: numbers → `Nashville (authored in {key})`; letters →
+`Key of {renderKey}` (e.g. `Key of F#`) — it's real chords now.
 
 `held` diamonds, split ticks, section labels, voltas, measure numbers, the rhythm
-strip: **unchanged** (mode-invariant). Only the chord glyph and the header string move.
+strip: **unchanged in logic.** (The held diamond's x trails the chord label via
+`widthOfTextAtSize`, `:340`, so it re-places per-mode — correct, and in-PDF only: it
+is never a calibration coordinate.)
 
-### 2. Storage — a derivable letters sibling, rendered on demand
+### 2. The toggle drives save
 
-Today: save renders numbers, hashes the bytes, stores at
-`${uid}/${songKey}/${role}/${H}.pdf` where `H = hashPdfBytes(numbersBytes)`. The
-`chart_library` row keeps `storage_path` + `source_hash = H`.
+The builder already holds `mode`. On save, send it:
 
-A letters PDF has **different bytes → a different hash**, so it can't be addressed by
-its own content hash and still be derivable. Instead we key it off the **numbers
-hash** — a stable proxy for spec identity (guaranteed by the determinism tests):
+- `RoadmapBuilder` save POST body gains `notation: mode`.
+- `app/api/charts/roadmap/save/route.ts` reads it (validate `'numbers'|'letters'`,
+  default `'numbers'`) and passes it to `renderRoadmap(spec, { songTitle, artist, notation })`.
 
-```
-letters sibling: ${uid}/${songKey}/${role}/${H}-letters.pdf
-```
+Everything downstream is **unchanged**: the notation-specific bytes hash to a
+`source_hash`, store at `…/${role}/${source_hash}.pdf`, and `save_builder_chart`
+writes the projected `buildCalibration` keyed by that hash (migration 009). Because
+there is exactly **one** PDF per chart, its calibration is keyed by its own bytes as
+today — no second row, no mismatch, no derivation.
 
-Derivable from the numbers path by string transform; no new column, no migration.
+### 3. Persist the notation so re-open is honest (the one correctness add)
 
-**Lazy materialization** (uniform for new and legacy charts — no backfill):
+`mode` defaults to `'numbers'`. Without persistence, re-opening a **letters** chart
+shows the toggle on Numbers; a save-without-toggling silently re-bakes it to numbers.
+So the chart must remember its notation and seed the toggle on re-open — mirroring
+`source_prompt` (migration 016):
 
-`GET /api/charts/roadmap/[chartId]/pdf?notation=letters`
-1. Read the chart row (public builder chart; 422 if not a builder chart).
-2. Compute the letters path from the stored `source_hash`.
-3. If the object exists → 302 to its public URL.
-4. If missing → render `renderRoadmap(source_spec, { notation:'letters', ... })`,
-   upload to the letters path (`upsert:true`, content-addressed so races are safe),
-   then 302 to the public URL.
+- **Migration 017:** `alter table chart_library add column source_notation text` —
+  nullable, no default; `null` ⇒ legacy ⇒ `'numbers'` (today's reality).
+- `save_builder_chart` RPC gains `p_source_notation`; the save route passes `notation`.
+- The read door (`app/api/charts/roadmap/[chartId]/route.ts`) returns `source_notation`.
+- `RoadmapBuilder` seeds `mode` from it on edit (`null`/absent → `'numbers'`).
 
-First letters view of a chart pays one deterministic render (~fast); every later view
-is a direct, cacheable public URL. Numbers is **unchanged** — still the direct public
-URL, no endpoint hop in the hot path. Legacy builder charts need **no re-save** — the
-endpoint materializes their letters sibling on first request.
+This closes the silent-flip footgun and keeps "flexible per edit" truthful: you always
+re-open in the notation you last saved.
 
-### 3. Per-show setting — rides in the show config, no migration
+### 4. The show view — no change
 
-The show config (`AppConfig`) is already persisted wholesale to localStorage **and**
-Supabase on every change (`app/[owner]/[show]/page.tsx:604`). Add one field:
+The show renders the stored PDF as-is (`loadPdfDoc`/`renderPage`). Whatever notation
+was baked is what plays. Calibration, seek, markers, held-band darkness: **untouched**,
+because the retrieval stack still sees exactly one artifact per chart, keyed by its own
+bytes — the invariant it already relies on.
 
-```ts
-notation?: 'numbers' | 'letters'; // show-level; undefined ⇒ 'letters' (default)
-```
+### 5. Non-builder charts
 
-- A toggle in the perform toolbar flips it; it persists by the existing save path —
-  sticky per show, across reloads and devices.
-- New shows default to Letters; existing shows (field absent) resolve to Letters.
-
-The roadmap chart loader picks the URL by the setting:
-- `notation === 'letters'` **and** `chart.is_builder` → the letters endpoint URL.
-- otherwise → today's direct numbers public URL.
-
-**Owner-only, by decision.** `notation` is a shared show setting. As a config field it
-flows through `updateConfig`, which refuses writes from read-only collaborators
-(`isReadOnlyRef`, `page.tsx`) — so the **owner** sets notation and view-only band
-members inherit it. That is the intended behavior: the toggle is disabled (not hidden)
-for read-only viewers, matching every other config control on the page.
-
-### 4. Non-builder charts
-
-Uploaded PDFs/images have no `source_spec` to re-spell. The toggle is a **no-op** for
-them — they render identically in both modes. The endpoint returns 422 for a
-non-builder chart; the loader never routes a non-builder chart to it.
-
-### 5. Builder authoring preview — unchanged
-
-The builder keeps its own numbers/letters preview toggle (authoring aid). Charts are
-still **authored and stored canonically in numbers** (`source_spec` is degrees); the
-show setting only chooses which notation the *baked stage PDF* uses. The two toggles
-are independent and don't need to agree.
+Unaffected: uploaded PDFs/images have no `source_spec` and no toggle.
 
 ---
 
-## What this intentionally does NOT touch
+## Why the two-artifact / per-show design was dropped (Codex R1)
 
-- The pdf.js performance viewer, page rendering, or prefetch.
-- `buildCalibration`, the section/seek/marker overlay, the held-band darkness read.
-- The `source_spec` contract, the save RPC signature, or any migration.
-- Uploaded/converted charts.
+v1 proposed a per-show setting that swapped the show between a numbers PDF and a
+lazily-rendered letters sibling. Codex R1 showed the whole retrieval stack keys on the
+**fetched PDF's byte-hash** (or `fileId+modifiedTime`), not on spec identity:
 
-All of the above are mode-invariant, which is the whole reason A is cheap.
+- calibration is fetched by `hashPdfBytes(fetchedBytes)` (`page.tsx:3601`) — a letters
+  PDF hashes differently and 404s its calibration → loses redline/markers/seek;
+- `fetchChartBytes` direct-fetches only storage URLs, else the Drive proxy
+  (`pdf-viewer.ts:75`); the load effect keys on `[chartFileId, chartModifiedTime,
+  accessToken]` — a URL-only change wouldn't reload;
+- the doc/offline caches key on `fileId+modifiedTime` — numbers/letters would collide.
+
+Every one of those failures *came from introducing a second artifact.* This design has
+one artifact per chart, so none of them arise. The trade — accepted — is that a chart
+is baked in a single notation: different shows can't display the same chart
+differently. You change notation by re-saving.
 
 ---
 
 ## Tests
 
-- **T1 — letters PDF draws letters.** `renderRoadmap(spec, {notation:'letters'})` for
-  a spec in F: degree 1 → `F`, degree 4 → `Bb`, a `♭7` → `Eb`; header contains the
-  key, not "Nashville". Numbers path byte-identical to today (regression pin).
-- **T2 — calibration is mode-invariant (load-bearing).**
-  `buildCalibration(spec, layoutNumbers)` deep-equals `buildCalibration(spec, layoutLetters)`
-  for a spec exercising sections, splits, held, voltas. (Trivially true because
-  notation doesn't enter layout — the test *pins* that it stays that way.)
-- **T3 — letters render is deterministic.** Same spec → byte-identical letters bytes
-  on repeat → stable `-letters.pdf` hash. Self-comparison, not golden bytes.
-- **T4 — lazy endpoint.** Miss → renders + uploads at `{H}-letters.pdf`, 302s to the
-  public URL; hit → no re-render (upload not called). 422 for a non-builder chart.
-- **T5 — show setting.** Absent field resolves to Letters; toggling persists through
-  the existing save; a builder chart in Letters mode loads the endpoint URL, a
-  non-builder chart never does.
-- **T6 — spelling agreement.** The PDF letters label for a chord equals
-  `renderCell(cell,'letters',key)` for the same cell — one seam, asserted, so preview
-  and PDF can't drift.
+- **T1 — letters PDF draws letters.** `renderRoadmap(spec,{notation:'letters'})` for a
+  spec in F: degree 1 → `F`, degree 4 → `Bb`, a `♭7` → `Eb`; header `Key of F`. With
+  `notation` omitted or `'numbers'`, byte-identical to today (regression pin).
+- **T2 — spelling agreement.** The PDF letters label for a chord equals
+  `renderCell(cell,'letters',key)` — one seam, so preview and PDF can't drift.
+- **T3 — determinism per notation.** Same spec+notation → byte-identical bytes on
+  repeat → stable `source_hash` (self-comparison, not golden bytes).
+- **T4 — save honors the toggle.** Save with `notation:'letters'` renders letters and
+  stores `source_notation:'letters'`; default/absent stores numbers.
+- **T5 — re-open round-trips.** Read door returns `source_notation`; the builder seeds
+  `mode` from it; a legacy row (`null`) opens on Numbers. (Guards the silent flip.)
+- **T6 — calibration follows the one PDF.** buildCalibration is stored keyed by the
+  rendered bytes' hash regardless of notation (mechanism unchanged; pin that letters
+  saves still land a readable calibration row).
 
 ---
 
-## Resolved decisions
-
-- **Setting scope:** owner-only shared show setting (config field), not a per-viewer
-  preference. View-only collaborators inherit; the toggle is disabled for them.
-- **Letters header:** `Key of {renderKey}` (e.g. `Key of F#`).
-- **Materialization:** lazy only — uniform for legacy + new, never double-renders a
-  chart no one views in letters. (Rejected: bake-both-at-save, which still needs the
-  lazy endpoint as a legacy fallback — two mechanisms for one job.)
-
 ## Open questions for review
 
-1. **Toolbar placement** — one global Numbers/Letters control in the perform toolbar
-   (assumed, matches "per-show setting") vs a per-chart override. Assuming global.
-2. **`cellFromBar` shape.** `drawBarContent` iterates the bar's chord objects; confirm
-   they carry `{degree, alter, quality, bass}` in the shape `renderCell` expects, or
-   add a thin adapter. (Numbers path reads exactly these fields today, so this is a
-   packaging detail, not a data gap.)
+1. **`cellFromBar` shape.** `drawBarContent` iterates the bar's chord objects; confirm
+   they carry `{degree, alter, quality, bass}` as `renderCell` expects, or add a thin
+   adapter. (Numbers path reads exactly these fields today — a packaging detail, not a
+   data gap.)
+2. **Migration 017 vs reuse.** A dedicated `source_notation` column is the clean shape.
+   Any reason to fold notation into an existing column instead? (Prefer the column.)
