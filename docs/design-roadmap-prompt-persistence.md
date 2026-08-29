@@ -67,7 +67,7 @@ server-side; smuggling a non-spec field into that JSON is a schema smell and wou
 have to be stripped before render/validate. A sibling nullable column mirrors how
 `source_spec` itself was added (migration 009) and keeps the spec pure.
 
-## 4. Data flow — four small touch points
+## 4. Data flow — five small touch points
 
 1. **Save route** (`app/api/charts/roadmap/save/route.ts`): add
    `source_prompt?: unknown` to `PostBody`; read `body.source_prompt`, trim, pass
@@ -86,8 +86,18 @@ have to be stripped before render/validate. A sibling nullable column mirrors ho
    - **EditChart caller** (`components/ManageChartsModal.tsx:118`): thread
      `sourcePrompt: data.source_prompt` from the read-door response into the
      `EditChart` it builds.
+5. **Upload/Replace path** (`app/api/charts/upload/route.ts:105`) — **the
+   de-buildering writer, and the one Codex R1 caught this design missing.**
+   Replacing a builder chart with an uploaded file already upserts
+   `source_spec: null` to convert the row to an ordinary file chart; once
+   `source_prompt` exists it must set `source_prompt: null` in that SAME upsert.
+   Otherwise a non-builder file row **retains the old builder prompt**, violating
+   the §5(d)/§6 "de-buildered row has a null prompt" invariant. A full-tree sweep
+   for `source_spec` writes confirms this is the ONLY de-buildering writer — the
+   save RPC (touch point 1) and this upsert are the only two writers of
+   `source_spec`; `[chartId]:63` is the read-door response, not a write.
 
-That is the whole surface: 1 migration, 4 edits. No new endpoint, no new component.
+That is the whole surface: 1 migration, 5 edits. No new endpoint, no new component.
 
 ## 5. The divergence model (the core of the design)
 
@@ -109,7 +119,9 @@ Four states; each is ruled, not left implicit:
   text (`description.trim() || null`), full stop.
 - **(d) Legacy / non-builder-authored (`source_prompt` null).** Box seeds empty;
   Regenerate stays opt-in and dead until you type — **identical to today's v1**.
-  No backfill (§6).
+  No backfill (§6). This state is REACHED, not just initial: a Replace-with-file
+  de-builders the row and MUST null the prompt with the spec (§4 touch point 5),
+  or a file row keeps a stale prompt.
 
 **Honesty requirement:** no copy may imply the prompt reflects hand-edits. The
 current refine-rail copy (`:463`, *"Adjust the description and regenerate, or tweak
@@ -131,12 +143,27 @@ calibration. The spec↔calibration parity gate (`save/route.ts:100`) and the
 `specToView → viewToSpec` round-trip invariant (edit-loop §6) are entirely
 unaffected. This PR cannot change any existing chart's rendered output.
 
-## 8. Security / RBAC
+## 8. Security / RBAC — the read boundary, stated precisely (Codex R1)
 
-- **Owner-only**, unchanged. The read door already asserts `owner_id === user.id`
-  via the admin client (`[chartId]/route.ts:37`), NOT via RLS, precisely because an
-  edit door is the owner's alone. Collaborators are **view-only** and never reach
-  the builder.
+- **The API EDIT door is owner-only** (`[chartId]/route.ts:37` asserts
+  `owner_id === user.id` via the admin client, NOT via RLS, precisely because an
+  edit door is the owner's alone). But that is the door, not the table.
+- **The TABLE is NOT owner-only.** `chart_library` carries a `"Collaborator read
+  charts"` RLS policy (migration `003:47-56`) that grants a collaborator SELECT on
+  the owner's **entire library** — every row, and RLS grants **all columns** — for
+  any owner whose show they collaborate on. So a collaborator with a Supabase
+  session can already directly read **`source_spec`** for the whole library today.
+  (The `014` comment calling `chart_library` "owner-only from the start" is
+  **wrong** — the collaborator SELECT policy has been there since `003`. Worth a
+  one-line doc fix in `[chartId]/route.ts`/`014` but out of scope here.)
+- **`source_prompt` inherits that exact exposure — and that is ACCEPTABLE.** It is
+  strictly LESS information than the `source_spec` a collaborator can already read
+  (the prompt is the input that produced the spec), and under Graham's ruled
+  security scope *"the only thing I care about is protecting people's BYOA agent
+  key; the rest is not sensitive"* a song-structure prompt is not sensitive. So we
+  put it on `chart_library` beside `source_spec` — **NOT** a separate owner-only
+  table or column privilege. **This design deliberately accepts collaborator-
+  readable prompt text.**
 - The prompt is **arbitrary user text**: stored as `text`, passed as a **bind
   param** to the RPC, never concatenated into SQL, never executed. It already flows
   to `/api/charts/roadmap/parse` (which consumes `description`), so no new trust
@@ -154,6 +181,9 @@ unaffected. This PR cannot change any existing chart's rendered output.
   Regenerate **enabled**; `EditChart` without it → box empty → Regenerate
   **disabled** (the preserved legacy path). Review Save sends
   `source_prompt = <current box text>`.
+- **Upload/Replace clears the prompt:** replacing a builder chart (that has a
+  stored `source_prompt`) with a file leaves the row with `source_prompt = null`
+  alongside `source_spec = null` — the de-buildering invariant (§4 touch point 5).
 - **Migration:** verify via psql (show Graham the DDL first — `[[feedback_never_push_main]]`
   DDL discipline) that the column exists and the **new 16-arg signature is
   `service_role`-executable** (`has_function_privilege`, per the STATE verify
@@ -179,6 +209,6 @@ column, still no migration.
 
 ## 12. Build size
 
-1 migration (016) + 4 edits (save route, RPC, read door, builder + its
-`ManageChartsModal` caller) + tests. Additive and low-risk; mirrors the edit-loop's
-own shape.
+1 migration (016) + 5 edits (save route, RPC, read door, builder + its
+`ManageChartsModal` caller, and the upload/Replace null-out) + tests. Additive and
+low-risk; mirrors the edit-loop's own shape.
