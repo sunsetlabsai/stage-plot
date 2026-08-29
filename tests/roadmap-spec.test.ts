@@ -5,6 +5,8 @@ import {
   isValidKey,
   QUALITY_WHITELIST,
   TIME_SIG_UNITS,
+  RENDER_KEYS_MAJOR,
+  RENDER_KEYS_MINOR,
   type RoadmapSpec,
 } from '../lib/roadmap-spec';
 
@@ -437,5 +439,64 @@ describe('validateRoadmapSpec — reports all errors at once', () => {
     });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.errors.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// ── The offerable key menu ───────────────────────────────────────────────────
+// The bug this pins: the builder's key picker carried a hand-written 14-entry list
+// (10 majors, 4 minors), so F# was unreachable — you could not author a chart in a
+// key the spec contract accepts perfectly well.
+//
+// "Every entry is valid" would NOT have caught that: the old list was entirely valid,
+// just short. The test that catches it is COVERAGE — map each entry to its pitch class
+// and demand all twelve. So pitchClass below is deliberately an INDEPENDENT
+// reimplementation, not an import: a shared helper would agree with a wrong menu.
+const NATURAL_PC: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+
+function pitchClass(key: string): number {
+  const m = key.match(/^([A-G])(#|b)?m?$/);
+  if (!m) throw new Error(`not a key: ${key}`);
+  const accidental = m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0;
+  return (((NATURAL_PC[m[1]] + accidental) % 12) + 12) % 12;
+}
+
+describe('RENDER_KEYS — the offerable key menu', () => {
+  it('offers all twelve major pitch classes, exactly once each', () => {
+    const classes = RENDER_KEYS_MAJOR.map(pitchClass);
+    expect(new Set(classes).size).toBe(12);
+    expect([...classes].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  });
+
+  it('offers all twelve minor pitch classes, exactly once each', () => {
+    const classes = RENDER_KEYS_MINOR.map(pitchClass);
+    expect(new Set(classes).size).toBe(12);
+    expect([...classes].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  });
+
+  it('every offered key satisfies the spec contract', () => {
+    for (const k of [...RENDER_KEYS_MAJOR, ...RENDER_KEYS_MINOR]) {
+      expect(isValidKey(k), `${k} must satisfy KEY_PATTERN`).toBe(true);
+    }
+  });
+
+  it('separates the modes — majors carry no "m", minors all do', () => {
+    for (const k of RENDER_KEYS_MAJOR) expect(k.endsWith('m')).toBe(false);
+    for (const k of RENDER_KEYS_MINOR) expect(k.endsWith('m')).toBe(true);
+  });
+
+  it('offers F# and F#m — the key that was unreachable', () => {
+    // The reported counterexample, named rather than implied: "9 to 5" is in F# and
+    // the old menu's nearest offer was F, which is a different song.
+    expect(RENDER_KEYS_MAJOR).toContain('F#');
+    expect(RENDER_KEYS_MINOR).toContain('F#m');
+  });
+
+  it('spells each pitch class with the fewer-accidental key signature', () => {
+    // Forced choices, not taste — Db is 5 flats where C# is 7 sharps; C#m is 4 sharps
+    // where Dbm is 8. Pinning them stops a future "tidy-up" flipping the spelling.
+    expect(RENDER_KEYS_MAJOR).toContain('Db');
+    expect(RENDER_KEYS_MAJOR).not.toContain('C#');
+    expect(RENDER_KEYS_MINOR).toContain('C#m');
+    expect(RENDER_KEYS_MINOR).not.toContain('Dbm');
   });
 });

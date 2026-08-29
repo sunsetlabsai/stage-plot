@@ -1,0 +1,142 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import RoadmapBuilder from '../components/RoadmapBuilder';
+import type { RoadmapSpec } from '../lib/roadmap-spec';
+
+// Two builder bugs reported from UAT on "9 to 5" (2026-08-28), both on the Review
+// screen, both invisible from the outside:
+//
+//   1. A failed Regenerate produced NO feedback. `error`/`specErrors` were set by
+//      generate() but passed only to Compose, so on Review the button flipped
+//      Generating… → Regenerate and the chart sat unchanged — indistinguishable from
+//      a dead button. That is exactly how it was reported: "didn't seem to do
+//      anything."
+//   2. Regenerate sent Compose's `composeKey`, a value the Review screen never shows,
+//      so changing the key in the Review toolbar and regenerating silently discarded
+//      the change.
+//
+// Both are about what crosses the Compose→Review boundary, so they are driven through
+// the real component rather than asserted on a helper.
+
+const SPEC: RoadmapSpec = {
+  version: 1,
+  timeSig: { beats: 4, unit: 4 },
+  renderKey: 'F',
+  sections: [
+    { id: 'intro', label: 'Intro', bars: 4, changes: [{ bar: 1, chords: [{ degree: 1 }] }] },
+    { id: 'turnaround', label: 'Turnaround', bars: 2 },
+  ],
+};
+
+function mockFetchOnce(body: unknown, ok = true) {
+  return vi.fn().mockResolvedValue({ ok, json: async () => body });
+}
+
+// Drive Compose → Review with a successful parse, and hand back the fetch mock so a
+// test can re-point it before exercising Regenerate.
+async function renderInReview() {
+  const fetchMock = mockFetchOnce({ ok: true, spec: SPEC });
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(<RoadmapBuilder songTitle="9 to 5" charts={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '4/4 in F. 4-bar intro, 2-bar turnaround.' } });
+  fireEvent.click(screen.getByRole('button', { name: /generate chart/i }));
+
+  await screen.findByRole('button', { name: /regenerate/i });
+  return fetchMock;
+}
+
+function bodyOf(fetchMock: ReturnType<typeof vi.fn>, callIndex: number) {
+  return JSON.parse(fetchMock.mock.calls[callIndex][1].body as string);
+}
+
+beforeEach(() => {
+  // Regenerate is behind a confirm(); jsdom's returns undefined, which would abort
+  // every regenerate and make these tests pass for the wrong reason.
+  vi.stubGlobal('confirm', () => true);
+  // jsdom has no ResizeObserver, which the preview's fit-to-width hook constructs on
+  // mount. A no-op stub leaves the measured width at 0, so the layout falls back to
+  // its 4-bars/line default — deterministic, and none of these assertions touch wrap.
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+describe('RoadmapBuilder — Regenerate surfaces failure', () => {
+  it('shows a transport error raised by a Regenerate on the Review screen', async () => {
+    const fetchMock = await renderInReview();
+
+    fetchMock.mockResolvedValue({ ok: false, json: async () => ({ error: 'Parser is temporarily unavailable.' }) });
+    fireEvent.click(screen.getByRole('button', { name: /regenerate/i }));
+
+    expect(await screen.findByText('Parser is temporarily unavailable.')).toBeInTheDocument();
+  });
+
+  it('shows spec-validation errors raised by a Regenerate on the Review screen', async () => {
+    const fetchMock = await renderInReview();
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: false, errors: ['sections[1].bars must be an integer >= 1'] }),
+    });
+    fireEvent.click(screen.getByRole('button', { name: /regenerate/i }));
+
+    expect(await screen.findByText(/produced an invalid chart/i)).toBeInTheDocument();
+    expect(screen.getByText('sections[1].bars must be an integer >= 1')).toBeInTheDocument();
+  });
+
+  it('clears a previous error once a Regenerate succeeds', async () => {
+    const fetchMock = await renderInReview();
+
+    fetchMock.mockResolvedValue({ ok: false, json: async () => ({ error: 'Could not reach the parser.' }) });
+    fireEvent.click(screen.getByRole('button', { name: /regenerate/i }));
+    await screen.findByText('Could not reach the parser.');
+
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ ok: true, spec: SPEC }) });
+    fireEvent.click(screen.getByRole('button', { name: /regenerate/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Could not reach the parser.')).not.toBeInTheDocument();
+    });
+  });
+});
+
+describe('RoadmapBuilder — Regenerate carries the key the Review screen is showing', () => {
+  it('sends the toolbar key, not the stale Compose selector', async () => {
+    const fetchMock = await renderInReview();
+
+    // The Compose selector was left on Auto, so a regression here re-reads it as
+    // undefined and the assertion below fails loudly rather than silently passing.
+    expect(bodyOf(fetchMock, 0).key).toBeUndefined();
+
+    // Change the key in the Review toolbar — the picker showing the chart's renderKey.
+    fireEvent.change(screen.getByDisplayValue('F'), { target: { value: 'F#' } });
+    fireEvent.click(screen.getByRole('button', { name: /regenerate/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(bodyOf(fetchMock, 1).key).toBe('F#');
+  });
+
+  it('offers F# in the Review key picker at all — the reported gap', async () => {
+    await renderInReview();
+
+    const picker = screen.getByDisplayValue('F') as HTMLSelectElement;
+    const offered = Array.from(picker.options).map((o) => o.value);
+    expect(offered).toContain('F#');
+    expect(offered).toContain('F#m');
+    // 12 majors + 12 minors, and no stray blank/placeholder option on this picker.
+    expect(offered).toHaveLength(24);
+  });
+});

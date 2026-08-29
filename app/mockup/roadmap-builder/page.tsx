@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { pickBarsPerLine, chunkIntoLines } from '@/lib/roadmap-layout';
+import { RENDER_KEYS_MAJOR, RENDER_KEYS_MINOR } from '@/lib/roadmap-spec';
 import {
   DndContext,
   closestCenter,
@@ -66,7 +67,6 @@ const SAMPLE_DESCRIPTION =
   'to-coda at the end of the chorus, coda at the solo, D.S. al coda at the outro.';
 
 const ROLES = ['Guitar', 'Lyrics', 'Keys', 'Bass', 'Horns', 'Drums', 'Other'];
-const KEYS = ['C', 'G', 'D', 'A', 'E', 'B', 'F', 'Bb', 'Eb', 'Ab', 'Am', 'Em', 'Dm', 'Bm'];
 
 type EditSection = { id: string; label: string; bars: number; repeat: string | null; chords: Bar[] };
 
@@ -549,11 +549,20 @@ function PreviewToolbar({
           onChange={(e) => setRenderKey(e.target.value)}
           className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm text-white outline-none focus:border-blue-500"
         >
-          {KEYS.map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
+          <optgroup label="Major">
+            {RENDER_KEYS_MAJOR.map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </optgroup>
+          <optgroup label="Minor">
+            {RENDER_KEYS_MINOR.map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </optgroup>
         </select>
       </label>
       {mode === 'letters' && (

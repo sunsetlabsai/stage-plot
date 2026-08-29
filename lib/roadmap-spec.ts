@@ -120,6 +120,33 @@ export function isValidKey(k: unknown): k is string {
   return typeof k === 'string' && KEY_PATTERN.test(k);
 }
 
+// ── The offerable printed keys (the UI menu) ─────────────────────────────────
+// KEY_PATTERN above is the CONTRACT — what a spec is allowed to carry. This is the
+// MENU — what a human is offered in a picker. They are deliberately different: the
+// pattern accepts every enharmonic spelling (Gb, D#m, Cb), the menu offers exactly
+// one spelling per pitch class so the list stays scannable.
+//
+// The spelling chosen is the one with FEWER accidentals in its key signature, which
+// is forced, not taste: Db (5♭) over C# (7♯); C#m (4♯) over Dbm (8♭). Only the two
+// six-accidental pairs are a genuine coin-flip — F#/Gb major and Ebm/D#m — and those
+// go to the spelling commoner in band charts.
+//
+// Because the menu is narrower than the contract, a picker MUST tolerate an
+// off-menu value (an imported or AI-resolved Gb is a valid chart, and selecting it
+// away would silently re-key someone's chart). Both builder pickers keep a fallback
+// option for exactly that reason.
+//
+// Majors run chromatically from C; minors from Am, the relative minor of C and by
+// far the commonest minor key — starting the minor list anywhere else reads wrong
+// to a musician even though it would be more symmetrical.
+export const RENDER_KEYS_MAJOR: readonly string[] = [
+  'C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B',
+];
+
+export const RENDER_KEYS_MINOR: readonly string[] = [
+  'Am', 'Bbm', 'Bm', 'Cm', 'C#m', 'Dm', 'Ebm', 'Em', 'Fm', 'F#m', 'Gm', 'G#m',
+];
+
 // ── Validator (the DB boundary gate) ─────────────────────────────────────────
 
 export type SpecValidation =

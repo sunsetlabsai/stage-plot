@@ -31,7 +31,12 @@ import {
   type ViewBar,
   type ViewNavigation,
 } from '@/lib/roadmap-view';
-import type { RoadmapSpec, SectionRepeat } from '@/lib/roadmap-spec';
+import {
+  RENDER_KEYS_MAJOR,
+  RENDER_KEYS_MINOR,
+  type RoadmapSpec,
+  type SectionRepeat,
+} from '@/lib/roadmap-spec';
 import { pickBarsPerLine, chunkIntoLines, lineStartNumbers } from '@/lib/roadmap-layout';
 
 // ── Roadmap Builder — describe a song's structure, render an exact chart ─────
@@ -43,7 +48,63 @@ import { pickBarsPerLine, chunkIntoLines, lineStartNumbers } from '@/lib/roadmap
 // view↔spec bridge (lib/roadmap-view) is the only place the editor's beat-weight
 // model meets the canonical ChordHit contract.
 
-const KEYS = ['C', 'G', 'D', 'A', 'E', 'B', 'F', 'Bb', 'Eb', 'Ab', 'Am', 'Em', 'Dm', 'Bm'];
+// Every key the menu offers, in one flat set — the membership test both pickers use
+// to decide whether the current value needs a fallback <option>.
+const MENU_KEYS: ReadonlySet<string> = new Set([...RENDER_KEYS_MAJOR, ...RENDER_KEYS_MINOR]);
+
+// The grouped option list, shared by BOTH pickers (Compose's pre-parse selector and
+// the Review toolbar) so they can never again drift to different vocabularies —
+// which is exactly how a 14-key hand-list survived: two copies, neither audited.
+// `current` is the picker's present value; when it is off-menu (a valid spec key the
+// menu doesn't spell, e.g. an imported Gb) it is offered first so selecting the
+// picker cannot silently re-key the chart.
+function KeyOptions({ current }: { current?: string }) {
+  const offMenu = current && !MENU_KEYS.has(current) ? current : null;
+  return (
+    <>
+      {offMenu && <option value={offMenu}>{offMenu}</option>}
+      <optgroup label="Major">
+        {RENDER_KEYS_MAJOR.map((k) => (
+          <option key={k} value={k}>
+            {k}
+          </option>
+        ))}
+      </optgroup>
+      <optgroup label="Minor">
+        {RENDER_KEYS_MINOR.map((k) => (
+          <option key={k} value={k}>
+            {k}
+          </option>
+        ))}
+      </optgroup>
+    </>
+  );
+}
+
+// Parse feedback, rendered identically wherever a generate can fail. Compose had
+// this inline and Review had NOTHING, so a failed Regenerate on the Review screen
+// set state that nothing displayed: the button flipped back and the chart sat
+// unchanged, indistinguishable from "the click did nothing". One component now, and
+// both call sites render it.
+function ParseErrors({ error, specErrors }: { error: string; specErrors: string[] }) {
+  if (!error && specErrors.length === 0) return null;
+  return (
+    <div className="mt-3 text-sm text-amber-400 space-y-0.5">
+      {error && <p>{error}</p>}
+      {specErrors.length > 0 && (
+        <>
+          <p>The description was understood but produced an invalid chart:</p>
+          <ul className="list-disc pl-5 text-amber-300/90">
+            {specErrors.slice(0, 6).map((e, i) => (
+              <li key={i}>{e}</li>
+            ))}
+          </ul>
+          <p className="text-zinc-500">Try rephrasing and generate again.</p>
+        </>
+      )}
+    </div>
+  );
+}
 
 // Re-opening a saved builder chart for editing. The spec + slot identity come from
 // the GET read door; the builder mounts straight into Review with the role locked
@@ -77,7 +138,12 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
   const [specErrors, setSpecErrors] = useState<string[]>([]);
   const [tally, setTally] = useState<string[]>([]); // L4 read-back echo
 
-  async function generate(reset: boolean) {
+  // `uiKey` is the key the CALLING SURFACE is showing. Compose passes its pre-parse
+  // selector ('' = Auto); Review passes the chart's live renderKey, which is what the
+  // toolbar edits. Review used to have no say at all — it read `composeKey`, a piece
+  // of Compose state the Review screen never shows — so changing the key in the
+  // toolbar and hitting Regenerate silently discarded the change.
+  async function generate(reset: boolean, uiKey: string) {
     const text = description.trim();
     if (!text || generating) return;
     if (reset && view && !confirm('Regenerate will replace your manual edits. Continue?')) return;
@@ -89,7 +155,7 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
       const res = await fetch('/api/charts/roadmap/parse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description: text, key: composeKey || undefined }),
+        body: JSON.stringify({ description: text, key: uiKey || undefined }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -136,7 +202,7 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
           error={error}
           specErrors={specErrors}
           tally={tally}
-          onGenerate={() => generate(false)}
+          onGenerate={() => generate(false, composeKey)}
         />
       ) : (
         <Review
@@ -148,8 +214,10 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
           description={description}
           setDescription={setDescription}
           generating={generating}
+          error={error}
+          specErrors={specErrors}
           tally={tally}
-          onRegenerate={() => generate(true)}
+          onRegenerate={() => generate(true, view.renderKey)}
           onSaved={onSaved}
         />
       )}
@@ -198,18 +266,7 @@ function Compose({
           placeholder="e.g. 4/4 in G. 4-bar intro on the 1, 8-bar verse (4 of 1, 2 of 4, then 5) played twice, 8-bar chorus with 1st and 2nd endings, an 8-bar solo, then a 4-bar outro…"
           className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-3 text-base text-white outline-none focus:border-blue-500 resize-none leading-relaxed"
         />
-        {error && <p className="text-sm text-amber-400 mt-3">{error}</p>}
-        {specErrors.length > 0 && (
-          <div className="mt-3 text-sm text-amber-400 space-y-0.5">
-            <p>The description was understood but produced an invalid chart:</p>
-            <ul className="list-disc pl-5 text-amber-300/90">
-              {specErrors.slice(0, 6).map((e, i) => (
-                <li key={i}>{e}</li>
-              ))}
-            </ul>
-            <p className="text-zinc-500">Try rephrasing and generate again.</p>
-          </div>
-        )}
+        <ParseErrors error={error} specErrors={specErrors} />
         {tally.length > 0 && <ReadBack tally={tally} />}
         <div className="flex items-center justify-between mt-4">
           <label className="inline-flex items-center gap-2 text-xs text-zinc-500">
@@ -220,11 +277,7 @@ function Compose({
               className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-sm text-white outline-none focus:border-blue-500"
             >
               <option value="">Auto</option>
-              {KEYS.map((k) => (
-                <option key={k} value={k}>
-                  {k}
-                </option>
-              ))}
+              <KeyOptions current={composeKey} />
             </select>
           </label>
           <button
@@ -250,6 +303,8 @@ function Review({
   description,
   setDescription,
   generating,
+  error,
+  specErrors,
   tally,
   onRegenerate,
   onSaved,
@@ -262,6 +317,8 @@ function Review({
   description: string;
   setDescription: (v: string) => void;
   generating: boolean;
+  error: string;
+  specErrors: string[];
   tally: string[];
   onRegenerate: () => void;
   onSaved: (chart: Chart) => void;
@@ -413,6 +470,7 @@ function Review({
         >
           {generating ? 'Generating…' : 'Regenerate'}
         </button>
+        <ParseErrors error={error} specErrors={specErrors} />
         {tally.length > 0 && <ReadBack tally={tally} />}
         <p className="text-[11px] text-zinc-600 mt-auto">
           Tip: click a bar — &ldquo;1&rdquo; or &ldquo;IV&rdquo; for a whole bar, &ldquo;5 4&rdquo; to
@@ -685,16 +743,11 @@ function PreviewToolbar({
       <label className="inline-flex items-center gap-1.5 text-xs text-zinc-500">
         Key
         <select
-          value={KEYS.includes(renderKey) ? renderKey : ''}
+          value={renderKey}
           onChange={(e) => setRenderKey(e.target.value)}
           className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm text-white outline-none focus:border-blue-500"
         >
-          {!KEYS.includes(renderKey) && <option value={renderKey}>{renderKey}</option>}
-          {KEYS.map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
+          <KeyOptions current={renderKey} />
         </select>
       </label>
       {mode === 'letters' && <span className="text-[11px] text-zinc-600">re-spelled in {renderKey}</span>}
