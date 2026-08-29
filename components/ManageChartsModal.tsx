@@ -6,7 +6,9 @@ import type { Chart } from '@/lib/types';
 import { canonicalizeRole, displayRole, type ChartRole } from '@/lib/normalize';
 import { uploadChart, ChartUploadError, type ConvertResult } from '@/lib/chart-upload';
 import { availableRoles, applyUploadedChart, removeChartById } from '@/lib/chart-management';
-import { loadPdfDoc, renderPage } from '@/lib/pdf-viewer';
+import { loadPdfDoc, renderPage, fetchChartBytes } from '@/lib/pdf-viewer';
+import { chartShareFilename } from '@/lib/share';
+import ShareButton from '@/components/ShareButton';
 import RoadmapBuilder, { type EditChart } from '@/components/RoadmapBuilder';
 
 // PDF only: the in-show viewer renders to a canvas via pdf.js and has NO image
@@ -15,6 +17,37 @@ import RoadmapBuilder, { type EditChart } from '@/components/RoadmapBuilder';
 // (design-core-path-tier1 §1.2). This is the hint; /api/charts/upload sniffs the
 // bytes and is the actual boundary.
 const ACCEPT = '.pdf';
+
+// Share a saved chart OUT of the app (text/email/print) via the same tiered
+// Web-Share helper the show viewer uses — file first, then the public URL. No
+// show/setlist context here, so the URL tier is the chart's own public storage
+// link rather than a deep link into a show. Available to anyone who can see the
+// chart (viewers included), like Preview.
+//
+// File tier is offered ONLY for PDFs. chartShareFilename always names `.pdf`, so a
+// legacy non-PDF chart (an old image upload) would otherwise be handed over as
+// image bytes under a .pdf filename — a broken/misleading file. Those fall through
+// to the URL tier (a correct public link to the actual image). Exported for a unit
+// test of exactly that guard.
+export function chartShareProps(songTitle: string, chart: Chart) {
+  const role = displayRole(canonicalizeRole(chart.role));
+  // Trust an explicit MIME; only fall back to the filename when MIME is ABSENT. A
+  // filename must never override a known non-PDF type — a legacy row like
+  // { mimeType: 'image/png', label: 'scan.pdf' } would otherwise re-enable the bad
+  // tier-1 (image bytes shared as application/pdf). MIME-less legacy PDFs still
+  // share via the .pdf filename fallback.
+  const isPdf = chart.mimeType ? chart.mimeType.includes('pdf') : (chart.label ?? '').toLowerCase().endsWith('.pdf');
+  return {
+    title: `${songTitle} – ${role}`,
+    buildUrl: () => chart.url,
+    getFile: isPdf
+      ? async () => {
+          const bytes = await fetchChartBytes(chart);
+          return bytes ? new File([bytes], chartShareFilename(songTitle, role), { type: 'application/pdf' }) : null;
+        }
+      : undefined,
+  };
+}
 
 interface Props {
   songTitle: string;
@@ -123,6 +156,8 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
         sourcePrompt: typeof data.source_prompt === 'string' ? data.source_prompt : undefined,
         // Seed the notation toggle from the chart's baked notation (silent-flip guard).
         sourceNotation: data.source_notation === 'letters' ? 'letters' : 'numbers',
+        // The stored artifact's URL, so Review can Share it immediately on re-open.
+        url: chart.url,
       });
     } catch {
       setError('Could not open this chart for editing.');
@@ -217,6 +252,8 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
                 >
                   Preview
                 </button>
+                {/* Share is a read affordance (like Preview) — not owner-gated. */}
+                <ShareButton {...chartShareProps(songTitle, c)} className="shrink-0" />
                 {isOwner && (
                   <>
                     {/* Edit (spec) is offered only for builder charts — an
@@ -301,12 +338,21 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
             <input ref={replaceFileRef} type="file" accept={ACCEPT} className="hidden" onChange={onReplaceFile} />
           </div>
 
-          {/* Right: preview pane */}
-          <div className="p-4 min-h-[240px] md:min-h-0 flex items-center justify-center bg-zinc-950">
+          {/* Right: preview pane (detail) */}
+          <div className="p-4 min-h-[240px] md:min-h-0 flex flex-col bg-zinc-950">
             {preview ? (
-              <ChartPreview key={`${preview.fileId}:${preview.url}`} chart={preview} />
+              <>
+                <div className="flex items-center justify-end pb-2">
+                  <ShareButton {...chartShareProps(songTitle, preview)} />
+                </div>
+                <div className="flex-1 min-h-0 flex items-center justify-center">
+                  <ChartPreview key={`${preview.fileId}:${preview.url}`} chart={preview} />
+                </div>
+              </>
             ) : (
-              <p className="text-sm text-zinc-600">Select a chart to preview.</p>
+              <div className="flex-1 flex items-center justify-center">
+                <p className="text-sm text-zinc-600">Select a chart to preview.</p>
+              </div>
             )}
           </div>
         </div>

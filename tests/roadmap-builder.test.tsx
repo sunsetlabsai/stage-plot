@@ -317,3 +317,61 @@ describe('RoadmapBuilder — the notation toggle drives save, and re-open seeds 
     expect(onSaved.mock.calls[0][0]).toMatchObject({ is_builder: true, notation: 'letters' });
   });
 });
+
+// Chart export (reuse the show-mode Share): the Review screen can share the SAVED
+// artifact out of the app. It appears once a stored URL exists — on re-open, or
+// after a save produces one — and never for a fresh build with nothing saved yet.
+const STORED_URL = 'https://x.supabase.co/storage/v1/object/public/charts/u/9-to-5/guitar/h.pdf';
+describe('RoadmapBuilder — Review can Share the saved chart', () => {
+  function renderReviewEdit(url?: string) {
+    render(
+      <RoadmapBuilder
+        songTitle="9 to 5"
+        charts={[]}
+        editChart={{ chartId: 'c1', role: 'guitar', spec: SPEC, updatedAt: '2026-08-29T00:00:00Z', url }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+  }
+
+  it('shows Share on re-open when the stored URL is known', () => {
+    renderReviewEdit(STORED_URL);
+    expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
+  });
+
+  it('a fresh build has nothing to share until it is saved', async () => {
+    await renderInReview();
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull();
+  });
+
+  it('reveals Share once a save returns a URL', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ chart_id: 'c1', role: 'guitar', url: STORED_URL, song_key: '9-to-5' }) });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderReviewEdit(undefined);
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument());
+  });
+
+  it('hides Share while a save is in flight, then restores it (Codex Low)', async () => {
+    // A re-save moves the content-addressed URL and deletes the old object, so
+    // sharing mid-save could copy a URL about to 404. Share must vanish while saving.
+    let release!: (v: unknown) => void;
+    const fetchMock = vi.fn().mockReturnValue(new Promise((r) => (release = r)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderReviewEdit(STORED_URL);
+    expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Share' })).toBeNull());
+
+    release({ ok: true, json: async () => ({ chart_id: 'c1', role: 'guitar', url: STORED_URL, song_key: '9-to-5' }) });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument());
+  });
+});
