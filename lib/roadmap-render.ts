@@ -40,6 +40,13 @@ import {
   type LaidBar,
   type RoadmapLayout,
 } from './roadmap-layout';
+import { slashBeats } from './roadmap-rhythm';
+
+// The bar band (SYSTEM_BARS_H = 48pt) splits into a chord row on top and a rhythm
+// strip below, in the SAME 20/28 proportion as the preview's h-5 / h-7 rows, so a
+// bar reads as a two-line staff in both. The chord baseline (yTop − 18) sits in
+// the chord row; the top rule at yTop − CHORD_ROW_PT divides it from the strip.
+const CHORD_ROW_PT = 20;
 
 export interface RenderResult {
   pdfBytes: Uint8Array;
@@ -247,7 +254,11 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
     }
     const yTopPt = denormYTop(sys.yTop);
     const yBottomPt = denormYTop(sys.yBottom);
-    drawLine(pg, denormX(sys.xStart), yBottomPt, denormX(sys.xEnd), yBottomPt, 1);
+    const stripTopPt = yTopPt - CHORD_ROW_PT;
+    drawLine(pg, denormX(sys.xStart), yBottomPt, denormX(sys.xEnd), yBottomPt, 1); // staff bottom rule
+    // Staff TOP rule (design): the rhythm strip needs both rules to read as a
+    // staff like the preview; the PDF drew only the bottom rule before.
+    drawLine(pg, denormX(sys.xStart), stripTopPt, denormX(sys.xEnd), stripTopPt, 1);
 
     // Measure number in the left gutter (design §3.1): 8pt, right-aligned 3pt clear
     // of the leading barline so it is subordinate to the 11pt bold label and never
@@ -263,7 +274,8 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
 
     for (const bar of sys.bars) {
       drawLine(pg, denormX(bar.xStart), yTopPt, denormX(bar.xStart), yBottomPt, 1); // leading barline
-      drawBarContent(pg, font, bar, beats, yTopPt);
+      drawSlashBand(pg, bar, beats, stripTopPt, yBottomPt); // rhythm strip: EVERY bar
+      drawBarContent(pg, font, bar, beats, yTopPt);          // chord labels: sparse
     }
     drawLine(pg, denormX(sys.xEnd), yTopPt, denormX(sys.xEnd), yBottomPt, 1); // trailing barline
   }
@@ -271,6 +283,28 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
   drawRoadmapGlyphs(pages, fontBold, spec, layout);
 
   return doc.save();
+}
+
+// The rhythm strip — one slash per beat across the FULL width of EVERY bar (the
+// staff band the preview always drew but the PDF never did, so slashes could never
+// reach the printed show). Held beats are suppressed by the SHARED slashBeats rule
+// so the strip agrees with the diamond drawn above it. Slashes are diagonal
+// STROKES, not a ╱ glyph: Helvetica/WinAnsi can't encode U+2571 — the same
+// constraint the accidental prefix works around (see drawBarContent).
+function drawSlashBand(page: PDFPage, bar: LaidBar, beats: number, stripTopPt: number, stripBotPt: number): void {
+  if (beats <= 0) return;
+  const change = bar.section.changes?.find((c) => c.bar === bar.barInSection);
+  const slots = slashBeats(change?.chords, beats);
+  const x0 = denormX(bar.xStart);
+  const w = denormX(bar.xEnd) - x0;
+  const midY = (stripTopPt + stripBotPt) / 2;
+  const rise = 5; // ±5pt tall (10pt within the 28pt strip)…
+  const run = 3;  // …and ±3pt wide, so each stroke leans like ╱ (low-left → high-right)
+  for (let b = 0; b < beats; b += 1) {
+    if (!slots[b]) continue;
+    const cx = x0 + (b + 0.5) * (w / beats);
+    drawLine(page, cx - run, midY - rise, cx + run, midY + rise, 0.75);
+  }
 }
 
 // Per-bar Nashville chord content. Sparse: a bar with no addressed change draws

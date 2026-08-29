@@ -140,3 +140,59 @@ describe('RoadmapBuilder — Regenerate carries the key the Review screen is sho
     expect(offered).toHaveLength(24);
   });
 });
+
+// The rhythm strip is drawn by BOTH the preview (here) and the PDF, from the ONE
+// shared slashBeats rule, so held-suppression can't drift between them. These pin
+// the preview end; roadmap-rhythm.test.ts pins the rule, roadmap-render.test.ts
+// pins the PDF end. A suppressed beat renders an empty span, so it never matches
+// the ╱ query — the count IS the number of struck beats.
+describe('RoadmapBuilder — rhythm slashes follow the shared beat→slash rule', () => {
+  async function renderSpecInReview(spec: RoadmapSpec) {
+    const fetchMock = mockFetchOnce({ ok: true, spec });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<RoadmapBuilder songTitle="X" charts={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'anything' } });
+    fireEvent.click(screen.getByRole('button', { name: /generate chart/i }));
+    await screen.findByRole('button', { name: /regenerate/i });
+  }
+
+  it('draws one slash per beat for every struck / inherited bar', async () => {
+    // SPEC: 4 + 2 bars at 4/4, all struck or inherited → 24 slashes, none suppressed.
+    await renderSpecInReview(SPEC);
+    expect(screen.getAllByText('╱')).toHaveLength(6 * 4);
+  });
+
+  it('suppresses all four slashes under a held whole-bar chord (the ring)', async () => {
+    const held: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'F',
+      sections: [
+        { id: 'intro', label: 'Intro', bars: 4, changes: [{ bar: 1, chords: [{ degree: 1, held: true }] }] },
+        { id: 'turn', label: 'Turn', bars: 2 },
+      ],
+    };
+    // Bar 1 held → its 4 beats blank; the other 5 bars keep 4 each.
+    await renderSpecInReview(held);
+    expect(screen.getAllByText('╱')).toHaveLength(5 * 4);
+  });
+
+  it('suppresses only the held half of a split bar', async () => {
+    const split: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'F',
+      sections: [
+        {
+          id: 'only',
+          label: 'Only',
+          bars: 1,
+          changes: [{ bar: 1, chords: [{ degree: 4, beats: 2 }, { degree: 5, beats: 2, held: true }] }],
+        },
+      ],
+    };
+    // One bar: beats 1-2 struck, 3-4 held → exactly 2 slashes.
+    await renderSpecInReview(split);
+    expect(screen.getAllByText('╱')).toHaveLength(2);
+  });
+});

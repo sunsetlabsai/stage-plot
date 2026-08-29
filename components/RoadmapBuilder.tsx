@@ -38,6 +38,7 @@ import {
   type SectionRepeat,
 } from '@/lib/roadmap-spec';
 import { pickBarsPerLine, chunkIntoLines, lineStartNumbers } from '@/lib/roadmap-layout';
+import { slashBeats } from '@/lib/roadmap-rhythm';
 
 // ── Roadmap Builder — describe a song's structure, render an exact chart ─────
 // Full-screen overlay launched from ManageChartsModal. Compose (big prompt) →
@@ -950,9 +951,12 @@ function Measure({
         )}
       </div>
       <div className="h-7 flex items-center justify-around border-t border-b border-black px-1">
-        {Array.from({ length: beats }).map((_, b) => (
+        {/* One slash per beat by the SHARED rule (lib/roadmap-rhythm) the PDF also
+            calls — a held chord suppresses the slashes under it so the strip agrees
+            with the ring; an empty/inherited bar keeps the full rhythm. */}
+        {slashBeats(cells, beats).map((on, b) => (
           <span key={b} className="text-zinc-400 text-sm leading-none select-none">
-            ╱
+            {on ? '╱' : ''}
           </span>
         ))}
       </div>

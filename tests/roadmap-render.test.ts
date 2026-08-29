@@ -447,6 +447,31 @@ describe('renderRoadmap — chord content & header', () => {
     expect(Buffer.from(a.pdfBytes).equals(Buffer.from(b.pdfBytes))).toBe(true);
   });
 
+  it('the rhythm strip reaches the PDF: held suppresses slashes as INK, not geometry', async () => {
+    // The bug this fixes: slashes lived only in the preview, never the printed PDF.
+    // Two specs identical but for one whole-bar chord's `held` flag. Struck → four
+    // slashes drawn under the bar; held → none (the ring). The rhythm strip is real
+    // ink, so the bytes MUST differ — but the strip is drawn from the same layout,
+    // so the born calibration MUST be byte-identical (the save route asserts parity).
+    const struck: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'G',
+      sections: [{ id: 'v', label: 'Verse', bars: 4, changes: [{ bar: 1, chords: [{ degree: 1 }] }] }],
+    };
+    const held: RoadmapSpec = {
+      ...struck,
+      sections: [{ id: 'v', label: 'Verse', bars: 4, changes: [{ bar: 1, chords: [{ degree: 1, held: true }] }] }],
+    };
+    const s = await renderRoadmap(struck);
+    const h = await renderRoadmap(held);
+    expect(Buffer.from(s.pdfBytes).equals(Buffer.from(h.pdfBytes))).toBe(false); // slashes are ink
+    expect(s.calibration).toEqual(h.calibration);                               // geometry unchanged
+    // …and each is still deterministic.
+    const hAgain = await renderRoadmap(held);
+    expect(Buffer.from(h.pdfBytes).equals(Buffer.from(hAgain.pdfBytes))).toBe(true);
+  });
+
   it('threads a song title into the header (changes bytes, stays deterministic)', async () => {
     const spec = richSpec();
     const untitled = await renderRoadmap(spec);
