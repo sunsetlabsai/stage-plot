@@ -150,8 +150,10 @@ unaffected. This PR cannot change any existing chart's rendered output.
   edit door is the owner's alone). But that is the door, not the table.
 - **The TABLE is NOT owner-only.** `chart_library` carries a `"Collaborator read
   charts"` RLS policy (migration `003:47-56`) that grants a collaborator SELECT on
-  the owner's **entire library** — every row, and RLS grants **all columns** — for
-  any owner whose show they collaborate on. So a collaborator with a Supabase
+  the owner's **entire library** — every row for any owner whose show they
+  collaborate on. RLS filters *rows*; the columns come along because there is **no
+  column-level revoke** on the table, so a SELECT-able row is readable in full. So
+  a collaborator with a Supabase
   session can already directly read **`source_spec`** for the whole library today.
   (The `014` comment calling `chart_library` "owner-only from the start" is
   **wrong** — the collaborator SELECT policy has been there since `003`. Worth a
@@ -192,13 +194,18 @@ unaffected. This PR cannot change any existing chart's rendered output.
 
 ## 10. Why this is the refine-in-place foundation, not a detour
 
-`planChanges` (refine-in-place) needs the **prompt that generated the current
-spec** to compute a prompt-delta and apply a *targeted* spec diff that preserves
-hand-edits. Persisting `source_prompt` now **is** that substrate — when
-refine-in-place lands it reads `source_prompt` + `source_spec`, plans, and edits in
-place, with **no schema change**. If we later adopt decision (c-ii) (store only the
-prompt that last generated the spec), that is a semantics refinement on the same
-column, still no migration.
+`planChanges` (refine-in-place) works from a **persisted prompt seed alongside the
+current spec** — it reads `source_prompt` + `source_spec`, plans a *targeted* spec
+diff, and edits in place preserving hand-edits. Persisting `source_prompt` now **is**
+that substrate, with **no schema change** required later.
+
+**One invariant this design does NOT provide, stated so a future PR can't assume
+it (Codex R2):** under §5(c)'s verbatim rule, `source_prompt` is **not guaranteed
+to be the exact prompt that produced the current `source_spec`** — a hand-edit, or
+a prompt edit saved without regenerating, deliberately breaks that correspondence.
+So refine-in-place must treat `source_prompt` as a **seed to diff against**, not a
+ground-truth baseline of the current spec. (If a later PR wants that stronger
+guarantee, it is a semantics refinement on the same column — still no migration.)
 
 ## 11. Out of scope
 
