@@ -284,9 +284,36 @@ export function foldDraft(draft: AuthoringDraft): FoldResult {
 // Tiny key grammar: a leading/inline statement of the printed key. The note
 // letter stays strict A–G (case-sensitive); the surrounding keywords are matched
 // in their natural casing. "in D" / "key of Bb" / "G minor" / "in Dm".
-const NOTE = '([A-G](?:#|b)?)';
-const RE_KEYED = new RegExp(`(?:[Kk]ey of|\\b[Ii]n)\\s+${NOTE}(m)?(?:\\s+(minor|min|major|maj))?\\b`);
-const RE_BARE = new RegExp(`\\b${NOTE}\\s+(minor|major)\\b`);
+// An accidental is EITHER a symbol fused to the letter ("F#", "Bb", "F♯") or the
+// SPELLED word after whitespace ("F sharp", "B flat"). The two forms are separate
+// alternatives on purpose: allowing whitespace before the bare `b` would make
+// "in B bars" parse as Bb.
+//
+// The spelled form is not a nicety — it fixes a silent misparse. "9 to 5 in F sharp"
+// previously matched "in F" and resolved to F, so the chart was authored a semitone
+// out with no error anywhere. A key that reads back wrong is worse than one that
+// fails, because nothing tells you to look.
+const ACC_SYMBOL = '#|♯|b|♭';
+const ACC_WORD = '[Ss]harp|[Ff]lat';
+const NOTE = `([A-G])(?:(${ACC_SYMBOL})|\\s+(${ACC_WORD})\\b)?`;
+
+// ⚠ NOT `\\b`. A trailing word boundary cannot match after `#` at end-of-input, so
+// "in F#" backtracked into the shorter match "in F" and resolved to F — silently, a
+// semitone out, with the sharp simply dropped. Flats never showed it (`b` IS a word
+// char) and "in F# major" never showed it (the mode word restored the boundary), so
+// it survived as a sharp-key-at-end-of-phrase bug. A negative lookahead for a letter
+// is what was actually meant: don't match mid-word, and say nothing about symbols.
+const END = '(?![A-Za-z])';
+const RE_KEYED = new RegExp(`(?:[Kk]ey of|\\b[Ii]n)\\s+${NOTE}(m)?(?:\\s+(minor|min|major|maj))?${END}`);
+const RE_BARE = new RegExp(`\\b${NOTE}\\s+(minor|major)${END}`);
+
+// Both spellings of each accidental collapse to the one the KEY_PATTERN accepts.
+function accidental(symbol?: string, word?: string): string {
+  const t = (symbol ?? word ?? '').toLowerCase();
+  if (t === '#' || t === '♯' || t === 'sharp') return '#';
+  if (t === 'b' || t === '♭' || t === 'flat') return 'b';
+  return '';
+}
 
 function explicitKey(text: string): string | null {
   let note: string | undefined;
@@ -294,14 +321,14 @@ function explicitKey(text: string): string | null {
 
   const m = text.match(RE_KEYED);
   if (m) {
-    note = m[1];
-    if (m[2]) minor = true;                                  // trailing m, e.g. "in Dm"
-    else if (m[3] && /^min/i.test(m[3])) minor = true;       // "in D minor"
+    note = m[1] + accidental(m[2], m[3]);
+    if (m[4]) minor = true;                                  // trailing m, e.g. "in Dm"
+    else if (m[5] && /^min/i.test(m[5])) minor = true;       // "in D minor"
   } else {
     const b = text.match(RE_BARE);
     if (!b) return null;
-    note = b[1];
-    minor = /^min/i.test(b[2]);
+    note = b[1] + accidental(b[2], b[3]);
+    minor = /^min/i.test(b[4]);
   }
 
   const key = note + (minor ? 'm' : '');
@@ -312,11 +339,26 @@ function explicitKey(text: string): string | null {
 // in the description wins; (2) the UI-selected key (Compose pre-parse selector);
 // (3) default "C" — the same fallback the parse prompt / validator use today.
 // L1's letter→degree parse MUST run against this pinned key, never an unpinned one.
-export function resolveRenderKey(description: string, uiKey?: string): string {
+// `override` distinguishes the two places a UI key comes from, which want opposite
+// precedence:
+//   - Compose's pre-parse selector is a HINT offered before anyone has seen a chart,
+//     so a key stated in the prose outranks it (the §4.1 default).
+//   - The Review toolbar is an OVERRIDE: the chart exists, its key is on screen, and
+//     the user just changed it. Letting the description win there means the control
+//     does nothing and says nothing — the reported bug (a chart stuck in F because
+//     the prose said "in F", with the toolbar set to F#).
+// Ruled by Graham 2026-08-28. This ADDS a precedence level above the existing two;
+// it does not reorder them.
+export function resolveRenderKey(
+  description: string,
+  uiKey?: string,
+  opts: { override?: boolean } = {},
+): string {
+  const ui = uiKey && isValidKey(uiKey) ? uiKey : undefined;
+  if (opts.override && ui) return ui;
   const stated = explicitKey(description);
   if (stated) return stated;
-  if (uiKey && isValidKey(uiKey)) return uiKey;
-  return 'C';
+  return ui ?? 'C';
 }
 
 // ── L4 — read-back tally (post-parse, pre-accept) ────────────────────────────

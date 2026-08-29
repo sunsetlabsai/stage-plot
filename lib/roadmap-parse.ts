@@ -207,15 +207,18 @@ export function parseGrammarDraft(
 // Thin transport: pin the key (L0), send the description to Claude, gate the
 // reply. Throws on transport/auth/timeout (the route maps that to a clean
 // failure); otherwise returns the uniform ParseResult. Key sourcing stays the
-// route's concern (shared platform key today, per-owner BYOA later). `uiKey` is
-// the optional Compose-screen pre-parse key selector (L0 source 2).
+// route's concern (shared platform key today, per-owner BYOA later). `uiKey` is the
+// key the calling surface is showing; `keyOverride` says whether that surface is the
+// Review toolbar (an explicit override that outranks the prose) rather than Compose's
+// pre-parse hint (which does not) — see resolveRenderKey.
 export async function parseRoadmapSpec(
   description: string,
   apiKey: string,
   signal?: AbortSignal,
   uiKey?: string,
+  keyOverride?: boolean,
 ): Promise<ParseResult> {
-  const renderKey = resolveRenderKey(description, uiKey);
+  const renderKey = resolveRenderKey(description, uiKey, { override: keyOverride });
 
   // L1: try the deterministic span-grammar first. A hit skips the model entirely —
   // the count is right by construction. A miss falls through to L2. Log the

@@ -474,3 +474,68 @@ describe('parseDescription — L1 deterministic span-grammar', () => {
     expect(parseDescription('   ', 'D')).toBeNull();
   });
 });
+
+// ── L0 key resolution: spelled accidentals + the Review-toolbar override ─────
+// Both fixes come from the same UAT report: a chart of "9 to 5" that is in F# was
+// authored in F, and neither the prose nor the toolbar could say otherwise.
+describe('resolveRenderKey — spelled accidentals', () => {
+  it('reads a spelled sharp/flat, not just the symbol', () => {
+    expect(resolveRenderKey('9 to 5, in F sharp. 4-bar intro.')).toBe('F#');
+    expect(resolveRenderKey('key of B flat, medium swing')).toBe('Bb');
+    expect(resolveRenderKey('in F Sharp minor')).toBe('F#m');
+    expect(resolveRenderKey('E flat major throughout')).toBe('Eb');
+  });
+
+  it('still reads the symbol forms, fused or unicode', () => {
+    expect(resolveRenderKey('in F#')).toBe('F#');
+    expect(resolveRenderKey('key of Bb')).toBe('Bb');
+    expect(resolveRenderKey('in F♯')).toBe('F#');
+    expect(resolveRenderKey('in E♭ minor')).toBe('Ebm');
+  });
+
+  it('does NOT swallow a following word that merely starts with b or a sharp/flat lookalike', () => {
+    // The reason the symbol and spelled forms are separate alternatives: allowing
+    // whitespace before a bare `b` turns "in B bars" into Bb.
+    expect(resolveRenderKey('in B bars of four')).toBe('B');
+    expect(resolveRenderKey('in D flatten the 7th')).toBe('D');
+  });
+
+  it('the old silent misparses are gone — neither "in F sharp" nor "in F#" resolves to F', () => {
+    expect(resolveRenderKey('in F sharp')).not.toBe('F');
+    expect(resolveRenderKey('in F#')).not.toBe('F');
+  });
+
+  it('keeps a sharp that ENDS the phrase — the pre-existing backtrack bug', () => {
+    // Found while testing the spelled-accidental fix, and present in main all along:
+    // the trailing \\b could not match after `#` at end-of-input, so the regex
+    // backtracked to the shorter "in F" and dropped the sharp. Only sharps, and only
+    // at the end of the phrase — `b` is a word char so flats always worked, and a
+    // following mode word restored the boundary. A semitone, lost in silence.
+    expect(resolveRenderKey('in F#')).toBe('F#');
+    expect(resolveRenderKey('key of F#')).toBe('F#');
+    expect(resolveRenderKey('in C#m')).toBe('C#m');
+    // The cases that always worked, pinned so a future fix can't trade one for the other.
+    expect(resolveRenderKey('in F# major')).toBe('F#');
+    expect(resolveRenderKey('in Bb')).toBe('Bb');
+  });
+});
+
+describe('resolveRenderKey — precedence', () => {
+  it('a stated key outranks the Compose hint (the §4.1 default, unchanged)', () => {
+    expect(resolveRenderKey('in F. 8-bar verse.', 'F#')).toBe('F');
+  });
+
+  it('the Compose hint is used when the prose states no key', () => {
+    expect(resolveRenderKey('8-bar verse, 8-bar chorus.', 'F#')).toBe('F#');
+  });
+
+  it('an OVERRIDE outranks a stated key — the Review toolbar', () => {
+    expect(resolveRenderKey('in F. 8-bar verse.', 'F#', { override: true })).toBe('F#');
+  });
+
+  it('an override falls back to the stated key when the override value is junk', () => {
+    // Fail safe: an unusable override must not silently become C.
+    expect(resolveRenderKey('in F. 8-bar verse.', 'H', { override: true })).toBe('F');
+    expect(resolveRenderKey('8-bar verse.', '', { override: true })).toBe('C');
+  });
+});

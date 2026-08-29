@@ -143,7 +143,7 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
   // toolbar edits. Review used to have no say at all — it read `composeKey`, a piece
   // of Compose state the Review screen never shows — so changing the key in the
   // toolbar and hitting Regenerate silently discarded the change.
-  async function generate(reset: boolean, uiKey: string) {
+  async function generate(reset: boolean, uiKey: string, keyOverride = false) {
     const text = description.trim();
     if (!text || generating) return;
     if (reset && view && !confirm('Regenerate will replace your manual edits. Continue?')) return;
@@ -155,7 +155,12 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
       const res = await fetch('/api/charts/roadmap/parse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description: text, key: uiKey || undefined }),
+        body: JSON.stringify({
+          description: text,
+          key: uiKey || undefined,
+          // Review's toolbar is an explicit override; Compose's selector is a hint.
+          ...(keyOverride ? { keyOverride: true } : {}),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -217,7 +222,7 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
           error={error}
           specErrors={specErrors}
           tally={tally}
-          onRegenerate={() => generate(true, view.renderKey)}
+          onRegenerate={() => generate(true, view.renderKey, true)}
           onSaved={onSaved}
         />
       )}

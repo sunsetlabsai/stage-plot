@@ -12,7 +12,8 @@ const MAX_DESCRIPTION_CHARS = 8_000;
 
 interface PostBody {
   description?: string;
-  key?: string;        // optional Compose-screen pre-parse key selector (L0 source 2)
+  key?: string;        // the key the calling surface is showing (L0 source 2)
+  keyOverride?: boolean; // true = Review toolbar (outranks a key stated in the prose)
 }
 
 // POST /api/charts/roadmap/parse — AI parse boundary (PARSE-ONLY). Natural-language
@@ -53,12 +54,13 @@ export async function POST(request: NextRequest) {
   // L0 source 2: the optional Compose key selector. resolveRenderKey ignores an
   // invalid value (and an explicit key in the description still outranks it).
   const uiKey = typeof body.key === 'string' && body.key.trim() ? body.key.trim() : undefined;
+  const keyOverride = body.keyOverride === true;
 
   // Abort under maxDuration so a slow model returns a clean 502 rather than a 504.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PARSE_TIMEOUT_MS);
   try {
-    const result = await parseRoadmapSpec(description, apiKey, controller.signal, uiKey);
+    const result = await parseRoadmapSpec(description, apiKey, controller.signal, uiKey, keyOverride);
     return Response.json(result);
   } catch (err) {
     // Log the real cause — the user-facing message is deliberately generic, but a
