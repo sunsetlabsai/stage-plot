@@ -1,6 +1,6 @@
 # Design: Numbers ⇄ Letters — bake the toggle into the saved chart
 
-**Status:** Draft v2 — simplified after Codex R1 (two-artifact design dropped)
+**Status:** Draft v3 — Codex R2 folded (key badge, de-builder clear, migration constraints)
 **Depends on:** roadmap builder (renderRoadmap, roadmap-view, save route), chart_library
 **Scope:** The builder's existing Numbers⇄Letters preview toggle becomes the chart's
 notation of record: **save renders the PDF in the selected notation, and the show
@@ -69,8 +69,12 @@ The builder already holds `mode`. On save, send it:
 Everything downstream is **unchanged**: the notation-specific bytes hash to a
 `source_hash`, store at `…/${role}/${source_hash}.pdf`, and `save_builder_chart`
 writes the projected `buildCalibration` keyed by that hash (migration 009). Because
-there is exactly **one** PDF per chart, its calibration is keyed by its own bytes as
-today — no second row, no mismatch, no derivation.
+there is exactly **one live PDF artifact** per chart (`chart_library.storage_path`,
+old storage best-effort removed after commit), its calibration is keyed by its own
+bytes as today — no mismatch, no derivation. (Old `chart_calibration` rows are
+retained by `(chart_id, source_hash)` history and stay individually fetchable to a
+holder of the old hash, but no live show selects them — show load follows the current
+`storage_path`. That is existing behavior, unchanged here.)
 
 ### 3. Persist the notation so re-open is honest (the one correctness add)
 
@@ -79,25 +83,58 @@ shows the toggle on Numbers; a save-without-toggling silently re-bakes it to num
 So the chart must remember its notation and seed the toggle on re-open — mirroring
 `source_prompt` (migration 016):
 
-- **Migration 017:** `alter table chart_library add column source_notation text` —
+- **Migration 017:** `alter table chart_library add column source_notation text
+  check (source_notation is null or source_notation in ('numbers','letters'))` —
   nullable, no default; `null` ⇒ legacy ⇒ `'numbers'` (today's reality).
-- `save_builder_chart` RPC gains `p_source_notation`; the save route passes `notation`.
+- `save_builder_chart` RPC gains `p_source_notation text default null`, appended after
+  `p_source_prompt`, following migration 016 exactly: drop the precise old signature,
+  recreate with `set search_path`, `revoke` from public/authenticated/anon, `grant` to
+  `service_role` only. The `default null` keeps any not-yet-updated caller valid.
 - The read door (`app/api/charts/roadmap/[chartId]/route.ts`) returns `source_notation`.
 - `RoadmapBuilder` seeds `mode` from it on edit (`null`/absent → `'numbers'`).
 
 This closes the silent-flip footgun and keeps "flexible per edit" truthful: you always
 re-open in the notation you last saved.
 
-### 4. The show view — no change
+### 4. The show view — PDF unchanged, but the key badge must branch
 
-The show renders the stored PDF as-is (`loadPdfDoc`/`renderPage`). Whatever notation
-was baked is what plays. Calibration, seek, markers, held-band darkness: **untouched**,
-because the retrieval stack still sees exactly one artifact per chart, keyed by its own
-bytes — the invariant it already relies on.
+The show renders the stored PDF as-is (`loadPdfDoc`/`renderPage`); calibration, seek,
+markers, held-band darkness are **untouched** — the retrieval stack still sees one
+artifact per chart keyed by its own bytes.
+
+The one exception is the **key badge**. Today (`page.tsx:3756`) a builder chart shows
+`song.key || authored_key` — correct for a **numbers** PDF, whose degrees are
+key-invariant and *are* live-rekeyed by the setlist. A **letters** PDF is the opposite:
+its chords are baked concrete in `spec.renderKey`, so a live re-key (`song.key ≠
+authored_key`) would print `G` on the badge over an F-baked chart. The badge must tell
+the truth per notation:
+
+- **numbers** → `song.key || authored_key` (live key), as today.
+- **letters** → `authored_key` (the baked/printed key), **ignoring** the live override —
+  a letters chart cannot be re-keyed without re-rendering.
+
+For the viewer to distinguish them, the show/song chart payload must expose notation:
+
+- `app/api/shows/[owner]/[show]/route.ts` (`:117`) adds `notation: c.source_notation`
+  to each chart object (alongside `is_builder`/`authored_key`).
+- `lib/types.ts` `Chart` gains `notation?: 'numbers' | 'letters'` (null/absent ⇒
+  `'numbers'`, matching the legacy default).
+- The badge (and the standalone `ManageChartsModal` preview, which already uses
+  `authored_key`) branch on it.
+
+This is the only client change; the PDF load path stays byte-hash-keyed and untouched.
 
 ### 5. Non-builder charts
 
 Unaffected: uploaded PDFs/images have no `source_spec` and no toggle.
+
+### 6. Replace-with-file clears notation too
+
+Replacing a builder chart with an uploaded file de-builders the row. The upload route
+already nulls `source_spec` and `source_prompt` (`upload/route.ts:89`); migration 017
+adds a third builder-only field, so the **same de-builder path must null
+`source_notation`** — otherwise the row keeps stale notation after becoming a file
+chart. Same class of stale-metadata bug `source_prompt` already fixed.
 
 ---
 
@@ -137,6 +174,13 @@ differently. You change notation by re-saving.
 - **T6 — calibration follows the one PDF.** buildCalibration is stored keyed by the
   rendered bytes' hash regardless of notation (mechanism unchanged; pin that letters
   saves still land a readable calibration row).
+- **T7 — key badge branches on notation.** A **numbers** chart with a setlist
+  `song.key` override renders the override on the badge; a **letters** chart renders
+  its `authored_key` and ignores the override. (Drives the real chrome; the reported
+  contradiction.)
+- **T8 — de-builder clears notation.** Replacing a builder chart with a file nulls
+  `source_notation` alongside `source_spec` and `source_prompt` (extends the existing
+  `charts-upload-route.test.ts` "de-builders the slot" case).
 
 ---
 
