@@ -538,8 +538,33 @@ describe('resolveRenderKey — spelled accidentals', () => {
     // is happy to end the match at "C" with the `#` still sitting there — "in C#m7"
     // resolved to C. A semitone out, silently, again.
     expect(resolveRenderKey('in C#m7', 'A')).toBe('A');
-    expect(resolveRenderKey('vamp on F#7', 'G')).toBe('G');
     expect(resolveRenderKey('in E♭9', 'G')).toBe('G');
+    // NOT "vamp on F#7" — Codex R2 caught that one passing for the wrong reason:
+    // "on" is not a key keyword, so it never reached the guard at all. Use the "in"
+    // form so the assertion can only pass if the accidental-drop guard is doing it.
+    expect(resolveRenderKey('in F#7', 'G')).toBe('G');
+    // Positive control for the line above: the same prefix WITHOUT the trailing digit
+    // must still resolve, so this pair fails if the guard ever over-rejects.
+    expect(resolveRenderKey('in F#', 'G')).toBe('F#');
+  });
+
+  it('reads a HYPHENATED spelled accidental, and fails closed on any other hyphen', () => {
+    // Two halves of one rule. The author who writes "in F-sharp" stated a key as
+    // plainly as the one who wrote "in F sharp", so SEP admits the hyphen...
+    expect(resolveRenderKey('in F-sharp', 'G')).toBe('F#');
+    expect(resolveRenderKey('key of B-flat', 'G')).toBe('Bb');
+    expect(resolveRenderKey('in F-sharp minor', 'G')).toBe('F#m');
+    expect(resolveRenderKey('in D-major', 'G')).toBe('D');
+    expect(resolveRenderKey('in D-minor', 'G')).toBe('Dm');
+    // ...and because it does, `-` must also END the token, or every other hyphenated
+    // word shortens to its first letter. "in G-string" resolving to G is the same
+    // silent-semitone shape as the F# backtrack, one separator later.
+    expect(resolveRenderKey('in G-string', 'A')).toBe('A');
+    expect(resolveRenderKey('in D-ish somewhere', 'A')).toBe('A');
+    expect(resolveRenderKey('in Bb-based riff', 'A')).toBe('A');
+    // A hyphen that is plain prose, well clear of the key, must not be disturbed.
+    expect(resolveRenderKey('bars 1-4 in D', 'G')).toBe('D');
+    expect(resolveRenderKey('8-bar verse, in F#', 'G')).toBe('F#');
   });
 
   it('still parses a key statement that ends in punctuation or a symbol accidental', () => {

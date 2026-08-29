@@ -285,17 +285,24 @@ export function foldDraft(draft: AuthoringDraft): FoldResult {
 // letter stays strict A–G (case-sensitive); the surrounding keywords are matched
 // in their natural casing. "in D" / "key of Bb" / "G minor" / "in Dm".
 // An accidental is EITHER a symbol fused to the letter ("F#", "Bb", "F♯") or the
-// SPELLED word after whitespace ("F sharp", "B flat"). The two forms are separate
-// alternatives on purpose: allowing whitespace before the bare `b` would make
-// "in B bars" parse as Bb.
+// SPELLED word after a separator ("F sharp", "F-sharp", "B flat"). The two forms are
+// separate alternatives on purpose: allowing a separator before the bare `b` would
+// make "in B bars" parse as Bb.
 //
 // The spelled form is not a nicety — it fixes a silent misparse. "9 to 5 in F sharp"
 // previously matched "in F" and resolved to F, so the chart was authored a semitone
 // out with no error anywhere. A key that reads back wrong is worse than one that
 // fails, because nothing tells you to look.
+//
+// SEP admits a HYPHEN as well as whitespace, so "in F-sharp" and "in D-major" are read
+// as what the author obviously meant. This is one half of a pair: the other half adds
+// `-` to END below, so a hyphen that ISN'T a key continuation ("in G-string") fails
+// closed instead of shortening to G. Supporting hyphens without guarding them, or
+// guarding them without supporting them, is wrong in one direction each.
 const ACC_SYMBOL = '#|♯|b|♭';
 const ACC_WORD = '[Ss]harp|[Ff]lat';
-const NOTE = `([A-G])(?:(${ACC_SYMBOL})|\\s+(${ACC_WORD})\\b)?`;
+const SEP = '[\\s-]+';
+const NOTE = `([A-G])(?:(${ACC_SYMBOL})|${SEP}(${ACC_WORD})\\b)?`;
 
 // ⚠ NOT `\\b`. A trailing word boundary cannot match after `#` at end-of-input, so
 // "in F#" backtracked into the shorter match "in F" and resolved to F — silently, a
@@ -317,9 +324,15 @@ const NOTE = `([A-G])(?:(${ACC_SYMBOL})|\\s+(${ACC_WORD})\\b)?`;
 // and resolved to C — a semitone out, exactly the failure the sharp fix was for, reached
 // from the other side. (`\\b` had the same hole for the same reason.) The rule this
 // encodes: a key statement ends where the key ENDS, not merely where the letters do.
-const END = '(?![\\w#♯♭])';
-const RE_KEYED = new RegExp(`(?:[Kk]ey of|\\b[Ii]n)\\s+${NOTE}(m)?(?:\\s+(minor|min|major|maj))?${END}`);
-const RE_BARE = new RegExp(`\\b${NOTE}\\s+(minor|major)${END}`);
+//
+// ⚠ And `-` for the third instance of that same rule: a hyphen is a separator INSIDE a
+// key token (SEP above), so it can also continue one. Without it here, "in F-sharp"
+// shortened to F and "in G-string" resolved to G — the author wrote a longer token and
+// the engine took the shorter one, which is this bug's whole signature. Three tunings
+// of one lookahead now (letters → \w → symbols → hyphen); each hid the next.
+const END = '(?![\\w#♯♭-])';
+const RE_KEYED = new RegExp(`(?:[Kk]ey of|\\b[Ii]n)\\s+${NOTE}(m)?(?:${SEP}(minor|min|major|maj))?${END}`);
+const RE_BARE = new RegExp(`\\b${NOTE}${SEP}(minor|major)${END}`);
 
 // Both spellings of each accidental collapse to the one the KEY_PATTERN accepts.
 function accidental(symbol?: string, word?: string): string {
