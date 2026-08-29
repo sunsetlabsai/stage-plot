@@ -61,5 +61,14 @@ describe('ManageChartsModal — Share on every chart (summary + detail)', () => 
     const image = chartShareProps('9 to 5', { role: 'Art', url: 'u', mimeType: 'image/png', label: 'scan.png', fileId: 'a1' } as Chart);
     expect(image.getFile).toBeUndefined();
     expect(image.buildUrl()).toBe('u'); // still shareable, via the public URL
+
+    // A .pdf FILENAME must not override an explicit non-PDF MIME (Codex re-review):
+    // trust the MIME → URL-only, never wrap image bytes as application/pdf.
+    const mislabeled = chartShareProps('9 to 5', { role: 'Art', url: 'u', mimeType: 'image/png', label: 'scan.pdf', fileId: 'a2' } as Chart);
+    expect(mislabeled.getFile).toBeUndefined();
+
+    // A MIME-less legacy PDF still gets the file tier via the filename fallback.
+    const mimeless = chartShareProps('9 to 5', { role: 'Guitar', url: 'u', label: 'chart.pdf', fileId: 'g2' } as Chart);
+    expect(typeof mimeless.getFile).toBe('function');
   });
 });

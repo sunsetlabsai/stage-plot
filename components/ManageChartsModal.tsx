@@ -31,7 +31,12 @@ const ACCEPT = '.pdf';
 // test of exactly that guard.
 export function chartShareProps(songTitle: string, chart: Chart) {
   const role = displayRole(canonicalizeRole(chart.role));
-  const isPdf = (chart.mimeType ?? '').includes('pdf') || (chart.label ?? '').toLowerCase().endsWith('.pdf');
+  // Trust an explicit MIME; only fall back to the filename when MIME is ABSENT. A
+  // filename must never override a known non-PDF type — a legacy row like
+  // { mimeType: 'image/png', label: 'scan.pdf' } would otherwise re-enable the bad
+  // tier-1 (image bytes shared as application/pdf). MIME-less legacy PDFs still
+  // share via the .pdf filename fallback.
+  const isPdf = chart.mimeType ? chart.mimeType.includes('pdf') : (chart.label ?? '').toLowerCase().endsWith('.pdf');
   return {
     title: `${songTitle} – ${role}`,
     buildUrl: () => chart.url,
