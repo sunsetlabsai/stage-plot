@@ -1,6 +1,9 @@
 # Conductor transport — cloud relay as the one deployment (kills the local-box story)
 
-**Status:** v3 — DESIGN-ONLY. Not built.
+**Status:** v5 — chunks 1–3 BUILT, MERGED, DEPLOYED (`relay.showrunr.ai` on Fly, live since
+2026-07-02; UAT fix PR #118). v4/v5 amend the shipped design with **§9: the venue-network
+requirement and the degraded-state contract**, ratified by Graham 2026-08-04. §8 Q5 and Q6
+are RESOLVED by §9 — read §9 before re-litigating either.
 **Codex R1 = NO-GO (3H/5M/2L), all folded** — root cause: v1's D4 kept the shipped
 *implicit-create-on-first-hello*, which only made sense on a band-private box; v2 moved to
 explicit create/join intent + relay-minted codes.
@@ -14,9 +17,19 @@ cut-eligible).
 **Codex R3 = GO-WITH-NITS (2 LOW, both doc-consistency, both folded).** R3 confirmed:
 cross-room epoch interleave safe under the shipped reducer; write-ahead-before-ack is the
 right durability point — **build note: "flushed durable" must be real (fsync), not just
-writeFileSync + rename.** Awaiting Graham's GO before any build.
-**Date:** 2026-07-02
-**Branch:** `opus/design-relay-cloud`
+writeFileSync + rename.** Graham gave GO; chunks 1–3 shipped as PRs #115/#116/#117.
+**Codex R4 = NO-GO (2H/1M) on the §9 amendment, all folded (v5).** Root cause of both
+HIGHs, and it is one root cause: **§9 was written as product requirements without checking
+them against the shipped code**, so it asserted capability the build does not have. HIGH-1 —
+§9.3 called itself "UI-only, zero protocol contact" while requiring the conductor to see
+follower reality, which no frame carries (the relay holds `room.members` privately and emits
+nothing to the writer). HIGH-2 — §9.1 promised offline chart rendering as a guarantee when
+`sw.js`/`chart-cache.ts` are explicitly best-effort. MED-3 — "never connected vs lost" was
+required without a state model, against a hook with only `'off' | 'connecting' | 'joined'`.
+v5 fixes the class, not the instances: **every §9.3 requirement now names the mechanism that
+satisfies it and whether that mechanism exists today.**
+**Date:** 2026-07-02 (v3) · 2026-08-04 (v4 amendment, v5 R4 fold)
+**Branch:** `opus/design-relay-cloud` (v3) · `opus/relay-venue-network-requirement` (v4)
 **Parent:** `design-conductor-authority.md` (epic), `design-conductor-3b-discovery-failover.md`
 (the protocol — UNCHANGED by this doc except where called out), chunk 6
 (`relay/provision-cert.sh` + `docs/relay-provisioning.md` — RETIRED by this doc).
@@ -356,6 +369,17 @@ never see room identity.
    LTE hotspot) mirror a session.
 4. **Docs cleanup** (§6) + delete provision-cert.sh.
 5. *(cut-eligible)* Uptime ping/alert on `/healthz`.
+6. **`presence` frame** (§9.3.2) — relay→writer roster on join/leave/grant, coalesced;
+   `relay-core.ts` + `relay-protocol.ts` + conn-machine → `RelayFacts`. Reducer tests per
+   §9.3.2. Requires a relay deploy. *(Gated on the §9.6 phone retest.)*
+7. **Degraded-state UI** (§9.3.1) — the six-state connection model in
+   `use-conductor-session.ts`, copy + affordance for each, conductor-side follower readout
+   from chunk 6. No protocol contact. *(Depends on 6 for the readout only; the
+   `room-rotated` state does not — see §9.3.)*
+8. **Persist-on-fetch** (§9.1) — `fetchChartBytes` writes network-fetched bytes to the
+   chart cache, making "rendered once ⇒ available offline" true. **Solo-mode only, no relay
+   contact — NOT gated on the §9.6 phone retest**, and the one chunk here that can land
+   ahead of testers. Lets §9.5's precondition relax back to "open it once."
 
 ## 8. Open questions (defer-with-default)
 
@@ -369,10 +393,17 @@ never see room identity.
 3. **Room-code length:** 6 (S1). Could go 5 if typing feels heavy at UAT; not below.
 4. **Multi-region later?** v1 = single region nearest home turf. A band tour crossing
    oceans adds ~150ms — still fine at bar grain. Revisit only with real demand.
-5. **The dead-venue story:** officially "self-drive floor, no togetherness." If real
-   demand emerges: native app (true P2P) — NOT a hardware kit. Recorded so the Pi never
-   comes back.
-6. **Mid-show backhaul loss (v2 candidate, discussed with Graham 2026-07-02):** the cloud
+5. **The dead-venue story:** ✅ **RESOLVED 2026-08-04 — see §9.2.** Officially "self-drive
+   floor, no togetherness." Reaffirmed and promoted from a deferred question to a stated
+   product requirement. If real demand emerges: native app (true P2P) — NOT a hardware
+   kit. Recorded so the Pi never comes back.
+6. **Mid-show backhaul loss** — ✅ **RESOLVED 2026-08-04: DECLINED for v1, see §9.4.**
+   Graham re-raised this independently on 2026-08-03 ("limited backhaul for the purposes of
+   establishing the connection"), which is this question restated — evidence that leaving it
+   "open" makes it recur. It is now closed with a rationale and a named re-open trigger.
+   Original text retained below for the record.
+
+   *(v2 candidate, discussed with Graham 2026-07-02):* the cloud
    star requires continuous backhaul from every mirroring device. A WebRTC-data-channel
    hybrid — cloud relay does signaling at soundcheck, deltas then flow peer-to-peer over
    the local network — could survive backhaul dying mid-show (established local ICE pairs
@@ -380,3 +411,329 @@ never see room identity.
    dissolves once a cloud relay exists to sign through. Real cost: mesh complexity, NAT
    variance, and the baton arbiter needs a home. Deliberately NOT v1; recorded so the
    strongest objection to the star has a named answer.
+
+---
+
+## 9. The venue-network requirement and the degraded-state contract (ratified 2026-08-04; amended through v6)
+
+Added after Graham raised venue backhaul as a blocker to putting ShowRunr in outside
+testers' hands. This section states as **product requirements** what §1 and §8 previously
+carried as implementation notes and deferred questions.
+
+> ### ★ Rule for all of §9 (v6, after Codex R5)
+>
+> **Every falsifiable claim in this section names its mechanism and whether that mechanism
+> exists in shipped code today — including tester-facing instructions.**
+>
+> This rule exists because the same defect has now been caught twice. R4 found §9 asserting
+> capability the build does not have; v5 fixed it by adding a mechanism/exists-today table
+> **to §9.3 only**, and then wrote §9.1 and §9.5 free-hand — so R5 found the identical error
+> in the offline claim (HIGH-1). The v5 fix was applied as an *instance* when the defect was
+> a *class*.
+>
+> Two corollaries, both drawn from R5 findings:
+> - **An acceptance criterion is a claim.** "Join emits presence" named no mechanism and
+>   contradicted the coalescing requirement beside it (MED-2).
+> - **The rule cuts both ways.** Requirement 6 was marked "does not exist" when the code
+>   existed and was tested (MED-3). Unchecked pessimism builds the wrong chunk just as
+>   surely as unchecked optimism ships a false promise.
+
+### 9.1 Two independent offline stories — do not conflate them
+
+Graham's framing, 2026-08-04. ShowRunr makes two different "works offline" claims, with
+different requirements. Most of the confusion in this area comes from treating them as one.
+
+| | **Solo mode** | **Conductor mode** |
+|---|---|---|
+| Covers | charts, setlist, stage plot, input list, notes | shared navigation: position mirroring, moving redline, baton |
+| Connectivity to **start** | required once (cache warm) | required |
+| Connectivity **during** the show | **not required** | **required, continuously** |
+| Status | shipped | shipped (chunks 1–3), **not yet verified on a phone** (§9.6) |
+
+The solo floor is real and present in code: `public/sw.js` caches the app shell (`/` plus
+the PDF worker), serves navigations network-first with cache fallback, keeps a separate
+chart cache, and accepts a `WARM_CACHE` message for pre-warming.
+
+**But it is best-effort, and the doc must not promise more than the code delivers** (Codex
+R4 HIGH-2). Opening the show once while online *starts* the warm; it does not guarantee it
+finished, or that everything needed got cached:
+
+- `lib/chart-cache.ts` races the service-worker controller against a timeout and posts
+  `WARM_CACHE` only if the controller won — no controller, no warm, no error.
+- `WARM_CACHE` failures are skipped silently; nothing reports which URLs actually landed.
+- `sw.js` never caches `/api/*` by design, so anything a chart needs from an API route at
+  render time is not covered by the shell cache.
+- Chart auto-cache on the show page is fire-and-forget and Supabase-only.
+- ★ **Rendering a chart does not cache it** (Codex R5 HIGH-1). `fetchChartBytes`
+  (`lib/pdf-viewer.ts:65`) reads the persistent cache first, but on a miss it fetches
+  network bytes and **returns them without writing to Cache API**; `loadPdfDoc` then holds
+  only an in-memory doc cache that dies with the tab. The sole writer to persistent storage
+  is `downloadAllCharts`. So a chart can render perfectly online and be absent offline.
+
+**Therefore the two chart sources have different offline stories, and only one of them is
+automatic:**
+
+| Source | What caches it | Survives a reload offline? |
+|---|---|---|
+| Supabase | fire-and-forget auto-cache on show open (`page.tsx:490`) | **Usually** — unobserved, no error surfaced if it fails |
+| Drive (legacy) | **only** the explicit Offline Access download (`page.tsx:6464`) | **No**, unless the user ran that download |
+
+So the honest claim is: **a device that has completed the Offline Access download with zero
+failures — or has passed an airplane-mode reopen test — will open and render those charts
+with zero connectivity.** Opening the show and watching charts render is *not* sufficient
+and must not be offered as if it were: it exercises the render path, which is precisely the
+path that does not persist. A device installing the PWA for the first time *at* a dead venue
+has nothing cached and gets nothing. See §9.5.
+
+**Named build chunk (not backlog — this one is a trap, not a nicety):** make
+`fetchChartBytes` **write fetched bytes to the chart cache on the network path**, so
+"rendered once ⇒ available offline" becomes true and the simple precondition can come back.
+Mechanism: the function already owns both the cache read and both network branches, so the
+write has exactly one home. This is **solo-mode only — no relay contact — so it is NOT
+gated on the §9.6 phone retest** and can land ahead of testers. Listed as chunk 8 in §7.
+
+**Backlog (named, so it is not lost):** the warm is unobservable to the user. A readiness
+indicator — "charts ready offline" vs "still caching" — would make the precondition
+checkable instead of ritual. Not v1; it is the natural companion to §9.3 and should be
+reconsidered the moment a tester reports missing charts at a venue.
+
+> "ShowRunr works offline" is **true of solo mode and false of conductor mode.** Never say
+> it unqualified to a tester.
+
+### 9.2 The requirement (v1, ratified)
+
+**Every device that wants to mirror holds a path to `relay.showrunr.ai` for as long as it
+wants to mirror.**
+
+Stated plainly, because the shorthand keeps drifting: this is **persistent backhaul for the
+duration of the show, not merely enough to establish the room.** The relay is a dumb star —
+every navigation frame flows through it, for the whole show. There is no post-join handoff
+to a local transport. The architecture in which establishment alone needs the internet is
+§8 Q6, declined for v1 (§9.4).
+
+**An AP without backhaul buys nothing.** A browser tab cannot accept incoming connections,
+so devices sharing a disconnected LAN have no one to talk to. **"Local AP, no internet" and
+"no network at all" are the same case** — the router's presence is irrelevant. This is the
+same physics that killed the local-box story in §0; it did not change.
+
+**Governing constraint (Graham, 2026-08-04): simplicity for the conductor and the players
+outranks venue coverage.** Setup must not be hard for anyone. A requirement of "the venue
+needs working internet" is accepted as fair, and is cheaper than any mechanism that would
+relax it.
+
+### 9.3 Degraded-state contract — the build item
+
+The failure this defends against is **not** "the venue had no internet." It is *"something
+looked broken and the player could not tell whether it was working."* The degraded state is
+a good product — your whole chart book, minus sync — and today we do not say so.
+
+Requirements — **each names the mechanism that satisfies it, and whether that mechanism
+exists today.** v4 omitted this column and thereby asserted capability the build lacks
+(Codex R4 HIGH-1); the column is the fix for the class of error, not just the instance.
+
+| # | Requirement | Mechanism | Exists today? |
+|---|---|---|---|
+| 1 | **Loss of the relay is a named state, not a silent one.** A device that was mirroring and is no longer mirroring says so. | Client-side: socket close → a distinguishable state (§9.3.1) | **No** — state model too coarse; needs 9.3.1 |
+| 2 | **Name what still works.** "Charts only — no conductor sync," never a bare error. The player has lost a feature, not the app. | UI copy on the states from 9.3.1 | **No** — pure UI, no blocker |
+| 3 | **Never a dead end.** Every degraded state carries an affordance back (retry / re-open the join sheet). | UI affordance per state | **Partly** — PR #118 shipped it for the *pre-join hang* (`RelayConnectingOverlay`, tappable connecting chip); the *post-join drop* is uncovered |
+| 4 | **Distinguish "never connected" from "lost connection."** Different causes, different user actions. | The state model in §9.3.1 | **No** — `use-conductor-session.ts` has only `'off' \| 'connecting' \| 'joined'`, and every close resets to `initClientConn()`, so a mid-show drop is byte-identical to a cold start |
+| 5 | **The conductor sees follower reality.** An MD driving a room where nobody is mirroring should know. Silent solo-conducting is the worst version of this bug. | **A new `presence` frame, relay→writer** (§9.3.2) | **No — and this one is protocol, not UI.** The relay mutates `room.members` on join/leave but emits nothing to the writer; non-writer disconnect returns no effects at all |
+| 6 | **Silent room rotation is surfaced.** *(new in v5; re-attributed in v6)* | **The create-mode 4004 close path** (`use-conductor-session.ts:606`), surfaced as the `room-rotated` state in §9.3.1. Presence (§9.3.2) is *corroborating evidence only*, never the detector | **Partly** — the rotation itself is implemented **and tested** (`tests/use-conductor-session.test.tsx:1119`). What is missing is only that it is **silent**: no state, no copy, no signal on either side |
+
+**Requirement 6, found folding R4 and not in v4 at all.** On close code 4004 in create-mode,
+the conductor clears `adoptedRoomRef` and the next connect **mints a brand-new room code**
+(chunk 2, by design: the old room is genuinely gone). The QR silently re-renders — and every
+follower is now holding a dead code, where they get 4004 → `roomGone` → retries stopped. A
+relay restart or a GC sweep mid-show therefore **orphans the entire band while the conductor
+keeps conducting**, with no signal on either side that the room they share no longer exists.
+This is the sharpest real instance of requirement 5, which is why it was invisible while
+requirement 5 had no mechanism.
+
+**v6 correction (Codex R5 MED-3) — do not attribute this to presence.** v5 said presence
+makes rotation observable because "followers drop to zero and stay there." That is wrong as
+a *detector*: a zero follower count is indistinguishable from nobody having scanned yet,
+from everyone having legitimately left, and from the normal pre-show state. It cannot
+carry the requirement.
+
+The real mechanism is **local to the conductor and already exists**: the create-mode 4004
+branch in `use-conductor-session.ts:606` knows, at the instant it fires, that the room it
+adopted is gone and a new code is coming. Nothing needs to be inferred. Requirement 6 is
+therefore satisfied by the **`room-rotated` state in §9.3.1** — a client state transition,
+not a protocol addition — and presence serves only as corroboration once it exists. This
+also means **requirement 6 does not depend on chunk 6**; it lands with the §9.3.1 state
+model. The conductor-facing copy must say *re-scan*, not *reconnect* — the old code will
+never work again.
+
+#### 9.3.1 The connection state model (Codex R4 MED-3)
+
+Requirements 1 and 4 need states the client does not currently have. Today: `status: 'off' |
+'connecting' | 'joined'`, and `onclose` rebuilds the binding via `initClientConn()`, which
+lands back on `connecting` no matter what preceded it. "Never connected" and "lost
+connection" are therefore *the same value*.
+
+Replace with an explicit, closed set. **Each state must name its trigger, its copy, and its
+affordance** — a state without an affordance is the dead end requirement 3 forbids:
+
+| State | Entered when | Copy intent | Affordance |
+|---|---|---|---|
+| `idle` | Not conducting/mirroring; user hasn't asked | — | Go live / Join |
+| `connecting-initial` | First connect attempt of this session; never reached `joined` | "Getting a room code…" / "Joining…" | Hide (overlay stays until dismissed — PR #118) |
+| `joined` | `joined` frame received | Live | Normal UI |
+| `reconnecting` | Socket closed **after** having reached `joined`; retrying with backoff | "Lost connection — charts only, no conductor sync. Reconnecting…" | Retry now |
+| `room-gone` | Close 4004 in **join**-mode; retries stopped (already modelled as `roomGone`) | "That room has ended." | Re-scan QR / re-enter code |
+| `room-rotated` | Close 4004 in **create**-mode; a new code was minted | "Your room code changed — followers must re-scan." | Show new QR |
+
+The distinction requirement 4 asks for is exactly `connecting-initial` vs `reconnecting`,
+and it is cheap: it is one "have we ever seen `joined` on this session" bit that `onclose`
+must stop discarding when it resets the binding. **That bit is the whole fix** — the states
+above are its presentation.
+
+Note `room-gone` and `room-rotated` are the follower and conductor faces of the *same*
+event. Testing one without the other is how requirement 6 stayed invisible.
+
+#### 9.3.2 The `presence` frame (relay → writer)
+
+Requirement 5 cannot be satisfied without the relay telling the conductor something it has
+never told anyone. This is a **real protocol addition** and must be spec'd, built, and
+tested as one — not smuggled in as UI work.
+
+It is small, because the relay already holds the data: `room.members` is a
+`Map<conn, deviceLabel>`, maintained on join (`relay-core.ts:422`) and leave (`:453`).
+Nothing reads it outward except late-joiner attribution.
+
+- **Shape:** `{ type: 'presence'; followers: number; labels: string[] }`, added to the
+  relay→client union in `lib/relay-protocol.ts` alongside `conductor-lost`.
+- **Recipient:** the writer only. Followers do not get a roster in v1 — smallest change that
+  satisfies the requirement, and it keeps labels off every socket.
+- **`followers` is defined as `room.members.size` excluding `writerConn`.** State it in the
+  code, not just here; off-by-one on "does the conductor count itself" is the obvious bug.
+- **Labels come from the relay's own member registry, never from a payload** — same rule as
+  `writerLabel` (§4.3). The dumbness fence holds: the relay is reporting what it already
+  knows about connections, not interpreting content.
+- **Triggered by:** member join, member leave, and **grant** — a device that claims the
+  baton mid-session never sent a fresh `hello`, so it would otherwise hold the baton with no
+  roster. This is the case that will be missed if it isn't written down. Note *triggered*,
+  not *emitted*: see the next bullet, which v5 got wrong.
+- ★ **Coalesced — and the debounce lives in the reducer, not the binding** (Codex R5 MED-2).
+  v5 said both "join emits presence" and "trailing-edge coalesce," which cannot both be
+  true: for two rapid joins, immediate emit gives two frames and trailing-edge gives one
+  later frame. The contradiction came from never naming *where* the timer lives. It lives
+  **in reducer state, flushed on tick**:
+  - A join / leave / grant sets `room.presenceDueAt = now + PRESENCE_DEBOUNCE_MS` (~1s) and
+    returns **no presence effect**.
+  - `sweep()` — already the reducer's `{ kind: 'tick', now }` arm (`relay/server.ts:388`
+    drives it) — emits one `presence` effect for every room whose `presenceDueAt` has
+    elapsed, computed from the room's state **at flush time**, then clears the marker.
+  - Trailing-edge falls out for free: the flush reads current state, so the frame always
+    carries the final count. A flapping follower produces one frame per window, not per flap.
+
+  **Why reducer-state and not a `setTimeout` in the binding:** §9.3.2's acceptance criteria
+  are pure-reducer tests, where time is an argument. A binding-level debounce would push
+  presence testing into server-integration territory and out of the layer where every other
+  relay invariant is proven. It would also be the only piece of relay timing not visible to
+  `reduceRelay` — the lease sweep and room GC already live there.
+
+  Edge case to spec, because it is the one that will bite: if the writer disconnects between
+  the trigger and the flush, the pending marker must be **dropped, not delivered** — a room
+  with no writer has nobody to tell (see the test list below).
+- **Extend, never reshape** — same discipline as `joined` (§4): shipped clients that don't
+  parse `presence` must keep working, so it is a new frame type, not a field on an old one.
+
+**Tests (relay-core, pure-reducer level — these are the acceptance criteria).** All of them
+assert *eventual* emission — drive `{ kind: 'tick', now }` past the window; **none may
+assert that a join emits synchronously**, which is exactly the v5 error:
+
+- A join returns **no** presence effect at `t+0`; a tick past the window emits exactly one,
+  addressed to the writer and to nobody else.
+- Two rapid joins inside one window emit **one** frame, carrying the **final** count.
+- A leave, and a grant, each arm the same flush (grant → the **new** writer).
+- `followers` excludes `writerConn`.
+- A room with no writer emits nothing — no crash, no queued frame — and a writer that
+  disconnects between trigger and flush drops the pending marker.
+- **A follower count dropping to zero is delivered.** This is requirement 5's whole point,
+  and zero is exactly the value a naive "only send if non-empty" guard would swallow.
+- Ticks with no armed room emit nothing (no per-tick chatter).
+
+**Build (revised — v4's "UI-only, zero protocol contact" was false):** two chunks, in order.
+**Numbered per §7's global sequence — v5 numbered them 1 and 2 locally while §7 called them
+6 and 7, which is the kind of drift that gets the wrong thing built** (Codex R5 LOW-4):
+
+- **Chunk 6 — `presence` frame:** `relay-core.ts` (trigger + `presenceDueAt` + tick flush)
+  + `relay-protocol.ts` + the client conn-machine surfacing `followers`/`labels` into
+  `RelayFacts`. Tests above. Relay deploy required.
+- **Chunk 7 — degraded-state UI:** the §9.3.1 state model in `use-conductor-session.ts`,
+  plus copy and affordances for all six states, plus the conductor-side follower readout
+  **from chunk 6**. No protocol contact; genuinely UI + hook once chunk 6 lands.
+
+Note **requirement 6 (`room-rotated`) sits in chunk 7, not chunk 6** — its mechanism is the
+existing create-mode 4004 path, so it needs no protocol work. Only the *follower readout*
+in chunk 7 depends on chunk 6.
+
+Neither is started. Build after Codex GO, per the standing gate.
+
+### 9.4 §8 Q6 (WebRTC hybrid) — DECLINED for v1
+
+The idea: relay does signaling at soundcheck, deltas then flow peer-to-peer over the venue
+LAN, so an established room survives backhaul dying mid-show.
+
+Declined, for three reasons:
+
+1. **It contradicts the governing constraint.** It adds a second transport and a fallback
+   negotiation between them. Complexity lands on the exact surface — go-live at a gig —
+   that §9.2 says must stay simple.
+2. **New failure class, worst-timed.** Peer-mesh problems (NAT variance, ICE, the baton
+   arbiter's home) are the kind that pass at rehearsal and fail at the venue.
+3. **It fails where it is needed.** Guest Wi-Fi that isolates clients blocks peer traffic
+   outright — and hostile guest Wi-Fi is precisely the venue class this was meant to save.
+   So it adds risk in the venues that already work and does not rescue many that don't.
+
+**Re-open trigger (evidence, not anticipation):** outside-tester sessions show that
+*mid-show backhaul loss* — as distinct from never having usable internet, or from onboarding
+failures — is a material cause of failed sessions. Absent that evidence, this stays closed.
+If the dead-venue case ever becomes commercially real, §8 Q5's answer stands: a native app,
+not a hardware kit and not a mesh.
+
+### 9.5 Tester-facing preconditions
+
+What must be said plainly to outside testers, and what must be true before they get it.
+
+**Onboarding (mandatory, not advisory).** Until chunk 8 lands, every device must do **one of
+these two** while online, at home, before leaving for the gig:
+
+1. **Run Offline Access → download, to completion, with zero failures.** Not "start it" —
+   watch it finish and report no failures. This is the only path that writes charts to
+   persistent storage, and for legacy Drive charts it is the *only* path at all.
+2. **Or pass an airplane-mode reopen test:** put the device in airplane mode, fully reopen
+   the show, and confirm every chart comes up. This proves the floor instead of assuming it.
+
+**v6 correction (Codex R5 HIGH-1):** v5 asked testers to "open the show and confirm charts
+render," on the theory that rendering proves the cache is warm. It does not — the render
+path (`fetchChartBytes`) reads the cache but never writes it, so a chart can render online
+and be gone offline (§9.1). That instruction was the *same* class of error as R4 HIGH-2: a
+tester-facing claim written without checking it against shipped code. It is corrected here,
+and §9's mechanism rule (below) now covers this section too, so it cannot recur by writing
+prose in a part of §9 that had no table.
+
+The most likely tester failure is still not exotic venue networking — it is skipping, or
+half-doing, this step. Chunk 8 exists to make the step small again.
+
+**The stated requirement:** conductor mode needs working internet at the venue for the whole
+show. One member's phone hotspot is a fully supported answer (§1 on-ramps) — frames are
+tiny; it is continuity, not bandwidth, that matters.
+
+**Named venue risks — all of these look like "there is Wi-Fi" and behave like a dead
+network:**
+- **Captive portals** — per-device sign-in, very common in bars. Every device must complete it.
+- **Client isolation** — devices cannot see each other. Harmless to us (we are a star, not a
+  mesh), and worth noting as the reason §9.4 would not have helped.
+- **An AP with no backhaul** — buys nothing (§9.2).
+
+**What to promise:** if the internet drops, nobody loses their charts; they lose the moving
+redline and shared navigation until signal returns, then rejoin and re-sync. That is the
+honest, and genuinely decent, floor.
+
+### 9.6 Sequencing note
+
+The parked phone retest gates this. Until conductor mode is verified working end-to-end on
+Graham's own phone, handing it to outside testers measures onboarding, not transport.
+Retest first, then §9.3, then testers.
