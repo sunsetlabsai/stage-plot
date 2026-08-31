@@ -19,13 +19,27 @@ get DELETED from here when they do — a tombstone here is worse than nothing.
 
 Do not duplicate detail for these. The live detail lives in session state.
 
-1. **Rhythm slashes absent from the generated PDF.** `drawBarContent` in
-   `lib/roadmap-render.ts` has no slash-drawing code; the HTML preview draws them in a
-   staff band. Preview-only, so they can never reach the show view. **[verified
-   2026-08-28** — pulled the saved PDF from storage and rasterized it.**]**
-2. **Persist the chart description + refine-in-place**, designed as one thing.
-3. **PDF export from the library** — chart-edit view *and* the summary page.
-4. **NNS⇄Letters toggle must persist and exist in the show view**, not just library edit.
+1. **Share from the library song row.** `SongRow` (`app/library/page.tsx:283-340`) renders
+   `Build chart` / `Edit` / `Duplicate` / `Delete` and **no Share**, while the chart-level
+   Share already exists one level down in `ManageChartsModal` (`:256` rows, `:346`
+   preview) and in the builder's Review step (`RoadmapBuilder.tsx:645`). So the capability
+   ships; the row is the surface that never got it. While in there: rename `Build chart`
+   → `Build`. **[verified 2026-08-31]**
+   - **Open design question, answer before building:** a song row can carry several charts
+     (`song.chart_count`), so row-level Share is ambiguous about *which* chart. Options:
+     share only when `count === 1`, share the lead/primary role, or open a picker. The
+     modal does not have this problem because it shares a specific chart.
+   - The action column is a fixed `210px` track in a
+     `grid-cols-[1fr_80px_120px_60px_60px_210px]`; a fifth button needs that width
+     revisited, not just appended.
+2. **NNS⇄Letters toggle in the SHOW view.** The builder half shipped (migration `017`,
+   `source_notation`, baked into the stored PDF on save). What remains is the show-view
+   surface, and Graham's stated preference is a **per-show** setting. Note the tension
+   with the shipped model: notation is baked into the one stored PDF at save time, so a
+   per-show toggle cannot re-render an existing PDF without either a re-bake or a second
+   artifact — and the two-artifact approach was **killed by Codex R1** (the retrieval
+   stack keys on fetched-bytes hash, not spec id). Do not restart there. **[verified
+   2026-08-31]**
 
 ---
 
