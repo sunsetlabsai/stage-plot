@@ -45,16 +45,32 @@ Do not duplicate detail for these. The live detail lives in session state.
 
 ## Tune-ups nobody has claimed
 
-### Wire up advance-on-listen **[carried]**
-The plumbing is reported to exist already; this is a hook-up, not a build. Confirm what
-"exists" means before scoping it — the conductor's `shouldAutoFire` has been stubbed
-`false` since chunk 4, so check whether this is the same seam or a different one.
+### Advance-on-listen — the mic is shadow-only **[verified 2026-09-01]**
+The clock already self-drives. `lib/use-conductor-session.ts:890` dispatches exactly one
+clock-driven advance per tick, stamped `rung: 'static-bpm'`. What it drives on is the
+**stated** tempo (`song.bpm`), never a detected one.
 
-### Graceful empty / non-chart upload **[carried]**
-An empty or non-chart PDF currently degrades to "overlay could not be generated", which
-reads as a system failure rather than "this isn't a chart". It cost a real diagnostic
-detour on 2026-08-26. Validate the upload and say something true instead of falling
-through to the generic degrade path.
+The mic detector is fully built and fully wired — `useTempoDetector` runs at `:347` and
+its telemetry reaches `ingestTelemetry` with confidence and octave-folding — but every
+consumer is a *readout*: the synchronous `telemetryRef`, the `shadow` display state, and a
+capped `validationLog`. Nothing routes a detected tempo into the clock's tempo input.
+
+So this is not a hook-up of missing plumbing. The plumbing exists and deliberately
+terminates in observation. What is missing is a **third clock rung** — `ClockRung` is
+`'static-bpm' | 'manual'` (`:196`), and `'static-bpm'` is the only literal constructed
+anywhere in the repo — plus the policy question that rung exists to answer: how confident
+must a detected tempo be before it takes over from the stated one, and how does it hand
+back when confidence drops. That policy is the actual work; the DSP is done.
+
+⚠ Do not confuse this with `shouldAutoFire` (`lib/conductor-session.ts:166`). That gate is
+implemented and tested, and it answers a different question — whether an *already-armed*
+change commits when the playhead arrives at its fire bar. It does not move the playhead.
+
+### Graceful empty / non-chart upload **[verified 2026-09-01]**
+An empty or non-chart PDF degrades to `'Chart uploaded — overlay could not be generated.'`
+(`components/ManageChartsModal.tsx:120`), which reads as a system failure rather than
+"this isn't a chart". It cost a real diagnostic detour on 2026-08-26. Validate the upload
+and say something true instead of falling through to the generic degrade path.
 
 ### Overlay-accuracy knob — `AGENT_MODEL_VISION=claude-opus-4-8` **[carried]**
 Not code. Chart AI is model-agnostic; the default (sonnet) works on real charts but opus
@@ -81,47 +97,71 @@ Degree and quality are concatenated at uniform size, so `5⁷` renders as `57` a
 "fifty-seven" as easily as a five-seven chord. Raised with Graham 2026-08-28; he has not
 ruled on it. A musician's call, not an engineering one.
 
-### No BPM control in the in-show chart flows **[carried]**
-`song.bpm` is editable only in the Library song form (TapTempo). Add-to-show,
-create-chart and edit-chart have no BPM control, and the show page only *reads* `song.bpm`
-to feed the conductor. So a chart authored entirely in-show has an unreachable tempo
-source. Either surface TapTempo in those flows, or confirm add-to-show always inherits a
-library song that already carries BPM. Needs a small design pass.
+### No BPM control in the chart-authoring flows **[verified 2026-09-01]**
+`TapTempo` reaches exactly two surfaces: the Library song form (`app/library/page.tsx:430`)
+and the show's setlist row (`app/[owner]/[show]/page.tsx:4839`, behind the `showBpm`
+toggle, writing globally through `onBpmChange` — "sets this song's tempo everywhere").
 
-### Artist display gaps **[carried]**
-Two places an artist never shows: the in-show ManageChartsModal (the setlist RPCs build
-their config blob from title/key/lead/notes and never include artist, so it needs blob
-threading) and the builder preview.
+What has no BPM control is the **chart-authoring** path: `RoadmapBuilder` and
+`ManageChartsModal` contain zero references to `bpm`. So building a chart never surfaces
+tempo; you have to leave and set it from the setlist row or the library. That is a flow
+gap, not an unreachable value.
 
-### Nav-shrink edge **[carried]**
+### Artist display gaps **[verified 2026-09-01]**
+`ManageChartsModal.tsx` and `RoadmapBuilder.tsx` each contain **zero** occurrences of
+`artist`. For the modal the setlist RPCs build their config blob from
+title/key/lead/notes and never include artist, so it needs blob threading; the builder
+preview simply never renders the field.
+
+### Nav-shrink edge **[verified 2026-09-01]**
 Shrinking a section below a navigation reference's bar leaves the reference dangling
-until save, where server validation rejects it. Not silent corruption — but the
-nav-editing UI does not exist yet, so this is latent rather than reachable.
+until save, where server validation rejects it. Not silent corruption, and **not reachable
+today**: the builder's only navigation surface is `navMarkers`
+(`components/RoadmapBuilder.tsx:673-683`), documented in-source as a "Read-only summary of
+the global roadmap navigation as marker chips". There is no nav-editing UI, so this is
+latent until one is built — at which point it becomes reachable immediately.
 
-### `tallyDraft` is op-blind **[carried]**
-`tallyDraft` reads the pre-op SpanList, so the L4 read-back echo can disagree with the
-folded spec — an intro `3x` repeat is not reflected. The read-back exists precisely to
-catch a dropped span on sight, so a fidelity hole in it is worth more than it looks.
+### `tallyDraft` is op-blind **[verified 2026-09-01]**
+`tallyDraft` (`lib/roadmap-authoring.ts:407`) sums `sec.spans` directly, and the function's
+own header comment says it renders "FROM the SpanList (pre-op spans)". So the L4 read-back
+echo can disagree with the folded spec — an intro `3x` repeat is not reflected. The
+read-back exists precisely to catch a dropped span on sight, so a fidelity hole in it is
+worth more than it looks.
 
 ---
 
 ## Deferred design questions
 
-### Mid-song key change is inexpressible **[carried]**
-`renderKey` is global to a spec, so a song that modulates cannot be described. If this is
-ever built, **the key change MUST be stored RELATIVE** — the new tonic as an interval off
-the primary key — or it breaks transpose-invariance. That constraint is the whole reason
-this note exists; do not design it as an absolute key per section.
+### Mid-song key change is inexpressible **[verified 2026-09-01]**
+`renderKey` is a single `string` field on the spec (`lib/roadmap-spec.ts:22`), global to
+the artifact, so a song that modulates cannot be described. If this is ever built, **the
+key change MUST be stored RELATIVE** — the new tonic as an interval off the primary key —
+or it breaks transpose-invariance. That constraint is the whole reason this note exists;
+do not design it as an absolute key per section.
 
 ### Old saved PDFs carry baked pre-fit-to-width calibration **[carried]**
 Self-heals on the next save. No backfill was written, deliberately.
 
-### Blank-key honesty flag **[carried]**
+### Blank-key honesty flag **[verified 2026-09-01]**
 `song.key || authored_key` shows the authored key even when a show has *intentionally*
-blanked it, because `resolveOverride` collapses blank `''` to `undefined` —
-indistinguishable from "never set". A proper fix means carrying a resolved-key source
-flag on the show payload, which touches override semantics with existing tests pinning
-blank-as-intentional. Thin edge case; its own small chunk if it ever matters.
+blanked it. The mechanism is sharper than previously recorded, and the sharpness is the
+fix: `resolveOverride` (`lib/overrides.ts:41`) is genuinely three-state — `''` returns its
+`emptyAs` parameter, `null`/`undefined` falls back to the library value. **Key is the one
+caller that omits `emptyAs`**, while its siblings pass `''`:
+
+```ts
+// app/api/shows/[owner]/[show]/route.ts:39-41  (same shape at shows/update/route.ts:190-192)
+key:   resolveOverride(row.key_override,   song?.key),            // ← no emptyAs → '' becomes undefined
+lead:  resolveOverride(row.lead_override,  song?.lead,  '') ?? '', // ← blankness preserved
+notes: resolveOverride(row.notes_override, song?.notes, '') ?? '',
+```
+
+So blanked-key collapses to `undefined` and becomes indistinguishable from never-set at
+the `||` downstream, purely because of that one missing argument. A proper fix means
+carrying a resolved-key source flag on the show payload, which touches override semantics
+with existing tests pinning blank-as-intentional — so it is not a one-character change,
+but the asymmetry is where to start looking. Thin edge case; its own small chunk if it
+ever matters.
 
 ---
 
