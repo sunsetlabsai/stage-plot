@@ -141,9 +141,25 @@ describe('fetchChartBytes — persist on fetch (chunk 8)', () => {
     expect(store.size).toBe(0);
   });
 
-  it('still returns bytes when the cache write throws — the render must not depend on it', async () => {
-    // Quota exceeded / private browsing / no Cache API. Offline availability is a bonus on
-    // top of a render that already succeeded; it can never be a precondition for one.
+  // Codex R1-2: res.ok spans all of 2xx. A 204 or 206 would have passed that check and
+  // persisted an empty or truncated body, which every later read then prefers over the
+  // network — a poisoned cache that looks like a successful offline chart.
+  it.each([
+    ['204 No Content', 204, ''],
+    ['206 Partial Content', 206, '%PDF-1.7 trunc'],
+  ])('does NOT cache a %s — 2xx is not good enough, only 200 is', async (_label, status, body) => {
+    fetchMock.mockResolvedValueOnce(new Response(status === 204 ? null : body, { status }));
+
+    const bytes = await fetchChartBytes(supabaseChart);
+    await settle();
+
+    expect(bytes).toBeNull();
+    expect(store.size).toBe(0);
+  });
+
+  it('still returns bytes when the cache WRITE throws — the render must not depend on it', async () => {
+    // Quota exceeded. Offline availability is a bonus on top of a render that already
+    // succeeded; it can never be a precondition for one.
     (globalThis as Record<string, unknown>).caches = {
       open: async () => ({
         match: async () => undefined,
@@ -160,6 +176,36 @@ describe('fetchChartBytes — persist on fetch (chunk 8)', () => {
 
     expect(bytes).not.toBeNull();
     expect(bytes!.byteLength).toBe(PDF_BYTES.byteLength);
+  });
+
+  // Codex R1-3: the READ side was unguarded — it sat outside the try, so a rejecting
+  // caches.open() failed the render before the network was ever tried. The previous version
+  // of this suite CLAIMED to cover "no Cache API" but only made put() throw, which exercises
+  // the write path. These two hit the read path specifically.
+  it('still renders when `caches` is undefined entirely (no secure context)', async () => {
+    delete (globalThis as Record<string, unknown>).caches;
+
+    const bytes = await fetchChartBytes(supabaseChart);
+    await settle();
+
+    expect(bytes).not.toBeNull();
+    expect(bytes!.byteLength).toBe(PDF_BYTES.byteLength);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('still renders when the cache READ rejects (private browsing)', async () => {
+    (globalThis as Record<string, unknown>).caches = {
+      open: async () => {
+        throw new Error('SecurityError');
+      },
+    };
+
+    const bytes = await fetchChartBytes(supabaseChart);
+    await settle();
+
+    expect(bytes).not.toBeNull();
+    expect(bytes!.byteLength).toBe(PDF_BYTES.byteLength);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('still returns bytes for a chart with no modifiedTime (unkeyable, so uncacheable)', async () => {

@@ -63,8 +63,17 @@ function evictOldest() {
 // Exported for the share button (tier-1 file share reuses this exact
 // cache/proxy path — do NOT duplicate it).
 export async function fetchChartBytes(chart: Chart, accessToken?: string): Promise<ArrayBuffer | null> {
-  const cachedBlob = await getCachedChartBlob(chart);
-  if (cachedBlob) return await cachedBlob.arrayBuffer();
+  // The cache READ is guarded too (Codex R1-3 on chunk 8). `caches` is absent outside a
+  // secure context and `caches.open()` can reject in private browsing; before this guard
+  // that rejection escaped uncaught — ahead of the try below — and failed the render
+  // outright rather than degrading to the network. A cache problem must never be fatal in
+  // either direction.
+  try {
+    const cachedBlob = await getCachedChartBlob(chart);
+    if (cachedBlob) return await cachedBlob.arrayBuffer();
+  } catch {
+    // fall through to the network
+  }
 
   try {
     let res: Response;
@@ -85,14 +94,19 @@ export async function fetchChartBytes(chart: Chart, accessToken?: string): Promi
       });
     }
 
-    if (!res.ok) return null;
+    // Strictly 200, not res.ok (Codex R1-2 on chunk 8). res.ok spans all of 2xx, so a 204
+    // No Content or a 206 Partial Content would pass, and persisting either would poison
+    // the cache with a truncated or empty body that every later read prefers over the
+    // network. We never send a Range request, so 200 is the only success we expect.
+    if (res.status !== 200) return null;
     const bytes = await res.arrayBuffer();
 
     // Relay chunk 8 — persist on fetch (design-relay-cloud.md §9.1).
-    // Before this, the ONLY writer to the persistent cache was downloadAllCharts, so a
-    // chart could render perfectly online and be absent offline: a gig-night failure for
-    // anyone who skipped the bulk download. Both network branches funnel through here, so
-    // the write has exactly one home.
+    // Before this, every persistent write went through downloadAllCharts. Supabase charts
+    // got that automatically on show open (page.tsx:557), but LEGACY DRIVE charts had no
+    // auto-cache at all, and a silently-failed Supabase warm left no second chance either.
+    // In both cases a chart could render perfectly online and be absent offline. Both
+    // network branches funnel through here, so the write has exactly one home.
     //
     // Fire-and-forget, and it must stay that way: a cache failure (quota exceeded, private
     // browsing, no Cache API) must never fail the render the caller is awaiting. Offline
