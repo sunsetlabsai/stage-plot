@@ -1,6 +1,6 @@
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 import type { Chart } from './types';
-import { getCachedChartBlob, versionedChartUrl } from './chart-cache';
+import { getCachedChartBlob, versionedChartUrl, cacheChart } from './chart-cache';
 import { hashPdfBytes } from './chart-calibration';
 
 // Lazy-init pdf.js to avoid SSR issues
@@ -86,7 +86,34 @@ export async function fetchChartBytes(chart: Chart, accessToken?: string): Promi
     }
 
     if (!res.ok) return null;
-    return await res.arrayBuffer();
+    const bytes = await res.arrayBuffer();
+
+    // Relay chunk 8 — persist on fetch (design-relay-cloud.md §9.1).
+    // Before this, the ONLY writer to the persistent cache was downloadAllCharts, so a
+    // chart could render perfectly online and be absent offline: a gig-night failure for
+    // anyone who skipped the bulk download. Both network branches funnel through here, so
+    // the write has exactly one home.
+    //
+    // Fire-and-forget, and it must stay that way: a cache failure (quota exceeded, private
+    // browsing, no Cache API) must never fail the render the caller is awaiting. Offline
+    // availability is strictly a bonus over a render that already succeeded.
+    //
+    // The Response is built SYNCHRONOUSLY here, before `bytes` is returned — body
+    // extraction copies the buffer, so pdf.js detaching it later cannot corrupt the cached
+    // copy. Content-Length is set explicitly because a Response built from an ArrayBuffer
+    // carries no such header, and getCacheStats (chart-cache.ts:184) reads it to size the
+    // download manager — without it these entries would count but weigh 0.
+    void cacheChart(
+      chart,
+      new Response(bytes, {
+        headers: {
+          'Content-Type': chart.mimeType || 'application/pdf',
+          'Content-Length': String(bytes.byteLength),
+        },
+      }),
+    ).catch(() => {});
+
+    return bytes;
   } catch {
     return null;
   }
