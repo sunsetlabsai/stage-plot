@@ -63,8 +63,10 @@ The rung ladder is **already fully typed** —
 Nothing needs adding to the contract. What is missing is that the top two rungs are
 **unreachable**: `computeStaticRung` (`:135-143`) returns only `'manual'` or
 `'static-bpm'`, and the driver hardcodes `rung: 'static-bpm'` at
-`lib/use-conductor-session.ts:891`. Those two plus `'manual'` are the only rung literals
-constructed anywhere in the repo.
+`lib/use-conductor-session.ts:891`. No code path anywhere **produces** `'live'` or
+`'coasting'`. Both literals do occur in the repo — in the type, in `clockConfidenceOk`'s
+switch, and as test arguments — but only ever as values *consumed*, never as a rung any
+function returns or stamps onto an advance.
 
 This was designed, not overlooked. `conductor-clock.ts:120-124` says so in-source: *"with
 NO telemetry input chunk 2 can only PRODUCE the bottom two rungs; live/coasting are added
@@ -74,7 +76,12 @@ the effective-tempo/rung resolution so `live` and `coasting` become reachable.
 
 The real design question inside item 4 is the policy, not the wiring: how confident must a
 detected tempo be before it takes over from the stated one, and how does it hand back when
-confidence drops. The DSP is done; the confidence policy is not.
+confidence drops. Note the confidence gate is *already* exhaustive over all four rungs
+(`clockConfidenceOk`, `lib/conductor-clock.ts:155-168`), and `'coasting'` is already ruled
+— `false`, deliberately: motion yes, auto-commit no. The single open branch is `'live'`, a
+standing `return false` annotated *"needs a sustained-HIGH telemetry input — extends here
+in item 4"* (`:161-162`). Defining that sustained-HIGH bound is the work; the DSP and the
+gate's shape are done.
 
 ⚠ Do not confuse this with `shouldAutoFire` (`lib/conductor-session.ts:166`). That gate is
 implemented and tested, and it answers a different question — whether an *already-armed*
