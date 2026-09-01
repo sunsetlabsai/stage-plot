@@ -56,11 +56,25 @@ consumer is a *readout*: the synchronous `telemetryRef`, the `shadow` display st
 capped `validationLog`. Nothing routes a detected tempo into the clock's tempo input.
 
 So this is not a hook-up of missing plumbing. The plumbing exists and deliberately
-terminates in observation. What is missing is a **third clock rung** — `ClockRung` is
-`'static-bpm' | 'manual'` (`:196`), and `'static-bpm'` is the only literal constructed
-anywhere in the repo — plus the policy question that rung exists to answer: how confident
-must a detected tempo be before it takes over from the stated one, and how does it hand
-back when confidence drops. That policy is the actual work; the DSP is done.
+terminates in observation.
+
+The rung ladder is **already fully typed** —
+`ClockRung = 'live' | 'coasting' | 'static-bpm' | 'manual'` (`lib/conductor-clock.ts:126`).
+Nothing needs adding to the contract. What is missing is that the top two rungs are
+**unreachable**: `computeStaticRung` (`:135-143`) returns only `'manual'` or
+`'static-bpm'`, and the driver hardcodes `rung: 'static-bpm'` at
+`lib/use-conductor-session.ts:891`. Those two plus `'manual'` are the only rung literals
+constructed anywhere in the repo.
+
+This was designed, not overlooked. `conductor-clock.ts:120-124` says so in-source: *"with
+NO telemetry input chunk 2 can only PRODUCE the bottom two rungs; live/coasting are added
+by **item 4** when a tempo-telemetry input exists."* The telemetry input now exists and is
+observed-only, so item 4 is the named, waiting piece of work: route detected tempo into
+the effective-tempo/rung resolution so `live` and `coasting` become reachable.
+
+The real design question inside item 4 is the policy, not the wiring: how confident must a
+detected tempo be before it takes over from the stated one, and how does it hand back when
+confidence drops. The DSP is done; the confidence policy is not.
 
 ⚠ Do not confuse this with `shouldAutoFire` (`lib/conductor-session.ts:166`). That gate is
 implemented and tested, and it answers a different question — whether an *already-armed*
