@@ -11,8 +11,10 @@ here changes generate-once, the hash rule, or verify/`canVerify`.
 A deterministic geometry pass that replaces VLM-first conversion for vector charts:
 measure staves and barlines from the PDF's own vector data, read printed measure
 numbers / time signatures / multirest counts from the text layer, validate measured
-against printed, and emit verdicts. The VLM is demoted to a per-system fallback for
-`uncertain` systems and the whole-chart path for raster scans (`estimated`).
+against printed, and emit verdicts. The VLM is demoted to targeted work where evidence is missing: the
+per-system fallback for `uncertain` systems, the corroborating opinion on number-less
+vector charts (per the frozen `corroborated` definition), and the whole-chart path for
+raster scans (`estimated`).
 
 Validation status (2026-09-02): the reference implementation scores **464/464 scored
 systems across 62 real charts** (multi-page, multiple engraving toolchains, mostly
@@ -124,8 +126,10 @@ then:
 
 1. hashes the **authoritative storage bytes** and **rejects on mismatch** with the
    payload's `source_hash` — the client may have measured a stale Cache-API copy
-   (`lib/pdf-viewer.ts` reads cache-first); on rejection the client re-fetches
-   cache-busted, re-measures, and re-submits. Stale geometry can never be inserted
+   (`lib/pdf-viewer.ts` reads cache-first); on rejection the client **evicts the
+   chart's Cache API entry and fetches network-direct** — `fetchChartBytes` prefers
+   the cache before any URL, so a versioned URL alone would loop on the same stale
+   bytes — then re-measures and re-submits. Stale geometry can never be inserted
    under the current hash, preserving "an overlay applies only to the bytes it was
    built for";
 2. validates the payload (`isValidCalibration`, runtime verdict-enum check per the
