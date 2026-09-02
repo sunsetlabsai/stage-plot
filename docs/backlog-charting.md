@@ -50,8 +50,14 @@ An uploaded chart's overlay only earns its cost when the chart participates in c
 mode or a uniform band roadmap — so conversion becomes a capability, not a reflex:
 - **Upload stores bytes and stops.** No auto `triggerOverlayCreate`, no "Generating
   overlay…" transient for ordinary uploads.
-- **Conversion fires on first need**: the first time the chart is opened in a
-  conductor/roadmap context, or an explicit "Build overlay" action.
+- **Conversion fires on OWNER demand**: an explicit "Build overlay" action, or the
+  owner's first entry into roadmap/conductor *preparation* for that chart. Owner-only is
+  both mechanical and product truth: `/api/charts/convert` is owner-scoped
+  (`app/api/charts/convert/route.ts:38`), the conductor view is open to collaborators —
+  who must never spend the owner's AI budget — and perform mode already requires a
+  performable overlay to exist, so "first conductor open" cannot literally be the
+  trigger. **Exact trigger placement in the flow is an open build decision for the
+  lazy-conversion chunk.**
 - **Known-never gates, checked before the call ever fires** (the point is to SAVE the
   call, not clean up after it): `role = 'lyrics'` (measured 2026-09-02: 342/342 lyrics
   PDFs in the live library have zero detectable staves), `source_spec IS NOT NULL`

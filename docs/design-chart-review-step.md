@@ -8,9 +8,11 @@ stays as the deep fallback). Nothing here changes verify/`canVerify` or the show
 ## Why
 
 The 2026-09-01 spike proved uploaded-chart bar geometry is **measurable, not guessable**:
-barlines are vector primitives recoverable from pdf.js path ops, and the result
+barlines are vector primitives recoverable from the PDF's vector data, and the result
 **self-validates** against the chart's own printed measure numbers in the text layer
-(current probe: 35/49 systems across 6 of 8 real charts; 1 of 8 is a raster scan).
+(validated 2026-09-02: **464/464 scored systems across 62 real charts**, multi-page,
+multiple engravers, mostly out-of-sample; raster scans remain VLM-only —
+see `backlog-charting.md` §Ruled 2026-09-02).
 
 That changes what "confidence" means. Today's review queue flags on the VLM's
 self-reported confidence — the model's opinion of its own guess. Validation gives us
@@ -44,10 +46,10 @@ Per system, in order:
 4. **VLM fallback** only for systems that fail validation. Raster pages (no vectors, no
    text layer): VLM for everything, chart marked *estimated*.
 
-Heuristic generalization (e.g. the Long Train Runnin' staff-detection under-count) is
-prerequisite engineering with its own loop — the self-validation score is the objective
-function. It is **not in this doc's build scope**, and nothing here may assume the current
-35/49 rate; the review step must work at any accuracy level.
+Heuristic generalization is done (the validation above); **productizing** the
+measurement engine is prerequisite engineering with its own loop — the self-validation
+score is the objective function. It is **not in this doc's build scope**, and nothing
+here may assume any particular accuracy rate; the review step must work at any level.
 
 ## Confidence verdicts (the new flag signal)
 
