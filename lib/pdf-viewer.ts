@@ -1,6 +1,7 @@
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 import type { Chart } from './types';
 import { getCachedChartBlob, versionedChartUrl, cacheChart } from './chart-cache';
+import { sniffPdf } from './chart-converter';
 import { hashPdfBytes } from './chart-calibration';
 
 // Lazy-init pdf.js to avoid SSR issues
@@ -117,15 +118,25 @@ export async function fetchChartBytes(chart: Chart, accessToken?: string): Promi
     // copy. Content-Length is set explicitly because a Response built from an ArrayBuffer
     // carries no such header, and getCacheStats (chart-cache.ts:184) reads it to size the
     // download manager — without it these entries would count but weigh 0.
-    void cacheChart(
-      chart,
-      new Response(bytes, {
-        headers: {
-          'Content-Type': chart.mimeType || 'application/pdf',
-          'Content-Length': String(bytes.byteLength),
-        },
-      }),
-    ).catch(() => {});
+    // Codex R2: status 200 is NOT proof of a chart. A Drive HTML interstitial or a bad
+    // storage body arrives as a perfectly good 200; caching it poisons the cache STICKILY,
+    // because every later read prefers the cache over the network and pdf.js only discovers
+    // the problem after. Sniff the magic bytes — the repo already owns this decision
+    // (chart-converter.ts:21, "classify by the leading bytes of the FETCHED object, never
+    // the claimed MIME"). Non-PDF bytes are still RETURNED (the share path is a legitimate
+    // caller and v1 storage is PDF-only by policy, not by guarantee) — they are just never
+    // persisted.
+    if (sniffPdf(new Uint8Array(bytes, 0, Math.min(8, bytes.byteLength)))) {
+      void cacheChart(
+        chart,
+        new Response(bytes, {
+          headers: {
+            'Content-Type': chart.mimeType || 'application/pdf',
+            'Content-Length': String(bytes.byteLength),
+          },
+        }),
+      ).catch(() => {});
+    }
 
     return bytes;
   } catch {

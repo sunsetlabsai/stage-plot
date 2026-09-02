@@ -157,6 +157,24 @@ describe('fetchChartBytes — persist on fetch (chunk 8)', () => {
     expect(store.size).toBe(0);
   });
 
+  // Codex R2: a 200 is not proof of a chart. This is the sticky-cache failure class the
+  // whole PR exists to prevent — a bad body cached once is preferred over the network forever.
+  it.each([
+    ['a Drive HTML interstitial', '<!DOCTYPE html><html><body>Sign in</body></html>'],
+    ['an empty 200 body', ''],
+    ['a plausible-but-wrong text body', 'Not a chart, just words.'],
+  ])('does NOT cache %s served with status 200', async (_label, body) => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(body, { status: 200, headers: { 'Content-Type': 'application/pdf' } }),
+    );
+
+    const bytes = await fetchChartBytes(supabaseChart);
+    await settle();
+
+    expect(bytes).not.toBeNull();   // still returned — the share path is a legitimate caller
+    expect(store.size).toBe(0);     // but never persisted
+  });
+
   it('still returns bytes when the cache WRITE throws — the render must not depend on it', async () => {
     // Quota exceeded. Offline availability is a bonus on top of a render that already
     // succeeded; it can never be a precondition for one.
