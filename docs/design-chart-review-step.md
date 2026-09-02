@@ -59,26 +59,39 @@ Per system, replacing VLM self-confidence as the review-queue driver:
 | `corroborated` | no printed numbers on this chart; measured and VLM independently agree | silent |
 | `uncertain` | validation failed, or the two sources disagree | flagged — the ask |
 | `estimated` | raster scan / no vector data; VLM-only | chart-level badge, soft flag |
-| `confirmed` | a human answered | pinned; never flagged, never machine-overwritten |
+| `confirmed` | a human answered via pick-a-split / count | pinned; never flagged, never machine-overwritten |
+| `edited` | a human manually edited the system or its bars | pinned; never flagged |
 
 Chart-level confidence is the aggregate, surfaced in plain words ("9 of 12 lines
 verified"). Scans surface as "scanned chart — overlay is estimated."
 
 Plumbing: a new optional per-`System` `verdict` field (optional-field forward-compat, no
-schema bump — same pattern as `confidence`). `chart-review.ts` flags on `verdict` when
-present and falls back to the numeric `confidence` threshold otherwise, so VLM-only and
-legacy calibrations keep working unchanged. Sections and roadmap markers keep the
-existing numeric-confidence flow — verdicts apply to system/bar geometry only, because
-only geometry has printed ground truth to validate against.
+schema bump — same pattern as `confidence`). **A present verdict is the EXCLUSIVE flag
+signal for that system** — the numeric roll-up in `chart-review.ts` (band low-confidence
+OR any child bar low-confidence) applies only to verdict-less systems. v2 conversion
+writes a verdict on **every** system, so an absent verdict means exactly one thing: a
+legacy / VLM-only calibration, which keeps the unchanged numeric path. Absent is never
+the result of an edit. Sections and roadmap markers keep the existing numeric-confidence
+flow — verdicts apply to system geometry only, because only geometry has printed ground
+truth to validate against.
+
+Exclusivity is safe because of how verdicts are assigned: `validated` systems carry
+vector-measured geometry (no VLM-seeded child confidences exist to ignore);
+`corroborated` means two independent sources agree, which outranks the VLM's
+self-reported doubt about its own bars; and every system whose geometry actually came
+from the VLM is `uncertain` or `estimated` — already flagged.
 
 Lifecycle (the edit-owns-it move, extended): `verdict` lives on the `System` only. Any
 manual geometry edit to a system **or any of its bars** (move/resize/barline drag/
-auto-distribute) **clears the system's `verdict` in the same authoring helpers that
-already clear `confidence`** — one move, not two. The system becomes human-owned, drops
-out of the queue, and a stale machine verdict can never re-flag it or mis-mark it
-machine-owned. Pick-a-split and the count fallback are the **only** writers of
-`verdict: 'confirmed'`. The flag rule stays monotone with the shipped seam: absent
-verdict + absent confidence is never flagged.
+auto-distribute) **writes `verdict: 'edited'` on the parent system, in the same
+authoring-helper move that already clears the touched element's `confidence`** (those
+helpers keep their shipped per-element scope — `moveBarBoundary` clears the moved bars,
+`resizeSystemBand` the band). `edited` is human-owned and never flagged, and because
+verdicts are exclusive, leftover numeric confidence on untouched sibling bars is inert —
+there is no numeric-fallback path that can re-flag a human-owned system. This is the
+shipped self-clearing philosophy at system granularity: the queue never strands a
+touched item. Pick-a-split and the count fallback are the **only** writers of
+`verdict: 'confirmed'`.
 
 ## The interaction — pick a split, count as fallback (decided)
 
@@ -147,9 +160,10 @@ Which split looks right?
 
 ## Open questions (Codex)
 
-1. **Verdict lifecycle residual** — verdict now clears in the same helpers as
-   confidence; any remaining edge (replace, legacy rows, undo/history paths) where a
-   stale verdict survives an edit?
+1. **Exclusive precedence residual** — verdict now shadows the numeric child-bar
+   roll-up entirely for verdict-bearing systems; any real case where that hides a flag
+   worth surfacing, or an edit path (undo/history, replace) that bypasses the authoring
+   helpers and leaves a stale non-`edited` verdict?
 2. **Plausibility floor** — the N-span re-run's scoring floor is build-time work; flag
    any real layout where *visible-span counting itself* is ambiguous to a non-reader
    (the case that would defeat the count fallback entirely).
