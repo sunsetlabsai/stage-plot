@@ -3,6 +3,7 @@ import {
   LINEAR_SCHEMA_VERSION,
   MAX_PDF_BYTES,
   buildCalibrationFromVision,
+  overlaySkipReason,
   schemaVersionToPersist,
   sniffPdf,
   type VisionChart,
@@ -329,5 +330,40 @@ describe('schemaVersionToPersist', () => {
     expect(cal.roadmap).toBeUndefined();
     expect(schemaVersionToPersist(cal)).toBe(LINEAR_SCHEMA_VERSION);
     expect(LINEAR_SCHEMA_VERSION).toBeLessThan(CALIBRATION_SCHEMA_VERSION);
+  });
+});
+
+// ── Known-never gates (backlog-charting.md §Ruled 2026-09-02) ────────────────
+// The predicate the "Build overlay" CTA and /api/charts/convert BOTH consult, so
+// these cases pin the one rule rather than either call site's copy of it.
+describe('overlaySkipReason', () => {
+  it('a plain uploaded chart is convertible', () => {
+    expect(overlaySkipReason({ role: 'guitar', hasSourceSpec: false })).toBeNull();
+  });
+
+  it('a builder chart is `authored` — the spec is already ground truth', () => {
+    expect(overlaySkipReason({ role: 'guitar', hasSourceSpec: true })).toBe('authored');
+  });
+
+  it('a lyrics sheet is `lyrics` — no staves to measure', () => {
+    expect(overlaySkipReason({ role: 'lyrics', hasSourceSpec: false })).toBe('lyrics');
+  });
+
+  it('role is CANONICALIZED, not compared raw — role is free text on the row', () => {
+    // The live library holds "Lyrics" (folder-cased). A raw === would let every
+    // one of those 342 sheets through the gate.
+    for (const role of ['Lyrics', 'LYRICS', ' lyrics ', 'LyRiCs']) {
+      expect(overlaySkipReason({ role, hasSourceSpec: false })).toBe('lyrics');
+    }
+  });
+
+  it('`authored` wins over `lyrics` — it holds whatever the role says', () => {
+    expect(overlaySkipReason({ role: 'Lyrics', hasSourceSpec: true })).toBe('authored');
+  });
+
+  it('an unrecognized role canonicalizes to `other` and stays convertible', () => {
+    // 'trombone' → 'other'. Only the lyrics gate is a never; unknown is not.
+    expect(overlaySkipReason({ role: 'trombone', hasSourceSpec: false })).toBeNull();
+    expect(overlaySkipReason({ role: '', hasSourceSpec: false })).toBeNull();
   });
 });

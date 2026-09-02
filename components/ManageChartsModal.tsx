@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import type { Chart } from '@/lib/types';
 import { canonicalizeRole, displayRole, type ChartRole } from '@/lib/normalize';
-import { uploadChart, ChartUploadError, type ConvertResult } from '@/lib/chart-upload';
+import { uploadChart, ChartUploadError } from '@/lib/chart-upload';
 import { availableRoles, applyUploadedChart, removeChartById } from '@/lib/chart-management';
 import { loadPdfDoc, renderPage, fetchChartBytes } from '@/lib/pdf-viewer';
 import { chartShareFilename } from '@/lib/share';
@@ -85,8 +85,10 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
     setBusy(true);
     setError('');
     try {
-      const { chart, overlay } = await uploadChart(file, songTitle, role);
-      reportOverlay(overlay);
+      // Upload stores bytes and stops — no overlay is generated here any more
+      // (backlog-charting.md §Ruled 2026-09-02). The owner builds one on demand
+      // from the perform readiness strip, where the need actually appears.
+      const chart = await uploadChart(file, songTitle, role);
       const next = applyUploadedChart(charts, {
         role: chart.role,
         url: chart.url,
@@ -107,19 +109,6 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
       );
     } finally {
       setBusy(false);
-    }
-  }
-
-  // Surface a non-fatal overlay outcome (the chart uploaded either way).
-  function reportOverlay(overlay: ConvertResult | null) {
-    if (!overlay) return;
-    if (!overlay.generated && overlay.reason && overlay.reason !== 'exists') {
-      const msg: Record<string, string> = {
-        unsupported_type: 'Chart uploaded — overlay skipped (unsupported file type).',
-        too_large: 'Chart uploaded — overlay skipped (file too large).',
-        failed: 'Chart uploaded — overlay could not be generated.',
-      };
-      setError(msg[overlay.reason] ?? '');
     }
   }
 
