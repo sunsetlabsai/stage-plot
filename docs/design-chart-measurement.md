@@ -242,16 +242,58 @@ today's VLM calibration would be a regression: the owner would lose section dete
 they have today and have to hand-add every section.
 
 **Ruling for B2: the VLM section pass stays.** The measured payload supplies
-`systems` + `bars`; the server's existing vision call supplies `sections` (and
-`roadmap`); the two are merged before the insert. Measurement replaces VLM *geometry*,
-not VLM *semantics*. The honest cost story is "the same one VLM call, with exact
-geometry instead of estimated geometry" — and geometry was the broken half
+`systems` + `bars`; the server's existing vision call supplies `sections`; the two are
+merged before the insert. Measurement replaces VLM *geometry*, not VLM *semantics*. The
+honest cost story is "the same one VLM call, with exact geometry instead of estimated
+geometry" — and geometry was the broken half
 (`project_showbible_converter_bar_quality`: bar overlay near-random under VLM
 coordinate estimation).
 
 Deterministic section detection from the text layer is plausible — section labels are
 text, and the engine already reads the text layer for measure numbers — but it is a new
 sub-pipeline with its own corpus gate, and it is **not** in B2. Backlog it.
+
+### ⚠ The roadmap is NOT separable semantics (Codex, #172)
+
+An earlier draft of this section said the vision call supplies "`sections` (and
+`roadmap`)", merged before the insert. That is wrong, and the reason is that **roadmap
+markers are bound through VLM BAR INDICES, not through geometry-free semantics.** The
+vision prompt defines every roadmap ref as `barIndex` / `barIndices` /
+`repeatStartBarIndex` into the model's own `bars[]` (`lib/chart-vision.ts:20`), and
+`buildCalibrationFromVision` resolves them through a `barIdByModelIndex` map built from
+those same VLM bars (`lib/chart-converter.ts:285`, markers at `:322`). Install measured
+bars and that map describes nothing. Copying the roadmap across would either fail
+`resolveRoadmap` or — worse — bind a repeat to the wrong bar and pass validation.
+
+**Ruling for B2: route by roadmap presence.** The server runs the VLM anyway for
+sections. Afterward:
+
+| VLM roadmap | bars installed | path |
+|---|---|---|
+| empty | **measured** | B2's deterministic path |
+| non-empty | VLM | today's path, byte-for-byte unchanged |
+
+This is a **scope predicate on B2, not a second implementation.** Nothing regresses
+against today, no rebinding heuristic ships untested, and it is the same reasoning that
+deferred the `uncertain` and `corroborated` legs: don't ship code the corpus cannot
+exercise. The ordering works under the split contract — the client measures *before* the
+server calls the VLM, so a discarded measurement costs client CPU, never AI spend.
+
+Measured on the live library (2026-09-02, n=7 charts — one owner, curated, **not** a
+population estimate): 4 charts carry a non-empty roadmap, but only **2 of 7** are
+VLM-produced. The discriminator is `confidence`: `buildCalibrationFromVision` wraps
+model-derived markers in `withConfidence`, so a marker without the field was hand-added
+in Calibrate. Every marker in the library — VLM and hand-added alike — is
+`repeatStart`/`repeatEnd`; no segno, coda, D.S. or ending has ever been produced or
+entered.
+
+⚠ **The cost, stated plainly:** charts with printed repeats keep the estimated geometry
+until rebinding is built, and by that sample they are the ~2-in-7 whose geometry is
+hardest and most worth measuring. **Rebinding is on the generate-once clock** (see
+§Multirests): every chart converted before it lands keeps VLM bars permanently, short of
+new bytes or a hand edit. Backlog it as a named item with that consequence attached — not
+as a quiet TODO. The likely shape is ordinal rebinding gated on VLM and measured bar
+counts agreeing, which becomes measurable once converted charts accumulate.
 
 ## The geometry-completeness precondition (★ the never-gate's safety rule)
 
@@ -268,11 +310,49 @@ VLM fallback. So it must fire only on evidence of **absence**, never on absence 
 | zero staves, real text, geometry **incomplete** | `estimated` | **no gate** — whole-page VLM |
 | zero staves, no text | `estimated` | whole-page VLM |
 
-"Geometry incomplete" means the adapter observed paint it could not account for: a
-`gfx.ctx` swap, or pattern/opaque paint covering enough of the page to hide a staff.
-This dissolves the threshold problem — the test is "did we observe everything we
-painted", which the shim already tracks, not "is this image big enough to be hiding
-something".
+**"Geometry incomplete" is a two-clause predicate over what the shim already returns.**
+An earlier draft said the test was "did we observe everything we painted, which the shim
+already tracks" (Codex, #172: overclaimed). `PageGeometry` returns `warnings: string[]`
+plus `opaque: Record<string, number>` — op *counts*, no bounds — so an unqualified
+"any opaque paint means incomplete" reading is both wrong and useless. Measured against
+the corpus, `Σ opaque === 0` holds for **0 of 87 files**: `fillText` is the text layer
+(every vector chart has one) and `wash` is the page-covering fill the shim
+**deliberately drops** (B1's fourth measured fact). Neither is unobserved paint. Gating
+on the aggregate would disable the never-gate entirely and quietly spend AI on all 342
+lyrics PDFs.
+
+The record is categorized precisely so the categories can be told apart:
+
+```
+complete  ⟺  no OBSERVABILITY warning
+             ∧ drawImage + putImageData + createPattern == 0
+```
+
+- **Observability warnings** — `stroke-without-path` (`lib/chart-measure-canvas.ts:343`),
+  `fill-without-path` (`:358`), `no-2d-context` (`:436`). Paint happened and the shim did
+  not see it. These mean incomplete.
+- **`anisotropic-ctm`** (`:348`) is a **precision** caveat, not an observability failure:
+  the geometry *was* observed, under a non-uniform scale. It must **not** open the gate.
+  B1's blanket comment on `warnings` ("any warning means INCOMPLETE") is too strong and
+  is corrected here — measured, 4 corpus files carry `anisotropic-ctm` and validate
+  **53/53** systems between them.
+- **Raster/pattern ops** are the only paint that can carry a hidden staff — the two
+  bypass classes from §Answered by chunk B1. `fillText` / `strokeText` / `fillRect` /
+  `wash` / `clip` are all accounted-for paint and are not consulted.
+
+No threshold, no bounds data needed, and it fails toward the VLM.
+
+**Measured on the corpus (2026-09-02, 87 files, harness at `PARITY: clean`):**
+
+| | result |
+|---|---|
+| `not-notation` candidates still gating under the predicate | **23 / 23** |
+| files anywhere with raster/pattern paint | **2** — and both classify `raster`, so they route to whole-page VLM and were never gate candidates |
+| files with any warning | 4, all `anisotropic-ctm`, all validating cleanly |
+| observability warnings across the whole corpus | **0** |
+
+The separation is exact: every file the gate wants to catch is complete, and every file
+with hiding-class paint is already on the VLM path for an unrelated reason.
 
 Confidence that the gate itself is sound comes from measurement, not assumption: 342/342
 lyrics PDFs in the live library have zero detectable staves, and 25/25 zero-staff corpus
@@ -321,9 +401,19 @@ visible bars, so the conductor advances one where the band plays four.
 This was briefly backlogged as "pre-existing." That was wrong, and the reason is
 **generate-once**: the write is insert-only, conflict-as-no-op, with no same-hash
 machine re-run of any kind. A chart converted without the multirest count never acquires
-it — not on retry, not from a better engine later, not ever, short of new bytes. So
+it **by machine** — not on retry, not from a better engine later, short of new bytes. So
 "backlog" here does not mean "later", it means "never, for every chart converted in the
 meantime." The count must be persisted by the conversion that first measures it.
+
+⚠ *Precision (Codex, #172): "never" is a claim about machine re-runs only.*
+`/api/charts/calibration` PUT is an owner **overwrite** path for the same
+`(chart_id, source_hash)` — an upsert without `ignoreDuplicates`
+(`app/api/charts/calibration/route.ts`). A human can therefore repair a calibration by
+hand. That does not weaken the argument here, because `measures` has **no editing
+surface at all** — the Calibrate tools expose sections, bars and roadmap, not musical
+measure counts — so for multirests specifically there is no human path either. (Contrast
+the roadmap in §The roadmap is NOT separable semantics, which *is* hand-repairable and
+is deferred partly for that reason.)
 
 It is also free. The engine already reads multirest counts to compute
 `printed delta = visible spans + Σ(multirest − 1)` — the arithmetic that produces the
@@ -341,10 +431,48 @@ relax that invariant and ripple through every consumer. Keeping `absNumber` dens
 *visible* bars changes nothing downstream, and the musical measure number stays
 derivable: `1 + Σ(measures of preceding bars)`.
 
-Validation additions: `measures` is an integer ≥ 1 when present, checked in `isValidBar`
-alongside the existing rules. `Σ measures` over a system must equal that system's
-`expectedSpans` when the system is `validated` — the page's own printed numbers are
-already the check, so this costs nothing new and catches a mis-assigned count.
+### ⚠ The invariant, corrected — and it is weaker than it looks (Codex, #172)
+
+An earlier draft said "`Σ measures` over a system must equal that system's
+`expectedSpans` when `validated`". **That is backwards.** `expectedSpans` is defined as
+the expected count of **visible** spans, *after* subtracting the multirest extras
+(`lib/chart-measure.ts:463`):
+
+```
+delta         = next.printedNumber − this.printedNumber      // printed, MUSICAL
+expectedSpans = delta − Σ(multirest − 1)                     // VISIBLE
+Σ measures    = visible spans + Σ(multirest − 1) = delta     // MUSICAL
+```
+
+So the draft's equation is wrong by exactly `Σ(multirest − 1)` — it holds only when the
+system contains no multirest, which is precisely the case it was written to check. The
+corrected pair:
+
+- `bars.length === expectedSpans` — the existing `validated` check, restated over bars.
+- `Σ bars[].measures === delta` — the new one.
+
+**And it is a consistency guard, not a correctness proof.** A sum is invariant under
+mis-assignment: attach `measures: 4` to the wrong bar in the system and the total is
+still right. It catches a dropped or duplicated count, nothing more. `measures` is an
+integer ≥ 1 when present, checked in `isValidBar`.
+
+### ★ B1's public shape cannot assign the count (Codex, #172 — blocking for the build)
+
+`MeasuredSystem.multirests` is `number[]` — **counts only, no position**
+(`lib/chart-measure.ts:145`). The H-bar's x-range exists inside the engine
+(`s.multirestBars`, paired with its digit at `:403-412`) and is discarded at the public
+boundary. So B2 as drafted cannot know *which* `Bar` gets `measures: 4`, and the sum
+check above would happily accept it on the wrong one.
+
+**B2 therefore includes an additive change to the pure module:**
+
+```ts
+multirests: { count: number; xStart: number; xEnd: number }[]   // was: number[]
+```
+
+Stage-4 arithmetic changes only by summing `.count`. This shifts the harness's failure
+line format (`mr=[...]`) but must not move the score: **464/464, `PARITY: clean`** stays
+the gate.
 
 Conductor follow-along is then arithmetic over `measures`, and is **not** B2's to build —
 but B2 is what makes it possible, which is the whole point of doing it now.
@@ -356,6 +484,13 @@ but B2 is what makes it possible, which is the whole point of doing it now.
 ```
 POST { chart_id, source_hash?, measured? }
 ```
+
+⚠ **The two optional fields are not independently optional (Codex, #172):
+`measured` present ⟹ `source_hash` REQUIRED.** A measured payload with no hash cannot
+clear the hash boundary in step 1, so the server must reject the pair as a 400 rather
+than silently commit unverified client geometry. Both stay optional only for the legacy
+no-measurement request, which is what `triggerOverlayCreate` sends today — it posts
+`{ chart_id }` alone (`lib/chart-upload.ts:86`) and must keep working untouched.
 
 `measured` carries the systems/bars the client measured plus per-system verdicts. The
 server then, in this order:
