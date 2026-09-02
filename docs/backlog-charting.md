@@ -43,6 +43,50 @@ Do not duplicate detail for these. The live detail lives in session state.
 
 ---
 
+## Ruled 2026-09-02 — lazy conversion + overlay-create gates (Graham, agreed)
+
+### Conversion is on-demand, not an upload side-effect **[ruling 2026-09-02]**
+An uploaded chart's overlay only earns its cost when the chart participates in conductor
+mode or a uniform band roadmap — so conversion becomes a capability, not a reflex:
+- **Upload stores bytes and stops.** No auto `triggerOverlayCreate`, no "Generating
+  overlay…" transient for ordinary uploads.
+- **Conversion fires on OWNER demand**: an explicit "Build overlay" action, or the
+  owner's first entry into roadmap/conductor *preparation* for that chart. Owner-only is
+  both mechanical and product truth: `/api/charts/convert` is owner-scoped
+  (`app/api/charts/convert/route.ts:38`), the conductor view is open to collaborators —
+  who must never spend the owner's AI budget — and perform mode already requires a
+  performable overlay to exist, so "first conductor open" cannot literally be the
+  trigger. **Exact trigger placement in the flow is an open build decision for the
+  lazy-conversion chunk.**
+- **Known-never gates, checked before the call ever fires** (the point is to SAVE the
+  call, not clean up after it): `role = 'lyrics'` (measured 2026-09-02: 342/342 lyrics
+  PDFs in the live library have zero detectable staves), `source_spec IS NOT NULL`
+  (builder-generated charts — the spec already is ground truth), and a zero-staves
+  classifier as automatic backstop for mislabeled uploads.
+- Eager conversion also creates **review debt** — uncertain-badges on charts nobody will
+  conduct — which is the second reason to gate, independent of cost.
+- `design-chart-review-step.md`'s entry point is amended in the same PR (offer follows
+  *conversion*, whenever it runs). `design-chart-converter.md`'s chunk-3 upload-flow
+  states move to the on-demand trigger at build time; that doc is not rewritten here.
+
+### Measurement-first geometry — validated, needs a productization decision **[verified 2026-09-02]**
+The vector-measurement pipeline behind the review-step verdicts is no longer speculative:
+**464/464 scored systems pass self-validation across 62 real charts** (multi-page,
+multiple engravers, mostly out-of-sample), with lyrics/chord-sheets/stubs cleanly
+classified no-staves and duplicates caught by hash. Reference implementation: `probe8.mjs`
+in the dev spike folder (`~/chart-spike/` on the mini), with the earned rules inline
+(staff candidates by merged rule length; printed-delta = visible spans + Σ(multirest−1);
+multirest = digit **paired with** an H-bar; modal barline stroke width; begin-repeat
+subtract gated on gap < median bar width and ≥3 clusters; unnumbered-first-system =
+measure 1 on page 1 only).
+- ⚠ **Open before build:** probe8 leans on poppler's `pdftocairo` (native binary — not
+  available on Vercel). Candidate paths: a recording-canvas shim over pdf.js rendering
+  (pure JS; correct transforms by construction — hand-rolled CTM walking is a proven
+  trap), WASM pdfium/poppler, or a small conversion service. This is the first decision
+  of the measurement-engine design doc.
+
+---
+
 ## Tune-ups nobody has claimed
 
 ### Advance-on-listen — the mic is shadow-only **[verified 2026-09-01]**
