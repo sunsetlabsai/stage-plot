@@ -116,15 +116,24 @@ it away:
 **Contract:** the client engine extracts geometry + text and computes provisional
 verdicts — it writes nothing and holds no keys. It POSTs the measured payload
 (segments summarized as the draft calibration + per-system verdicts + per-system
-raster/uncertain flags) to the **convert route, extended to accept a measured
-payload** (owner-authenticated, same scope as today). The server then:
+raster/uncertain flags, **plus `source_hash` computed from the exact bytes it
+measured** — hash the fetched ArrayBuffer, the same canonical-bytes-by-construction
+rule as `design-chart-converter.md` §Hash rule) to the **convert route, extended to
+accept a measured payload** (owner-authenticated, same scope as today). The server
+then:
 
-1. validates the payload (`isValidCalibration`, runtime verdict-enum check per the
+1. hashes the **authoritative storage bytes** and **rejects on mismatch** with the
+   payload's `source_hash` — the client may have measured a stale Cache-API copy
+   (`lib/pdf-viewer.ts` reads cache-first); on rejection the client re-fetches
+   cache-busted, re-measures, and re-submits. Stale geometry can never be inserted
+   under the current hash, preserving "an overlay applies only to the bytes it was
+   built for";
+2. validates the payload (`isValidCalibration`, runtime verdict-enum check per the
    frozen spec, sanity bounds) — client geometry is *data*, not trusted computation;
-2. runs the VLM fallback **server-side** for `uncertain` systems and raster pages,
-   with the server-resolved key, exactly where the key already lives;
-3. performs the same **insert-only, conflict-as-no-op** write the converter performs
-   today (generate-once and the hash rule untouched).
+3. runs the VLM work **server-side** with the server-resolved key, exactly where the
+   key already lives (scope in §Integration);
+4. performs the same **insert-only, conflict-as-no-op** write the converter performs
+   today (generate-once untouched).
 
 Trust note: the payload writer is the chart's owner writing their own *draft*
 calibration — the same trust level as today's client-driven conversion trigger; a
@@ -136,9 +145,11 @@ remains the authority afterward.
 - Invoked by the owner-demand trigger (lazy-conversion chunk; placement decided
   there). Pre-gates run first: `role = 'lyrics'` and `source_spec IS NOT NULL` never
   reach the engine.
-- Cost profile: measurement is local JS — the paid VLM call happens only for
-  `uncertain` systems and raster pages, server-side per the split contract.
-  Silent-when-confident comes free.
+- Cost profile: measurement is local JS — paid VLM calls happen only where evidence
+  is missing, server-side per the split contract: `uncertain` systems, raster pages,
+  and **number-less vector charts needing corroboration** (a `corroborated` verdict
+  requires an independent VLM opinion *by definition* — frozen spec §Confidence
+  verdicts). Fully-numbered charts that validate cleanly cost nothing.
 
 ## Non-goals
 
