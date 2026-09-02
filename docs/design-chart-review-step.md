@@ -37,7 +37,9 @@ Per system, in order:
    points are themselves a second barline signal); verticals accepted as barlines only
    when both endpoints land on the outer staff lines within tight tolerance.
 2. **Read ground truth**: printed measure numbers, time signature, multirest counts from
-   the text layer (coordinates included).
+   the text layer (coordinates included). Multirest counts feed the validation arithmetic
+   only (a 24-bar multirest explains a measure-number delta of 24 across one visible
+   span) — they are **never** used to split geometry.
 3. **Validate**: measured bars-per-system vs the printed number delta.
 4. **VLM fallback** only for systems that fail validation. Raster pages (no vectors, no
    text layer): VLM for everything, chart marked *estimated*.
@@ -69,6 +71,15 @@ legacy calibrations keep working unchanged. Sections and roadmap markers keep th
 existing numeric-confidence flow — verdicts apply to system/bar geometry only, because
 only geometry has printed ground truth to validate against.
 
+Lifecycle (the edit-owns-it move, extended): `verdict` lives on the `System` only. Any
+manual geometry edit to a system **or any of its bars** (move/resize/barline drag/
+auto-distribute) **clears the system's `verdict` in the same authoring helpers that
+already clear `confidence`** — one move, not two. The system becomes human-owned, drops
+out of the queue, and a stale machine verdict can never re-flag it or mis-mark it
+machine-owned. Pick-a-split and the count fallback are the **only** writers of
+`verdict: 'confirmed'`. The flag rule stays monotone with the shipped seam: absent
+verdict + absent confidence is never flagged.
+
 ## The interaction — pick a split, count as fallback (decided)
 
 For each flagged system, a focused one-line-at-a-time sheet (not the calibrate canvas):
@@ -88,11 +99,15 @@ Which split looks right?
   staff detection). Candidates: **measured**, **VLM**, and **printed-number-implied**
   splits, deduplicated — two agreeing sources show as one option. Never more than three.
 - Tap one → that split is applied and the system becomes `confirmed`.
-- "None of these" → **"How many bars do you count in this line?"** The answer is ground
-  truth: the detector re-runs constrained to N (choose the best-scoring N-bar
-  segmentation from the candidate verticals). On raster charts, the count re-prompts the
-  VLM with N pinned; even division within the band is the last resort. Result applies as
-  `confirmed`.
+- "None of these" → **"How many bars do you count in this line?"** N is defined as
+  **visible barline-delimited spans** — exactly what a non-reader counts by eye — and
+  never played or written measures: a multirest is one span, a pickup bar changes
+  numbering but not span count, a meter change changes neither. So N is sufficient
+  ground truth for *geometry*: the detector re-runs seeking the best-scoring N-span
+  segmentation from the candidate verticals. **If no segmentation clears a plausibility
+  floor, the count is not forced into fake geometry — the sheet routes to "Open
+  calibration" instead.** On raster charts, the count re-prompts the VLM with N pinned;
+  even division of the band into N is the last resort. Result applies as `confirmed`.
 - Anything pick-a-split can't express (wrong band, merged systems) → "Open calibration"
   hands off to the existing calibrate editor + barline drag. The editor is the deep
   fallback, not the front line.
@@ -110,12 +125,18 @@ Which split looks right?
 
 ## Persistence and re-runs
 
-- `confirmed` is human-owned, same standing as a manual edit (which keeps its existing
-  clears-confidence, edit-owns-it semantics). **A re-run of the converter — including
-  future improved-heuristic backfills over the same hash — merges into machine-owned
-  systems only and never touches human-owned ones.** Otherwise shipping a better
-  detector would silently undo human answers.
-- Replace semantics are unchanged: new bytes → new hash → new calibration target.
+- **Generate-once stands, unqualified** (`design-chart-converter.md`: the converter
+  writes only when no `(chart_id, source_hash)` row exists, insert-only,
+  conflict-as-no-op, never updates; the A2 backfill skips existing rows). **There is no
+  same-hash machine re-run of any kind.** An improved detector benefits new conversions
+  and replaces only; it never retroactively touches an existing calibration. Human
+  answers are therefore pinned *structurally* — no merge/ownership policy exists because
+  no machine writer exists after generation.
+- The review step's writes — pick-a-split, the count fallback, and the calibrate
+  hand-off — are part of the **human/verify flow that owns the row after generation**,
+  the same standing as any manual calibrate edit.
+- Replace semantics unchanged: new bytes → new hash → new calibration target, converted
+  from scratch by the then-current pipeline.
 
 ## Non-goals
 
@@ -126,11 +147,11 @@ Which split looks right?
 
 ## Open questions (Codex)
 
-1. **Verdict/confidence precedence** — flag on `verdict` when present, numeric fallback
-   otherwise: any lifecycle edge (edit-clears, replace, legacy rows) where the two
-   signals disagree in a way the seam can't order?
-2. **Constrained re-run** — "best N-bar segmentation from candidate verticals" needs an
-   algorithm sketch at build time; flag if N alone is insufficient ground truth in any
-   real layout (pickup bars, multirests).
+1. **Verdict lifecycle residual** — verdict now clears in the same helpers as
+   confidence; any remaining edge (replace, legacy rows, undo/history paths) where a
+   stale verdict survives an edit?
+2. **Plausibility floor** — the N-span re-run's scoring floor is build-time work; flag
+   any real layout where *visible-span counting itself* is ambiguous to a non-reader
+   (the case that would defeat the count fallback entirely).
 3. **Strip rendering** — per-system raster crops on mobile: acceptable cost, or
    pre-render at conversion time?
