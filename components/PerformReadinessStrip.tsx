@@ -69,8 +69,8 @@ function lineFor(
       return {
         text:
           view.reason === 'unsupported-schema'
-            ? "This chart's map was made by a newer version of the app — update to edit it."
-            : "This chart's stored map is corrupt.",
+            ? "This chart's overlay was made by a newer version of the app — update to edit it."
+            : "This chart's stored overlay is corrupt.",
       };
     case 'ready':
       return readyLine(view.readiness, calibratable, convertible, convertState);
@@ -97,7 +97,7 @@ function readyLine(
       // Gated charts (lyrics sheets, builder charts) keep the hand-calibrate
       // route — we decline to spend AI, not to let the owner set it up.
       if (!convertible) {
-        return { text: 'No chart map for these bytes — Calibrate to set up Perform.', cta: { kind: 'calibrate', label: 'Calibrate', tool: 'sections' } };
+        return { text: 'No overlay for these bytes — Calibrate to set up Perform.', cta: { kind: 'calibrate', label: 'Calibrate', tool: 'sections' } };
       }
       switch (convertState) {
         case 'running':
@@ -110,7 +110,7 @@ function readyLine(
           // header. A failed build leaves the chart exactly as it was.
           return { text: "Couldn't build an overlay for this chart.", cta: { kind: 'build', label: 'Try again' } };
         case 'idle':
-          return { text: 'No chart map for these bytes.', cta: { kind: 'build', label: 'Build overlay' } };
+          return { text: 'No overlay for these bytes.', cta: { kind: 'build', label: 'Build overlay' } };
       }
     case 'verifiable':
       return calibratable
