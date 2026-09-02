@@ -199,17 +199,23 @@ describe('measurePage — line-start begin-repeat', () => {
   });
 
   it('keeps a thick divider that has a real measure before it', () => {
-    // Same thick bar, but far enough in that a whole measure fits ahead of it — so it
-    // is a divider and must still count. ("Left 20% of the staff" gets this wrong.)
+    // ★ This fixture is built so the shipped rule and the REJECTED "leftmost 20% of the
+    // staff" rule disagree — otherwise it pins nothing. The staff runs 50..550, so the
+    // rejected rule's window is x < 150 and the thick bar at x=140 sits inside it: that
+    // rule would call this a line-start repeat and subtract. But the bars here are 60pt
+    // wide and the gap from the staff start is 90pt — a whole measure fits ahead of the
+    // thick bar, so it is a DIVIDER and must still count. Eight clusters, eight
+    // measures. (A real chart taught us this: its genuine first bar fit inside the 20%.)
     const segs = [
       ...staffLines(100),
-      ...barlines(100, [200], 2.4),
-      ...barlines(100, [300, 400, 500, 550]),
+      ...barlines(100, [140], 2.4),
+      ...barlines(100, [200, 260, 320, 380, 440, 500, 550]),
       ...staffLines(200),
       ...barlines(200, [150, 250, 350, 450, 550]),
     ];
     const m = measurePage(segs, [], 1);
-    expect(m.systems[0].spans).toBe(5);
+    expect(m.systems[0].barlines).toHaveLength(8);
+    expect(m.systems[0].spans).toBe(8);
   });
 });
 
