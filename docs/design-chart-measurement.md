@@ -1,0 +1,127 @@
+# Design — Chart measurement engine (productizing the geometry spike)
+
+Status: **design only — no build until merged** (standing process).
+Companion to `design-chart-review-step.md` (frozen): this engine *supplies* the
+per-system verdicts that doc consumes. Invoked per `backlog-charting.md` §Ruled
+2026-09-02 (owner-demand trigger; never-gates checked before anything runs). Nothing
+here changes generate-once, the hash rule, or verify/`canVerify`.
+
+## What it is
+
+A deterministic geometry pass that replaces VLM-first conversion for vector charts:
+measure staves and barlines from the PDF's own vector data, read printed measure
+numbers / time signatures / multirest counts from the text layer, validate measured
+against printed, and emit verdicts. The VLM is demoted to a per-system fallback for
+`uncertain` systems and the whole-chart path for raster scans (`estimated`).
+
+Validation status (2026-09-02): the reference implementation scores **464/464 scored
+systems across 62 real charts** (multi-page, multiple engraving toolchains, mostly
+out-of-sample). This doc is about porting that into the product without losing it.
+
+## The coordinate-source decision (the reason this doc exists)
+
+The reference implementation leans on poppler's `pdftocairo` — a native binary,
+unavailable on Vercel. And the one approach that looks free is **disproven**:
+hand-rolling transform composition over pdf.js's operator list produced
+content-dependent coordinate drift of 23–28pt varying *by graphics context* — wrong in
+ways that self-validation partially masked. Do not walk operator lists by hand.
+
+**Decision: a recording-canvas shim over pdf.js rendering, client-side.**
+
+- Hand `page.render()` a real 2D context wrapped in a recording proxy. The proxy
+  forwards every call (rendering stays correct) and records path geometry with the
+  **transform pdf.js itself has set** — read via `ctx.getTransform()` at paint time.
+  Correct coordinates *by construction*, because the same code path that puts ink on
+  screen produces the measurements.
+- Runs in the browser, where pdf.js already renders every chart — matching the shipped
+  client-driven conversion model (`design-chart-converter.md` §Execution model). Zero
+  new dependencies, zero new infra.
+- ⚠ Known interception detail: modern pdf.js builds paths via **`Path2D`** rather than
+  ctx verbs when available. The shim must intercept both: patch the `Path2D`
+  constructor (a subclass that records verbs and remains a real `Path2D`) and record
+  the CTM at `stroke(path)` / `fill(path)` time, when the transform actually applies.
+  Chunk B opens with a feasibility spike on exactly this; the acceptance harness below
+  is its exit gate.
+- Rejected: WASM poppler/pdfium (heavyweight new dependency for one function), a
+  sidecar conversion service (new infra for a pure function), server-side node-canvas
+  (native dep back on Vercel — the original problem).
+
+Captured per segment: endpoints (page space), stroke width, stroked-vs-filled, and
+flat-curve chords (control points on the chord → emit as line; real slurs/ties stay
+curves and are ignored). Text via `getTextContent()` as today.
+
+## Pipeline (per page)
+
+1. **Staves**: bucket horizontal segments by y, merge contiguous x-ranges (some
+   engravers break each staff line at every barline); staff candidates by merged
+   length ≥ 60% of the longest rule; group candidates by spacing. Interleaved ink
+   (voltas, rehearsal boxes, multirests, hairpins) cannot split a staff.
+2. **Barlines**: verticals whose endpoints land on the outer staff lines
+   (tol = max(0.04·staffHeight, 1.2pt)); keep modal-stroke-width strokes (barline
+   width is engraver-specific but modal per chart; staff-spanning note stems are
+   thinner) plus thick (>1.5pt) strokes; cluster within 6pt (repeat thick+thin pairs
+   run 3–4.5pt). A thick leftmost cluster with ≥3 clusters total and a gap from staff
+   start under 1.0× the median bar width is a line-start begin-repeat: a span *start*,
+   not a divider.
+3. **Text**: printed measure numbers at the staff's left edge; time signatures excluded
+   as stacked same-x digit pairs; a multirest is the *pair* of a digit and an H-bar
+   under it (chord-extension superscripts have no bar; beams have no digit).
+4. **Arithmetic**: printed delta = visible spans + Σ(multirest − 1). An unnumbered
+   first system is measure 1 on **page 1 only**; continuation pages abstain.
+5. **Verdicts** per the frozen spec: `validated` (measured = printed delta) ·
+   `corroborated` (no printed numbers; measured = VLM) · `uncertain` (mismatch /
+   disagreement → per-system VLM fallback, still `uncertain` until a human answers) ·
+   `estimated` (raster page: no vectors, no text → whole-page VLM). Zero staves on a
+   vector page with real text = **not notation** (lyrics/chord-sheet class): no VLM
+   call, no overlay, record the classification — this is the automatic backstop gate
+   from §Ruled 2026-09-02.
+
+All thresholds above are corpus-calibrated constants, named in one place in the
+implementation — not scattered magic numbers — because the acceptance harness is how
+they are ever retuned.
+
+## Acceptance harness (load-bearing)
+
+The port must reproduce the reference results on the reference corpus: **464/464
+scored systems, and identical no-staves classifications**. The corpus (real charts,
+`~/chart-spike/` on the dev machine) is copyrighted material and stays out of the
+repo; the harness is a local dev script that runs the engine (headless browser for the
+shim) against the stored expected-results JSON. Regressions in any rule change must be
+caught by score movement — the self-validation signal is the objective function, the
+same way it was during the spike.
+
+Open question below: whether extracted geometry fixtures (segment/verdict JSON, no
+renderable content) may live in-repo so CI can cover the pure pipeline stages
+(2–5) without the corpus. The pipeline is pure functions over segments + text items,
+so stages 2–5 are unit-testable with synthetic fixtures regardless.
+
+## Integration
+
+- Invoked by the owner-demand trigger (lazy-conversion chunk; placement decided
+  there). Pre-gates run first: `role = 'lyrics'` and `source_spec IS NOT NULL` never
+  reach the engine.
+- Writes the draft calibration exactly as the converter does today (generate-once,
+  insert-only, same hash rule), now including per-`System` `verdict`
+  (runtime-enum-validated at the DB boundary per the frozen spec).
+- Cost profile: measurement is local JS — the paid VLM call happens only for
+  `uncertain` systems and raster pages. Silent-when-confident comes free.
+
+## Non-goals
+
+- The review sheet UI (chunk C, frozen spec) and the trigger UX (chunk A).
+- Re-measuring existing calibrations (generate-once stands; improved engines benefit
+  new conversions and replaces only).
+- Cross-page measure-number chaining (scores page-tail systems; future accuracy
+  tune-up, not required for verdicts to work).
+
+## Open questions (Codex)
+
+1. **Shim coverage risk**: besides `Path2D`, does the shipped pdf.js version paint any
+   chart-relevant geometry through paths the proxy can't observe (e.g., `putImageData`
+   compositing, worker-side rasterization)? Name any op class that bypasses both
+   interception points.
+2. **Fixture strategy**: geometry-JSON fixtures in-repo for CI — acceptable, or keep
+   all corpus-derived data local and rely on synthetic unit fixtures?
+3. **Perf**: one extra render pass per page at conversion time (recording proxy), on
+   mobile Safari — acceptable, or does the shim need to piggyback the viewer's
+   existing render?
