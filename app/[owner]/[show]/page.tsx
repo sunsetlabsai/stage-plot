@@ -72,7 +72,7 @@ import {
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart, fetchChartBytes } from '@/lib/pdf-viewer';
 import { isUnsupportedChartMime, overlaySkipReason } from '@/lib/chart-converter';
-import { triggerOverlayCreate } from '@/lib/chart-upload';
+import { triggerOverlayCreate, buildOverlayStep } from '@/lib/chart-upload';
 import { parseChartDeepLink, buildChartShareUrl, buildShowShareUrl, chartShareFilename } from '@/lib/share';
 import ShareButton from '@/components/ShareButton';
 import ManageChartsModal from '@/components/ManageChartsModal';
@@ -3573,18 +3573,17 @@ function ChartNavigator({
     setConvertState('running');
     const result = await triggerOverlayCreate(calibrationChartId);
     if (calGenRef.current !== gen) return; // chart changed under us — drop it
-    if (!result?.generated) {
-      // Covers reason 'exists' too: a row exists for the SERVER's hash while our
-      // own load 404'd on ours, which means we are rendering different bytes
-      // than storage holds (a stale cached copy). Honest failure + retry here;
-      // the evict-and-remeasure path belongs to chunk B's split contract.
+    if (buildOverlayStep(result) === 'failed') {
       setConvertState('error');
       return;
     }
     // Refetch at the hash of the bytes THIS client loaded rather than trusting
     // the calibration in the response: the converter addresses its write to the
     // authoritative storage bytes, and an overlay may only ever be drawn over
-    // the bytes it was built for.
+    // the bytes it was built for. This GET is the SINGLE authority on that —
+    // it is also what resolves a `exists` result (see buildOverlayStep), so a
+    // row built for other bytes 404s here and fails, while one built for these
+    // bytes is adopted no matter who inserted it.
     try {
       const res = await fetch(
         `/api/charts/calibration?chart_id=${encodeURIComponent(calibrationChartId)}&hash=${sourceHash}`,

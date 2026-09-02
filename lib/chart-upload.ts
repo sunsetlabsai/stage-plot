@@ -52,6 +52,33 @@ export class ChartUploadError extends Error {
   }
 }
 
+// What the caller should do next with a convert result. Pure, so the reasoning
+// below is pinned by tests rather than buried in an async tail in page.tsx.
+export type BuildOverlayStep = 'refetch' | 'failed';
+
+/**
+ * Map a convert outcome to the next step.
+ *
+ * ⚠ `exists` is NOT a failure, and reading it as one was a real bug (caught in
+ * review of PR #169). The client's calibration GET 404s at LOAD time; the
+ * convert fires later, on a click, and anything can insert a row for
+ * (chart_id, hash) in between — another tab or device, the admin backfill, or
+ * THIS client's own previous build whose post-build refetch failed transiently.
+ * That last one made the error self-sustaining: every retry returned `exists`
+ * and re-errored, while a perfectly good overlay for the bytes on screen sat in
+ * the DB, reachable only by reloading the page.
+ *
+ * Whether an existing row describes the bytes we are RENDERING is a question
+ * only the hash-addressed GET can answer — it is keyed on the hash of the bytes
+ * this client loaded, so a row built for different bytes 404s there and fails
+ * correctly. So `exists` defers to that one authority instead of guessing here.
+ */
+export function buildOverlayStep(result: ConvertResult | null): BuildOverlayStep {
+  if (!result) return 'failed'; // transport failure / non-ok HTTP
+  if (result.generated) return 'refetch';
+  return result.reason === 'exists' ? 'refetch' : 'failed';
+}
+
 // Fire the overlay converter for a chart, ON OWNER DEMAND. Non-fatal by design:
 // any failure (vision error, timeout, transport) returns null and the chart
 // simply has no overlay (manual rail). Never throws — the caller renders the
