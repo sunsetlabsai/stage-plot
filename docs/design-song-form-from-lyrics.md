@@ -67,8 +67,12 @@ Section headers in the corpus follow a consistent convention:
 | Form | Meaning | Example |
 | --- | --- | --- |
 | `<Label> <N>x` | **bar count within** the section | `Verse 8x` → an 8-bar verse |
-| `<Label> x<N>` | **play the section N times** | `Chorus x2` → the chorus, twice |
+| `<Label> x<N>` | **play the section N times** — carries **no bar count**, so it inherits like a bare label | `Chorus x2` → the 8-bar chorus, twice |
 | `<Label>` (bare) | inherit bar count from the previous same-labelled section | second `Verse` → 8 bars |
+
+⚠ Note the second row: **`x<N>` states a repeat, not a length.** In the worked example
+below, the final `Chorus x2` gets its 8 bars from the earlier `Chorus 8x` — so it is an
+*inheriting* form too, and carries exactly the same guess risk as a bare label (§2.2).
 
 A representative sheet:
 
@@ -110,13 +114,18 @@ Named explicitly, because each one is a place we must not guess:
 
 ### 2.2 Ambiguities the parser must surface rather than resolve
 
-- **Bare-section inheritance requires explicit per-section confirmation.**
+- **Any inheriting section requires explicit per-section confirmation.** That means
+  **both** a bare `<Label>` **and** a multiplier-only `<Label> x<N>` — the latter states
+  how many times to play a section, never how long it is, so it inherits its bar count
+  exactly as a bare label does. *(The `x<N>` case was missed in the first two drafts and
+  caught in Codex R2; the doc's own worked example depends on it.)*
   If verse 1 is 16 bars and verse 2 is 8, inheritance produces a confidently wrong
   form. An inherited count is still a **guess** — the source omitted it — so by this
-  doc's own standard (§3) it cannot be emitted as a resolved value. A bare section
-  yields a **proposed** count the owner must confirm per section; it is never persisted
-  on confidence alone. *(Tightened from "reduced confidence + review flag" after Codex
-  review: a flag still ships a concrete number.)*
+  doc's own standard (§3) it cannot be emitted as a resolved value. An inheriting
+  section yields a **proposed** count the owner must confirm per section; it is never
+  persisted on confidence alone. With no same-label antecedent it **fails**; we do not
+  invent a length in either form. *(Tightened from "reduced confidence + review flag"
+  after Codex R1: a flag still ships a concrete number.)*
 - **Multiplier scope.** `Verse, Chorus x2` — the `x2` binds to `Chorus` under this
   grammar. If a sheet ever intends "the verse/chorus pair, twice," the grammar cannot
   express it and the parser must not invent it. Parse per-section; flag adjacent
@@ -148,12 +157,22 @@ where cross-instrument sync matters most: horn and vocal parts.
 3. **The authored side is already musical.** `RoadmapSection.bars` comes from an author
    describing form; builder charts have no multirests, so it is a measure count already.
 
-**This costs nothing new in the alignment layer** — and that is a useful confirmation
-that the unit choice is right. One `CanonicalBar` per measure means a multirest chart
-maps N canonical bars onto 1 visible bar, which is precisely a **non-`bar-isomorphic`**
-span, so `barOffset` already correctly coarsens to the section head
-(`design-conductor-authority.md` §2.3.1). The existing design anticipated this shape;
-it just needs the unit stated.
+**What the alignment layer actually does with a multirest — degrade, not resolve.**
+*(Corrected after Codex R2; an earlier draft claimed multirest alignment came "for
+free," which overstated the model.)* Alignment maps a canonical **section** to a local
+section plus a boolean — `NodeAlignment` is `{ status, localSectionId, barIsomorphic }`
+(`lib/song-structure.ts:65-80`). It does **not** map N canonical bars onto 1 visible
+bar; there is no bar-level correspondence in the model at all.
+
+What is genuinely true, and verified: `seedAlignment` marks a span non-isomorphic when
+bar counts differ (`lib/song-structure.ts:272-283`), and `resolveRef` then coarsens
+`barOffset` to the local section head (`:242-248`). So a multirest section **degrades
+safely to section precision** — "top of the bridge," not "bar 5 of the bridge."
+
+That is the correct outcome under §2.2.0's *degrade precision, never honesty*, and it
+means choosing the musical measure as the canonical unit introduces **no new failure
+mode**. It is not the same as bar-accurate following through a multirest, which the
+model cannot express today and which nothing in this design proposes to add.
 
 **Consequence for this design:** a lyrics-derived count is directly comparable to
 `RoadmapSection.bars` and to `SongStructure` bars, and is **not** comparable to
@@ -337,7 +356,8 @@ Every one of these degrades to review, never to a silent result.
 | Condition | Handling |
 | --- | --- |
 | Bare section, no prior same-label section | **Fail** the section; cannot invent a bar count |
-| Bare section inheriting from a prior one | **Propose** the inherited count; **require per-section owner confirmation** before persisting (§2.2) |
+| `<Label> x<N>`, no prior same-label section | **Fail** — a multiplier states repeats, not length (§2.2) |
+| Any inheriting section (bare **or** `x<N>`) with an antecedent | **Propose** the inherited count; **require per-section owner confirmation** before persisting (§2.2) |
 | No key line | Spec needs `renderKey`; prompt the owner, do not default |
 | No time signature | Default `4/4` with `timeSigSource: 'assumed'` in the spec; duration math refuses until confirmed (§2.1) |
 | Bar count total disagrees with a converter read of the same song | Surface both; owner decides. **Never auto-reconcile** |
@@ -415,12 +435,17 @@ Every one of these degrades to review, never to a silent result.
 
 Gated commits, Codex per chunk.
 
-1. **Grammar parser (pure, tested).** Header extraction + §2 grammar →
-   `AuthoringDraft`, via `parseDescription` where possible. **Tests:** each grammar row
-   in §2; every §7 failure mode; the §2 worked example end-to-end; a bare section with
-   no antecedent fails; a dropped section is caught by `tallyDraft`.
-2. **Ingest path.** Text-layer extraction from a lyrics PDF → parser → `foldDraft` →
+1. **Grammar parser (pure, tested).** Header extraction + §2 grammar → `RoadmapSpec`
+   **directly**, per §6.2 — a form-only adapter emitting `RoadmapSection[]` with
+   `changes` omitted. It does **not** route through `AuthoringDraft`, `parseDescription`
+   or `foldDraft`; that path rejects chord-free input (`lib/roadmap-authoring.ts:559`).
+   **Tests:** each grammar row in §2; every §7 failure mode; the §2 worked example
+   end-to-end; a bare section with no antecedent fails; a multiplier-only section with
+   no antecedent fails (§2.2).
+2. **Ingest path.** Text-layer extraction from a lyrics PDF → parser →
    `validateRoadmapSpec` → proposal record. Fails closed with no text layer.
+   Read-back tally derived from the **validated spec**, not `tallyDraft` (§6.4) —
+   `tallyDraft` is op-blind and this grammar emits repeats routinely.
 3. **Owner confirmation UI.** Proposal → review → confirm, reusing the §2.2.1 flow.
    Blocked on that flow existing (conductor chunk 1 wiring).
 4. **`SongStructure` seeding.** Confirmed spec → `SongStructure` + initial
