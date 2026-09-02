@@ -71,7 +71,8 @@ import {
   type DownloadProgress,
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart, fetchChartBytes } from '@/lib/pdf-viewer';
-import { isUnsupportedChartMime } from '@/lib/chart-converter';
+import { isUnsupportedChartMime, overlaySkipReason } from '@/lib/chart-converter';
+import { triggerOverlayCreate, buildOverlayStep } from '@/lib/chart-upload';
 import { parseChartDeepLink, buildChartShareUrl, buildShowShareUrl, chartShareFilename } from '@/lib/share';
 import ShareButton from '@/components/ShareButton';
 import ManageChartsModal from '@/components/ManageChartsModal';
@@ -107,7 +108,7 @@ import {
   performReadinessView,
 } from '@/lib/chart-calibration';
 import type { TraversalStep } from '@/lib/chart-calibration';
-import PerformReadinessStrip, { type CalTool } from '@/components/PerformReadinessStrip';
+import PerformReadinessStrip, { type CalTool, type ConvertState } from '@/components/PerformReadinessStrip';
 import {
   detectBarlines,
   snapBarsToLines,
@@ -2991,6 +2992,18 @@ function ChartNavigator({
   const [reviewIdx, setReviewIdx] = useState(-1);
   const [everReviewed, setEverReviewed] = useState(false);
 
+  // ── Owner-demand overlay build (lazy conversion) ──
+  // Transient, per-chart, never persisted: a failed build leaves the chart
+  // exactly as it was, so there is nothing to remember. Reset with the rest of
+  // the calibration state when the chart changes.
+  const [convertState, setConvertState] = useState<ConvertState>('idle');
+  // Bumped by every calibration-state reset, i.e. once per chart load. A build
+  // can outlive the chart that started it (the vision call runs for seconds and
+  // the performer can page to the next chart meanwhile), so the handler captures
+  // this and bails if it moved — the same job `cancelled` does in the load
+  // effect, which a plain closure over chartId can't do from an async tail.
+  const calGenRef = useRef(0);
+
   // Reset chart and page when song or available charts change
   useEffect(() => {
     if (currentIdx !== prevSongIdxRef.current) {
@@ -3044,6 +3057,14 @@ function ChartNavigator({
   // The Calibrate affordance (edit mode) is owner-only — the v1 source-scope
   // boundary. Drive / static charts and non-owners never see it.
   const calibratable = isOwner && !!calibrationChartId;
+  // May we OFFER to build an overlay for this chart? Everything Calibrate needs,
+  // plus the known-never gates — decided by the same predicate the convert route
+  // enforces, so the CTA and the server can never disagree about what is
+  // convertible. `is_builder` is the client's view of `source_spec IS NOT NULL`.
+  const convertible =
+    calibratable &&
+    !!activeChart &&
+    overlaySkipReason({ role: activeChart.role, hasSourceSpec: !!activeChart.is_builder }) === null;
   // Perform consumes a calibration only when it is verified (and hash-matched on
   // load). overlayCalibration is what the overlay renders in each mode.
   const overlayCalibration =
@@ -3530,6 +3551,57 @@ function ChartNavigator({
     }
   };
 
+  // The ONE place a fetched calibration becomes live state, shared by the chart
+  // load effect and the post-build refetch below — so an overlay that was just
+  // built behaves exactly like one loaded from storage, review latch included.
+  // Two call sites interpreting the same payload is precisely how they drift.
+  const applyLoadedCalibration = useCallback((loadedCal: ChartCalibration) => {
+    setCalibration(loadedCal);
+    // Latch the review-done indicator if the draft carries any model flags
+    // (low-confidence ∪ resolve-error).
+    if (reviewFlags(loadedCal).count > 0) setEverReviewed(true);
+  }, []);
+
+  // Build an overlay for the open chart, on the owner's explicit ask (the strip's
+  // "Build overlay"). This is the lazy-conversion trigger — the only convert call
+  // site in the app now that upload stores bytes and stops.
+  const buildOverlay = useCallback(async () => {
+    // sourceHash is required, not incidental: without the hash of the bytes we
+    // loaded there is nothing to address the result to.
+    if (!calibrationChartId || !sourceHash) return;
+    const gen = calGenRef.current;
+    setConvertState('running');
+    const result = await triggerOverlayCreate(calibrationChartId);
+    if (calGenRef.current !== gen) return; // chart changed under us — drop it
+    if (buildOverlayStep(result) === 'failed') {
+      setConvertState('error');
+      return;
+    }
+    // Refetch at the hash of the bytes THIS client loaded rather than trusting
+    // the calibration in the response: the converter addresses its write to the
+    // authoritative storage bytes, and an overlay may only ever be drawn over
+    // the bytes it was built for. This GET is the SINGLE authority on that —
+    // it is also what resolves a `exists` result (see buildOverlayStep), so a
+    // row built for other bytes 404s here and fails, while one built for these
+    // bytes is adopted no matter who inserted it.
+    try {
+      const res = await fetch(
+        `/api/charts/calibration?chart_id=${encodeURIComponent(calibrationChartId)}&hash=${sourceHash}`,
+      );
+      if (calGenRef.current !== gen) return;
+      if (!res.ok) {
+        setConvertState('error');
+        return;
+      }
+      const json = await res.json();
+      if (calGenRef.current !== gen) return;
+      applyLoadedCalibration(json.calibration as ChartCalibration);
+      setConvertState('idle');
+    } catch {
+      if (calGenRef.current === gen) setConvertState('error');
+    }
+  }, [calibrationChartId, sourceHash, applyLoadedCalibration]);
+
   useEffect(() => {
     let cancelled = false;
     // New chart ⇒ drop any prior calibration state (avoid cross-chart bleed).
@@ -3554,6 +3626,8 @@ function ChartNavigator({
       setCanvasBox(null);
       setReviewIdx(-1);
       setEverReviewed(false);
+      setConvertState('idle');
+      calGenRef.current += 1;
     };
     if (!chartFileId) {
       // Defer state reset to microtask to satisfy lint (no sync setState in effect)
@@ -3604,13 +3678,7 @@ function ChartNavigator({
             if (cancelled) return;
             if (res.ok) {
               const json = await res.json();
-              if (!cancelled) {
-                const loadedCal = json.calibration as ChartCalibration;
-                setCalibration(loadedCal);
-                // Latch the review-done indicator if the loaded draft carries
-                // any model flags (low-confidence ∪ resolve-error).
-                if (reviewFlags(loadedCal).count > 0) setEverReviewed(true);
-              }
+              if (!cancelled) applyLoadedCalibration(json.calibration as ChartCalibration);
             } else if (res.status === 409) {
               // A row EXISTS but this build refused it (owner-only). Do NOT show
               // `none`/"Calibrate" — that would clobber the unreadable map (§3.2).
@@ -4327,6 +4395,9 @@ function ChartNavigator({
           view={performReadinessView({ loading, loadError, unreadable: calUnreadable, cal: calibration })}
           calibratable={calibratable}
           onCalibrate={enterCalibrate}
+          convertible={convertible}
+          convertState={convertState}
+          onBuildOverlay={buildOverlay}
         />
       ) : null}
 

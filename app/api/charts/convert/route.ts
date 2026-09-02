@@ -7,6 +7,7 @@ import { hashPdfBytes } from '@/lib/chart-calibration';
 import {
   MAX_PDF_BYTES,
   buildCalibrationFromVision,
+  overlaySkipReason,
   schemaVersionToPersist,
   sniffPdf,
 } from '@/lib/chart-converter';
@@ -30,7 +31,9 @@ interface PostBody {
   chart_id?: string;
 }
 
-// POST /api/charts/convert — auto-overlay generator. Vision-first: send the PDF
+// POST /api/charts/convert — the overlay generator, fired ON OWNER DEMAND (it
+// is no longer an upload side-effect: backlog-charting.md §Ruled 2026-09-02).
+// Vision-first: send the PDF
 // to Claude as a document block, map the structured JSON to a DRAFT
 // ChartCalibration, and persist it once under (chart_id, source_hash). Idempotent
 // and edit-safe: the INSERT … ON CONFLICT DO NOTHING is the real generate-once
@@ -56,15 +59,26 @@ export async function POST(request: NextRequest) {
   }
 
   // 1b. Owner check (RLS would also block; this yields a clean 403) + storage path.
+  //     `role` / `source_spec` come back for the known-never gates in 1c.
   const { data: chart } = await supabase
     .from('chart_library')
-    .select('storage_path')
+    .select('storage_path, role, source_spec')
     .eq('id', chartId)
     .eq('owner_id', user.id)
     .maybeSingle();
   if (!chart) {
     return Response.json({ error: 'Chart not found or permission denied' }, { status: 403 });
   }
+
+  // 1c. Known-never gates, BEFORE any download or vision call — the whole point
+  //     is to save the call (backlog-charting.md §Ruled 2026-09-02). The client
+  //     suppresses the "Build overlay" CTA on the same rule, so reaching here
+  //     means a direct POST; the shared predicate is what keeps the two honest.
+  const skip = overlaySkipReason({
+    role: typeof chart.role === 'string' ? chart.role : '',
+    hasSourceSpec: chart.source_spec != null,
+  });
+  if (skip) return degrade(skip);
 
   // 2. Fetch bytes from the AUTHORITATIVE storage object (service-role download,
   //    not the CDN) so the hash matches what the viewer computes on the same bytes.

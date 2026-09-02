@@ -7,6 +7,7 @@ import type {
 } from './types';
 import { CALIBRATION_SCHEMA_VERSION, isValidCalibration } from './chart-calibration';
 import { EXPORT_MIME_TYPES } from './drive';
+import { canonicalizeRole } from './normalize';
 
 // ─── Caps (tunable constants — see docs/design-chart-converter.md §Limits) ────
 // File-size cap: oversized PDFs skip vision and degrade to manual (`too_large`).
@@ -28,6 +29,48 @@ export function sniffPdf(bytes: Uint8Array): boolean {
     bytes[3] === 0x46 &&
     bytes[4] === 0x2d
   );
+}
+
+// ─── Known-never gates (backlog-charting.md §Ruled 2026-09-02) ────────────────
+//
+// Conversion is LAZY — it fires on owner demand, never as an upload side-effect
+// — so these gates are not a cost cleanup. They answer "may this chart be
+// offered an overlay at all?", and the point is to SAVE the call, not explain it
+// afterwards. That makes them a shared DECISION with two consumers that must
+// never drift: the client suppresses the "Build overlay" CTA
+// (`PerformReadinessStrip`, via page.tsx's `convertible`), and
+// `/api/charts/convert` enforces the same rule server-side, because the route is
+// what actually spends the owner's AI budget. One rule, one place.
+//
+// Two of the ruling's three gates are decidable from the chart_library row and
+// live here. The third — the zero-staves classifier, the automatic backstop for
+// a MISLABELED upload — needs the measurement engine to see inside the PDF, so
+// it arrives with chunk B; it cannot be expressed at this layer.
+export type OverlaySkipReason = 'authored' | 'lyrics';
+
+/**
+ * Why this chart must never be sent to the converter — or `null` if it may be.
+ *
+ * - `authored` — a builder chart (`source_spec IS NOT NULL`). The spec already
+ *   IS the ground truth, and `/api/charts/roadmap/save` writes a born-verified
+ *   calibration for it; re-deriving geometry from the PDF we ourselves rendered
+ *   could only be worse. Checked first: it is the stronger statement, and it
+ *   holds whatever the role says.
+ * - `lyrics` — a lyrics sheet has no staves to measure (measured 2026-09-02:
+ *   342/342 lyrics PDFs in the live library have zero detectable staves).
+ *   Role is free text on the row, so it is canonicalized, not compared raw —
+ *   "Lyrics" and "LYRICS" are the same gate.
+ *
+ * A gated chart is not a broken chart: the owner can still hand-calibrate it
+ * from the Calibrate editor. We only decline to spend AI on it.
+ */
+export function overlaySkipReason(chart: {
+  role: string;
+  hasSourceSpec: boolean;
+}): OverlaySkipReason | null {
+  if (chart.hasSourceSpec) return 'authored';
+  if (canonicalizeRole(chart.role) === 'lyrics') return 'lyrics';
+  return null;
 }
 
 /**

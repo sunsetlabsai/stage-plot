@@ -8,6 +8,7 @@ import { hashPdfBytes } from '@/lib/chart-calibration';
 import {
   MAX_PDF_BYTES,
   buildCalibrationFromVision,
+  overlaySkipReason,
   schemaVersionToPersist,
   sniffPdf,
 } from '@/lib/chart-converter';
@@ -142,7 +143,33 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Could not read chart_calibration', detail: calErr.message }, { status: 500 });
   }
   const calibrated = new Set((calRows ?? []).map((r) => r.chart_id as string));
-  const needWork = (charts as ChartRow[]).filter((c) => !calibrated.has(c.id));
+
+  // Known-never gates (backfill-charting.md §Ruled 2026-09-02). A bulk sweep is
+  // now the ONE place these still save real money: the per-chart trigger is the
+  // owner asking for a specific chart, but this walks EVERY un-calibrated row,
+  // which on the live library means 342 lyrics PDFs that provably have no staves.
+  // Gating here (rather than inside convertChart) also keeps the dry-run preview
+  // honest — need_work counts what will actually be worked.
+  // Ids only: `source_spec` is a full spec blob and this is a whole-library read.
+  const { data: authoredRows, error: authoredErr } = await admin
+    .from('chart_library')
+    .select('id')
+    .not('source_spec', 'is', null);
+  if (authoredErr) {
+    return Response.json(
+      { error: 'Could not read chart_library source_spec', detail: authoredErr.message },
+      { status: 500 },
+    );
+  }
+  const authored = new Set((authoredRows ?? []).map((r) => r.id as string));
+
+  const uncalibrated = (charts as ChartRow[]).filter((c) => !calibrated.has(c.id));
+  const needWork = uncalibrated.filter(
+    (c) => overlaySkipReason({ role: c.role, hasSourceSpec: authored.has(c.id) }) === null,
+  );
+  // Surfaced in the response rather than silently dropped — a batch that reports
+  // "nothing to do" must not be hiding hundreds of deliberately-gated charts.
+  const gated = uncalibrated.length - needWork.length;
 
   // Dry run: counts only — instant, nothing fetched or written.
   if (dryRun) {
@@ -150,7 +177,8 @@ export async function POST(request: NextRequest) {
       dry_run: true,
       limit,
       total_charts: charts.length,
-      already_calibrated: charts.length - needWork.length,
+      already_calibrated: charts.length - uncalibrated.length,
+      gated_never_convert: gated,
       need_work: needWork.length,
       would_process_this_batch: Math.min(needWork.length, limit),
     });
@@ -197,7 +225,8 @@ export async function POST(request: NextRequest) {
     dry_run: false,
     limit,
     total_charts: charts.length,
-    already_calibrated: charts.length - needWork.length,
+    already_calibrated: charts.length - uncalibrated.length,
+    gated_never_convert: gated,
     ...tally,
     generated_charts: generatedCharts,
     failures,

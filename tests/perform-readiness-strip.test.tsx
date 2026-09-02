@@ -17,6 +17,9 @@ function props(over: Partial<PerformReadinessStripProps> = {}): PerformReadiness
     view: { phase: 'loading' },
     calibratable: true,
     onCalibrate: vi.fn(),
+    convertible: true,
+    convertState: 'idle',
+    onBuildOverlay: vi.fn(),
     ...over,
   };
 }
@@ -58,17 +61,85 @@ describe('PerformReadinessStrip', () => {
     expect(screen.queryByRole('button')).toBeNull();
   });
 
-  it('none → Calibrate→sections for owner; nothing for a non-calibratable viewer', () => {
+  it('none → nothing for a non-calibratable viewer, convertible or not', () => {
+    // calibratable is the outer gate: a collaborator must never be offered a
+    // build that would spend the OWNER's AI budget.
+    for (const convertible of [true, false]) {
+      cleanup();
+      const { container } = render(
+        <PerformReadinessStrip
+          {...props({ view: ready({ state: 'none' }), calibratable: false, convertible })}
+        />,
+      );
+      expect(container).toBeEmptyDOMElement();
+    }
+  });
+
+  // ── Owner-demand overlay build (lazy conversion) ────────────────────────────
+  it('none + convertible → "Build overlay" fires the BUILD callback, not Calibrate', () => {
+    const onBuildOverlay = vi.fn();
     const onCalibrate = vi.fn();
-    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), onCalibrate })} />);
+    render(
+      <PerformReadinessStrip
+        {...props({ view: ready({ state: 'none' }), onBuildOverlay, onCalibrate })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Build overlay' }));
+    expect(onBuildOverlay).toHaveBeenCalledTimes(1);
+    expect(onCalibrate).not.toHaveBeenCalled();
+  });
+
+  it('none + NOT convertible → the hand-calibrate CTA (gated ≠ unusable)', () => {
+    // A lyrics sheet / builder chart: we decline to spend AI, but the owner can
+    // still set it up by hand.
+    const onCalibrate = vi.fn();
+    const onBuildOverlay = vi.fn();
+    render(
+      <PerformReadinessStrip
+        {...props({ view: ready({ state: 'none' }), convertible: false, onCalibrate, onBuildOverlay })}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: 'Build overlay' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Calibrate' }));
     expect(onCalibrate).toHaveBeenCalledWith('sections');
+    expect(onBuildOverlay).not.toHaveBeenCalled();
+  });
 
-    cleanup();
-    const { container } = render(
-      <PerformReadinessStrip {...props({ view: ready({ state: 'none' }), calibratable: false })} />,
+  it('none + running → progress copy and NO button (the route has no cancel)', () => {
+    render(
+      <PerformReadinessStrip {...props({ view: ready({ state: 'none' }), convertState: 'running' })} />,
     );
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.getByText(/Building overlay/)).toBeInTheDocument();
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+
+  it('none + error → honest copy + a retry that re-fires the build', () => {
+    const onBuildOverlay = vi.fn();
+    render(
+      <PerformReadinessStrip
+        {...props({ view: ready({ state: 'none' }), convertState: 'error', onBuildOverlay })}
+      />,
+    );
+    expect(screen.getByText(/Couldn't build an overlay/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(onBuildOverlay).toHaveBeenCalledTimes(1);
+  });
+
+  it('convertState is scoped to `none` — it never disturbs a state that HAS a map', () => {
+    // A stale 'running'/'error' must not leak into the draft/verified copy: those
+    // states already have a calibration, so building is not the next step.
+    for (const convertState of ['running', 'error'] as const) {
+      cleanup();
+      const onCalibrate = vi.fn();
+      render(
+        <PerformReadinessStrip
+          {...props({ view: ready({ state: 'verifiable' }), convertState, onCalibrate })}
+        />,
+      );
+      expect(screen.getByText(/Draft — Verify to perform/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Calibrate' }));
+      expect(onCalibrate).toHaveBeenCalledWith('sections');
+    }
   });
 
   it('verifiable → "Draft — Verify to perform." + Calibrate→sections', () => {

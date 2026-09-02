@@ -1,13 +1,15 @@
 import type { ChartCalibration } from './types';
 
-// Shared chart-ADD path. BOTH add surfaces — the in-show ChartNavigator upload
-// and (later) the library Manage-Charts modal — go through uploadChart() so no
-// add path can skip overlay creation. This is the `triggerOverlayCreate` seam
-// named in the converter/library designs.
+// Shared chart-ADD path. Both add surfaces (the library Manage-Charts modal and
+// the in-show ChartNavigator) go through uploadChart().
 //
-// Until the converter route ships (chunk 2) /api/charts/convert does not exist;
-// triggerOverlayCreate tolerates that (404 → null), so this chunk is a no-op
-// overlay trigger with zero behavior change.
+// ⚠ Upload STORES BYTES AND STOPS (backlog-charting.md §Ruled 2026-09-02).
+// Conversion used to fire from here on every add; it no longer does. An overlay
+// only earns its cost when the chart is actually going to be conducted, so
+// `triggerOverlayCreate` is now called on OWNER DEMAND — from the perform
+// readiness strip, where the owner is looking at a chart that can't perform yet.
+// Do not re-attach it to the upload path: eager conversion spends the owner's AI
+// budget on charts nobody will conduct, and creates review debt on top.
 
 // The chart_library row the upload route returns (plus a derived public URL).
 export interface UploadedChart {
@@ -23,7 +25,16 @@ export interface UploadedChart {
 }
 
 // Why an overlay was/wasn't generated (mirrors the convert route contract).
-export type ConvertReason = 'exists' | 'unsupported_type' | 'too_large' | 'failed';
+// 'authored' | 'lyrics' are the known-never gates (see lib/chart-converter.ts
+// `overlaySkipReason`): the client suppresses the CTA for these, so they only
+// reach a caller that POSTed the route directly.
+export type ConvertReason =
+  | 'exists'
+  | 'unsupported_type'
+  | 'too_large'
+  | 'failed'
+  | 'authored'
+  | 'lyrics';
 
 export interface ConvertResult {
   generated: boolean;
@@ -41,9 +52,37 @@ export class ChartUploadError extends Error {
   }
 }
 
-// Fire the auto-overlay converter for a freshly added/replaced chart. Non-fatal
-// by design: any failure (route absent, vision error, timeout) returns null and
-// the chart simply has no overlay (manual rail). Never throws.
+// What the caller should do next with a convert result. Pure, so the reasoning
+// below is pinned by tests rather than buried in an async tail in page.tsx.
+export type BuildOverlayStep = 'refetch' | 'failed';
+
+/**
+ * Map a convert outcome to the next step.
+ *
+ * ⚠ `exists` is NOT a failure, and reading it as one was a real bug (caught in
+ * review of PR #169). The client's calibration GET 404s at LOAD time; the
+ * convert fires later, on a click, and anything can insert a row for
+ * (chart_id, hash) in between — another tab or device, the admin backfill, or
+ * THIS client's own previous build whose post-build refetch failed transiently.
+ * That last one made the error self-sustaining: every retry returned `exists`
+ * and re-errored, while a perfectly good overlay for the bytes on screen sat in
+ * the DB, reachable only by reloading the page.
+ *
+ * Whether an existing row describes the bytes we are RENDERING is a question
+ * only the hash-addressed GET can answer — it is keyed on the hash of the bytes
+ * this client loaded, so a row built for different bytes 404s there and fails
+ * correctly. So `exists` defers to that one authority instead of guessing here.
+ */
+export function buildOverlayStep(result: ConvertResult | null): BuildOverlayStep {
+  if (!result) return 'failed'; // transport failure / non-ok HTTP
+  if (result.generated) return 'refetch';
+  return result.reason === 'exists' ? 'refetch' : 'failed';
+}
+
+// Fire the overlay converter for a chart, ON OWNER DEMAND. Non-fatal by design:
+// any failure (vision error, timeout, transport) returns null and the chart
+// simply has no overlay (manual rail). Never throws — the caller renders the
+// null as "couldn't build one", never as a broken chart.
 export async function triggerOverlayCreate(chartId: string): Promise<ConvertResult | null> {
   try {
     const res = await fetch('/api/charts/convert', {
@@ -58,14 +97,14 @@ export async function triggerOverlayCreate(chartId: string): Promise<ConvertResu
   }
 }
 
-// Upload (or replace) a chart, then fire overlay creation. Throws
-// ChartUploadError on upload failure (the caller owns the chart-add); overlay
-// creation failure is swallowed (the chart still uploaded).
+// Upload (or replace) a chart. Stores bytes and stops — no overlay creation
+// (see the header note). Throws ChartUploadError on upload failure; the caller
+// owns the chart-add.
 export async function uploadChart(
   file: File,
   songTitle: string,
   role: string,
-): Promise<{ chart: UploadedChart; overlay: ConvertResult | null }> {
+): Promise<UploadedChart> {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('song_title', songTitle);
@@ -83,7 +122,5 @@ export async function uploadChart(
     throw new ChartUploadError(res.status, err.error);
   }
 
-  const chart = (await res.json()) as UploadedChart;
-  const overlay = await triggerOverlayCreate(chart.id);
-  return { chart, overlay };
+  return (await res.json()) as UploadedChart;
 }
