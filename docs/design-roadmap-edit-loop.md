@@ -1,13 +1,32 @@
 # ShowRunr — Roadmap Builder Edit Loop (chunk 5 / "5c regenerate") DESIGN
 
-**Status:** DESIGN-ONLY. No build until Graham GO + Codex review.
+**Status: SHIPPED.** Both mechanisms of §2 are live; this doc is now a record of
+*why* it is built the way it is, not a proposal.
+
+| Shipped | Where |
+| --- | --- |
+| Re-open a saved builder chart | **Edit** on builder rows in `ManageChartsModal` → `startEdit` → `GET /api/charts/roadmap/[chartId]` → `RoadmapBuilder` mounted with `editChart` |
+| Manual edit (scalpel) — §2 | structure CRUD (`+ Add section`, per-section remove) and per-bar chord entry (click a bar → inline input → `onCommitBar`) |
+| Regenerate (hammer) — §2 / §5 | `onRegenerate`, guarded by a "Regenerate will replace your manual edits" confirm |
+| Save replaces in place | `POST /api/charts/roadmap/save` with `old_storage_path` |
+
+Merged in `95080e0` ("roadmap builder edit loop (5c) — reopen, edit/regenerate,
+save"). Two follow-ons build directly on it: `90da2c4` persists the authoring prompt
+so Regenerate is live on a re-opened chart (`design-roadmap-prompt-persistence.md`),
+and `ca52814` bakes the Numbers⇄Letters toggle into the saved chart
+(`design-roadmap-notation-toggle.md`).
+
 Companion to `docs/design-roadmap-builder.md` (chunks 0–4 shipped; re-key chunk 4
 merged main `8404b81`). This is chunk 5 of that doc's build sequence ("Edit loop:
 re-open spec from a saved builder chart → re-render → replace").
 
+> **Known gap, tracked separately:** chord entry is fully built but has **no
+> affordance** — nothing indicates a bar is clickable, so the capability reads as
+> missing to anyone looking at the structure list. See issue #173.
+
 ---
 
-## 1. The problem (a saved builder chart is a dead end)
+## 1. The problem this closed (historical — a saved builder chart *was* a dead end)
 
 The builder authors **new** charts: `ManageChartsModal` shows "Build a chart with
 AI" only when a role is **free** (`free.length > 0`), and it opens an empty
@@ -20,9 +39,9 @@ section, change a chord, or re-derive the whole thing from a better description 
 your only option is to delete it and start over, re-typing the entire song from
 scratch. The authored `source_spec` we carefully persist is **write-once**.
 
-This is the gap chunk 5 closes: make a builder chart **re-editable** — the
+This was the gap chunk 5 closed: making a builder chart **re-editable** — the
 property the builder design doc promised (§"Re-editable: re-open the spec, tweak,
-re-render").
+re-render"). It is now shipped; the paragraphs above describe the pre-`95080e0` state.
 
 ## 2. Two mechanisms — scalpel and hammer (Graham's framing)
 
