@@ -58,6 +58,7 @@ Per system, replacing VLM self-confidence as the review-queue driver:
 | Verdict | Meaning | Review behavior |
 |---|---|---|
 | `validated` | measured count matches the printed measure-number delta | silent |
+| `unscored` | geometry measured, but no printed delta existed to check it against — the page-tail system, or the first system of a continuation page | silent |
 | `corroborated` | no printed numbers on this chart; measured and VLM independently agree | silent |
 | `uncertain` | validation failed, or the two sources disagree | flagged — the ask |
 | `estimated` | raster scan / no vector data; VLM-only | chart-level badge, soft flag |
@@ -65,7 +66,20 @@ Per system, replacing VLM self-confidence as the review-queue driver:
 | `edited` | a human manually edited the system or its bars | pinned; never flagged |
 
 Chart-level confidence is the aggregate, surfaced in plain words ("9 of 12 lines
-verified"). Scans surface as "scanned chart — overlay is estimated."
+verified"). Scans surface as "scanned chart — overlay is estimated." `unscored` systems
+are measured, not unverified-in-the-worrying-sense, so they count as verified in that
+tally; only `uncertain` subtracts.
+
+**Amendment 2026-09-02 (Graham's ruling), `unscored`:** the original four verdicts had
+no slot for a system the geometry measured cleanly but arithmetic could not check,
+because no printed delta was available. Measured on the corpus, that is **86 of 550
+systems — 15.6%**, distributed as almost exactly one per page: the page-tail system, and
+the first system of a continuation page (cross-page measure-number chaining is a
+§Non-goal of `design-chart-measurement.md`). Folding these into `uncertain` would flag a
+sixth of all systems for human review with nothing wrong with them — precisely the
+"review debt" `backlog-charting.md` §Ruled 2026-09-02 warns against — and leaving the
+verdict absent is taken, since an absent verdict means "legacy / VLM-only calibration".
+Hence a fifth machine verdict, silent in review.
 
 Plumbing: a new optional per-`System` `verdict` field (optional-field forward-compat, no
 schema bump — same pattern as `confidence`). Because exclusivity makes any *present*
