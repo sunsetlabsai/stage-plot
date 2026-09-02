@@ -35,13 +35,18 @@ ways that self-validation partially masked. Do not walk operator lists by hand.
   screen produces the measurements.
 - Runs in the browser, where pdf.js already renders every chart — matching the shipped
   client-driven conversion model (`design-chart-converter.md` §Execution model). Zero
-  new dependencies, zero new infra.
+  new external dependencies or infra services; the one new surface is the server commit
+  contract below.
 - ⚠ Known interception detail: modern pdf.js builds paths via **`Path2D`** rather than
-  ctx verbs when available. The shim must intercept both: patch the `Path2D`
-  constructor (a subclass that records verbs and remains a real `Path2D`) and record
-  the CTM at `stroke(path)` / `fill(path)` time, when the transform actually applies.
-  Chunk B opens with a feasibility spike on exactly this; the acceptance harness below
-  is its exit gate.
+  ctx verbs when available. The shim must intercept the full `Path2D` surface: patch
+  the constructor (a subclass that records verbs and remains a real `Path2D`), **record
+  and replay `Path2D.addPath(source, matrix)`** — the vendored pdfjs-dist 5.7.284 uses
+  `addPath` to copy/transform paths before stroke/fill, including stroke rescaling and
+  pattern/text/group paths (pdf.mjs:11433, :11476, :11553, :11659, :12663), so a shim
+  that misses it silently drops transformed strokes from the measurement stream — and
+  capture the CTM at `stroke(path)` / `fill(path)` time, when the transform actually
+  applies. Chunk B opens with a feasibility spike on exactly this; the acceptance
+  harness below is its exit gate.
 - Rejected: WASM poppler/pdfium (heavyweight new dependency for one function), a
   sidecar conversion service (new infra for a pure function), server-side node-canvas
   (native dep back on Vercel — the original problem).
@@ -95,16 +100,45 @@ renderable content) may live in-repo so CI can cover the pure pipeline stages
 (2–5) without the corpus. The pipeline is pure functions over segments + text items,
 so stages 2–5 are unit-testable with synthetic fixtures regardless.
 
+## The split contract (client measures; server commits and pays)
+
+Two shipped facts force an explicit split, and the design owns it rather than implying
+it away:
+
+- The only insert-only calibration writer lives inside server-side
+  `/api/charts/convert` (`route.ts:130`); the generic client write
+  (`/api/charts/calibration` PUT, `route.ts:201`) is an overwrite-capable upsert
+  reserved for the human editing flow. A browser engine must NOT gain overwrite power
+  by riding that PUT.
+- The VLM key is resolved server-side (`convert/route.ts:99`) and never reaches the
+  browser.
+
+**Contract:** the client engine extracts geometry + text and computes provisional
+verdicts — it writes nothing and holds no keys. It POSTs the measured payload
+(segments summarized as the draft calibration + per-system verdicts + per-system
+raster/uncertain flags) to the **convert route, extended to accept a measured
+payload** (owner-authenticated, same scope as today). The server then:
+
+1. validates the payload (`isValidCalibration`, runtime verdict-enum check per the
+   frozen spec, sanity bounds) — client geometry is *data*, not trusted computation;
+2. runs the VLM fallback **server-side** for `uncertain` systems and raster pages,
+   with the server-resolved key, exactly where the key already lives;
+3. performs the same **insert-only, conflict-as-no-op** write the converter performs
+   today (generate-once and the hash rule untouched).
+
+Trust note: the payload writer is the chart's owner writing their own *draft*
+calibration — the same trust level as today's client-driven conversion trigger; a
+hostile owner can only corrupt their own overlay, and the human calibrate/verify flow
+remains the authority afterward.
+
 ## Integration
 
 - Invoked by the owner-demand trigger (lazy-conversion chunk; placement decided
   there). Pre-gates run first: `role = 'lyrics'` and `source_spec IS NOT NULL` never
   reach the engine.
-- Writes the draft calibration exactly as the converter does today (generate-once,
-  insert-only, same hash rule), now including per-`System` `verdict`
-  (runtime-enum-validated at the DB boundary per the frozen spec).
 - Cost profile: measurement is local JS — the paid VLM call happens only for
-  `uncertain` systems and raster pages. Silent-when-confident comes free.
+  `uncertain` systems and raster pages, server-side per the split contract.
+  Silent-when-confident comes free.
 
 ## Non-goals
 
