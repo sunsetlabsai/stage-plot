@@ -313,11 +313,41 @@ normalization needs them. Both are unit-testable additions to the pure module.
 `absNumber` is assigned client-side across the whole chart in reading order
 (page → yTop → xStart), matching what `barsInOrder` re-derives during validation.
 
-⚠ **Known semantic gap, not B2's to fix:** a multirest is one visible bar but N
-measures, so `absNumber` counts visible bars, not musical measures, and the conductor
-advances one where the band plays four. This is **pre-existing** — today's VLM path has
-the same shape — but measurement is the first thing that actually *knows* the multirest
-count, and the schema has nowhere to put it. Backlog with that context.
+## Multirests — IN B2, at creation (★ Graham's ruling 2026-09-02)
+
+A multirest is **one visible bar but N musical measures**. Today `absNumber` counts
+visible bars, so the conductor advances one where the band plays four.
+
+This was briefly backlogged as "pre-existing." That was wrong, and the reason is
+**generate-once**: the write is insert-only, conflict-as-no-op, with no same-hash
+machine re-run of any kind. A chart converted without the multirest count never acquires
+it — not on retry, not from a better engine later, not ever, short of new bytes. So
+"backlog" here does not mean "later", it means "never, for every chart converted in the
+meantime." The count must be persisted by the conversion that first measures it.
+
+It is also free. The engine already reads multirest counts to compute
+`printed delta = visible spans + Σ(multirest − 1)` — the arithmetic that produces the
+`validated` verdict at all. Discarding a number we deliberately went and got, at the
+write boundary, is the loss.
+
+**Design: a new optional `Bar.measures?: number` (default 1)** — how many musical
+measures this one visible bar represents. Optional-field forward-compat, no schema bump,
+the same pattern as `confidence` and `verdict`.
+
+Why this and not "make `absNumber` the musical measure number": `absNumber` is bar
+IDENTITY — it keys the conductor, the chrome, and bar selection — and
+`isValidCalibration` enforces dense 1..n over reading order. Making it musical would
+relax that invariant and ripple through every consumer. Keeping `absNumber` dense over
+*visible* bars changes nothing downstream, and the musical measure number stays
+derivable: `1 + Σ(measures of preceding bars)`.
+
+Validation additions: `measures` is an integer ≥ 1 when present, checked in `isValidBar`
+alongside the existing rules. `Σ measures` over a system must equal that system's
+`expectedSpans` when the system is `validated` — the page's own printed numbers are
+already the check, so this costs nothing new and catches a mis-assigned count.
+
+Conductor follow-along is then arithmetic over `measures`, and is **not** B2's to build —
+but B2 is what makes it possible, which is the whole point of doing it now.
 
 ## Payload and route extension
 
