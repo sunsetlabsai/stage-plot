@@ -66,7 +66,10 @@ Chart-level confidence is the aggregate, surfaced in plain words ("9 of 12 lines
 verified"). Scans surface as "scanned chart — overlay is estimated."
 
 Plumbing: a new optional per-`System` `verdict` field (optional-field forward-compat, no
-schema bump — same pattern as `confidence`). **A present verdict is the EXCLUSIVE flag
+schema bump — same pattern as `confidence`). Because exclusivity makes any *present*
+value significant, `verdict` must get runtime enum validation at the same DB boundary
+where `confidence` is range-checked (`isValidSystem`); an unknown value is invalid, not
+ignored. **A present verdict is the EXCLUSIVE flag
 signal for that system** — the numeric roll-up in `chart-review.ts` (band low-confidence
 OR any child bar low-confidence) applies only to verdict-less systems. v2 conversion
 writes a verdict on **every** system, so an absent verdict means exactly one thing: a
