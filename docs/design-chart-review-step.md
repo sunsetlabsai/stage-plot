@@ -133,10 +133,11 @@ Which split looks right?
 ## Entry points (decided)
 
 - **Conversion tail — offered, skippable.** *(Amended 2026-09-02, ruled by Graham:
-  conversion itself is now LAZY — an upload never auto-converts; conversion runs on first
-  conductor/roadmap need or an explicit "Build overlay", and known-never classes — lyrics,
-  builder charts — are gated before the call fires. See `backlog-charting.md` §Ruled
-  2026-09-02. The offer below follows CONVERSION, whenever that happens.)* When conversion
+  conversion itself is now LAZY — an upload never auto-converts; conversion runs on
+  OWNER demand, and known-never classes — lyrics, builder charts — are gated before the
+  call fires. The trigger ruling and its open placement decision live in
+  `backlog-charting.md` §Ruled 2026-09-02; this doc does not restate them. The offer
+  below follows CONVERSION, whenever that happens.)* When conversion
   succeeds but uncertain systems exist, the transient status becomes *"Looks good — 3
   lines need a look. Review · Later."* "Later" (or ignoring it) saves everything as-is.
   Fully-confident conversions stay silent.
