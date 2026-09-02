@@ -1,6 +1,7 @@
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 import type { Chart } from './types';
-import { getCachedChartBlob, versionedChartUrl } from './chart-cache';
+import { getCachedChartBlob, versionedChartUrl, cacheChart } from './chart-cache';
+import { sniffPdf } from './chart-converter';
 import { hashPdfBytes } from './chart-calibration';
 
 // Lazy-init pdf.js to avoid SSR issues
@@ -63,8 +64,17 @@ function evictOldest() {
 // Exported for the share button (tier-1 file share reuses this exact
 // cache/proxy path — do NOT duplicate it).
 export async function fetchChartBytes(chart: Chart, accessToken?: string): Promise<ArrayBuffer | null> {
-  const cachedBlob = await getCachedChartBlob(chart);
-  if (cachedBlob) return await cachedBlob.arrayBuffer();
+  // The cache READ is guarded too (Codex R1-3 on chunk 8). `caches` is absent outside a
+  // secure context and `caches.open()` can reject in private browsing; before this guard
+  // that rejection escaped uncaught — ahead of the try below — and failed the render
+  // outright rather than degrading to the network. A cache problem must never be fatal in
+  // either direction.
+  try {
+    const cachedBlob = await getCachedChartBlob(chart);
+    if (cachedBlob) return await cachedBlob.arrayBuffer();
+  } catch {
+    // fall through to the network
+  }
 
   try {
     let res: Response;
@@ -85,8 +95,50 @@ export async function fetchChartBytes(chart: Chart, accessToken?: string): Promi
       });
     }
 
-    if (!res.ok) return null;
-    return await res.arrayBuffer();
+    // Strictly 200, not res.ok (Codex R1-2 on chunk 8). res.ok spans all of 2xx, so a 204
+    // No Content or a 206 Partial Content would pass, and persisting either would poison
+    // the cache with a truncated or empty body that every later read prefers over the
+    // network. We never send a Range request, so 200 is the only success we expect.
+    if (res.status !== 200) return null;
+    const bytes = await res.arrayBuffer();
+
+    // Relay chunk 8 — persist on fetch (design-relay-cloud.md §9.1).
+    // Before this, every persistent write went through downloadAllCharts. Supabase charts
+    // got that automatically on show open (page.tsx:557), but LEGACY DRIVE charts had no
+    // auto-cache at all, and a silently-failed Supabase warm left no second chance either.
+    // In both cases a chart could render perfectly online and be absent offline. Both
+    // network branches funnel through here, so the write has exactly one home.
+    //
+    // Fire-and-forget, and it must stay that way: a cache failure (quota exceeded, private
+    // browsing, no Cache API) must never fail the render the caller is awaiting. Offline
+    // availability is strictly a bonus over a render that already succeeded.
+    //
+    // The Response is built SYNCHRONOUSLY here, before `bytes` is returned — body
+    // extraction copies the buffer, so pdf.js detaching it later cannot corrupt the cached
+    // copy. Content-Length is set explicitly because a Response built from an ArrayBuffer
+    // carries no such header, and getCacheStats (chart-cache.ts:184) reads it to size the
+    // download manager — without it these entries would count but weigh 0.
+    // Codex R2: status 200 is NOT proof of a chart. A Drive HTML interstitial or a bad
+    // storage body arrives as a perfectly good 200; caching it poisons the cache STICKILY,
+    // because every later read prefers the cache over the network and pdf.js only discovers
+    // the problem after. Sniff the magic bytes — the repo already owns this decision
+    // (chart-converter.ts:21, "classify by the leading bytes of the FETCHED object, never
+    // the claimed MIME"). Non-PDF bytes are still RETURNED (the share path is a legitimate
+    // caller and v1 storage is PDF-only by policy, not by guarantee) — they are just never
+    // persisted.
+    if (sniffPdf(new Uint8Array(bytes, 0, Math.min(8, bytes.byteLength)))) {
+      void cacheChart(
+        chart,
+        new Response(bytes, {
+          headers: {
+            'Content-Type': chart.mimeType || 'application/pdf',
+            'Content-Length': String(bytes.byteLength),
+          },
+        }),
+      ).catch(() => {});
+    }
+
+    return bytes;
   } catch {
     return null;
   }

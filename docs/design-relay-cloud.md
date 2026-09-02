@@ -376,10 +376,16 @@ never see room identity.
    `use-conductor-session.ts`, copy + affordance for each, conductor-side follower readout
    from chunk 6. No protocol contact. *(Depends on 6 for the readout only; the
    `room-rotated` state does not — see §9.3.)*
-8. **Persist-on-fetch** (§9.1) — `fetchChartBytes` writes network-fetched bytes to the
-   chart cache, making "rendered once ⇒ available offline" true. **Solo-mode only, no relay
-   contact — NOT gated on the §9.6 phone retest**, and the one chunk here that can land
-   ahead of testers. Lets §9.5's precondition relax back to "open it once."
+8. ✅ **Persist-on-fetch** (§9.1) — **SHIPPED.** `fetchChartBytes` writes network-fetched
+   bytes to the chart cache on both branches, making "rendered once ⇒ available offline"
+   true. Was solo-mode only, no relay contact, so it landed ahead of testers without the
+   §9.6 phone retest. Its real value is narrower than "makes offline work": it closes the
+   gap for **legacy Drive charts**, which had no automatic cache path at all, and gives
+   Supabase charts a second chance when the unobserved bulk warm fails. ⚠ It does **not**
+   relax §9.5's precondition to "open it once" — an earlier draft of this line claimed that,
+   and it is wrong: chunk 8 persists only the charts a device actually *rendered*, and the
+   Supabase warm that covers the rest reports nothing. Offline Access remains the only
+   path that covers a full set **and** tells you whether it worked.
 
 ## 8. Open questions (defer-with-default)
 
@@ -463,34 +469,49 @@ finished, or that everything needed got cached:
 - `WARM_CACHE` failures are skipped silently; nothing reports which URLs actually landed.
 - `sw.js` never caches `/api/*` by design, so anything a chart needs from an API route at
   render time is not covered by the shell cache.
-- Chart auto-cache on the show page is fire-and-forget and Supabase-only.
-- ★ **Rendering a chart does not cache it** (Codex R5 HIGH-1). `fetchChartBytes`
-  (`lib/pdf-viewer.ts:65`) reads the persistent cache first, but on a miss it fetches
-  network bytes and **returns them without writing to Cache API**; `loadPdfDoc` then holds
-  only an in-memory doc cache that dies with the tab. The sole writer to persistent storage
-  is `downloadAllCharts`. So a chart can render perfectly online and be absent offline.
+- Chart auto-cache on the show page is fire-and-forget and **Supabase-only**
+  (`page.tsx:557-564` on show load; `page.tsx:6692` when a song is added). It calls
+  `downloadAllCharts`, so it covers the whole Supabase set in advance — but failures are
+  swallowed by `.catch(() => {})` and nothing reports what actually landed.
+- ✅ **Rendering a chart now caches it — chunk 8, shipped.** `fetchChartBytes`
+  (`lib/pdf-viewer.ts:65`) writes fetched bytes to the Cache API on both network branches,
+  so "rendered once ⇒ available offline" is true. It was the R5 HIGH-1 trap: before it, the
+  only persistent write was `downloadAllCharts`, which **legacy Drive charts never got
+  automatically at all**.
 
-**Therefore the two chart sources have different offline stories, and only one of them is
-automatic:**
+⚠ **The line reference above was stale, and that stale number caused a bad correction.** An
+earlier revision cited the auto-cache at `page.tsx:490`; that line is now `setTab('perform')`,
+and on 2026-09-01 I read the miss as evidence the auto-cache had never existed and deleted the
+claim — asserting "there never was" one. **It does exist**, at `:557-564`, and Codex caught
+it. The grep that "confirmed" the absence looked for callers of `cacheChart` and stopped one
+hop short of asking who calls `downloadAllCharts`. **When a cited line number doesn't match,
+that is evidence the file moved, not that the feature is fictional.**
+
+**Post-chunk-8 the two sources still differ, and the difference is the point of chunk 8:**
 
 | Source | What caches it | Survives a reload offline? |
 |---|---|---|
-| Supabase | fire-and-forget auto-cache on show open (`page.tsx:490`) | **Usually** — unobserved, no error surfaced if it fails |
-| Drive (legacy) | **only** the explicit Offline Access download (`page.tsx:6464`) | **No**, unless the user ran that download |
+| Supabase | bulk auto-cache on show open (whole set, unobserved), **plus** rendering it | **Usually** — and now with a second chance if the warm silently failed |
+| Drive (legacy) | **no auto-cache**; rendering it (chunk 8), or the Offline Access download | **Yes** once rendered or downloaded — before chunk 8, only if downloaded |
 
-So the honest claim is: **a device that has completed the Offline Access download with zero
-failures — or has passed an airplane-mode reopen test — will open and render those charts
-with zero connectivity.** Opening the show and watching charts render is *not* sufficient
-and must not be offered as if it were: it exercises the render path, which is precisely the
-path that does not persist. A device installing the PWA for the first time *at* a dead venue
-has nothing cached and gets nothing. See §9.5.
+So chunk 8's real value is narrower than "makes offline work," and should be stated that way:
+it closes the gap for **legacy Drive charts**, which had no automatic path at all, and gives
+**Supabase charts a second chance** when the unobserved bulk warm fails. The honest claim is:
+**a chart that has been rendered on this device, or covered by a clean Offline Access
+download, will open with zero connectivity.**
 
-**Named build chunk (not backlog — this one is a trap, not a nicety):** make
-`fetchChartBytes` **write fetched bytes to the chart cache on the network path**, so
-"rendered once ⇒ available offline" becomes true and the simple precondition can come back.
-Mechanism: the function already owns both the cache read and both network branches, so the
-write has exactly one home. This is **solo-mode only — no relay contact — so it is NOT
-gated on the §9.6 phone retest** and can land ahead of testers. Listed as chunk 8 in §7.
+Three residual gaps, all deliberate, all silent:
+
+- A chart with no `modifiedTime` has no cache key (`chart-cache.ts:9`), so it renders online
+  and stays absent offline.
+- The chunk-8 write is fire-and-forget by design — a quota or private-browsing failure
+  surfaces nothing, because offline availability must never fail a render that succeeded.
+- The Supabase bulk warm is equally unobserved, which is why the §9.3 readiness indicator
+  ("charts ready offline") remains the honest fix rather than more caching.
+
+A device installing the PWA for the first time *at* a dead venue still has nothing cached and
+still gets nothing. See §9.5. The §9.3 readiness indicator ("charts ready offline") is the
+natural companion and remains the honest way to make this checkable rather than ritual.
 
 **Backlog (named, so it is not lost):** the warm is unobservable to the user. A readiness
 indicator — "charts ready offline" vs "still caching" — would make the precondition
@@ -697,25 +718,30 @@ not a hardware kit and not a mesh.
 
 What must be said plainly to outside testers, and what must be true before they get it.
 
-**Onboarding (mandatory, not advisory).** Until chunk 8 lands, every device must do **one of
-these two** while online, at home, before leaving for the gig:
+**Onboarding (mandatory, not advisory).** Chunk 8 has landed, so rendering a chart now
+persists it — but that only covers charts the tester actually paged to, and the Supabase
+bulk warm that covers the rest is unobserved, so neither is checkable from the outside.
+Every device must still do **one of these two** while online, at home, before leaving for
+the gig:
 
 1. **Run Offline Access → download, to completion, with zero failures.** Not "start it" —
-   watch it finish and report no failures. This is the only path that writes charts to
-   persistent storage, and for legacy Drive charts it is the *only* path at all.
+   watch it finish and report no failures. It is the only path that both covers charts the
+   tester has *not* opened **and reports whether it worked** — the automatic Supabase warm
+   does the first but not the second, and legacy Drive charts get no automatic warm at all.
 2. **Or pass an airplane-mode reopen test:** put the device in airplane mode, fully reopen
    the show, and confirm every chart comes up. This proves the floor instead of assuming it.
 
-**v6 correction (Codex R5 HIGH-1):** v5 asked testers to "open the show and confirm charts
-render," on the theory that rendering proves the cache is warm. It does not — the render
-path (`fetchChartBytes`) reads the cache but never writes it, so a chart can render online
-and be gone offline (§9.1). That instruction was the *same* class of error as R4 HIGH-2: a
-tester-facing claim written without checking it against shipped code. It is corrected here,
-and §9's mechanism rule (below) now covers this section too, so it cannot recur by writing
-prose in a part of §9 that had no table.
+**v6 correction (Codex R5 HIGH-1), retained as the reason this section exists:** v5 asked
+testers to "open the show and confirm charts render," on the theory that rendering proves the
+cache is warm. At the time it did not — the render path read the cache but never wrote it.
+Chunk 8 has since made rendering persist, so v5's *instruction* now happens to hold for any
+chart actually rendered; its *reasoning* was still wrong when written, and the error class —
+a tester-facing claim written without checking it against shipped code — is what the §9
+mechanism rule guards. Do not read chunk 8 as a licence to reinstate "open the show once":
+that phrasing was wrong then for the write path and is wrong now for coverage.
 
 The most likely tester failure is still not exotic venue networking — it is skipping, or
-half-doing, this step. Chunk 8 exists to make the step small again.
+half-doing, this step. Chunk 8 made the step smaller, not optional.
 
 **The stated requirement:** conductor mode needs working internet at the venue for the whole
 show. One member's phone hotspot is a fully supported answer (§1 on-ramps) — frames are
