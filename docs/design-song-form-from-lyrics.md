@@ -92,11 +92,18 @@ Named explicitly, because each one is a place we must not guess:
 
 1. **No time signature.** Bars are bars, which is sufficient for form and for
    conductor position. It is **not** sufficient for duration estimates.
-   ⚠ `RoadmapSpec` carries `timeSig` but **no provenance field** — there is nowhere in
-   the persisted spec to record "this 4/4 was assumed, not read." So the assumption
-   must live in the **proposal wrapper** (pre-confirmation), and the owner must confirm
-   the meter **before** it is persisted. We do not write a default into the spec and let
-   it read as fact downstream.
+   `RoadmapSpec` carries `timeSig` but no provenance, so a defaulted 4/4 would read as
+   fact downstream. **Decision (Graham): carry the provenance in the spec** — add an
+   optional field (e.g. `timeSigSource?: 'read' | 'assumed'`; absent ⇒ `'read'`, so every
+   existing spec keeps its current meaning).
+   **No `ROADMAP_SPEC_VERSION` bump and no migration**: an added *optional* field is
+   forward-compatible, the same argument PR #172 makes for `Bar.measures?: number`
+   ("optional-field forward-compat, no schema bump"). Keeping the two decisions
+   consistent matters more than either one individually — both are "a count/unit we
+   defaulted, recorded as defaulted."
+   Downstream rule: anything computing **duration** must refuse to run on
+   `timeSigSource: 'assumed'` until an owner confirms the meter. Form, bar counts and
+   conductor position are unaffected — they never needed the meter.
 2. **No chords.** Addressed in §4.
 3. **No sub-bar rhythm.** Out of scope by construction — that is a chart, not a form.
 4. **No lyric-to-bar alignment.** §3.
@@ -117,6 +124,40 @@ Named explicitly, because each one is a place we must not guess:
 - **Label vocabulary is open.** `Out`, `Outro`, `Tag`, `Ending` are the same idea.
   Normalize for *seeding* alignment only — `lib/song-structure.ts` is explicit that
   label+ordinal is a seed heuristic and never the cross-chart authority.
+
+### 2.3 The unit is the musical measure, never the visible bar
+
+*(Raised by the parallel chunk-B session; it would otherwise have silently corrupted
+§9 Q5.)*
+
+`Verse 8x` means **eight musical measures**. That is not the same unit as
+`ChartCalibration.Bar.absNumber`, which is *"1-based global bar number in reading
+order"* (`lib/types.ts:113`) — i.e. **visible** bars on the page. A multirest is one
+visible bar but N musical measures, so the two counts diverge on exactly the charts
+where cross-instrument sync matters most: horn and vocal parts.
+
+**Canonical unit = the musical measure.** Three reasons, in order:
+
+1. **Canonical structure is abstract by definition.** `CanonicalBar` carries *"NO
+   geometry — canonical structure is abstract"* (`lib/song-structure.ts:27-29`). Visible
+   bars are a rendering property of one chart; measures are a property of the song. A
+   canonical layer counted in visible bars would be chart-specific by construction,
+   which is the one thing it exists not to be.
+2. **Cross-instrument sync requires it.** A horn part with an 8-measure multirest and a
+   guitar part with 8 written bars are *in the same place*. Only the musical count says so.
+3. **The authored side is already musical.** `RoadmapSection.bars` comes from an author
+   describing form; builder charts have no multirests, so it is a measure count already.
+
+**This costs nothing new in the alignment layer** — and that is a useful confirmation
+that the unit choice is right. One `CanonicalBar` per measure means a multirest chart
+maps N canonical bars onto 1 visible bar, which is precisely a **non-`bar-isomorphic`**
+span, so `barOffset` already correctly coarsens to the section head
+(`design-conductor-authority.md` §2.3.1). The existing design anticipated this shape;
+it just needs the unit stated.
+
+**Consequence for this design:** a lyrics-derived count is directly comparable to
+`RoadmapSection.bars` and to `SongStructure` bars, and is **not** comparable to
+`max(absNumber)`. See §9 Q5.
 
 ---
 
@@ -298,7 +339,7 @@ Every one of these degrades to review, never to a silent result.
 | Bare section, no prior same-label section | **Fail** the section; cannot invent a bar count |
 | Bare section inheriting from a prior one | **Propose** the inherited count; **require per-section owner confirmation** before persisting (§2.2) |
 | No key line | Spec needs `renderKey`; prompt the owner, do not default |
-| No time signature | Propose `4/4` **in the wrapper, not the spec**; owner confirms before persist (§2.1) |
+| No time signature | Default `4/4` with `timeSigSource: 'assumed'` in the spec; duration math refuses until confirmed (§2.1) |
 | Bar count total disagrees with a converter read of the same song | Surface both; owner decides. **Never auto-reconcile** |
 | No text layer (scanned sheet) | Out of scope v1; fail closed |
 | Adjacent multipliers suggesting group repeat | Parse per-section, flag (§2.2) |
@@ -333,10 +374,21 @@ Every one of these degrades to review, never to a silent result.
    - Ingest must key off `role='lyrics'` and must **not** infer "this looks like a
      lyrics sheet" from content. An untagged sheet is simply not a candidate — the
      honest failure is "not tagged," never a guess. (§7's fail-closed posture.)
-2. **Text-layer coverage.** What fraction of the corpus has a usable text layer? §6
-   fails closed without one, so this sizes the feature. (The charting corpus ran 7/8
-   vector, 1/8 scan; lyrics sheets are likely better, but that is an assumption, not a
-   measurement.)
+2. **Text-layer coverage — unknown, cheaply measurable, and NOT a ceiling.**
+   Graham (2026-09-02): *"not sure I know how to answer... but some do. And if/as
+   needed, I can edit or add new ones with follow-able marks."* Two consequences, and
+   the second is the important one:
+   - **Measure it before building.** A read-only pass over `role='lyrics'` rows
+     extracting text-layer presence + §2 grammar-match is a few hours and turns this
+     from an assumption into a number. Do that first; it sizes chunks 1-2 exactly.
+   - **The corpus is AUTHORABLE, so a parse failure is a work queue, not a dead end.**
+     This is unlike the charting corpus, where a scan is simply a scan. If a sheet has
+     no text layer or deviates from the grammar, Graham can add followable marks to it.
+     **Design consequence:** ingest must emit a per-sheet **failure report naming the
+     reason** (no text layer / no key line / unparseable header / bare section with no
+     antecedent), not a silent skip count. That report *is* the annotation backlog.
+     A design that only reports "412 of 464 succeeded" wastes the one property that
+     makes this corpus better than the PDF one.
 3. **Does a lyrics-derived proposal outrank a converter proposal** when both exist for
    one song, or does the owner always arbitrate? Recommendation: owner arbitrates, but
    default the selection to the lyrics read, since it is stated rather than recovered.
@@ -344,9 +396,18 @@ Every one of these degrades to review, never to a silent result.
    viewable, and some players prefer a one-page number chart to a four-page part. Is
    that a per-performer preference inside conductor mode? Believed desirable; deferred
    — it is a conductor-UI question, not a structure question.
-5. **Validation sweep.** Where lyrics-derived form and a converter read exist for the
-   same song, agreement is independent corroboration of both. Worth running as a
-   measurement before either is trusted. Sizing depends on Q1/Q2.
+5. **Validation sweep — BLOCKED on #172, and the block is the interesting part.**
+   Where lyrics-derived form and a converter read exist for the same song, agreement is
+   independent corroboration of both. But the two are in **different units** (§2.3): the
+   lyrics count is musical measures, `absNumber` is visible bars. Comparing them
+   directly mis-reports every chart containing a multirest.
+   `ChartCalibration` has **no musical count on `main` today** — `Bar.measures?: number`
+   is designed in PR #172 (open) and not yet merged. Until it lands the sweep cannot be
+   run honestly, because **without `measures` a multirest is indistinguishable from an
+   ordinary bar**, so we cannot even identify which charts are safe to compare.
+   Therefore: the sweep waits on #172, and when it runs it compares
+   `Σ section.bars` (lyrics) against `Σ Bar.measures` (calibration) — never
+   `max(absNumber)`.
 
 ---
 
@@ -375,6 +436,11 @@ Gated commits, Codex per chunk.
 
 6. **Upload-time `lyrics` role tagging.** Only gates the *ongoing* path (new uploads);
    the backfill over the already-tagged corpus does not wait on it (§9 Q1).
+
+**Chunk 0 — measure the corpus first.** Before any of the above: a read-only pass over
+`role='lyrics'` rows reporting text-layer presence and §2 grammar-match rates (§9 Q2).
+It is small, it sizes chunks 1-2, and it produces the annotation backlog. Nothing here
+should be built against an assumed coverage number.
 
 **Sequencing note.** Chunks 1–2 are self-contained and depend on nothing unbuilt —
 they produce a validated `RoadmapSpec`, which is already a first-class, editable
