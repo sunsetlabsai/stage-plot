@@ -24,14 +24,15 @@ saying so precisely is the point.
 
 | Concern | Status in repo today |
 | --- | --- |
-| Ordered sections + bar counts + repeats/voltas + time sig | **Built** — `RoadmapSpec` / `RoadmapSection`, `lib/roadmap-spec.ts:19-34` |
+| Ordered sections + bar counts + repeats/voltas + time sig | **Built** — `RoadmapSpec` / `RoadmapSection`, `lib/roadmap-spec.ts:19-51` |
 | Nashville chord model incl. split bars | **Built** — `ChordHit`, `BarChange`, `lib/roadmap-spec.ts:75-87` |
-| Deterministic text → structure parser | **Built** — `parseDescription`, `lib/roadmap-authoring.ts:545` |
+| Deterministic text → structure parser | **Built but chord-oriented** — `parseDescription` (`lib/roadmap-authoring.ts:545`) rejects form-only input (`:559`); **not reusable here**, see §6.2 |
 | Transcribe-then-fold parse discipline (anti bar-drop) | **Built** — `lib/roadmap-parse.ts`, `design-roadmap-authoring-fidelity.md` §2 |
 | Song-scoped canonical structure + per-chart alignment | **Designed + pure code, UNWIRED** — `lib/song-structure.ts`; no table, no route, no UI |
 | Provenance rule for `SongStructure` | **Decided** — `design-conductor-authority.md` §2.2.1 (converter proposes → owner confirms once → later charts align in) |
 | **A proposer that does not require PDF geometry** | **← this doc** |
 | **Lyrics-sheet section grammar as a parseable source** | **← this doc** |
+| **A form-only (chord-free) path into `RoadmapSpec`** | **← this doc** (§6.2) |
 
 Everything else below is composition, not invention. Where this doc and an existing
 doc disagree, the existing doc wins and this one is wrong.
@@ -90,18 +91,25 @@ which is, in `RoadmapSpec` terms: seven ordered `RoadmapSection`s, `bars` set fr
 Named explicitly, because each one is a place we must not guess:
 
 1. **No time signature.** Bars are bars, which is sufficient for form and for
-   conductor position. It is **not** sufficient for duration estimates. Default to
-   `4/4` and record that it was **assumed**, never inferred.
+   conductor position. It is **not** sufficient for duration estimates.
+   ⚠ `RoadmapSpec` carries `timeSig` but **no provenance field** — there is nowhere in
+   the persisted spec to record "this 4/4 was assumed, not read." So the assumption
+   must live in the **proposal wrapper** (pre-confirmation), and the owner must confirm
+   the meter **before** it is persisted. We do not write a default into the spec and let
+   it read as fact downstream.
 2. **No chords.** Addressed in §4.
 3. **No sub-bar rhythm.** Out of scope by construction — that is a chart, not a form.
 4. **No lyric-to-bar alignment.** §3.
 
 ### 2.2 Ambiguities the parser must surface rather than resolve
 
-- **Bare-section inheritance is right most of the time and silently wrong sometimes.**
+- **Bare-section inheritance requires explicit per-section confirmation.**
   If verse 1 is 16 bars and verse 2 is 8, inheritance produces a confidently wrong
-  form. Bare sections resolve **with reduced confidence, flagged for review** — never
-  silently.
+  form. An inherited count is still a **guess** — the source omitted it — so by this
+  doc's own standard (§3) it cannot be emitted as a resolved value. A bare section
+  yields a **proposed** count the owner must confirm per section; it is never persisted
+  on confidence alone. *(Tightened from "reduced confidence + review flag" after Codex
+  review: a flag still ships a concrete number.)*
 - **Multiplier scope.** `Verse, Chorus x2` — the `x2` binds to `Chorus` under this
   grammar. If a sheet ever intends "the verse/chorus pair, twice," the grammar cannot
   express it and the parser must not invent it. Parse per-section; flag adjacent
@@ -155,11 +163,32 @@ The complement of §3's principle:
 
 > **Chord rhythm is encodable in text. Lyric alignment is not.**
 
-`| 1 . 5 . |` carries its own subdivision. Nothing is being recovered from position,
-so promotion from L0 to L1 is safe — and it is already built: `ChordHit` /
-`BarChange` (`lib/roadmap-spec.ts:75-87`), the quality whitelist, the degree⇄letter
-conversion in `lib/roadmap-view.ts`, and the `RoadmapBuilder` UI. An MD types changes
-against a grid that already has the correct bar counts.
+A split bar carries its own subdivision in the notation. Nothing is recovered from
+position, so promotion from L0 to L1 is safe — and the whole path is **already built
+and reachable on a saved chart**:
+
+- **Re-open.** Builder charts carry an **Edit** affordance in `ManageChartsModal`
+  (`components/ManageChartsModal.tsx:248-256`) → `startEdit` fetches the saved spec
+  from `/api/charts/roadmap/[chartId]` (`:128-140`) → the builder mounts in edit mode.
+- **Enter chords.** In the rendered Nashville sheet, **click a bar** → an inline input
+  (`components/RoadmapBuilder.tsx:1040-1080`), grammar `1   5 4   1 - 4 5` (space
+  separates chords in the bar, `-` holds), with a live `SplitPreview` carving the bar
+  by beats as you type. Commit on Enter → `onCommitBar`
+  (`components/RoadmapBuilder.tsx:405, 942`).
+- **An all-empty spec is already representable.** `ViewBar = ViewCell[] | null`
+  (`lib/roadmap-view.ts:38`) and the view model seeds `Array.from({length: sec.bars},
+  () => null)` (`lib/roadmap-view.ts:341`). An L0 spec — correct bar counts, zero
+  `changes` — is a valid, renderable, editable chart on day one. **This is the single
+  most load-bearing reuse in this design**: the lyrics parser's output is not a new
+  kind of object needing new UI, it is an ordinary builder chart with empty bars.
+
+> ⚠ **Discoverability gap (not a blocker for this design, but a real finding).**
+> Chord entry lives on the *chart preview*, not on the section list — the section list
+> offers only `+ Add section` / remove (`RoadmapBuilder.tsx:573-574, 742`). Nothing signals
+> that clicking a bar is how chords are entered. An owner handed an L0 chart from a
+> lyrics sheet will be looking for exactly this and will plausibly conclude the product
+> cannot do it. Worth a separate UX ticket; this design assumes the capability, not the
+> affordance.
 
 Because NNS is key-agnostic and the sheet supplies the key, transposition is free —
 horns concert, guitar capoed, or the band dropping the song a whole step, all from
@@ -205,7 +234,7 @@ Consequences, all of them deliberate:
 ### 5.1 Why this matters to conductor mode specifically
 
 Today the conductor wire is scoped to a single chart file: `songRef` is the chart
-`fileId` (`app/[owner]/[show]/page.tsx:3363`), positions are chart-local bar ids
+`fileId` (`app/[owner]/[show]/page.tsx:3364`), positions are chart-local bar ids
 (`lib/conductor-targets.ts:20-26`), and a follower on a different chart for the same song
 is told so and self-navigates (`lib/relay-binding.ts:115`, `components/RelayStrip.tsx:136`).
 Cross-chart following is deliberately deferred to 3c
@@ -226,16 +255,33 @@ Reuse the existing discipline; do not build a second one.
    short, line-initial, and match the §2 grammar; lyric body text does not. Scanned
    sheets with no text layer are **out of scope for v1** — they fail closed with
    "no text layer," they do not fall back to vision.
-2. **Normalize to the authoring surface.** The deterministic
-   `parseDescription(description, renderKey, timeSig)` (`lib/roadmap-authoring.ts:545`)
-   already turns a textual structure description into an `AuthoringDraft`. Prefer
-   normalizing the sheet's grammar into that surface over writing a parallel parser.
-3. **Fold and validate.** `foldDraft` → `validateRoadmapSpec`, unchanged.
-   `validateRoadmapSpec` remains the DB boundary gate; a lyrics-derived spec earns no
-   exemption from it.
-4. **Read back a tally.** `tallyDraft` exists precisely to catch a dropped span before
-   save (`design-roadmap-authoring-fidelity.md` §2). A dropped section is the failure
-   mode most likely to look plausible, so the tally is mandatory here, not optional.
+2. **Emit a `RoadmapSpec` directly — do NOT route through `parseDescription`.**
+   *(Corrected after Codex review; an earlier draft of this doc claimed the authoring
+   surface could be reused, and it cannot.)* The existing text path is chord-oriented
+   and **rejects form-only input**: `parseDescription` returns null for a labelled
+   section with no span body — `if (clauses.length === 0) return null; // a labelled
+   section with no spans = miss` (`lib/roadmap-authoring.ts:559`) — and the whole
+   description defers on any unparseable clause (`:564`). `Verse 8x` has no chord
+   clause by construction, so **every** lyrics sheet would defer.
+
+   The L0 shape is simpler than an `AuthoringDraft` anyway: an ordered list of
+   `{ label, bars, repeat? }`. Build a **form-only adapter** that emits `RoadmapSection[]`
+   with `changes` **omitted** — legal, since `changes?` is optional
+   (`lib/roadmap-spec.ts:32`) and the view model already seeds empty bars
+   (`lib/roadmap-view.ts:341`). Do not synthesize placeholder spans to satisfy the
+   authoring surface: that would invent chords, violating §4.1.
+3. **Validate.** `validateRoadmapSpec` remains the DB boundary gate; a lyrics-derived
+   spec earns no exemption from it.
+4. **Read back a tally computed from the FOLDED SPEC, not the draft.** A read-back echo
+   is mandatory here — a dropped section is the failure mode most likely to look
+   plausible. But `tallyDraft` is **op-blind**: it sums `sec.spans` and ignores ops
+   (`lib/roadmap-authoring.ts:407-416`), a fidelity hole already recorded as verified in
+   `docs/backlog-charting.md` ("an intro `3x` repeat is not reflected"). This grammar
+   emits repeats as a matter of course (`Chorus x2`), so `tallyDraft` would silently
+   under-report exactly the construct we most need echoed. **The tally for this path
+   must be derived from the validated spec** (sections × bars, with repeats expanded),
+   or `tallyDraft` must first be made op-aware. Until one of those exists, the repeat
+   grammar is not pinned.
 
 **Determinism first.** The grammar in §2 is regular. An AI parse is a *fallback* for
 sheets that deviate, subject to the same transcribe-then-fold split already used in
@@ -250,9 +296,9 @@ Every one of these degrades to review, never to a silent result.
 | Condition | Handling |
 | --- | --- |
 | Bare section, no prior same-label section | **Fail** the section; cannot invent a bar count |
-| Bare section inheriting from a prior one | Resolve, **reduced confidence**, flag for review (§2.2) |
+| Bare section inheriting from a prior one | **Propose** the inherited count; **require per-section owner confirmation** before persisting (§2.2) |
 | No key line | Spec needs `renderKey`; prompt the owner, do not default |
-| No time signature | Assume `4/4`, **record as assumed**; block duration math on it |
+| No time signature | Propose `4/4` **in the wrapper, not the spec**; owner confirms before persist (§2.1) |
 | Bar count total disagrees with a converter read of the same song | Surface both; owner decides. **Never auto-reconcile** |
 | No text layer (scanned sheet) | Out of scope v1; fail closed |
 | Adjacent multipliers suggesting group repeat | Parse per-section, flag (§2.2) |
@@ -276,9 +322,17 @@ Every one of these degrades to review, never to a silent result.
 
 ## 9. Open questions
 
-1. **Corpus shape.** How are the lyrics PDFs currently stored — already `role='lyrics'`
-   rows in `chart_library`, or an external set awaiting import? This decides whether
-   ingest is a route over existing rows or a bulk importer.
+1. ~~**Corpus shape.**~~ **RESOLVED (Graham, 2026-09-02).** The existing library's
+   lyrics PDFs are **already `role='lyrics'`** rows in `chart_library`, so ingest over
+   the current corpus is a route over existing rows — no bulk importer needed.
+   **But newly uploaded lyrics sheets are not tagged**, and would have to be marked as
+   such at upload. That makes upload-time role tagging a **prerequisite for the ongoing
+   path**, not for the backfill. Two consequences:
+   - The backfill (existing corpus) and the ongoing path (new uploads) can ship
+     **independently**; the backfill is unblocked today.
+   - Ingest must key off `role='lyrics'` and must **not** infer "this looks like a
+     lyrics sheet" from content. An untagged sheet is simply not a candidate — the
+     honest failure is "not tagged," never a guess. (§7's fail-closed posture.)
 2. **Text-layer coverage.** What fraction of the corpus has a usable text layer? §6
    fails closed without one, so this sizes the feature. (The charting corpus ran 7/8
    vector, 1/8 scan; lyrics sheets are likely better, but that is an assumption, not a
@@ -310,12 +364,24 @@ Gated commits, Codex per chunk.
    Blocked on that flow existing (conductor chunk 1 wiring).
 4. **`SongStructure` seeding.** Confirmed spec → `SongStructure` + initial
    `ChartAlignment` via the existing `seedAlignment` (`lib/song-structure.ts:293`).
-   **This is the chunk that requires `SongStructure` to be persisted** — currently it
-   has no table. That persistence belongs to conductor chunk 1, not to this design.
+   **This chunk requires `SongStructure` to be PERSISTED, and no chunk owns that yet.**
+   Conductor chunk 1 is explicitly the *pure* model — "`SongStructure` + alignment model
+   (pure, tested)" (`docs/design-conductor-authority.md` §9.1) — it does not include a
+   table, a route, or a review flow. So this depends on a **future persistence + review
+   chunk that does not currently exist in any build outline**. *(Corrected after Codex
+   review; an earlier draft wrongly assigned persistence to conductor chunk 1.)*
 5. **Corroboration report.** Where both a lyrics read and a converter read exist,
    report agreement/disagreement per song (Q5).
 
-**Sequencing note.** Chunks 1–2 are self-contained and depend on nothing unbuilt.
-Chunks 3–4 depend on conductor chunk 1 landing `SongStructure` persistence. This
-design does **not** propose building that persistence — it is an argument for why
-conductor chunk 1 is worth more than it currently looks.
+6. **Upload-time `lyrics` role tagging.** Only gates the *ongoing* path (new uploads);
+   the backfill over the already-tagged corpus does not wait on it (§9 Q1).
+
+**Sequencing note.** Chunks 1–2 are self-contained and depend on nothing unbuilt —
+they produce a validated `RoadmapSpec`, which is already a first-class, editable
+builder chart (§4.1). **That is a shippable increment on its own**, and it is where
+this design's value is cheapest to realise.
+
+Chunks 3–5 depend on `SongStructure` persistence, which **no existing chunk owns**
+(§10.4). This design does not propose building it. What it does establish is a second,
+geometry-independent reason to build it — the canonical layer currently has a supply
+problem, and a corpus that already contains the answer.
