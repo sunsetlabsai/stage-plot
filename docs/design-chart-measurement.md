@@ -113,11 +113,11 @@ Two shipped facts force an explicit split, and the design owns it rather than im
 it away:
 
 - The only insert-only calibration writer lives inside server-side
-  `/api/charts/convert` (`route.ts:130`); the generic client write
+  `/api/charts/convert` (`route.ts:149`); the generic client write
   (`/api/charts/calibration` PUT, `route.ts:201`) is an overwrite-capable upsert
   reserved for the human editing flow. A browser engine must NOT gain overwrite power
   by riding that PUT.
-- The VLM key is resolved server-side (`convert/route.ts:99`) and never reaches the
+- The VLM key is resolved server-side (`convert/route.ts:118`) and never reaches the
   browser.
 
 **Contract:** the client engine extracts geometry + text and computes provisional
@@ -188,7 +188,9 @@ corpus, not from argument; the numbers are reproducible with
    pdf.js reassigns `gfx.ctx` for SMasks / transparency groups / own-canvas
    annotations, and tiling/shading patterns can render vector content into a scratch
    canvas that arrives via `createPattern` / `drawImage` / `fillRect`. Zero corpus pages
-   hit either. §The geometry-completeness precondition below is what they feed.
+   hit either. §The geometry-completeness precondition below is what they feed — note
+   that `fillRect` is handled there by a **bound**, not an exclusion, because every page
+   carries exactly one structural `fillRect` (§`fillRect` is bounded, not excluded).
 2. **Fixture strategy — settled by construction.** Synthetic fixtures in-repo (22 unit
    tests over stages 1-5, no corpus needed); the corpus and its expected-results file
    stay out of the repo. Extracted geometry fixtures were not needed and are not
@@ -324,8 +326,9 @@ lyrics PDFs.
 The record is categorized precisely so the categories can be told apart:
 
 ```
-complete  ⟺  no OBSERVABILITY warning
-             ∧ drawImage + putImageData + createPattern == 0
+complete  ⟺  no OBSERVABILITY warning                                  (per page)
+             ∧ drawImage + putImageData + createPattern + strokeRect == 0
+             ∧ fillRect <= 1
 ```
 
 - **Observability warnings** — `stroke-without-path` (`lib/chart-measure-canvas.ts:343`),
@@ -336,11 +339,50 @@ complete  ⟺  no OBSERVABILITY warning
   B1's blanket comment on `warnings` ("any warning means INCOMPLETE") is too strong and
   is corrected here — measured, 4 corpus files carry `anisotropic-ctm` and validate
   **53/53** systems between them.
-- **Raster/pattern ops** are the only paint that can carry a hidden staff — the two
-  bypass classes from §Answered by chunk B1. `fillText` / `strokeText` / `fillRect` /
-  `wash` / `clip` are all accounted-for paint and are not consulted.
+- **Raster/pattern ops** carry pixels, not geometry — the two bypass classes from
+  §Answered by chunk B1. `strokeRect` joins them: it is in `OPAQUE_OPS` (`:286`), is
+  rect-shaped paint the shim never converts to segments, and is **0 across all 87 corpus
+  files**, so excluding it is free.
+- **`fillText` / `strokeText` / `clip`** are text and clipping. They cannot hide a staff
+  and are not consulted.
 
-No threshold, no bounds data needed, and it fails toward the VLM.
+### ⚠ `fillRect` is bounded, not excluded (Codex R2, #172 — and the reason is measured)
+
+An earlier draft listed `fillRect` beside `fillText` and `wash` as "accounted-for paint,
+not consulted." **That was unjustified, and the mechanism is worse than the wording.**
+The wash test — white-ink or page-covering, diverting to `opaque.wash` — lives *inside
+the `fill(path)` handler* (`lib/chart-measure-canvas.ts:356-370`). `fillRect` is
+installed by the generic `OPAQUE_OPS` loop at `:384`, which only increments a counter and
+forwards. **`fillRect` never reaches the wash test at all**, produces no segments, and is
+therefore genuinely unobserved paint. pdf.js also uses `fillRect` for shading fills and
+image masks, either of which could cover a staff.
+
+But excluding it outright is not the fix, and measurement is what says so: **`fillRect` is
+present in 87 of 87 corpus files and in 23 of 23 gate candidates.** A
+`fillRect == 0` clause would disable the never-gate exactly as `Σ opaque == 0` would have
+— the same failure this section already exists to correct, one category further in.
+
+The distinguisher is the **count**, and it is sharp:
+
+| | measured, 87 files |
+|---|---|
+| `fillRect` per page | **exactly 1.00 for every file** — the pdf.js `beginDrawing` page-background fill, one per page, structural rather than content |
+| `strokeRect` | 0 |
+| `drawImage` | 2 files — both already classify `raster` |
+| `putImageData` / `createPattern` | 0 |
+
+So `fillRect <= 1` **per page** admits precisely the one structural background fill every
+page has and nothing else. A second `fillRect` on a page is a fill pdf.js did not need to
+draw the background — a shading fill or an image mask — and it opens the gate, routing
+that page to the whole-page VLM. That answers the real objection: the predicate does not
+have to tell a harmless background `fillRect` from a hiding one by its bounds, because
+the harmless one is *countable* and the corpus fixes its count at one.
+
+⚠ This is the one clause carrying an **empirical** rather than structural justification.
+If a future pdf.js changes how it paints the background, this clause fails **closed** —
+more `fillRect`s means more pages routed to the VLM, never a page wrongly gated. That is
+the correct direction, but the acceptance harness should report `fillRect` per page so the
+assumption is visible rather than silently drifting.
 
 **Measured on the corpus (2026-09-02, 87 files, harness at `PARITY: clean`):**
 
@@ -348,6 +390,7 @@ No threshold, no bounds data needed, and it fails toward the VLM.
 |---|---|
 | `not-notation` candidates still gating under the predicate | **23 / 23** |
 | files anywhere with raster/pattern paint | **2** — and both classify `raster`, so they route to whole-page VLM and were never gate candidates |
+| files with `fillRect` exceeding one per page | **0** |
 | files with any warning | 4, all `anisotropic-ctm`, all validating cleanly |
 | observability warnings across the whole corpus | **0** |
 
@@ -451,6 +494,16 @@ corrected pair:
 - `bars.length === expectedSpans` — the existing `validated` check, restated over bars.
 - `Σ bars[].measures === delta` — the new one.
 
+⚠ **Both are evaluable on SCORED systems only (Codex R2, #172).** `delta` and
+`expectedSpans` are computed in one guarded branch (`lib/chart-measure.ts:460-462`) that
+requires `from !== null` — the system's own printed number, or 1 for the first system on
+page 1 — **and** a `next` system **and** `next.printedNumber !== null`. So the invariant
+is undefined, not violated, for: the last system on any page, the first system on a
+continuation page with no printed number, and every `unscored` system (86/550, 15.6%).
+Validation must skip those rather than treat a null `expectedSpans` as a failure — a
+check that fires on absent evidence is the same mistake the never-gate's safety rule
+exists to prevent.
+
 **And it is a consistency guard, not a correctness proof.** A sum is invariant under
 mis-assignment: attach `measures: 4` to the wrong bar in the system and the total is
 still right. It catches a dropped or duplicated count, nothing more. `measures` is an
@@ -497,10 +550,24 @@ server then, in this order:
 
 1. re-hashes the **authoritative storage bytes** it already downloads, and **rejects on
    mismatch** with the payload's `source_hash`;
-2. validates the merged calibration with `isValidCalibration` plus the verdict enum
+2. runs its existing vision call — **unconditionally, and before any path decision.**
+   It supplies `sections` either way (§Ruling for B2: the VLM section pass stays), and
+   its `roadmap` is the discriminator step 3 branches on;
+3. **branches on VLM roadmap presence** (§The roadmap is NOT separable semantics):
+   roadmap empty → install the measured `systems`/`bars` + per-system verdicts beside
+   the VLM sections; roadmap non-empty → **discard the measurement** and take today's
+   `buildCalibrationFromVision` path byte-for-byte unchanged;
+4. validates the resulting calibration with `isValidCalibration` plus the verdict enum
    check — client geometry is *data*, never trusted computation;
-3. runs its existing vision call for sections/roadmap;
-4. performs the same insert-only, conflict-as-no-op write it performs today.
+5. performs the same insert-only, conflict-as-no-op write it performs today.
+
+⚠ **The order matters and an earlier draft had it backwards (Codex R2, #172):** it
+validated a "merged" calibration at step 2 and ran the VLM at step 3. Nothing can be
+merged before the vision call returns, and the roadmap-presence branch cannot be decided
+before it either — so the draft was unimplementable as written, and a builder following
+it would have validated an intermediate shape that the branch then discards. The order
+above is also the order the route already runs in: key resolve (`convert/route.ts:118`)
+→ vision (`:126`) → map + validate (`:141`) → insert-only persist (`:149`).
 
 A request with no `measured` behaves exactly as it does now, so the route degrades to
 current behaviour for any client that cannot measure.
