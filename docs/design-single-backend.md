@@ -41,8 +41,8 @@ shows, so the surviving mode is unusable exactly when it would trigger.
 > show (i.e., when supabase is 'down') buys us nothing of consequence."* — Graham
 
 Supporting context: the premise Redis was chosen under ("ShowRunr currently has
-zero server-side persistence", `design-kv-admin-settings.md`) expired when Supabase
-landed 2026-05-25; and the vendor churned twice (`@vercel/kv` sunset Dec 2024 →
+zero server-side persistence", in the since-deleted `design-kv-admin-settings.md`)
+expired when Supabase landed 2026-05-25; and the vendor churned twice (`@vercel/kv` sunset Dec 2024 →
 `redis`/Marketplace Redis Cloud, which itself became unreachable in prod by
 2026-08).
 
@@ -50,7 +50,8 @@ landed 2026-05-25; and the vendor churned twice (`@vercel/kv` sunset Dec 2024 �
 
 ## 2. What shipped, and what remains
 
-Migrations in prod through `015`. This ledger is the sole authority on status.
+Migrations in prod through `015`. **Build state is tracked in `docs/INDEX.md`, not here.**
+This ledger records which PR carried each chunk; it is history, not status.
 
 | Chunk | Shipped | PR | Key artifacts |
 |---|---|---|---|
@@ -60,7 +61,7 @@ Migrations in prod through `015`. This ledger is the sole authority on status.
 | 3 | ✅ | #161 (`2989997`) | BYOA → `user_secrets` + Vault; server routes; `/dashboard/settings`; migration `015` |
 | 5 | ✅ | #156 (`496b368`) | `redis` dropped from `package.json`; the import-scan guard widened repo-wide |
 | 6 | ✅ | #158 (`0a2141f`) | collaborators view-only; `show_collaborators.role` dropped; migration `014` |
-| **4** | **remaining** | — | **the BYOA settings overlay — §3 below** |
+| 4 | ✅ | `b0bed1c` | the BYOA settings overlay — §3 below; `components/SettingsOverlay.tsx` |
 
 **Infrastructure teardown (not code — Graham's to run).** The `redis` package and
 the `showrunr-kv` Marketplace store are gone, but two env vars are still set in
@@ -78,7 +79,7 @@ is visible in the repository — an env-var claim can only be settled against Ve
 
 ---
 
-## 3. Chunk 4 — the BYOA settings overlay (the one remaining build)
+## 3. Chunk 4 — the BYOA settings overlay
 
 ### 3.1 The three carried-forward rulings
 
@@ -132,8 +133,8 @@ table. `ConfigRead` is `{ status: 'ok'; source: 'env' } | { status: 'none' }` �
 `'store'` and `'error'` are unreachable (nothing stores anything, and an env var
 has no failure mode). **All three config keys still have live consumers**
 (`lib/admin-config.ts:60`): `google_client_id` and `google_client_secret` via
-`/api/auth/google` and its callback — Google OAuth *login*, which Drive retirement
-did **not** touch (it removed only Drive-as-a-chart-source) — and `claude_tryit_key`
+`/api/auth/google` and its callback — Google OAuth *login*, which the (still unbuilt)
+Drive retirement would not touch — and `claude_tryit_key`
 via the `CLAUDE_TRYIT_KEY` env fallback. Config changes via Vercel env + redeploy,
 not a UI: these values rotate rarely and there is one operator.
 
@@ -322,11 +323,10 @@ the sliding behaviour was an artifact of TTL being the only expiry Redis offers.
 
 Supersession notices are present in all four; full rewrites are separate work.
 
-- **`design-kv-admin-settings.md`** — its "Why Redis over Postgres" rationale and
-  its instance-per-customer "Model C" hosting are dead (Graham ruled multi-tenant
-  SaaS; the code already agreed — `app/api/profiles/route.ts` is self-serve slug
-  claiming). Its `ADMIN_SECRET` root-of-trust is replaced by the Supabase session
-  plus `PLATFORM_ADMIN_EMAIL`. Notice landed #150.
+- **`design-kv-admin-settings.md`** — DELETED 2026-09-04, wholly dead. Its "Why Redis
+  over Postgres" rationale and its instance-per-customer "Model C" hosting died with
+  the multi-tenant ruling; its `ADMIN_SECRET` root-of-trust is replaced by the Supabase
+  session plus `PLATFORM_ADMIN_EMAIL`.
 - **`design-supabase-backend.md`** — its `user_secrets` write-policy block is
   superseded (Vault requires server-side writes and there is no DELETE policy); its
   replacement table is correct and was executed for `/api/show` by chunk 0. Notice

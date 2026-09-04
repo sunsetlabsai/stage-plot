@@ -53,10 +53,47 @@ function docFiles(dir: string, base = 'docs'): string[] {
  * noticed. A bare filename in backticks has exactly one spelling.
  */
 function entries(index: string): { path: string; state: string; line: number }[] {
-  return index.split('\n').flatMap((line, i) => {
-    const m = line.match(/^\|\s*`([^`]+\.md)`\s*\|\s*([A-Z-]+)\s*\|/);
-    return m ? [{ path: `docs/${m[1]}`, state: m[2], line: i + 1 }] : [];
+  return visible(index).flatMap(({ text, line }) => {
+    const m = text.match(/^\|\s*`([^`]+\.md)`\s*\|\s*([A-Z-]+)\s*\|/);
+    return m ? [{ path: `docs/${m[1]}`, state: m[2], line }] : [];
   });
+}
+
+/**
+ * Lines a reader actually sees — fenced code blocks and HTML comments removed.
+ *
+ * Codex found the hole this closes: the parser used to scan raw lines, so the
+ * 75 real rows could be wrapped in an HTML comment and the visible table
+ * replaced with wrong states, and every assertion here would still pass while
+ * the rendered page lied. An index that is only correct in its hidden copy is
+ * exactly the two-homes failure this whole file exists to prevent.
+ */
+function visible(src: string): { text: string; line: number }[] {
+  const out: { text: string; line: number }[] = [];
+  let fenced = false;
+  let commented = false;
+  src.split('\n').forEach((text, i) => {
+    if (/^\s*```/.test(text)) {
+      fenced = !fenced;
+      return;
+    }
+    let t = text;
+    if (commented) {
+      const end = t.indexOf('-->');
+      if (end === -1) return;
+      commented = false;
+      t = t.slice(end + 3);
+    }
+    // Strip inline comments, then detect one that opens and does not close.
+    t = t.replace(/<!--.*?-->/g, '');
+    const open = t.indexOf('<!--');
+    if (open !== -1) {
+      commented = true;
+      t = t.slice(0, open);
+    }
+    if (!fenced) out.push({ text: t, line: i + 1 });
+  });
+  return out;
 }
 
 const INDEX_SRC = readFileSync(join(REPO, INDEX), 'utf8');
@@ -88,6 +125,21 @@ describe('docs/INDEX.md accounts for every doc', () => {
     for (const e of ENTRIES) seen.set(e.path, (seen.get(e.path) ?? 0) + 1);
     const dupes = [...seen].filter(([, n]) => n > 1).map(([p, n]) => `${p} ×${n}`);
     expect(dupes).toEqual([]);
+  });
+
+  it('does not count rows a reader cannot see', () => {
+    // The mutation Codex used to defeat the earlier parser: keep the real rows,
+    // hide them, and show something else. Both hidden forms must yield nothing.
+    const hidden = [
+      '<!--',
+      '| `design-nav-graph.md` | SHIPPED-RECORD | hidden in a comment |',
+      '-->',
+      '```',
+      '| `design-payments.md` | SHIPPED-RECORD | hidden in a fence |',
+      '```',
+      '| `design-perform-tab.md` | SHIPPED-RECORD | visible |',
+    ].join('\n');
+    expect(entries(hidden).map((e) => e.path)).toEqual(['docs/design-perform-tab.md']);
   });
 
   it('gives every entry a legal state', () => {

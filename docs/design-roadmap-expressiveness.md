@@ -3,7 +3,7 @@
 **Status:** Build state tracked in `docs/INDEX.md`, not here. Gap 2 (modulation) remains a deferred stub. Captured
 here so the discussion that produced it isn't lost and so the active chunks don't
 bake in assumptions that would block it. Chunk-5 authoring-fidelity design merged to
-main `4e29fb4`; chunk-4 re-key still on its own branch awaiting Codex re-review.
+main `4e29fb4`; chunk-4 re-key has since shipped (`lib/chart-calibration.ts:101`).
 
 **Theme:** expressing chords and tonal centers that fall **outside a single
 diatonic key**. Two real gaps + one non-gap that's worth recording so we don't

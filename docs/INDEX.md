@@ -88,15 +88,13 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | Doc | State | Note |
 |---|---|---|
 | `design-single-backend.md` | SHIPPED-RECORD | All chunks incl. 4 (`components/SettingsOverlay.tsx`). ⚠ Its own §status still lists chunk 4 as "remaining". Only the Vercel env teardown remains, outside the repo. |
-| `design-supabase-backend.md` | SHIPPED-RECORD | All four items its banner lists as unbuilt are closed. |
+| `design-supabase-backend.md` | PARTIAL | The four items its banner lists as unbuilt are closed. **But its "What Goes Away" table still specifies killing Google Drive (`:81-82`), which has not happened** — see `design-retire-drive.md` below. |
 | `design-owner-namespacing.md` | SHIPPED-RECORD | Migration `005` + the `[owner]/[show]` route. |
 | `design-owner-onboarding.md` | PARTIAL | Claim flow shipped. The `ADMIN_SECRET` bearer auth is dead — replaced by `requirePlatformAdmin()`. |
 | `design-ai-key-availability.md` | PARTIAL | Probe + panel + recovery shipped. **§13 (one key resolver for all three AI surfaces) unbuilt** — parse and convert still call `getAdminConfig` directly. |
 | `design-account-key-recovery.md` | SHIPPED-RECORD | `keyReject` wired (`agent/chat/route.ts:141`). |
 | `design-payments.md` | UNBUILT-DESIGN | No Stripe, no tier/quota table anywhere. |
 | `strategy-pwa-commercial.md` | PARTIAL | PWA half shipped. Commercial half has no code. |
-| `design-kv-admin-settings.md` | SUPERSEDED | Redis-era. Redis is gone from source, `package.json` and lockfile. |
-| `design-slug-urls.md` | SUPERSEDED | Specifies `app/api/show/` (singular), deleted — pinned absent by `tests/redis-retirement.test.ts:308`. |
 | `backlog-admin-identity.md` | BACKLOG | Salvage of closed PR #123. Carries "account deletion is impossible today". |
 
 ## Offline, PWA, storage, Drive
