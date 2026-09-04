@@ -416,18 +416,28 @@ Every one of these degrades to review, never to a silent result.
    viewable, and some players prefer a one-page number chart to a four-page part. Is
    that a per-performer preference inside conductor mode? Believed desirable; deferred
    — it is a conductor-UI question, not a structure question.
-5. **Validation sweep — BLOCKED on #172, and the block is the interesting part.**
+5. **Validation sweep — DESIGN-unblocked by #172, still BUILD-blocked, and the residual
+   block is the interesting part.**
    Where lyrics-derived form and a converter read exist for the same song, agreement is
    independent corroboration of both. But the two are in **different units** (§2.3): the
    lyrics count is musical measures, `absNumber` is visible bars. Comparing them
-   directly mis-reports every chart containing a multirest.
-   `ChartCalibration` has **no musical count on `main` today** — `Bar.measures?: number`
-   is designed in PR #172 (open) and not yet merged. Until it lands the sweep cannot be
-   run honestly, because **without `measures` a multirest is indistinguishable from an
-   ordinary bar**, so we cannot even identify which charts are safe to compare.
-   Therefore: the sweep waits on #172, and when it runs it compares
-   `Σ section.bars` (lyrics) against `Σ Bar.measures` (calibration) — never
-   `max(absNumber)`.
+   directly mis-reports every chart containing a multirest. Without a musical count a
+   multirest is indistinguishable from an ordinary bar, so we cannot even identify which
+   charts are safe to compare.
+   **PR #172 merged (`4d290db`), so `Bar.measures?: number` is now a frozen spec** —
+   `docs/design-chart-measurement.md` §Multirests. That closes the *design* dependency
+   this item was originally waiting on. **It does not close the data dependency:**
+   `Bar.measures` is not implemented in code, and calibration writes are
+   **generate-once / insert-only** (`docs/design-chart-measurement.md`; there is no
+   same-hash machine re-run). Multirests are captured **at creation, by chunk B2**.
+   Two consequences that size this item honestly:
+   - The sweep waits on the **B2 build**, not on a merge.
+   - Even after B2 ships, only charts **created by the measured path** carry `measures`.
+     Pre-B2 calibrations never acquire it by machine — an owner overwrite (PUT) is the
+     only path. So the sweep's corpus is *post-B2 charts*, and it must report the
+     unmeasurable remainder rather than silently comparing against a default of 1.
+   When it runs it compares `Σ section.bars` (lyrics) against `Σ Bar.measures`
+   (calibration) — never `max(absNumber)`.
 
 ---
 
