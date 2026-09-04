@@ -1,6 +1,6 @@
 # Design — Barline-Tick Drag (manual per-barline nudge)
 
-Status: DESIGN — awaiting Graham sign-off, then Codex. Build-on-GO only.
+Status: Build state tracked in `docs/INDEX.md`, not here.
 Scope: ONE focused gap. Does not touch CV snap (separate doc) or the Roadmap Builder.
 
 ## Why this exists

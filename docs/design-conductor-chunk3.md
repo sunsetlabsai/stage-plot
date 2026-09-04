@@ -1,6 +1,6 @@
 # Conductor chunk 3 — the shared state machine (build-level design)
 
-**Status:** DESIGN-ONLY (review the spec; do NOT build until GO).
+**Build state:** tracked in `docs/INDEX.md`, not here.
 **Parent:** `design-conductor-authority.md` §4 (authority/epoch), §6 (state machine), §9-3 (build outline).
 **Builds on:** chunk 2 `lib/roadmap-vm.ts` — `VMState`, `Directive` (the VM-level override), `compileRoadmap`/`initVM`/`stepVM`/`applyOverride`. Shipped to main `b69090f`.
 

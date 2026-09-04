@@ -1,13 +1,13 @@
 # Design — CV Barline Snap (auto-align bars to the printed lines)
 
-Status: DESIGN — decisions 1-8 LOCKED by Graham (all yes; #3 = option A).
+Status: decisions 1-8 LOCKED by Graham (all yes; #3 = option A). Build state tracked in `docs/INDEX.md`, not here.
 Revised after Codex round-1 (order-aware matching contract, honest no-regression
 claim, dedicated offscreen render helper), Opus self-review R2 (pre-snap snapshot
 determinism, MIN_STRENGTH floor in both branches, pinned alignment, post-apply
 honesty), **Codex round-2** (symmetric mutual-nearest matcher; edge-aware
 MAX_PULL; reading-order tie-break), and **Codex round-3** (pinned the
 `SnapBarsResult` metadata contract the UX needs; "sub-strength" wording — see
-§Decisions). Build-on-GO only, after Codex re-review.
+§Decisions). Build state in `docs/INDEX.md`, not here.
 Scope: the **automated** refinement that sits between `autoDistributeBars`
 (even floor) and the manual barline-tick drag (`moveBarBoundary`, shipped in
 PR #94). Cardinality reconciliation (add/remove a barline) is its companion —

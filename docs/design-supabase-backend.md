@@ -2,20 +2,22 @@
 
 > ## ⚠ PARTIALLY BUILT — read `docs/design-single-backend.md` first
 >
-> **Status below is STALE.** "Awaiting build approval" is wrong: shows, charts,
-> auth, songs, profiles and collaborators were all built and are in production.
+> **Status below is STALE — and so was this notice until 2026-09-04.** Build state
+> is tracked in `docs/INDEX.md`, not in either place.
 >
-> **What was NOT built, despite this document declaring it replaced:**
-> - `/api/show` (Redis slug CRUD) — the replacement shipped 2026-05-25; **the
->   Redis route was never deleted and still sits in the tree with zero callers.**
-> - `tryit_quota` + `increment_tryit()` — migrated in `001_initial_schema.sql`,
->   **never called.** Production still uses Redis `quota:{ip}`.
-> - `user_secrets` — table created, **zero application code**.
-> - Admin config — still Redis-only.
+> This notice used to list four things as "NOT built". **All four have since closed**,
+> and it kept saying otherwise:
+> - `/api/show` (Redis slug CRUD) — **deleted**, and pinned absent by
+>   `tests/redis-retirement.test.ts:308`.
+> - `tryit_quota` + `increment_tryit()` — **called** at `lib/agent-key.ts:176`.
+> - `user_secrets` — has application code (`app/api/settings/byoa/route.ts`) and
+>   `015_user_secrets_vault.sql`.
+> - Admin config — **not Redis**; Redis is absent from source, `package.json` and the
+>   lockfile.
 >
-> **⇒ This document's `Replaces: Redis` claim has been TRUE ON PAPER AND FALSE IN
-> PRODUCTION since May 2026.** `docs/design-single-backend.md` executes it, and
-> supersedes two specifics here:
+> **⇒ This document's `Replaces: Redis` claim was TRUE ON PAPER AND FALSE IN
+> PRODUCTION from May 2026 until the retirement actually landed.**
+> `docs/design-single-backend.md` executed it, and supersedes two specifics here:
 >
 > - The **`user_secrets` policy block**. *(Corrected 2026-08-24: an earlier
 >   version of this notice said those write policies "were never created". **That
@@ -26,7 +28,8 @@
 >   action. *The write-only guarantee comes from the absent SELECT policy, which
 >   this document got right.)*
 > - The **"Env vars only"** row in the table below — Graham ruled 2026-08-24 for
->   a Supabase `admin_config` table instead.
+>   a Supabase `admin_config` table instead. *(That table was later killed too; the
+>   try-it key rides the `CLAUDE_TRYIT_KEY` env var. There is no `admin_config`.)*
 
 **Status:** ~~Draft v1.4 — Post-adversarial review (14 findings across 3 rounds), awaiting build approval~~ — **superseded, see notice above**
 **Replaces:** Redis (slugs, admin config, try-it quota) — **aspirational; only partially executed, see notice above**, Google Drive (charts), localStorage-as-primary

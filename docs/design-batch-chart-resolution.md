@@ -1,6 +1,7 @@
 # Design: Batch Chart Resolution & Navigator
 
-**Status:** Draft v1.1 — cross-check fixes applied
+**Status:** SUPERSEDED — see `docs/INDEX.md`. Drive-era batch resolution, replaced by
+library-keyed resolution at show GET.
 **Depends on:** PR #1 (Charts / Lead Sheets — Google Drive integration)
 **Scope:** Setup-time batch resolution + showtime chart navigator
 

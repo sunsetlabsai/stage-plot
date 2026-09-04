@@ -1,8 +1,7 @@
 # Conductor 5b · chunk 1 — the MD align / true-up tap + re-anchor (the position primitive)
 
 **Status:** **DESIGN-DONE — Codex R2 GO** (no HIGH/MEDIUM; one LOW wording nit folded — the
-`anchor: null` gloss now reads "no human/trust anchor ever asserted", §2.1). Cleared for build
-pending Graham's GO. DESIGN-ONLY, no code in this pass. Builds on chunk 0 (`song.bpm` + click +
+`anchor: null` gloss now reads "no human/trust anchor ever asserted", §2.1). Build state tracked in `docs/INDEX.md`, not here. Builds on chunk 0 (`song.bpm` + click +
 tap-tempo, SHIPPED to prod `3eae7ae`) and the parent clock-layer design
 `docs/design-conductor-chunk5b-clock.md` (v0.6.6, Codex R9 GO). This doc is the build spec for
 **§8 item 1** of that parent; it does **not** reopen the parent (it is GO'd).

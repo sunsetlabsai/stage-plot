@@ -1,8 +1,8 @@
 # ShowRunr — Roadmap Authoring Fidelity (chunk 5: parse that doesn't drop bars) DESIGN
 
-**Status:** DESIGN-ONLY. Codex review, then build.
+**Status:** Build state tracked in `docs/INDEX.md`, not here.
 Companion to `docs/design-roadmap-builder.md` (chunks 0–3 shipped, main `9902d08`)
-and `docs/design-roadmap-key-resolution.md` (chunk 4, awaiting Codex).
+and `docs/design-roadmap-key-resolution.md` (chunk 4).
 
 ---
 

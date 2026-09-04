@@ -1,6 +1,6 @@
 # Conductor 5b — chunk 4: the live audio-tempo rung (detector → telemetry → ladder)
 
-**Status:** DESIGN, pre-Codex. Build-level spec for parent §8 **item 4** (`docs/design-conductor-chunk5b-clock.md:836`). Grounded against shipped code at main `5f58fd2` (chunks 0–3 merged). **Staged 4a (shadow, non-driving) → 4b (driving, after validation).** NOT building until Codex GO + Graham's explicit "build."
+**Status:** DESIGN, pre-Codex. Build-level spec for parent §8 **item 4** (`docs/design-conductor-chunk5b-clock.md:836`). Grounded against shipped code at main `5f58fd2` (chunks 0–3 merged). **Staged 4a (shadow, non-driving) → 4b (driving, after validation).** Build state tracked in `docs/INDEX.md`, not here.
 
 Parent decisions this inherits as LOCKED: placement = **(A) MD-mic v1** (§7-1); the audio rung is **shadow-only until it validates** (§6); confidence gates only the auto-*commit*, never motion (§5.2); MD-local, **no wire** (chunks 0–3 shipped no broadcast — the follower/relay transport is the separate conductor-authority epic, not built). Detector algorithm = **(a) zero-dep Web Audio spectral-flux → autocorrelation** (Graham's call, S-current).
 

@@ -1,6 +1,6 @@
 # Design — Library Chart Management
 
-Status: **REVISED for final review** · Branch `opus/design-library-chart-management` · Owner: Graham (sign-off gate)
+Status: **build state in `docs/INDEX.md`, not here** · Branch `opus/design-library-chart-management` · Owner: Graham (sign-off gate)
 
 > **Revision note (S34).** This spec was first drafted *before* the auto-overlay converter shipped.
 > The converter is now **live** (route `/api/charts/convert` + shared seam `lib/chart-upload.ts`), so

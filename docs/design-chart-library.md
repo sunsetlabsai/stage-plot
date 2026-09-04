@@ -1,6 +1,6 @@
 # Design: Chart Library — Owner-Scoped, Reusable Across Shows
 
-**Status:** Draft v1.3 — Post-adversarial review (12 findings across 3 rounds)
+**Status:** v1.3 — post-adversarial review (12 findings across 3 rounds). Build state tracked in `docs/INDEX.md`, not here.
 **Depends on:** Supabase backend (PR #44, merged)
 **Scope:** Replace show-scoped chart storage with an owner-scoped chart library. Charts are uploaded once, reused across all shows. Auto-matched to setlist songs by normalized title.
 

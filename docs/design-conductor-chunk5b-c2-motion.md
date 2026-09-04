@@ -1,7 +1,7 @@
 # Conductor 5b · chunk 2 — the static-BPM motion driver (the ladder + the loop)
 
 **Status:** DESIGN — **Codex R4 GO** (R1 2 HIGH + 1 MEDIUM, R2 1 HIGH, R3 1 HIGH, R4 1 LOW — all
-folded). DESIGN-ONLY, no code. **R4:** GO; one LOW — the §3.1 tick pseudocode used `session.vm.done`/
+folded). Build state tracked in `docs/INDEX.md`, not here. **R4:** GO; one LOW — the §3.1 tick pseudocode used `session.vm.done`/
 `session.current`; corrected to the shipped `session.state.vm.done`/`session.state.current` so the
 build implements the real shape. **R3 fold:** the loop would dispatch *no-op* advances after song end — a done-`advance`
 is `applied` (not `ignored`: `current: r.transition ?? state.current`, `conductor-state.ts:218`),

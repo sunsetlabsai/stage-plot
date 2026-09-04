@@ -1,6 +1,6 @@
 # Design — line-start measure numbers on generated roadmap charts
 
-**Status.** Design, for review. Build-ready — a rendering-only addition to the builder
+**Status.** Build state tracked in `docs/INDEX.md`, not here. A rendering-only addition to the builder
 (generated) chart path. No schema, no calibration, no data-model change.
 
 ---

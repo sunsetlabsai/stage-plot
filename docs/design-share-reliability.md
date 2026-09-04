@@ -1,6 +1,6 @@
 # Design: Share Reliability Fixes
 
-**Status:** v1.4 — merge-ready pending final Codex pass
+**Status:** v1.4. Build state tracked in `docs/INDEX.md`, not here.
 **Date:** 2025-06-03
 **Scope:** 3 fixes — slug stability, print overflow, friendly 404
 

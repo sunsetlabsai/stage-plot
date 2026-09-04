@@ -1,6 +1,6 @@
 # Design: Song Library Manager
 
-**Status:** Draft v1.8 (addresses Codex round 7: 1 HIGH — single keyspace)
+**Status:** v1.8 (addresses Codex round 7: 1 HIGH — single keyspace). Build state tracked in `docs/INDEX.md`, not here.
 **Date:** 2025-06-04
 **Depends on:** Supabase backend (migration 003 chart_library)
 

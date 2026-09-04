@@ -1,6 +1,7 @@
 # Design: Offline Chart Cache
 
-**Status:** Draft v1.1 — cross-check fixes applied
+**Status:** v1.1. Build state tracked in `docs/INDEX.md`, not here. The cache design here is LIVE and
+primary; only its Drive transport and its manual CTA are legacy.
 **Depends on:** Batch Chart Resolution & Navigator (PR #2 design)
 **Scope:** Download chart files for offline access at the gig
 

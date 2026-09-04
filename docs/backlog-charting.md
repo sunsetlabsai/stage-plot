@@ -87,6 +87,35 @@ measure 1 on page 1 only).
 
 ---
 
+### Google Drive stays — retirement considered and DECLINED **[ruled 2026-09-04]**
+
+Graham's call: keep the code, delete the design. `docs/design-retire-drive.md` was a
+full retirement spec that sat PRE-CODEX from PR #153 (2026-08-25) until it was deleted
+2026-09-04. **Do not re-derive it.** What is worth keeping from it:
+
+- **Drive is live but vestigial.** ⚠ **External measurement, not pinned by any repo
+  artifact** — run against the prod DB 2026-08-25:
+  `select count(*), count(config->>'chartsRootFolderId') from shows` → **6 shows, 0 with a
+  Drive folder.** Re-run it before relying on it; nothing in the repo will tell you if it
+  stops being true.
+  So the runtime cost is zero; the cost is only that `app/api/drive/*` (4 routes),
+  `lib/drive.ts`, and Drive branches in `page.tsx`, `chart-converter.ts`,
+  `chart-cache.ts`, `pdf-viewer.ts`, `show-file.ts` read as live architecture.
+- **Three couplings that make "just delete it" wrong**, if anyone reopens this:
+  1. `EXPORT_MIME_TYPES` lives in `lib/drive.ts` but has a consumer OUTSIDE Drive —
+     `lib/chart-converter.ts:82` — and `tests/tier1-loud-failures.test.ts` pins it.
+     The exemption is conditional on the download proxy existing, so retiring the
+     proxy makes "not unsupported" the wrong answer.
+  2. `lib/pdf-viewer.ts`'s `else` is a **catch-all for any non-Supabase URL**, not a
+     Drive branch. Deleting it makes the app fetch a removed route and fail silently.
+  3. `lib/show-file.ts`'s `chartsSource`: the retirement's rule was "stop writing, KEEP
+     reading" — old YAML exports carry it and loading one must not error. **That rule was
+     never applied**: `serializeShow` still WRITES it (`lib/show-file.ts:55-56`, guarded by
+     `config.chartsRootFolderId`) and `deserializeShow` → `fromYaml` reads it (`:100-101`).
+     Verified 2026-09-04. Only the read half is load-bearing today, since no show has the
+     folder id.
+- Google OAuth *login* (`/api/auth/google`) is separate and unaffected either way.
+
 ## Tune-ups nobody has claimed
 
 ### Advance-on-listen — the mic is shadow-only **[verified 2026-09-01]**

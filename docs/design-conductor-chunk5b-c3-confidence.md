@@ -1,6 +1,6 @@
 # Conductor 5b · chunk 3 — the confidence gate (clock-driven auto-fire, the trusted slice)
 
-**Status:** DESIGN — **pre-Codex**, DESIGN-ONLY (no code). Builds on chunk 2 (the static-BPM
+**Status:** Codex pre-review at time of writing. Build state tracked in `docs/INDEX.md`, not here. Builds on chunk 2 (the static-BPM
 motion driver + `driverRef`/`cfgRef` + the in-tick tempo reconcile, SHIPPED to main `9bbd1de`),
 chunk 1 (`ClockReckoning` + Invariant (P) + `reckonAfter`/`alignReckoning`, SHIPPED `57b8890`),
 and chunk 0 (`song.bpm` + click + `lib/tempo.ts`, SHIPPED `3eae7ae`). Parent authority:

@@ -1,8 +1,7 @@
 # Conductor Authority — Chunk 4: the change-marker UI + go-tap commit
 
-**Design-only.** This spec builds the MD's live control surface over the chunk-3
-pure reducer (`lib/conductor-state.ts`, shipped to main `5a958f0`). Review the
-spec; do NOT build until Graham's explicit GO. Codex review first.
+**Build state:** tracked in `docs/INDEX.md`, not here. This spec builds the MD's live control
+surface over the chunk-3 pure reducer (`lib/conductor-state.ts`, main `5a958f0`).
 
 Parent: `design-conductor-authority.md` §3.5 (the change marker — telegraph + fire,
 auto-fire gated) and §10 build outline step 4. Consumes chunk-3 `arm` / `commit` /

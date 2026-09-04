@@ -1,6 +1,6 @@
 # Design: Agent-as-Show-Codesigner (BYOA)
 
-**Status:** Draft v1.2 — 9-position grid, try-it mode, zone philosophy
+**Status:** v1.2 — 9-position grid, try-it mode, zone philosophy. Build state tracked in `docs/INDEX.md`, not here.
 **Depends on:** None (additive to current Setup tab)
 **Scope:** Natural language chat interface for populating and editing show configuration
 

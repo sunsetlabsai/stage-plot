@@ -1,6 +1,6 @@
 # Perform readiness — closing the "I have a chart but can't Perform/Conduct" dead-end
 
-Design-only. This is **not** a new conductor chunk — chunk 4 (the MD's manual baton) is built and
+Build state tracked in `docs/INDEX.md`, not here. This is **not** a new conductor chunk — chunk 4 (the MD's manual baton) is built and
 merged (`docs/design-conductor-chunk4-ui.md`, main `0a54084`). This doc closes the **loop gaps**
 that sit *upstream* of Conduct: the path from "I have a chart" to "I'm conducting through it" goes
 silent whenever the chart hasn't cleared the Perform gates, and the owner gets no reason and no

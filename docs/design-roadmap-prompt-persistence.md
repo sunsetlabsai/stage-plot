@@ -1,6 +1,6 @@
 # ShowRunr — Roadmap Builder: Persist the Prompt (PR B) DESIGN
 
-**Status:** DESIGN-ONLY. No build until Graham GO + Codex review.
+**Status:** Build state tracked in `docs/INDEX.md`, not here.
 Promotes `docs/design-roadmap-edit-loop.md` **§7 ("v1 vs deferred — persist the
 last-used prompt")** from deferred to a build. Companion to
 `docs/design-roadmap-builder.md`.

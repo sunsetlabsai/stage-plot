@@ -1,6 +1,6 @@
 # Conductor Authority — Chunk 5b: the clock layer + OQ-1 resolution (§5.1, §8.2-1)
 
-**Status:** **v0.6.6 — DESIGN-DONE, Codex R9 GO (no HIGH/MEDIUM). Cleared for build.**
+**Status:** **v0.6.6 — Codex R9 GO (no HIGH/MEDIUM).** Build state tracked in `docs/INDEX.md`, not here.
 R9 was a clean GO — Invariant (P) closes the no-op/current-write class, the unconfirmed-start
 guard is correct, the hold/vamp pacer analysis matches the VM. Two LOW doc-consistency nits
 folded: §5.1's `ClockReckoning` intro now says fields ride **any reduce that writes a new

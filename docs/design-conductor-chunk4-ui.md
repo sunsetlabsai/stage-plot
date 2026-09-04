@@ -1,6 +1,6 @@
 # Conductor Authority — Chunk 4 UI slice (`useConductorSession` + Perform transport)
 
-Design-only. The pure controller (`lib/conductor-session.ts`) and the pure target/redirect
+**Build state:** tracked in `docs/INDEX.md`, not here. The pure controller (`lib/conductor-session.ts`) and the pure target/redirect
 enumerators (`lib/conductor-targets.ts`) are **already built and Codex-green** (#101, main
 `b5999ef`). This doc designs the **last** piece of chunk 4: the thin React binding and the
 Perform-tab surface that drives it. No new wire types, no reducer changes, no lib changes —
@@ -241,4 +241,5 @@ No other open questions; everything else is pinned by the chunk-4 spec (D0-D7) a
 4. Binding tests (§5) + full gate.
 5. Commit a stable ref → hand to Codex for adversarial review before merge.
 
-NOTHING is built until Graham signs off on this doc (design-before-build; wait-for-approval).
+*(Build state is tracked in `docs/INDEX.md`, not here. This line asserted the doc was
+unbuilt and pending sign-off long after both had happened.)*

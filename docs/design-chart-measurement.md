@@ -1,6 +1,7 @@
 # Design — Chart measurement engine (productizing the geometry spike)
 
-Status: **chunk B1 SHIPPED (PR #170); chunk B2 designed below, not yet built.**
+Status: **build state in `docs/INDEX.md`, not here.** (This line previously claimed
+chunk B2 was unbuilt; B1 and B2 both shipped.)
 Companion to `design-chart-review-step.md` (frozen): this engine *supplies* the
 per-system verdicts that doc consumes. Invoked per `backlog-charting.md` §Ruled
 2026-09-02 (owner-demand trigger; never-gates checked before anything runs). Nothing
@@ -207,8 +208,10 @@ corpus, not from argument; the numbers are reproducible with
 # Chunk B2 — the commit path
 
 B1 shipped the engine (`lib/chart-measure.ts`, `lib/chart-measure-canvas.ts`) and its
-acceptance harness. Nothing imports them. B2 is what makes measurement reach the
-database. Scope below is **ruled**, not proposed.
+acceptance harness. B2 is what makes measurement reach the database. Scope below is
+**ruled**, not proposed. *(This paragraph read "Nothing imports them" until 2026-09-04.
+That was true when written and false once B2b shipped — `installMeasured` is called at
+`app/api/charts/convert/route.ts:227`.)*
 
 ## Scope ruling: the deterministic path only
 

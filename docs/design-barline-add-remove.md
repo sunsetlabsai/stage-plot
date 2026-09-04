@@ -1,6 +1,6 @@
 # Design — Add / Remove a Barline (local cardinality edit)
 
-Status: DESIGN GREEN — Codex R4 GO (R1-R3 blocking all resolved). BUILDING.
+Status: Codex R4 GO (R1-R3 blocking all resolved). Build state tracked in `docs/INDEX.md`, not here.
 **Decisions 2/3/5 changed** (union merge edge + deterministic position-based
 roadmap remap + **bounded** resolver sweep, replacing the original prune-only) —
 **Graham re-confirmed (all yes)**.
