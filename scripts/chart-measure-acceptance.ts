@@ -68,6 +68,19 @@ interface FileResult {
   spans: number;
   validated: number;
   scored: number;
+  /**
+   * Total `fillRect` calls across this file's pages.
+   *
+   * ★ Exists to pin ONE empirical assumption the never-gate rests on (see
+   * docs/design-chart-measurement.md §`fillRect` is bounded, not excluded). The
+   * completeness predicate admits `fillRect <= 1` per page because pdf.js emits exactly
+   * one structural page-background fill. That bound is NOT symmetrically safe: extra
+   * fillRects fail closed, but ZERO would let a hiding fill become the first on its page
+   * and be admitted. No count-based clause can close that, so the assumption is asserted
+   * every run rather than reasoned about — a silent drift to zero is the failure mode,
+   * and it is invisible in every other number this harness prints.
+   */
+  fillRect: number;
   failures: string[];
 }
 
@@ -171,23 +184,24 @@ async function measureFile(browser: Page, nodePdfjs: typeof import('pdfjs-dist')
     spans: 0,
     validated: 0,
     scored: 0,
+    fillRect: 0,
     failures: [],
   };
 
   for (let p = 1; p <= pages; p++) {
-    const geo: { segments: MeasuredSegment[]; warnings: string[] } = await browser.evaluate(
-      (u, n, s) => globalThis.__extract(u, n, s),
-      url,
-      p,
-      SCALE,
-    );
+    const geo = await browser.evaluate((u, n, s) => globalThis.__extract(u, n, s), url, p, SCALE);
     if (geo.warnings.length) result.failures.push(`p${p} WARN ${geo.warnings.join(',')}`);
+    result.fillRect += geo.opaque.fillRect ?? 0;
     const pdfPage = await doc.getPage(p);
     const text = await pdfPage.getTextContent();
+    // B1 flipped text with `view[3]` alone, i.e. assuming a MediaBox origin at (0,0).
+    // Kept verbatim rather than "corrected" to `view[3] - view[1]`: that would move
+    // measured output on any page with a shifted origin, and parity is the gate.
+    const [, , pageWidth, pageHeight] = pdfPage.view;
     const m = measurePage(
       geo.segments,
-      toPositionedText(text.items as { str: string; transform: number[] }[], pdfPage.view[3]),
-      p,
+      toPositionedText(text.items as { str: string; transform: number[] }[], pageHeight),
+      { number: p, width: pageWidth, height: pageHeight },
     );
     result.classification[m.classification] = (result.classification[m.classification] ?? 0) + 1;
     result.staves += m.staffCount;
@@ -200,7 +214,8 @@ async function measureFile(browser: Page, nodePdfjs: typeof import('pdfjs-dist')
       } else if (s.verdict === 'uncertain') {
         result.scored++;
         result.failures.push(
-          `p${p} y${Math.round(s.yTop)} spans=${s.spans} expected=${s.expectedSpans} mr=[${s.multirests}]`,
+          `p${p} y${Math.round(s.yTop)} spans=${s.spans} expected=${s.expectedSpans} ` +
+            `mr=[${s.multirests.map((r) => `${r.count}@${Math.round(r.xStart)}-${Math.round(r.xEnd)}`).join(',')}]`,
         );
       }
     }
@@ -252,6 +267,24 @@ async function main() {
   console.log(
     `zero-staff files=${zeroStaff.length} (not-notation=${notNotation}, raster=${zeroStaff.length - notNotation})`,
   );
+
+  // ★ The pinned assumption behind the never-gate's `fillRect <= 1` clause. Asserted
+  // rather than reported, because the dangerous direction — pdf.js emitting NO page
+  // background fill — fails OPEN and shows up in no other number here.
+  const fillRect = results.reduce((a, r) => a + r.fillRect, 0);
+  const pageTotal = results.reduce((a, r) => a + r.pages, 0);
+  const offenders = results.filter((r) => r.fillRect !== r.pages);
+  console.log(`fillRect=${fillRect} over ${pageTotal} pages (expect exactly 1/page)`);
+  if (offenders.length > 0) {
+    for (const r of offenders) console.log(`  FILLRECT ${r.file}: ${r.fillRect} over ${r.pages} pages`);
+    console.log(
+      `\nFILLRECT ASSERTION FAILED — ${offenders.length} file(s) not exactly 1 per page.\n` +
+        `  The completeness predicate admits fillRect <= 1 assuming one structural\n` +
+        `  background fill per page. Re-measure before trusting the never-gate: a drop\n` +
+        `  toward zero fails OPEN (docs/design-chart-measurement.md).`,
+    );
+    process.exitCode = 1;
+  }
 
   if (HAS('write')) {
     writeFileSync(EXPECTED, `${JSON.stringify(results, null, 1)}\n`);

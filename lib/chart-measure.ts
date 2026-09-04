@@ -128,6 +128,28 @@ export type ProvisionalVerdict = 'validated' | 'uncertain' | 'unscored';
  */
 export type PageClass = 'notation' | 'not-notation' | 'raster';
 
+/**
+ * One multirest: N musical measures drawn as a single visible bar.
+ *
+ * ★ The x-range was ADDED in B2 — this was a bare `number[]`. A count alone says the
+ * system contains a 4-measure multirest but not WHICH bar it is, and `Bar.measures` has
+ * to be attached to one specific bar. The sum check that guards it is invariant under
+ * mis-assignment (put the 4 on the wrong bar and the total is still right), so position
+ * is the only thing that can prevent that.
+ */
+export interface MeasuredMultirest {
+  count: number;
+  /** Page-space x-range of the H-bar, for matching to the bar that contains it. */
+  xStart: number;
+  xEnd: number;
+}
+
+/** One visible measure, as a page-space x-range inside its parent system. */
+export interface MeasuredBar {
+  xStart: number;
+  xEnd: number;
+}
+
 export interface MeasuredSystem {
   /** Page-space y of the top and bottom staff lines. */
   yTop: number;
@@ -139,17 +161,48 @@ export interface MeasuredSystem {
   barlines: number[];
   /** Number of measures the geometry says this system holds. */
   spans: number;
+  /**
+   * The visible measures, left to right — always exactly `spans` of them.
+   *
+   * Derived here rather than by each caller, because it depends on a stage-2 decision
+   * that is not otherwise visible at this boundary: `barlines` alone cannot say whether
+   * the leftmost cluster is a divider or a begin-repeat. A cluster is the RIGHT edge of a
+   * measure, so bars normally run staff-start → c0 → c1 → …; when the line-start
+   * begin-repeat rule fired the leftmost cluster is a span START and bars run between
+   * clusters instead.
+   */
+  bars: MeasuredBar[];
   /** The measure number printed at the staff's left edge, if any. */
   printedNumber: number | null;
-  /** Multirest counts found in this system, e.g. `[4]` for a 4-bar multirest. */
-  multirests: number[];
+  /** Multirests found in this system, with position. */
+  multirests: MeasuredMultirest[];
   /** What the printed numbers say `spans` should be, or null when unscored. */
   expectedSpans: number | null;
   verdict: ProvisionalVerdict;
 }
 
+/**
+ * Which page was measured, and how big it is. `width`/`height` are carried because
+ * normalization to the [0,1] coordinates `isValidCalibration` requires happens
+ * DOWNSTREAM, and a caller holding a `PageMeasurement` should not have to still be
+ * holding the pdf.js page to do it. This module itself stays entirely in page space.
+ */
+export interface PageInfo {
+  /**
+   * 1-based, and load-bearing at stage 4: an unnumbered first system is measure 1 on
+   * PAGE 1 ONLY. On a continuation page it must abstain.
+   */
+  number: number;
+  /** Page dimensions in points. */
+  width: number;
+  height: number;
+}
+
 export interface PageMeasurement {
   pageNumber: number;
+  /** Page dimensions in points, for normalizing geometry to [0,1]. */
+  pageWidth: number;
+  pageHeight: number;
   classification: PageClass;
   staffCount: number;
   systems: MeasuredSystem[];
@@ -318,15 +371,16 @@ function integerRuns(text: PositionedText[]): { n: number; x: number; y: number 
 // ─── Stages 1-5 ──────────────────────────────────────────────────────────────
 
 /**
- * Measure one page. `pageNumber` is 1-based and load-bearing at stage 4: an unnumbered
- * first system is measure 1 on PAGE 1 ONLY. On a continuation page it must abstain —
- * assuming 1 there invents a delta out of the previous page's measure count.
+ * Measure one page. See `PageInfo.number` for why the page number is load-bearing at
+ * stage 4 — assuming 1 on a continuation page invents a delta out of the previous page's
+ * measure count.
  */
 export function measurePage(
   segments: MeasuredSegment[],
   text: PositionedText[],
-  pageNumber: number,
+  page: PageInfo,
 ): PageMeasurement {
+  const { number: pageNumber, width: pageWidth, height: pageHeight } = page;
   const rules = mergeHorizontalRules(segments);
   const groups = groupStaves(rules);
 
@@ -339,6 +393,8 @@ export function measurePage(
     const hasText = text.some((t) => t.str.trim().length > 0);
     return {
       pageNumber,
+      pageWidth,
+      pageHeight,
       classification: hasText ? 'not-notation' : 'raster',
       staffCount: 0,
       systems: [],
@@ -375,7 +431,7 @@ export function measurePage(
       verts: verticalsOnStaff(verticals, yTop, yBot),
       multirestBars,
       printedNumber: null as number | null,
-      multirests: [] as number[],
+      multirests: [] as MeasuredMultirest[],
     };
   });
 
@@ -409,7 +465,9 @@ export function measurePage(
           r.y > t.y &&
           r.y - t.y < MULTIREST_DIGIT_Y_FACTOR * s.h,
       );
-      if (bar) s.multirests.push(t.n);
+      // Carry the H-bar's x-range, not just the count: B2 has to attach `measures` to
+      // one specific bar, and the count alone cannot say which.
+      if (bar) s.multirests.push({ count: t.n, xStart: bar.x0, xEnd: bar.x1 });
     }
   }
 
@@ -429,6 +487,7 @@ export function measurePage(
     }
 
     let spans = clusters.length;
+    let lineStartRepeat = false;
     if (clusters.length >= MIN_CLUSTERS_FOR_LINE_START_REPEAT && clusters[0].thick) {
       const widths = clusters
         .slice(1)
@@ -436,7 +495,22 @@ export function measurePage(
         .sort((a, b) => a - b);
       const median =
         widths[Math.floor(widths.length / 2)] ?? FALLBACK_MEDIAN_BAR_FRACTION * (s.x1 - s.x0);
-      if (clusters[0].x - s.x0 < LINE_START_REPEAT_GAP_FACTOR * median) spans--;
+      if (clusters[0].x - s.x0 < LINE_START_REPEAT_GAP_FACTOR * median) {
+        spans--;
+        lineStartRepeat = true;
+      }
+    }
+
+    // Clusters are the RIGHT edges of measures. Normally bar k runs from the previous
+    // cluster to cluster k, with the staff's left edge standing in for the first. When
+    // the line-start begin-repeat fired, the leftmost cluster is a span START instead, so
+    // bars run cluster-to-cluster and there is one fewer — which is exactly the decrement
+    // above. Either way `bars.length === spans`.
+    const bars: MeasuredBar[] = [];
+    let prevX = lineStartRepeat ? clusters[0].x : s.x0;
+    for (const c of clusters.slice(lineStartRepeat ? 1 : 0)) {
+      bars.push({ xStart: prevX, xEnd: c.x });
+      prevX = c.x;
     }
 
     return {
@@ -446,6 +520,7 @@ export function measurePage(
       x1: s.x1,
       barlines: clusters.map((c) => c.x),
       spans,
+      bars,
       printedNumber: s.printedNumber,
       multirests: s.multirests,
       expectedSpans: null,
@@ -460,12 +535,14 @@ export function measurePage(
     const from = s.printedNumber ?? (i === 0 && pageNumber === 1 ? 1 : null);
     if (from === null || !next || next.printedNumber === null) continue;
     const delta = next.printedNumber - from;
-    s.expectedSpans = delta - s.multirests.reduce((acc, n) => acc + (n - 1), 0);
+    s.expectedSpans = delta - s.multirests.reduce((acc, m) => acc + (m.count - 1), 0);
     s.verdict = s.spans === s.expectedSpans ? 'validated' : 'uncertain';
   }
 
   return {
     pageNumber,
+    pageWidth,
+    pageHeight,
     classification: 'notation',
     staffCount: groups.length,
     systems,
