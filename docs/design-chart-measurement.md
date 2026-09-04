@@ -126,23 +126,21 @@ verdicts — it writes nothing and holds no keys. It POSTs the measured payload
 raster/uncertain flags, **plus `source_hash` computed from the exact bytes it
 measured** — hash the fetched ArrayBuffer, the same canonical-bytes-by-construction
 rule as `design-chart-converter.md` §Hash rule) to the **convert route, extended to
-accept a measured payload** (owner-authenticated, same scope as today). The server
-then:
+accept a measured payload** (owner-authenticated, same scope as today).
 
-1. hashes the **authoritative storage bytes** and **rejects on mismatch** with the
-   payload's `source_hash` — the client may have measured a stale Cache-API copy
-   (`lib/pdf-viewer.ts` reads cache-first); on rejection the client **evicts the
-   chart's Cache API entry and fetches network-direct** — `fetchChartBytes` prefers
-   the cache before any URL, so a versioned URL alone would loop on the same stale
-   bytes — then re-measures and re-submits. Stale geometry can never be inserted
-   under the current hash, preserving "an overlay applies only to the bytes it was
-   built for";
-2. validates the payload (`isValidCalibration`, runtime verdict-enum check per the
-   frozen spec, sanity bounds) — client geometry is *data*, not trusted computation;
-3. runs the VLM work **server-side** with the server-resolved key, exactly where the
-   key already lives (scope in §Integration);
-4. performs the same **insert-only, conflict-as-no-op** write the converter performs
-   today (generate-once untouched).
+The server then runs the sequence defined **once**, in §Payload and route extension below.
+That list is canonical; this section does not restate it. (An earlier draft spelled the
+steps out in both places and the two drifted — this one still had validate-before-VLM
+and no roadmap-presence branch after the other was corrected. Codex R3, #172.)
+
+The one detail that belongs *here* rather than there is what the hash step is defending
+against: the client may have measured a **stale Cache-API copy** (`lib/pdf-viewer.ts`
+reads cache-first). On rejection the client evicts the chart's Cache API entry and
+fetches network-direct — `fetchChartBytes` prefers the cache before any URL, so a
+versioned URL alone would loop on the same stale bytes — then re-measures and
+re-submits. Stale geometry can never be inserted under the current hash, preserving
+"an overlay applies only to the bytes it was built for". See §Cache eviction — two
+helpers, not one.
 
 Trust note: the payload writer is the chart's owner writing their own *draft*
 calibration — the same trust level as today's client-driven conversion trigger; a
@@ -263,7 +261,7 @@ markers are bound through VLM BAR INDICES, not through geometry-free semantics.*
 vision prompt defines every roadmap ref as `barIndex` / `barIndices` /
 `repeatStartBarIndex` into the model's own `bars[]` (`lib/chart-vision.ts:20`), and
 `buildCalibrationFromVision` resolves them through a `barIdByModelIndex` map built from
-those same VLM bars (`lib/chart-converter.ts:285`, markers at `:322`). Install measured
+those same VLM bars (`lib/chart-converter.ts:286`, markers at `:322`). Install measured
 bars and that map describes nothing. Copying the roadmap across would either fail
 `resolveRoadmap` or — worse — bind a repeat to the wrong bar and pass validation.
 
@@ -378,11 +376,27 @@ that page to the whole-page VLM. That answers the real objection: the predicate 
 have to tell a harmless background `fillRect` from a hiding one by its bounds, because
 the harmless one is *countable* and the corpus fixes its count at one.
 
-⚠ This is the one clause carrying an **empirical** rather than structural justification.
-If a future pdf.js changes how it paints the background, this clause fails **closed** —
-more `fillRect`s means more pages routed to the VLM, never a page wrongly gated. That is
-the correct direction, but the acceptance harness should report `fillRect` per page so the
-assumption is visible rather than silently drifting.
+⚠ This is the one clause carrying an **empirical** rather than structural justification,
+and it is **not symmetrically safe** (Codex R3, #172). An earlier draft claimed it fails
+closed if pdf.js changes. That is true in only one direction:
+
+| pdf.js drift | effect | safe? |
+|---|---|---|
+| emits **more** background `fillRect`s | pages exceed the bound → routed to the VLM | ✅ fails closed |
+| emits **zero** background `fillRect`s | a hiding `fillRect` becomes the *first* on its page and is **admitted** by the bound | ❌ **fails open** — a staff could be hidden under a gated page |
+
+No count-based clause can close that second case, because the count is the only thing
+distinguishing the background fill from a content fill. So the assumption must be
+**pinned and asserted**, not reasoned about:
+
+- **B2 acceptance requirement (not a note):** `scripts/chart-measure-acceptance.ts` must
+  report and assert `fillRect === pageCount` across the corpus. It does not expose that
+  counter today — the 1.00/page figure came from a temporary probe, which is exactly the
+  fragility being fixed. A silent drift to zero is the failure mode, and only a standing
+  assertion catches it.
+- B2 must **pin the `pdfjs-dist` version** this rests on (vendored 5.7.284) and treat a
+  bump as a re-measure, alongside the existing `Path2D`/`addPath` interception surface
+  that is already version-sensitive.
 
 **Measured on the corpus (2026-09-02, 87 files, harness at `PARITY: clean`):**
 
