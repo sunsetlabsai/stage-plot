@@ -1,6 +1,7 @@
 'use client';
 
 import type { PerformReadiness, PerformReadinessView } from '@/lib/chart-calibration';
+import type { OverlaySkipReason } from '@/lib/chart-converter';
 
 // ── Perform readiness: the can't-Perform/Conduct strip (presentational) ───────
 //
@@ -28,12 +29,20 @@ export interface PerformReadinessStripProps {
   // Calibrate button that can't do anything (§4.1).
   calibratable: boolean;
   onCalibrate: (tool: CalTool) => void; // enter Calibrate on the RIGHT repair surface
-  // May this chart be OFFERED an overlay? The known-never gates (lyrics sheets,
-  // builder charts) are decided by `overlaySkipReason` in page.tsx and arrive
-  // already-answered — the strip never re-decides a gate, it only renders one.
-  // A non-convertible chart falls back to the hand-calibrate CTA: gated means
-  // "we won't spend AI on it", never "you can't set it up".
-  convertible: boolean;
+  // WHY this chart may never be offered an overlay, or null if it may be. Decided
+  // by `overlaySkipReason` in page.tsx and arriving already-answered — the strip
+  // never re-decides a gate, it only renders one.
+  //
+  // This carries the REASON rather than a boolean on purpose. Collapsed to
+  // `convertible: boolean`, every gated chart rendered the same generic "No overlay
+  // for these bytes", which reads as a failure the owner might retry — it never said
+  // a decision had been made, let alone which one. The two reasons are different
+  // KINDS of thing (`authored` is a fact about the row; `lyrics` is a classification
+  // off a column that can be wrong), and telling them apart is the whole point.
+  //
+  // A gated chart still gets the hand-calibrate CTA: gated means "we won't spend AI
+  // on it", never "you can't set it up".
+  skipReason: OverlaySkipReason | null;
   convertState: ConvertState; // only meaningful under readiness `none`
   onBuildOverlay: () => void;
 }
@@ -50,10 +59,18 @@ interface Line {
 // The per-state copy. Returns null when the strip renders nothing (loading,
 // bar-ready, and the "—" non-calibratable rows that can't actually reach a
 // non-owner by construction — §4 †).
+// What the owner is told when a never-gate fired. One line each, and each one names
+// the property of THIS chart that decided it — a gate the owner cannot see is
+// indistinguishable from a bug.
+const SKIP_COPY: Record<OverlaySkipReason, string> = {
+  authored: "Built in ShowRunr — we don't generate an overlay for these. Calibrate to set up Perform.",
+  lyrics: 'Lyrics sheet — no bars to detect. Calibrate to set up Perform.',
+};
+
 function lineFor(
   view: PerformReadinessView,
   calibratable: boolean,
-  convertible: boolean,
+  skipReason: OverlaySkipReason | null,
   convertState: ConvertState,
 ): Line | null {
   switch (view.phase) {
@@ -73,14 +90,14 @@ function lineFor(
             : "This chart's stored overlay is corrupt.",
       };
     case 'ready':
-      return readyLine(view.readiness, calibratable, convertible, convertState);
+      return readyLine(view.readiness, calibratable, skipReason, convertState);
   }
 }
 
 function readyLine(
   readiness: PerformReadiness,
   calibratable: boolean,
-  convertible: boolean,
+  skipReason: OverlaySkipReason | null,
   convertState: ConvertState,
 ): Line | null {
   switch (readiness.state) {
@@ -95,9 +112,10 @@ function readyLine(
     case 'none':
       if (!calibratable) return null;
       // Gated charts (lyrics sheets, builder charts) keep the hand-calibrate
-      // route — we decline to spend AI, not to let the owner set it up.
-      if (!convertible) {
-        return { text: 'No overlay for these bytes — Calibrate to set up Perform.', cta: { kind: 'calibrate', label: 'Calibrate', tool: 'sections' } };
+      // route — we decline to spend AI, not to let the owner set it up. The line
+      // states WHICH gate fired; the CTA is the same either way.
+      if (skipReason) {
+        return { text: SKIP_COPY[skipReason], cta: { kind: 'calibrate', label: 'Calibrate', tool: 'sections' } };
       }
       switch (convertState) {
         case 'running':
@@ -133,11 +151,11 @@ export default function PerformReadinessStrip({
   view,
   calibratable,
   onCalibrate,
-  convertible,
+  skipReason,
   convertState,
   onBuildOverlay,
 }: PerformReadinessStripProps) {
-  const line = lineFor(view, calibratable, convertible, convertState);
+  const line = lineFor(view, calibratable, skipReason, convertState);
   if (!line) return null;
   const cta = line.cta;
 

@@ -58,8 +58,14 @@ export type OverlaySkipReason = 'authored' | 'lyrics';
  *   holds whatever the role says.
  * - `lyrics` — a lyrics sheet has no staves to measure (measured 2026-09-02:
  *   342/342 lyrics PDFs in the live library have zero detectable staves).
- *   Role is free text on the row, so it is canonicalized, not compared raw —
- *   "Lyrics" and "LYRICS" are the same gate.
+ *   The COLUMN is a closed set — `check (role in ('guitar', 'lyrics', 'keys',
+ *   'bass', 'horns', 'drums', 'other'))`, `003_chart_library.sql:21` — but callers
+ *   pass free text, so the role is canonicalized rather than compared raw:
+ *   "Lyrics" and "LYRICS" are the same gate. (An earlier version of this comment
+ *   said the column itself was free text. It is not, and the difference matters:
+ *   role is also part of a chart's IDENTITY — `unique(owner_id, song_key, role)`
+ *   at `:28`, and it is baked into `storage_path` at `charts/upload/route.ts:53` —
+ *   so "just correct the role" is a MOVE between slots, not a field edit.)
  *
  * A gated chart is not a broken chart: the owner can still hand-calibrate it
  * from the Calibrate editor. We only decline to spend AI on it.

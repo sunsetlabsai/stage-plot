@@ -3057,14 +3057,23 @@ function ChartNavigator({
   // The Calibrate affordance (edit mode) is owner-only — the v1 source-scope
   // boundary. Drive / static charts and non-owners never see it.
   const calibratable = isOwner && !!calibrationChartId;
-  // May we OFFER to build an overlay for this chart? Everything Calibrate needs,
-  // plus the known-never gates — decided by the same predicate the convert route
-  // enforces, so the CTA and the server can never disagree about what is
-  // convertible. `is_builder` is the client's view of `source_spec IS NOT NULL`.
-  const convertible =
-    calibratable &&
-    !!activeChart &&
-    overlaySkipReason({ role: activeChart.role, hasSourceSpec: !!activeChart.is_builder }) === null;
+  // WHY we may not offer to build an overlay for this chart, or null if we may —
+  // decided by the same predicate the convert route enforces, so the CTA and the
+  // server can never disagree. `is_builder` is the client's view of
+  // `source_spec IS NOT NULL`.
+  //
+  // The reason travels to the strip INTACT. It used to collapse to a
+  // `convertible` boolean here, which meant a gated chart rendered the same
+  // generic "no overlay" line as a chart that simply hasn't been built yet —
+  // the owner was never told a decision had been made about their chart.
+  //
+  // The other two conjuncts of the old boolean are not lost: `calibratable` is
+  // passed separately and the strip gates on it FIRST, and a null `activeChart`
+  // cannot reach the gated branch because it leaves `calibrationChartId` null,
+  // which makes `calibratable` false.
+  const overlaySkip = activeChart
+    ? overlaySkipReason({ role: activeChart.role, hasSourceSpec: !!activeChart.is_builder })
+    : null;
   // Perform consumes a calibration only when it is verified (and hash-matched on
   // load). overlayCalibration is what the overlay renders in each mode.
   const overlayCalibration =
@@ -4395,7 +4404,7 @@ function ChartNavigator({
           view={performReadinessView({ loading, loadError, unreadable: calUnreadable, cal: calibration })}
           calibratable={calibratable}
           onCalibrate={enterCalibrate}
-          convertible={convertible}
+          skipReason={overlaySkip}
           convertState={convertState}
           onBuildOverlay={buildOverlay}
         />
