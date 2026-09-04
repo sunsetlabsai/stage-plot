@@ -261,6 +261,64 @@ describe('Bar.measures — attribution, not arithmetic', () => {
     expect(p.bars.every((b) => b.measures === undefined)).toBe(true);
   });
 
+  // ── The straddle regression (Codex, #177) ──────────────────────────────────
+  //
+  // These are the case best-overlap attribution could not fail on. It picked the bar
+  // with the largest positive overlap, so a multirest crossing a barline was assigned to
+  // whichever side it leaned toward — and the sum guard CANNOT catch it: with count 4
+  // over expectedSpans 2, Σmeasures = 5 = expectedSpans + Σ(count−1) either way. The
+  // arithmetic agrees while the musical numbering is wrong, which is exactly why
+  // position is the only real evidence and why ambiguity must demote.
+  it('★ REGRESSION — a multirest straddling a barline demotes, even with a clear majority', () => {
+    const p = buildMeasuredPayload([
+      complete(page({
+        systems: [sys({
+          // Boundary at 306: 106pt of this H-bar is in bar 1, 94pt in bar 2. Best-overlap
+          // called that bar 1 with full confidence. Containment calls it unplaced.
+          multirests: [{ count: 4, xStart: 200, xEnd: 400 }],
+          expectedSpans: 2,
+          verdict: 'validated',
+        })],
+      })),
+    ])!;
+    expect(p.systems[0].verdict).toBe('uncertain');
+    expect(p.bars.every((b) => b.measures === undefined)).toBe(true);
+  });
+
+  it('★ REGRESSION — an exact overlap tie is not broken by array order', () => {
+    const p = buildMeasuredPayload([
+      complete(page({
+        systems: [sys({
+          // 100pt either side of the boundary. The old comparison was strict `>`, so the
+          // FIRST bar won a dead heat silently — the count landed on bar 1 for no reason
+          // beyond iteration order, with the system still reported `validated`.
+          multirests: [{ count: 4, xStart: 206, xEnd: 406 }],
+          expectedSpans: 2,
+          verdict: 'validated',
+        })],
+      })),
+    ])!;
+    expect(p.systems[0].verdict).toBe('uncertain');
+    expect(p.bars.every((b) => b.measures === undefined)).toBe(true);
+  });
+
+  it('★ a multirest flush against the barline is still INSIDE — the tolerance is half a stroke', () => {
+    // The allowance exists for engraving width, not for search. An H-bar drawn onto the
+    // inner edge of its own barline must still attribute, or the rule would demote the
+    // normal case and make the badge meaningless.
+    const p = buildMeasuredPayload([
+      complete(page({
+        systems: [sys({
+          multirests: [{ count: 4, xStart: 305.5, xEnd: 550.9 }],
+          expectedSpans: 2,
+          verdict: 'validated',
+        })],
+      })),
+    ])!;
+    expect(p.systems[0].verdict).toBe('validated');
+    expect(p.bars[1].measures).toBe(4);
+  });
+
   it('★ the consistency guard fires when a count contradicts the printed delta', () => {
     // DOCTORED input, deliberately: for real engine output on a `validated` system this
     // identity holds by construction (Σ measures = spans + Σ(count−1) = expectedSpans +

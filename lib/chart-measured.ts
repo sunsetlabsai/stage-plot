@@ -15,6 +15,7 @@
 
 import type { Bar, ChartCalibration, SectionAnchor, System } from './types';
 import { CALIBRATION_SCHEMA_VERSION, isValidBar, isValidSystem } from './chart-calibration';
+import { THICK_STROKE_PT } from './chart-measure';
 import type { MeasuredSystem, PageClass, PageMeasurement } from './chart-measure';
 
 /**
@@ -54,6 +55,23 @@ export interface MeasuredPageResult {
 const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n);
 
 /**
+ * How far a multirest's H-bar may cross a bar boundary and still count as INSIDE it.
+ *
+ * A bar boundary is a barline's CENTER, but a barline is drawn with width
+ * (`THICK_STROKE_PT`), so a glyph sitting flush against a barline's inner edge lands
+ * half a stroke past that center. That half-stroke is the entire allowance: it is a
+ * drawing-width correction, not a search radius, and it must never grow into one.
+ *
+ * ★ UNMEASURED on the corpus, and deliberately conservative. `measure-expected.json` is
+ * B1's reference schema and records no multirest data at all, so the harness cannot say
+ * how often this demotes. The asymmetry decides it: over-demotion costs a review badge a
+ * human clears, under-demotion costs a permanently wrong musical count (generate-once —
+ * insert-only, never re-run). Quantify the badge volume in chunk C, where a human is
+ * already looking at the flagged systems.
+ */
+const MULTIREST_CONTAINMENT_TOL = THICK_STROKE_PT / 2;
+
+/**
  * Attach `measures` to the ONE bar each multirest actually sits in.
  *
  * Returns per-bar measure counts (parallel to `sys.bars`), or `null` when a multirest
@@ -62,28 +80,40 @@ const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n);
  * total is still right), so position is the only thing that can prevent a silently wrong
  * musical numbering. A null demotes the system rather than guessing.
  *
+ * ★ The test is CONTAINMENT, never best-overlap (Codex, #177). A multirest IS a bar: its
+ * H-bar is engraved between that bar's own barlines, so "inside exactly one bar" is the
+ * only evidence that actually locates it. An earlier version took the bar with the
+ * largest positive overlap, which cannot fail to produce an answer and therefore never
+ * demoted: a multirest straddling a boundary was assigned to whichever side overlapped
+ * more, and an exact TIE was silently resolved by array order. Both persisted a musical
+ * count the geometry did not support, and the sum guard is blind to it by construction.
+ * Ambiguity here is not a tie to be broken — it is the absence of a placement.
+ *
  * Page space throughout — normalization is a later, monotone step and would only add
- * rounding to an overlap comparison.
+ * rounding to a comparison that is already deciding a permanent write.
  */
 function attributeMultirests(sys: MeasuredSystem): number[] | null {
   const measures = sys.bars.map(() => 1);
   const claimed = new Set<number>();
   for (const mr of sys.multirests) {
-    let best = -1;
-    let bestOverlap = 0;
+    let target = -1;
     for (let i = 0; i < sys.bars.length; i++) {
       const b = sys.bars[i];
-      const overlap = Math.min(b.xEnd, mr.xEnd) - Math.max(b.xStart, mr.xStart);
-      if (overlap > bestOverlap) {
-        bestOverlap = overlap;
-        best = i;
-      }
+      const inside =
+        mr.xStart >= b.xStart - MULTIREST_CONTAINMENT_TOL &&
+        mr.xEnd <= b.xEnd + MULTIREST_CONTAINMENT_TOL;
+      if (!inside) continue;
+      // Contained in two bars at once — only reachable for a degenerate H-bar narrower
+      // than the tolerance itself, sitting on a shared boundary. Still ambiguous.
+      if (target >= 0) return null;
+      target = i;
     }
-    // No bar contains it, or two multirests land in one bar — a multirest IS a bar, so
-    // either means the H-bar/bar geometry disagree and the count cannot be placed.
-    if (best < 0 || claimed.has(best)) return null;
-    claimed.add(best);
-    measures[best] = mr.count;
+    // Contained by no bar (it straddles a boundary, or lies off the system entirely), or
+    // two multirests claim one bar — a multirest IS a bar, so either means the H-bar and
+    // the bar geometry disagree and the count cannot be placed.
+    if (target < 0 || claimed.has(target)) return null;
+    claimed.add(target);
+    measures[target] = mr.count;
   }
   return measures;
 }
