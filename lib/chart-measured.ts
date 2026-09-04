@@ -57,9 +57,18 @@ const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n);
 /**
  * How far a multirest's H-bar may cross a bar boundary and still count as INSIDE it.
  *
- * A bar boundary is a barline's CENTER, but a barline is drawn with width
- * (`THICK_STROKE_PT`), so a glyph sitting flush against a barline's inner edge lands
- * half a stroke past that center. That half-stroke is the entire allowance: it is a
+ * A bar boundary is a barline's CENTER (`chart-measure.ts:307`), so a glyph flush against
+ * a barline's inner edge lands roughly half that barline's width past the boundary. This
+ * allowance is sized for that effect but is NOT a measurement of it: `THICK_STROKE_PT` is
+ * a stroke CLASSIFIER threshold (`chart-measure.ts:42-43` — above it a stroke is a
+ * repeat/final bar rather than a note stem), not the width of any particular barline; the
+ * real per-barline width is `strokeW`, which varies by engraver and is modal within a
+ * chart, not global. So read this as a small conservative constant of about the right
+ * order, not a derived quantity (Codex NIT, #177).
+ *
+ * What actually says it is generous enough is engine-side and already recorded: the
+ * barline that ENDS a multirest sits ~4pt past the H-bar (`chart-measure.ts:414-418`), so
+ * real H-bars clear their boundaries by several times this tolerance. It is a
  * drawing-width correction, not a search radius, and it must never grow into one.
  *
  * ★ UNMEASURED on the corpus, and deliberately conservative. `measure-expected.json` is
