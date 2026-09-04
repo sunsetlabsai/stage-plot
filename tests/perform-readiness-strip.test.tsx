@@ -17,7 +17,7 @@ function props(over: Partial<PerformReadinessStripProps> = {}): PerformReadiness
     view: { phase: 'loading' },
     calibratable: true,
     onCalibrate: vi.fn(),
-    convertible: true,
+    skipReason: null,
     convertState: 'idle',
     onBuildOverlay: vi.fn(),
     ...over,
@@ -61,14 +61,15 @@ describe('PerformReadinessStrip', () => {
     expect(screen.queryByRole('button')).toBeNull();
   });
 
-  it('none → nothing for a non-calibratable viewer, convertible or not', () => {
+  it('none → nothing for a non-calibratable viewer, gated or not', () => {
     // calibratable is the outer gate: a collaborator must never be offered a
-    // build that would spend the OWNER's AI budget.
-    for (const convertible of [true, false]) {
+    // build that would spend the OWNER's AI budget — and must not be told about a
+    // gate on someone else's chart either.
+    for (const skipReason of [null, 'authored', 'lyrics'] as const) {
       cleanup();
       const { container } = render(
         <PerformReadinessStrip
-          {...props({ view: ready({ state: 'none' }), calibratable: false, convertible })}
+          {...props({ view: ready({ state: 'none' }), calibratable: false, skipReason })}
         />,
       );
       expect(container).toBeEmptyDOMElement();
@@ -76,7 +77,7 @@ describe('PerformReadinessStrip', () => {
   });
 
   // ── Owner-demand overlay build (lazy conversion) ────────────────────────────
-  it('none + convertible → "Build overlay" fires the BUILD callback, not Calibrate', () => {
+  it('none + no gate → "Build overlay" fires the BUILD callback, not Calibrate', () => {
     const onBuildOverlay = vi.fn();
     const onCalibrate = vi.fn();
     render(
@@ -89,20 +90,59 @@ describe('PerformReadinessStrip', () => {
     expect(onCalibrate).not.toHaveBeenCalled();
   });
 
-  it('none + NOT convertible → the hand-calibrate CTA (gated ≠ unusable)', () => {
-    // A lyrics sheet / builder chart: we decline to spend AI, but the owner can
-    // still set it up by hand.
-    const onCalibrate = vi.fn();
-    const onBuildOverlay = vi.fn();
-    render(
-      <PerformReadinessStrip
-        {...props({ view: ready({ state: 'none' }), convertible: false, onCalibrate, onBuildOverlay })}
-      />,
-    );
-    expect(screen.queryByRole('button', { name: 'Build overlay' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Calibrate' }));
-    expect(onCalibrate).toHaveBeenCalledWith('sections');
-    expect(onBuildOverlay).not.toHaveBeenCalled();
+  // ── Gate disclosure ─────────────────────────────────────────────────────────
+  // A never-gate that says nothing is indistinguishable from a bug. Each reason
+  // gets its own line; both keep the hand-calibrate CTA, because gated means "we
+  // won't spend AI on it", never "you can't set it up".
+  for (const skipReason of ['authored', 'lyrics'] as const) {
+    it(`none + ${skipReason} gate → discloses the reason, keeps the hand-calibrate CTA`, () => {
+      const onCalibrate = vi.fn();
+      const onBuildOverlay = vi.fn();
+      render(
+        <PerformReadinessStrip
+          {...props({ view: ready({ state: 'none' }), skipReason, onCalibrate, onBuildOverlay })}
+        />,
+      );
+      // Never the pre-disclosure copy, which said only that there was no overlay.
+      expect(screen.queryByText(/No overlay for these bytes/)).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Build overlay' })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Calibrate' }));
+      expect(onCalibrate).toHaveBeenCalledWith('sections');
+      expect(onBuildOverlay).not.toHaveBeenCalled();
+    });
+  }
+
+  it('the two gates render DIFFERENT text — the point of threading the reason', () => {
+    // Asserting each message in isolation would pass just as well if both reasons
+    // produced identical copy, which is exactly the bug this PR removes.
+    const textFor = (skipReason: 'authored' | 'lyrics') => {
+      cleanup();
+      const { container } = render(
+        <PerformReadinessStrip {...props({ view: ready({ state: 'none' }), skipReason })} />,
+      );
+      return container.textContent ?? '';
+    };
+    const authored = textFor('authored');
+    const lyrics = textFor('lyrics');
+    expect(authored).not.toEqual(lyrics);
+    expect(authored).toMatch(/Built in ShowRunr/);
+    expect(lyrics).toMatch(/Lyrics sheet/);
+  });
+
+  it('a gate outranks convertState — a gated chart never shows build progress', () => {
+    // convertState is owner-local and can be stale (an earlier build on another
+    // chart). It must never make a gated chart look like it is converting.
+    for (const convertState of ['running', 'error'] as const) {
+      cleanup();
+      render(
+        <PerformReadinessStrip
+          {...props({ view: ready({ state: 'none' }), skipReason: 'lyrics', convertState })}
+        />,
+      );
+      expect(screen.getByText(/Lyrics sheet/)).toBeInTheDocument();
+      expect(screen.queryByText(/Building overlay/)).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    }
   });
 
   it('none + running → progress copy and NO button (the route has no cancel)', () => {
