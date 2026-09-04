@@ -88,7 +88,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | Doc | State | Note |
 |---|---|---|
 | `design-single-backend.md` | SHIPPED-RECORD | All chunks incl. 4 (`components/SettingsOverlay.tsx`). ⚠ Its own §status still lists chunk 4 as "remaining". Only the Vercel env teardown remains, outside the repo. |
-| `design-supabase-backend.md` | PARTIAL | The four items its banner lists as unbuilt are closed. **But its "What Goes Away" table still specifies killing Google Drive (`:81-82`), which has not happened** — see `design-retire-drive.md` below. |
+| `design-supabase-backend.md` | PARTIAL | The four items its banner lists as unbuilt are closed. **But its "What Goes Away" table still specifies killing Google Drive (`:81-82`), which has not happened and is not going to** — Drive stays, ruled 2026-09-04; see `backlog-charting.md` §Google Drive stays. |
 | `design-owner-namespacing.md` | SHIPPED-RECORD | Migration `005` + the `[owner]/[show]` route. |
 | `design-owner-onboarding.md` | PARTIAL | Claim flow shipped. The `ADMIN_SECRET` bearer auth is dead — replaced by `requirePlatformAdmin()`. |
 | `design-ai-key-availability.md` | PARTIAL | Probe + panel + recovery shipped. **§13 (one key resolver for all three AI surfaces) unbuilt** — parse and convert still call `getAdminConfig` directly. |
@@ -105,7 +105,6 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | `design-offline-chart-cache.md` | PARTIAL | The Cache-API design is **live and primary** (`lib/chart-cache.ts:32,62,155`). Only its Drive transport and manual CTA are legacy. Do not delete. |
 | `design-alpha-ready.md` | SHIPPED-RECORD | Namespacing + PWA, both parts. |
 | `design-storage-notation.md` | PARTIAL | Phase 1 YAML shipped (`lib/show-file.ts:1`). Phase 2 BYOS/GitHub unbuilt. |
-| `design-retire-drive.md` | UNBUILT-DESIGN | ⚠ **Drive is NOT retired.** PR #153 shipped this doc only. Every deletion it specifies is still present — `app/api/drive/*`, `lib/drive.ts`, `chart-cache.ts:158`, `types.ts:161`, `page.tsx:6829`. |
 | `backlog-offline-performer-cache.md` | BACKLOG | Needs a design first. |
 
 ## AI agent
