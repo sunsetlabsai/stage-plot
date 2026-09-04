@@ -68,6 +68,27 @@ interface FileResult {
   spans: number;
   validated: number;
   scored: number;
+  /**
+   * `fillRect` calls PER PAGE, indexed page 1 → `[0]`. Every entry must be exactly 1.
+   *
+   * ★ Pins ONE empirical assumption the never-gate rests on (see
+   * docs/design-chart-measurement.md §`fillRect` is bounded, not excluded). The
+   * completeness predicate admits `fillRect <= 1` per page because pdf.js emits exactly
+   * one structural page-background fill. That bound is NOT symmetrically safe: extra
+   * fillRects fail closed, but ZERO would let a hiding fill become the first on its page
+   * and be admitted. No count-based clause can close that, so the assumption is asserted
+   * every run rather than reasoned about — a silent drift to zero is the failure mode,
+   * and it is invisible in every other number this harness prints.
+   *
+   * ★★ PER PAGE, not a file total (Codex, #176). A file sum is the WRONG SHAPE for a
+   * per-page predicate: a 2-page file counting [0, 2] sums to 2 over 2 pages and passes,
+   * while page 1 has lost its background fill (fails OPEN — a hiding fill would be
+   * admitted as the first on that page) and page 2 carries an extra one. The aggregate
+   * hides both. Keep the categories the predicate is written over.
+   */
+  fillRectByPage: number[];
+  /** Pages whose MediaBox origin is not (0,0) — see the text-flip note at the call site. */
+  shiftedOrigin: number[];
   failures: string[];
 }
 
@@ -171,23 +192,37 @@ async function measureFile(browser: Page, nodePdfjs: typeof import('pdfjs-dist')
     spans: 0,
     validated: 0,
     scored: 0,
+    fillRectByPage: [],
+    shiftedOrigin: [],
     failures: [],
   };
 
   for (let p = 1; p <= pages; p++) {
-    const geo: { segments: MeasuredSegment[]; warnings: string[] } = await browser.evaluate(
-      (u, n, s) => globalThis.__extract(u, n, s),
-      url,
-      p,
-      SCALE,
-    );
+    const geo = await browser.evaluate((u, n, s) => globalThis.__extract(u, n, s), url, p, SCALE);
     if (geo.warnings.length) result.failures.push(`p${p} WARN ${geo.warnings.join(',')}`);
+    result.fillRectByPage.push(geo.opaque.fillRect ?? 0);
     const pdfPage = await doc.getPage(p);
     const text = await pdfPage.getTextContent();
+
+    // ★ Two DIFFERENT quantities, deliberately not the same expression (Codex, #176).
+    //
+    // `textFlipY` is the baseline B1 flips text against. B1 used `view[3]` raw, i.e.
+    // assuming a MediaBox origin at (0,0), and that is preserved verbatim: "correcting"
+    // it would move measured output on a shifted-origin page, and parity is the gate.
+    //
+    // The page DIMENSIONS are a different thing and must be honest, because B2
+    // normalizes bar geometry against them — a wrong denominator puts every bar in the
+    // wrong place. pdf.js viewport dimensions are the view box's EXTENT, not its far
+    // corner. Conflating the two (as the first cut of this PR did) silently exports B1's
+    // origin assumption into B2's normalization.
+    const [vx0, vy0, vx1, vy1] = pdfPage.view;
+    const textFlipY = vy1;
+    if (vx0 !== 0 || vy0 !== 0) result.shiftedOrigin.push(p);
+
     const m = measurePage(
       geo.segments,
-      toPositionedText(text.items as { str: string; transform: number[] }[], pdfPage.view[3]),
-      p,
+      toPositionedText(text.items as { str: string; transform: number[] }[], textFlipY),
+      { number: p, width: vx1 - vx0, height: vy1 - vy0 },
     );
     result.classification[m.classification] = (result.classification[m.classification] ?? 0) + 1;
     result.staves += m.staffCount;
@@ -200,7 +235,8 @@ async function measureFile(browser: Page, nodePdfjs: typeof import('pdfjs-dist')
       } else if (s.verdict === 'uncertain') {
         result.scored++;
         result.failures.push(
-          `p${p} y${Math.round(s.yTop)} spans=${s.spans} expected=${s.expectedSpans} mr=[${s.multirests}]`,
+          `p${p} y${Math.round(s.yTop)} spans=${s.spans} expected=${s.expectedSpans} ` +
+            `mr=[${s.multirests.map((r) => `${r.count}@${Math.round(r.xStart)}-${Math.round(r.xEnd)}`).join(',')}]`,
         );
       }
     }
@@ -252,6 +288,43 @@ async function main() {
   console.log(
     `zero-staff files=${zeroStaff.length} (not-notation=${notNotation}, raster=${zeroStaff.length - notNotation})`,
   );
+
+  // ★ The pinned assumption behind the never-gate's `fillRect <= 1` clause. Asserted
+  // rather than reported, because the dangerous direction — pdf.js emitting NO page
+  // background fill — fails OPEN and shows up in no other number here.
+  //
+  // Evaluated PER PAGE. A file total would let [0, 2] pass as "2 over 2 pages" while
+  // both of its pages violate the predicate in opposite directions.
+  const offenders: string[] = [];
+  let pagesChecked = 0;
+  let fillRectTotal = 0;
+  for (const r of results) {
+    for (const [i, n] of r.fillRectByPage.entries()) {
+      pagesChecked++;
+      fillRectTotal += n;
+      if (n !== 1) offenders.push(`  FILLRECT ${r.file} p${i + 1}: ${n} (expected 1)`);
+    }
+  }
+  console.log(
+    `fillRect: ${fillRectTotal} over ${pagesChecked} pages, ` +
+      `${pagesChecked - offenders.length}/${pagesChecked} pages exactly 1`,
+  );
+  const shifted = results.flatMap((r) => r.shiftedOrigin.map((p) => `${r.file} p${p}`));
+  console.log(
+    shifted.length === 0
+      ? 'MediaBox origin: (0,0) on every page — B1\'s raw view[3] text flip is exact here'
+      : `MediaBox origin: SHIFTED on ${shifted.length} page(s) — ${shifted.slice(0, 3).join(', ')}`,
+  );
+  if (offenders.length > 0) {
+    for (const line of offenders) console.log(line);
+    console.log(
+      `\nFILLRECT ASSERTION FAILED — ${offenders.length} page(s) not exactly 1.\n` +
+        `  The completeness predicate admits fillRect <= 1 assuming one structural\n` +
+        `  background fill per page. Re-measure before trusting the never-gate: a drop\n` +
+        `  toward zero fails OPEN (docs/design-chart-measurement.md).`,
+    );
+    process.exitCode = 1;
+  }
 
   if (HAS('write')) {
     writeFileSync(EXPECTED, `${JSON.stringify(results, null, 1)}\n`);

@@ -4,6 +4,7 @@ import {
   mergeHorizontalRules,
   toPositionedText,
   type MeasuredSegment,
+  type PageInfo,
   type PositionedText,
 } from '../lib/chart-measure';
 
@@ -35,6 +36,13 @@ function barlines(yTop: number, xs: number[], strokeW = BARLINE_W): MeasuredSegm
 
 function text(str: string, x: number, y: number): PositionedText {
   return { str, x, y };
+}
+
+/** US Letter, which is what every fixture here is sized against. */
+const PAGE_W = 612;
+const PAGE_H = 792;
+function page(number: number): PageInfo {
+  return { number, width: PAGE_W, height: PAGE_H };
 }
 
 /** Two systems, five measures each, no printed numbers except where a test adds them. */
@@ -78,7 +86,7 @@ describe('mergeHorizontalRules', () => {
 
 describe('measurePage — staff and barline detection', () => {
   it('finds both systems and counts their measures', () => {
-    const m = measurePage(twoSystems(), [], 1);
+    const m = measurePage(twoSystems(), [], page(1));
     expect(m.classification).toBe('notation');
     expect(m.staffCount).toBe(2);
     expect(m.systems.map((s) => s.spans)).toEqual([5, 5]);
@@ -88,7 +96,7 @@ describe('measurePage — staff and barline detection', () => {
   it('ignores verticals that do not reach both outer staff lines', () => {
     // A note stem crossing most of the staff is the case this protects against.
     const stem: MeasuredSegment = { x0: 200, y0: 106, x1: 200, y1: 124, strokeW: 0.7 };
-    const m = measurePage([...twoSystems(), stem], [], 1);
+    const m = measurePage([...twoSystems(), stem], [], page(1));
     expect(m.systems[0].spans).toBe(5);
   });
 
@@ -96,13 +104,13 @@ describe('measurePage — staff and barline detection', () => {
     // Full height AND on the staff, but thinner than the modal barline width. Measured
     // on real charts the gap is as small as 0.62 vs 0.78 — hence the tight tolerance.
     const thinStem = barlines(100, [200], 0.4);
-    const m = measurePage([...twoSystems(), ...thinStem], [], 1);
+    const m = measurePage([...twoSystems(), ...thinStem], [], page(1));
     expect(m.systems[0].spans).toBe(5);
   });
 
   it('clusters a repeat thick+thin pair as one divider', () => {
     const pair = barlines(100, [349.9], 2.0); // 0.1pt from the existing 350 barline
-    const m = measurePage([...twoSystems(), ...pair], [], 1);
+    const m = measurePage([...twoSystems(), ...pair], [], page(1));
     expect(m.systems[0].spans).toBe(5);
   });
 });
@@ -111,34 +119,34 @@ describe('measurePage — printed measure numbers', () => {
   it('validates when measured spans equal the printed delta', () => {
     // System A is unnumbered — measure 1, because this is page 1. System B prints 6,
     // so A must hold 5 measures, and it does.
-    const m = measurePage(twoSystems(), [text('6', STAFF_X0, 198)], 1);
+    const m = measurePage(twoSystems(), [text('6', STAFF_X0, 198)], page(1));
     expect(m.systems[0].printedNumber).toBeNull();
     expect(m.systems[0].expectedSpans).toBe(5);
     expect(m.systems[0].verdict).toBe('validated');
   });
 
   it('flags a mismatch as uncertain rather than guessing', () => {
-    const m = measurePage(twoSystems(), [text('7', STAFF_X0, 198)], 1);
+    const m = measurePage(twoSystems(), [text('7', STAFF_X0, 198)], page(1));
     expect(m.systems[0].expectedSpans).toBe(6);
     expect(m.systems[0].verdict).toBe('uncertain');
   });
 
   it('abstains on a continuation page instead of assuming measure 1', () => {
     // Assuming 1 here invents a delta out of the previous page's measure count.
-    const m = measurePage(twoSystems(), [text('6', STAFF_X0, 198)], 2);
+    const m = measurePage(twoSystems(), [text('6', STAFF_X0, 198)], page(2));
     expect(m.systems[0].verdict).toBe('unscored');
     expect(m.systems[0].expectedSpans).toBeNull();
   });
 
   it('leaves the page-tail system unscored', () => {
-    const m = measurePage(twoSystems(), [text('6', STAFF_X0, 198)], 1);
+    const m = measurePage(twoSystems(), [text('6', STAFF_X0, 198)], page(1));
     expect(m.systems[1].verdict).toBe('unscored');
   });
 
   it('excludes a stacked time signature from the measure numbers', () => {
     // Two digits at the same x, 12pt apart, inside the margin band. Without the
     // exclusion the top one reads as this system's printed measure number.
-    const m = measurePage(twoSystems(), [text('4', 52, 206), text('4', 52, 218)], 1);
+    const m = measurePage(twoSystems(), [text('4', 52, 206), text('4', 52, 218)], page(1));
     expect(m.systems[1].printedNumber).toBeNull();
   });
 });
@@ -159,24 +167,24 @@ describe('measurePage — multirests', () => {
     // 5 visible spans, one of them a 4-bar multirest, so the printed delta is 5 + 3.
     const m = measurePage(
       [...twoSystems(), ...multirestBar],
-      [text('4', 280, 95), text('9', STAFF_X0, 198)],
-      1,
-    );
-    expect(m.systems[0].multirests).toEqual([4]);
+      [text('4', 280, 95), text('9', STAFF_X0, 198)], page(1));
+    // The x-range comes from the H-bar, not the digit — it is what lets B2 attach
+    // `measures: 4` to the one bar that contains it.
+    expect(m.systems[0].multirests).toEqual([{ count: 4, xStart: 260, xEnd: 340 }]);
     expect(m.systems[0].expectedSpans).toBe(5);
     expect(m.systems[0].verdict).toBe('validated');
   });
 
   it('ignores a digit with no H-bar beneath it', () => {
     // A chord-extension superscript is a digit floating over the staff with no bar.
-    const m = measurePage(twoSystems(), [text('9', 280, 95), text('6', STAFF_X0, 198)], 1);
+    const m = measurePage(twoSystems(), [text('9', 280, 95), text('6', STAFF_X0, 198)], page(1));
     expect(m.systems[0].multirests).toEqual([]);
     expect(m.systems[0].verdict).toBe('validated');
   });
 
   it('ignores an H-bar with no digit above it', () => {
     // A beam is a bar with no count printed over it.
-    const m = measurePage([...twoSystems(), ...multirestBar], [text('6', STAFF_X0, 198)], 1);
+    const m = measurePage([...twoSystems(), ...multirestBar], [text('6', STAFF_X0, 198)], page(1));
     expect(m.systems[0].multirests).toEqual([]);
     expect(m.systems[0].verdict).toBe('validated');
   });
@@ -193,7 +201,7 @@ describe('measurePage — line-start begin-repeat', () => {
       ...staffLines(200),
       ...barlines(200, [150, 250, 350, 450, 550]),
     ];
-    const m = measurePage(segs, [], 1);
+    const m = measurePage(segs, [], page(1));
     expect(m.systems[0].barlines).toHaveLength(6);
     expect(m.systems[0].spans).toBe(5);
   });
@@ -213,9 +221,75 @@ describe('measurePage — line-start begin-repeat', () => {
       ...staffLines(200),
       ...barlines(200, [150, 250, 350, 450, 550]),
     ];
-    const m = measurePage(segs, [], 1);
+    const m = measurePage(segs, [], page(1));
     expect(m.systems[0].barlines).toHaveLength(8);
     expect(m.systems[0].spans).toBe(8);
+  });
+});
+
+describe('measurePage — spans → bars', () => {
+  // Pins the derivation B2 installs as `Bar` rectangles. The invariant that matters is
+  // `bars.length === spans` in BOTH branches: a caller that trusted `spans` but read
+  // `bars` would otherwise silently drop or invent a measure.
+
+  it('runs the first bar from the staff edge, then cluster to cluster', () => {
+    const m = measurePage(twoSystems(), [], page(1));
+    expect(m.systems[0].bars).toEqual([
+      { xStart: STAFF_X0, xEnd: 150 },
+      { xStart: 150, xEnd: 250 },
+      { xStart: 250, xEnd: 350 },
+      { xStart: 350, xEnd: 450 },
+      { xStart: 450, xEnd: 550 },
+    ]);
+    expect(m.systems[0].bars).toHaveLength(m.systems[0].spans);
+  });
+
+  it('starts at the begin-repeat, not the staff edge, when the line-start rule fired', () => {
+    // Same fixture as the line-start begin-repeat test: six clusters, five measures. The
+    // staff edge at x=50 must NOT open a bar — the thick bar at x=90 does, and the gap
+    // ahead of it holds clef/key/time rather than music.
+    const segs = [
+      ...staffLines(100),
+      ...barlines(100, [90], 2.4),
+      ...barlines(100, [190, 290, 390, 490, 550]),
+      ...staffLines(200),
+      ...barlines(200, [150, 250, 350, 450, 550]),
+    ];
+    const m = measurePage(segs, [], page(1));
+    expect(m.systems[0].bars).toEqual([
+      { xStart: 90, xEnd: 190 },
+      { xStart: 190, xEnd: 290 },
+      { xStart: 290, xEnd: 390 },
+      { xStart: 390, xEnd: 490 },
+      { xStart: 490, xEnd: 550 },
+    ]);
+    expect(m.systems[0].bars).toHaveLength(m.systems[0].spans);
+    expect(m.systems[0].bars[0].xStart).toBeGreaterThan(STAFF_X0);
+  });
+
+  it('keeps bars.length === spans on every system of every fixture', () => {
+    for (const m of [
+      measurePage(twoSystems(), [], page(1)),
+      measurePage([...twoSystems(), ...barlines(100, [90], 2.4)], [], page(1)),
+      measurePage(twoSystems(), [text('6', STAFF_X0, 198)], page(2)),
+    ]) {
+      for (const s of m.systems) expect(s.bars).toHaveLength(s.spans);
+    }
+  });
+});
+
+describe('measurePage — page dimensions', () => {
+  // Carried so a downstream caller can normalize to [0,1] without still holding the
+  // pdf.js page. Reported on every classification, including those with no systems.
+  it('reports dimensions on a measured page', () => {
+    const m = measurePage(twoSystems(), [], page(1));
+    expect([m.pageWidth, m.pageHeight]).toEqual([PAGE_W, PAGE_H]);
+  });
+
+  it('reports them on a zero-staff page too', () => {
+    const m = measurePage([], [text('Verse 1', 60, 80)], page(1));
+    expect(m.classification).toBe('not-notation');
+    expect([m.pageWidth, m.pageHeight]).toEqual([PAGE_W, PAGE_H]);
   });
 });
 
@@ -225,24 +299,22 @@ describe('measurePage — page classification', () => {
     // VLM call, no overlay — the engine declines before anything is spent.
     const m = measurePage(
       [{ x0: 50, y0: 40, x1: 550, y1: 40, strokeW: 0.5 }],
-      [text('Verse 1', 60, 80)],
-      1,
-    );
+      [text('Verse 1', 60, 80)], page(1));
     expect(m.classification).toBe('not-notation');
     expect(m.staffCount).toBe(0);
     expect(m.systems).toEqual([]);
   });
 
   it('classifies a page with neither vectors nor text as raster', () => {
-    expect(measurePage([], [], 1).classification).toBe('raster');
+    expect(measurePage([], [], page(1)).classification).toBe('raster');
   });
 
   it('does not treat whitespace-only text as real text', () => {
-    expect(measurePage([], [text('   ', 10, 10)], 1).classification).toBe('raster');
+    expect(measurePage([], [text('   ', 10, 10)], page(1)).classification).toBe('raster');
   });
 
   it('classifies a page with staves as notation', () => {
-    expect(measurePage(twoSystems(), [], 1).classification).toBe('notation');
+    expect(measurePage(twoSystems(), [], page(1)).classification).toBe('notation');
   });
 });
 
