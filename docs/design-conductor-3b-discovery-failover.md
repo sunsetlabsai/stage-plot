@@ -1,6 +1,6 @@
 # Conductor Authority — 3b transport: discovery + claim/failover (§8.2-2 resolution)
 
-**Status:** v3 — DESIGN-ONLY. Codex R1 folded (3 HIGH + 2 MED — ONE systemic gap: session
+**Status:** v3. Build state tracked in `docs/INDEX.md`, not here. Codex R1 folded (3 HIGH + 2 MED — ONE systemic gap: session
 identity was missing from the control plane; fixed with the writer-announced `session`
 blob). Codex R2 folded (1 HIGH + 2 MED): session identity is now the FULL reducer-scope
 triple `SessionKey = {sessionId, songRef, programHash}` end to end — the R1 fold had

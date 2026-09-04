@@ -1,10 +1,9 @@
 # Design — one backend: retire Redis, consolidate on Supabase
 
-**Status.** The Redis retirement is DONE in code. Chunks 0–3, 5 and 6 shipped
-(ledger in §2). The only work this document still specifies is **chunk 4 — the
-BYOA settings overlay (§3)**. One infrastructure action also remains and is
-Graham's to run: remove the now-unused `REDIS_URL` and `ADMIN_SECRET` env vars
-from Vercel (§2). Everything else here is the durable design record — the
+**Status.** Build state is tracked in `docs/INDEX.md`, not here — every chunk this
+document specifies, including chunk 4 (the BYOA settings overlay, §3), has shipped.
+One infrastructure action remains and is Graham's to run: remove the now-unused
+`REDIS_URL` and `ADMIN_SECRET` env vars from Vercel (§2). Everything else here is the durable design record — the
 invariants, the security requirements, and the rulings that constrain future work
 — in the present tense. History lives in git; this document does not carry its own
 changelog.

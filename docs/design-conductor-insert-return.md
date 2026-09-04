@@ -1,8 +1,7 @@
 # Conductor Authority — Live Override: Insert-and-Return
 
-**Design-only.** This spec defines the DEFAULT semantics of a live conductor
-section jump. Review the spec; do NOT build until Graham's explicit GO. Codex
-review first.
+**Build state:** tracked in `docs/INDEX.md`, not here. This spec defines the DEFAULT semantics of a
+live conductor section jump.
 
 Parent: `design-conductor-authority.md` §3.3 / §3.4 (the redirect / override
 model). This doc **amends** the parent's line — *"Jump to a non-adjacent
@@ -644,7 +643,7 @@ Report the test-count delta on the build PR.
 
 ---
 
-## 11. Build outline (DESIGN-ONLY — do not build until GO)
+## 11. Build outline *(build state in `docs/INDEX.md`, not here)*
 
 1. `roadmap-vm.ts`: add `pendingReturn` to `VMState` (+ `initVM` null);
    `jumpTo.return` optional field; `applyOverride` left `pendingReturn`-blind +

@@ -1,6 +1,6 @@
 # Design: Core-Path UAT Blockers (Tier 1)
 
-**Status:** v6 — **APPROVED and PARTIALLY BUILT.**
+**Status:** v6. Build state tracked in `docs/INDEX.md`, not here.
 
 | Chunk | Scope | State |
 |---|---|---|

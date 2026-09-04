@@ -1,6 +1,7 @@
 # Design — Chart review step v2 (measured geometry + pick-a-split)
 
-Status: **design only — no build until this doc is merged** (standing process).
+Status: **build state in `docs/INDEX.md`, not here.** Merged and frozen; the review
+sheet it specifies is chunk C.
 Extends `design-chart-converter.md` (its "Review queue" section and open-Q1 "vision
 coordinate quality"); complements `design-barline-calibration.md` (the manual drag editor
 stays as the deep fallback). Nothing here changes verify/`canVerify` or the show view.

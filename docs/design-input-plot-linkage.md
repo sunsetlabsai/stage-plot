@@ -1,6 +1,6 @@
 # Design: Input List / Stage Plot / Mix Linkage
 
-**Status:** Proposed (v9) — ready for adversarial review (Codex R6)
+**Status:** v9. Build state tracked in `docs/INDEX.md`, not here.
 **Date:** 2026-06-06 (supersedes v8 same-day; v8←v7←v6←v5 same-day; v5←v4←v3←v2 2026-06-05←v1 2026-06-04)
 **Branch:** `opus/design-input-plot-linkage` (merged up to `main`)
 

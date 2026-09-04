@@ -1,6 +1,6 @@
 # Nav graph — repeats, endings, D.S./D.C./Coda/Fine (chunk 4 mini-spec)
 
-**Status:** DESIGN **SIGNED OFF & BUILD-READY** — Codex R1/R2/R3 clear (R3 "green for
+**Status:** Codex R1/R2/R3 clear (R3 "green for
 build"); Graham OQ-A..E resolved (§11). Build per §10 (3 gated commits, feature-branch
 PR). Earlier Codex rounds landed on `main` (`beadf8b..bcc98c8`); sign-off via PR #80.
 **Parent:** `design-realtime-chart-control.md` (resolves its OQ #3 + the "Navigation

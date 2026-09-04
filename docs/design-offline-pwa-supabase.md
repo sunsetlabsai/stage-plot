@@ -1,6 +1,6 @@
 # Design: Offline PWA — Supabase Storage Migration
 
-**Status:** v1.5 — build-ready
+**Status:** v1.5. Build state tracked in `docs/INDEX.md`, not here.
 **Date:** 2025-06-03
 **Depends on:** Supabase backend (migration 003), chart library (PR #46+)
 **Supersedes:** `design-offline-chart-cache.md` (Google Drive era — still valid for Drive charts)

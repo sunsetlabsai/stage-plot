@@ -1,7 +1,6 @@
 # ShowRunr — Roadmap Expressiveness (follow-on refinement) DESIGN
 
-**Status:** **Gap 1 (chromatic roots) is BUILD-READY and being pulled forward** (per
-Graham, after chunk-5 design GO). Gap 2 (modulation) stays a deferred stub. Captured
+**Status:** Build state tracked in `docs/INDEX.md`, not here. Gap 2 (modulation) remains a deferred stub. Captured
 here so the discussion that produced it isn't lost and so the active chunks don't
 bake in assumptions that would block it. Chunk-5 authoring-fidelity design merged to
 main `4e29fb4`; chunk-4 re-key still on its own branch awaiting Codex re-review.

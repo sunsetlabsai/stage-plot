@@ -1,6 +1,6 @@
 # Conductor Authority — Chunk 5: gated auto-fire (§3.5) + the clock fence (§5.1)
 
-**Status:** **DESIGN-ONLY** — review the spec, do NOT build. Branch
+**Build state:** tracked in `docs/INDEX.md`, not here. Branch
 `opus/design-conductor-chunk5` off main `704f60a`.
 
 **Parent:** `design-conductor-authority.md` §3.5 (change marker — telegraph + fire,
@@ -447,9 +447,10 @@ callbacks, no session/PDF/validity), so it remains jsdom-testable with no chart 
 
 ---
 
-## 7. Chunk 5b — the clock layer (GATED, fenced here, not built)
+## 7. Chunk 5b — the clock layer (fenced here)
 
-Recorded so the seam stays ready; **do not build until §8.2 OQ-1 closes.**
+Recorded so the seam stays ready. **Build state is in `docs/INDEX.md`, not here** — 5b
+has since shipped through chunk 3 (`design-conductor-chunk5b-clock.md` and its c1–c3).
 
 - **Blocked on (epic §8.2 OQ-1):** listener placement (MD device vs. separable taped
   node); clock/phase latency across the relay (likely invisible at bar granularity —

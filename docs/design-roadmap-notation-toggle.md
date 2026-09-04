@@ -1,6 +1,6 @@
 # Design: Numbers ⇄ Letters — bake the toggle into the saved chart
 
-**Status:** Draft v3 — Codex R2 folded (key badge, de-builder clear, migration constraints)
+**Status:** v3 — Codex R2 folded (key badge, de-builder clear, migration constraints). Build state tracked in `docs/INDEX.md`, not here.
 **Depends on:** roadmap builder (renderRoadmap, roadmap-view, save route), chart_library
 **Scope:** The builder's existing Numbers⇄Letters preview toggle becomes the chart's
 notation of record: **save renders the PDF in the selected notation, and the show

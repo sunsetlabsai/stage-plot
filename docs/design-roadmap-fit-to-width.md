@@ -1,6 +1,6 @@
 # Design — Roadmap chart fit-to-width + PDF render fixes
 
-Status: DRAFT (pre-Codex). Design-only. No build until approved.
+Status: Build state tracked in `docs/INDEX.md`, not here.
 
 ## 1. Problem
 

@@ -1,6 +1,6 @@
 # Design: New Show Modal + Duplicate Show
 
-**Status:** v1.3 — addresses Codex rounds 1-3
+**Status:** v1.3 — addresses Codex rounds 1-3. Build state tracked in `docs/INDEX.md`, not here.
 **Date:** 2026-06-04
 
 ---

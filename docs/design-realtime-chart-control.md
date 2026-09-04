@@ -1,6 +1,6 @@
 # Design: Realtime Chart Control (Perform-mode redline) + Chart Calibration
 
-**Status:** Proposed (v1.5) — **Codex R5: no merge blockers** (R1–R4 findings resolved; two R5 nits folded). Merge-ready pending owner GO.
+**Status:** v1.5 — **Codex R5: no merge blockers** (R1–R4 findings resolved; two R5 nits folded). Build state tracked in `docs/INDEX.md`, not here.
 **Date:** 2026-06-08
 **Branch:** `opus/design-realtime-chart-control`
 **Target/benchmark:** ForScore — a static PDF reader (library + setlists + pedal page-turns + annotations). Everything here is the *live, band-aware* layer ForScore structurally lacks.

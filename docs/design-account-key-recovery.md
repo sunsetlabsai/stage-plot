@@ -1,6 +1,6 @@
 # Design — recovery for a rejected ACCOUNT key
 
-**Status.** Design, for review. Follows chunk 4 (`design-single-backend.md` §3), which
+**Status.** Build state tracked in `docs/INDEX.md`, not here. Follows chunk 4 (`design-single-backend.md` §3), which
 made the capabilities probe account-aware and moved key entry into the settings overlay.
 Scope is one gap chunk 4 left open, flagged there as deliberate.
 

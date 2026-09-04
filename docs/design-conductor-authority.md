@@ -1,6 +1,6 @@
 # Conductor authority — live roadmap broadcast across N charts (design)
 
-**Status:** **v3.1 — APPROVED to build chunks 1–2.** v2 closed Codex R1 NO-GO (9 findings → 3 roots → one move; §0); v3 closed the R2 GO-WITH-NITS items (§3.3/§3.4/§3.1 MED, OQ-2 provenance §2.2.1) → **Codex R3 = GO**; v3.1 closes the two chunk-1/2 gating decisions (§2.2.0 alignment ambiguity, §2.3.1 `barOffset` span-equivalence). Remaining open items gate later chunks only (§8.2).
+**Status:** **v3.1.** Build state tracked in `docs/INDEX.md`, not here. v2 closed Codex R1 NO-GO (9 findings → 3 roots → one move; §0); v3 closed the R2 GO-WITH-NITS items (§3.3/§3.4/§3.1 MED, OQ-2 provenance §2.2.1) → **Codex R3 = GO**; v3.1 closes the two chunk-1/2 gating decisions (§2.2.0 alignment ambiguity, §2.3.1 `barOffset` span-equivalence). Remaining open items gate later chunks only (§8.2).
 **Date:** 2026-06-22
 **Branch:** `opus/design-conductor-authority` (PR #87)
 **Parent:** `design-realtime-chart-control.md` — detailed design of its **Concept B** (networked seek) + the tractable tier of **Concept C** (tempo-awareness). Resolves parent OQ #1 (B transport) + the C-tier split.

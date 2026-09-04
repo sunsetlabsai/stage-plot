@@ -1,6 +1,6 @@
 # Design: YAML Show Files & BYOS Storage
 
-**Status:** Draft v1.2 — Post-Adversarial Review (7 + 3 findings addressed)
+**Status:** v1.2 — post-adversarial review (7 + 3 findings addressed). Build state tracked in `docs/INDEX.md`, not here.
 **Depends on:** None (Phase 1 is a format change; Phase 2 adds a storage provider)
 **Scope:** Migrate show file format from JSON to YAML; introduce Bring Your Own Storage (BYOS) with GitHub as first provider; define chart normalization path for .md-first storage.
 

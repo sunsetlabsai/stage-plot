@@ -1,6 +1,6 @@
 # PWA & Commercial Strategy
-**Status:** Planning — not yet implemented
-**Last updated:** 2026-05-20
+**Status:** Build state tracked in `docs/INDEX.md`, not here — the PWA half shipped;
+the commercial half has no code.
 
 ---
 

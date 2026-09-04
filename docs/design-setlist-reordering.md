@@ -1,6 +1,6 @@
 # Design: Setlist Reordering (Setup + Show)
 
-**Status:** Draft v1.1 — reviewed by Opus
+**Status:** v1.1 — reviewed by Opus. Build state tracked in `docs/INDEX.md`, not here.
 **Depends on:** Existing setlist UI in `app/page.tsx` (Setup + Show tabs)  
 **Scope:** Drag-and-drop + explicit move up/down controls for run-order changes
 

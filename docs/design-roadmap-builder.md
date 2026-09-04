@@ -1,6 +1,6 @@
 # Design — Roadmap Builder (AI-copiloted chart authoring)
 
-Status: **DRAFT for review** · Branch `opus/design-roadmap-builder` · Owner: Graham (sign-off gate)
+Status: **build state in `docs/INDEX.md`, not here** · Branch `opus/design-roadmap-builder` · Owner: Graham (sign-off gate)
 · Codex R1 addressed (HIGH transposition/storage overclaim → honest key-dimension phasing; MED
 source_spec lifecycle + server-owned save route; LOW born-verified-still-gated)
 · Codex R2: no BLOCK/HIGH — addressed MED (non-atomic storage↔DB save ordering: stage-new-hash → DB
@@ -13,7 +13,7 @@ resolveRoadmap's EITHER-plain-OR-volta rule; (B3) no spec field for global jumps
 `RoadmapNavigation` block (segno/coda/toCoda/fine/jump via `BarRef`), validator mirrors resolver
 preconditions; (NB) spec↔calibration parity assertion in the save route; (NB) renderer embeds a fixed
 bundled font for metric determinism.
-**Directionally ready; awaiting Graham sign-off.**
+**Build state in `docs/INDEX.md`, not here.**
 
 ## Why now
 

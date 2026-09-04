@@ -1,6 +1,6 @@
 # Design — Chart Converter (auto-overlay)
 
-Status: **DRAFT for review** · Branch `opus/design-chart-converter` · Owner: Graham (sign-off gate)
+Status: **build state in `docs/INDEX.md`, not here** · Branch `opus/design-chart-converter` · Owner: Graham (sign-off gate)
 · Codex R1 addressed (hash rule decided; insert-on-conflict guard; route limits; dropped-vs-surfaced
 reconciled; confidence validation+lifecycle) · Codex R2 addressed (v1 PDF-only end-to-end, typed
 image no-op; magic-byte MIME classify; insert-result via RETURNING) · **Codex R3 = UNBLOCKED for
