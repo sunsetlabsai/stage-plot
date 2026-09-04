@@ -72,26 +72,45 @@ function visible(src: string): { text: string; line: number }[] {
   const out: { text: string; line: number }[] = [];
   let fenced = false;
   let commented = false;
-  src.split('\n').forEach((text, i) => {
-    if (/^\s*```/.test(text)) {
-      fenced = !fenced;
-      return;
-    }
-    let t = text;
+  src.split('\n').forEach((raw, i) => {
+    let t = raw;
+
+    // Order matters, and getting it wrong is how the first version of this
+    // was defeated: it toggled the fence flag BEFORE looking at comment
+    // state, so a ``` line inside an HTML comment flipped the parser out of
+    // step with how Markdown actually renders. Codex used exactly that to
+    // show 72 entries for 72 files while the visible table said OPS for
+    // every row. Whichever context is already open wins.
+
+    // 1. Already inside a comment: nothing is a fence, only `-->` matters.
     if (commented) {
       const end = t.indexOf('-->');
       if (end === -1) return;
       commented = false;
       t = t.slice(end + 3);
     }
-    // Strip inline comments, then detect one that opens and does not close.
-    t = t.replace(/<!--.*?-->/g, '');
+
+    // 2. Already inside a fence: `<!--` is literal code, only a closing fence
+    //    matters. Fenced lines render as code, never as a table row.
+    if (fenced) {
+      if (/^\s*```/.test(t)) fenced = false;
+      return;
+    }
+
+    // 3. Normal text: remove complete comments, then honour an opener that
+    //    does not close on this line.
+    t = t.replace(/<!--[\s\S]*?-->/g, '');
     const open = t.indexOf('<!--');
     if (open !== -1) {
       commented = true;
       t = t.slice(0, open);
     }
-    if (!fenced) out.push({ text: t, line: i + 1 });
+
+    if (/^\s*```/.test(t)) {
+      fenced = true;
+      return;
+    }
+    out.push({ text: t, line: i + 1 });
   });
   return out;
 }
@@ -140,6 +159,28 @@ describe('docs/INDEX.md accounts for every doc', () => {
       '| `design-perform-tab.md` | SHIPPED-RECORD | visible |',
     ].join('\n');
     expect(entries(hidden).map((e) => e.path)).toEqual(['docs/design-perform-tab.md']);
+  });
+
+  it('keeps fence and comment nesting straight in either order', () => {
+    // Codex R2: a fence INSIDE a comment desynchronized the first fix.
+    const fenceInComment = [
+      '<!--',
+      '```',
+      '| `design-nav-graph.md` | SHIPPED-RECORD | hidden |',
+      '-->',
+      '| `design-perform-tab.md` | SHIPPED-RECORD | visible |',
+    ].join('\n');
+    expect(entries(fenceInComment).map((e) => e.path)).toEqual(['docs/design-perform-tab.md']);
+
+    // And the mirror: `<!--` inside a fence is literal code, not a comment.
+    const commentInFence = [
+      '```',
+      '<!--',
+      '| `design-nav-graph.md` | SHIPPED-RECORD | code, not a row |',
+      '```',
+      '| `design-perform-tab.md` | SHIPPED-RECORD | visible |',
+    ].join('\n');
+    expect(entries(commentInFence).map((e) => e.path)).toEqual(['docs/design-perform-tab.md']);
   });
 
   it('gives every entry a legal state', () => {

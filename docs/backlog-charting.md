@@ -104,8 +104,11 @@ full retirement spec that sat PRE-CODEX from PR #153 (2026-08-25) until it was d
      proxy makes "not unsupported" the wrong answer.
   2. `lib/pdf-viewer.ts`'s `else` is a **catch-all for any non-Supabase URL**, not a
      Drive branch. Deleting it makes the app fetch a removed route and fail silently.
-  3. `lib/show-file.ts`'s `chartsSource`: stop writing, KEEP reading. Old YAML exports
-     carry it and loading one must not error.
+  3. `lib/show-file.ts`'s `chartsSource`: the retirement's rule was "stop writing, KEEP
+     reading" — old YAML exports carry it and loading one must not error. **That rule was
+     never applied**: `serializeShow` still WRITES it (`lib/show-file.ts:55-56`, guarded by
+     `config.chartsRootFolderId`) and `parseShowFile` reads it (`:100-101`). Verified
+     2026-09-04. Only the read half is load-bearing today, since no show has the folder id.
 - Google OAuth *login* (`/api/auth/google`) is separate and unaffected either way.
 
 ## Tune-ups nobody has claimed

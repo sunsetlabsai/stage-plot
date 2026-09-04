@@ -28,7 +28,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 |---|---|---|
 | `design-chart-converter.md` | SHIPPED-RECORD | Uploaded PDF → VLM → draft calibration. Live at `/api/charts/convert`. |
 | `design-chart-library.md` | SHIPPED-RECORD | `chart_library` + upload. Migration `003_chart_library.sql`. |
-| `design-chart-measurement.md` | SHIPPED-RECORD | Measurement engine, B1 **and** B2 (`lib/chart-measured.ts:297` → `convert/route.ts:227`). ⚠ Its own text still says B2 is unbuilt and `:210` "Nothing imports them" — both false. |
+| `design-chart-measurement.md` | SHIPPED-RECORD | Measurement engine, B1 **and** B2 (`lib/chart-measured.ts:297` → `convert/route.ts:227`). |
 | `design-chart-review-step.md` | PARTIAL | Verdict vocabulary shipped (`lib/types.ts:96`, `chart-calibration.ts:1005`). The pick-a-split review sheet is **chunk C, unbuilt** — today's review UI is still the v1 confidence queue it set out to replace. |
 | `design-chart-offline-fixes.md` | SHIPPED-RECORD | Both fixes live (`page.tsx:6208`, `songs/route.ts:83`). |
 | `design-chart-role-overrides.md` | UNBUILT-DESIGN | No `chartOverrides`/`sourceRole` anywhere. One role per chart still. |
@@ -87,7 +87,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 
 | Doc | State | Note |
 |---|---|---|
-| `design-single-backend.md` | SHIPPED-RECORD | All chunks incl. 4 (`components/SettingsOverlay.tsx`). ⚠ Its own §status still lists chunk 4 as "remaining". Only the Vercel env teardown remains, outside the repo. |
+| `design-single-backend.md` | SHIPPED-RECORD | All chunks incl. 4 (`b0bed1c`, `components/SettingsOverlay.tsx`). Only the Vercel env teardown remains, and that is outside the repo. |
 | `design-supabase-backend.md` | PARTIAL | The four items its banner lists as unbuilt are closed. **But its "What Goes Away" table still specifies killing Google Drive (`:81-82`), which has not happened and is not going to** — Drive stays, ruled 2026-09-04; see `backlog-charting.md` §Google Drive stays. |
 | `design-owner-namespacing.md` | SHIPPED-RECORD | Migration `005` + the `[owner]/[show]` route. |
 | `design-owner-onboarding.md` | PARTIAL | Claim flow shipped. The `ADMIN_SECRET` bearer auth is dead — replaced by `requirePlatformAdmin()`. |
