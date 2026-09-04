@@ -37,8 +37,9 @@ export function sniffPdf(bytes: Uint8Array): boolean {
 // — so these gates are not a cost cleanup. They answer "may this chart be
 // offered an overlay at all?", and the point is to SAVE the call, not explain it
 // afterwards. That makes them a shared DECISION with two consumers that must
-// never drift: the client suppresses the "Build overlay" CTA
-// (`PerformReadinessStrip`, via page.tsx's `convertible`), and
+// never drift: the client suppresses the "Build overlay" CTA and DISCLOSES which
+// gate fired (`PerformReadinessStrip`, via page.tsx's `overlaySkip`, which passes
+// this reason through intact rather than collapsing it to a boolean), and
 // `/api/charts/convert` enforces the same rule server-side, because the route is
 // what actually spends the owner's AI budget. One rule, one place.
 //
