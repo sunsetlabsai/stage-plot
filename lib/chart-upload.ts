@@ -28,13 +28,18 @@ export interface UploadedChart {
 // 'authored' | 'lyrics' are the known-never gates (see lib/chart-converter.ts
 // `overlaySkipReason`): the client suppresses the CTA for these, so they only
 // reach a caller that POSTed the route directly.
+// 'not_notation' is the THIRD never-gate, and the only one that cannot be decided from
+// the row: it needs the measurement engine to look inside the PDF and find zero staves
+// in geometry it could fully observe (a mislabeled upload — a lyrics sheet filed as
+// 'guitar'). The client measures and the route enforces, same shape as the other two.
 export type ConvertReason =
   | 'exists'
   | 'unsupported_type'
   | 'too_large'
   | 'failed'
   | 'authored'
-  | 'lyrics';
+  | 'lyrics'
+  | 'not_notation';
 
 export interface ConvertResult {
   generated: boolean;
@@ -84,16 +89,45 @@ export function buildOverlayStep(result: ConvertResult | null): BuildOverlayStep
 // simply has no overlay (manual rail). Never throws — the caller renders the
 // null as "couldn't build one", never as a broken chart.
 export async function triggerOverlayCreate(chartId: string): Promise<ConvertResult | null> {
+  const { result } = await postConvert({ chart_id: chartId });
+  return result;
+}
+
+// What the convert route accepts. `measured` and `source_hash` are NOT independently
+// optional: `measured` present ⟹ `source_hash` REQUIRED, because a measured payload
+// with no hash cannot clear the route's hash boundary and the server must reject the
+// pair rather than commit unverified client geometry. Both stay optional only for the
+// legacy no-measurement request above, which is what a client that cannot measure sends.
+export interface ConvertRequest {
+  chart_id: string;
+  source_hash?: string;
+  measured?: unknown;
+}
+
+/**
+ * The raw POST, exposing the STATUS as well as the body.
+ *
+ * `triggerOverlayCreate` collapses every non-ok to `null`, which is right for the legacy
+ * call — there is nothing to do about a 500 but degrade. The measured path needs more:
+ * a 409 means "you measured stale bytes", which is recoverable exactly once, by evicting
+ * and re-measuring. Collapsing it to null would turn a recoverable mismatch into a dead
+ * "couldn't build an overlay".
+ *
+ * `status` is 0 for a transport failure (no response at all).
+ */
+export async function postConvert(
+  body: ConvertRequest,
+): Promise<{ status: number; result: ConvertResult | null }> {
   try {
     const res = await fetch('/api/charts/convert', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chart_id: chartId }),
+      body: JSON.stringify(body),
     });
-    if (!res.ok) return null;
-    return (await res.json()) as ConvertResult;
+    if (!res.ok) return { status: res.status, result: null };
+    return { status: res.status, result: (await res.json()) as ConvertResult };
   } catch {
-    return null;
+    return { status: 0, result: null };
   }
 }
 

@@ -548,3 +548,96 @@ export function measurePage(
     systems,
   };
 }
+
+// ─── Geometry completeness — the never-gate's safety rule (B2) ────────────────
+//
+// docs/design-chart-measurement.md §The geometry-completeness precondition.
+//
+// A never-gate is UNAPPEALABLE: it refuses conversion permanently, with no VLM
+// fallback. So `zero staves` may gate a page only when the geometry we scored was
+// COMPLETE — evidence of absence, never absence of evidence.
+//
+// ★★ EVALUATED PER PAGE, over CATEGORIES, never over an aggregate. Both halves of that
+// sentence are load-bearing and both have been got wrong before:
+//
+//  - `Σ opaque === 0` holds for 0 of 87 corpus files (`fillText` is the text layer;
+//    `wash` is the page-covering fill the shim deliberately drops), so gating on the
+//    total would disable the never-gate entirely and spend AI on all 342 lyrics PDFs.
+//  - A file-level fold is the WRONG SHAPE for a per-page predicate: `fillRect` [0, 2]
+//    sums to 2 over 2 pages and looks compliant while page 1 has lost its background
+//    fill (fails OPEN) and page 2 carries an extra one.
+//
+// The input is deliberately structural rather than `PageGeometry` (that type lives in
+// the client-only canvas adapter): this module imports nothing, and the predicate has to
+// be callable from a node test and from the server-side payload check.
+
+/**
+ * Warnings that mean paint happened where the shim could not observe it. These, and only
+ * these, mean the geometry is incomplete.
+ *
+ * ⚠ `anisotropic-ctm` is deliberately ABSENT. It is a PRECISION caveat — the geometry
+ * *was* observed, under a non-uniform scale — and B1's blanket "any warning means
+ * INCOMPLETE" is corrected here, measured: 4 corpus files carry it and validate 53/53
+ * systems between them. Treating it as incomplete would route clean charts to the VLM.
+ */
+export const OBSERVABILITY_WARNINGS: readonly string[] = [
+  'stroke-without-path',
+  'fill-without-path',
+  'no-2d-context',
+];
+
+/**
+ * Ops that carry PIXELS rather than geometry, any of which could hide a staff: the two
+ * shim-bypass classes (SMask / transparency-group ctx swaps, and pattern scratch
+ * canvases arriving via `createPattern` / `drawImage`) plus `strokeRect`, which is
+ * rect-shaped paint the shim never converts to segments. Measured across 87 corpus
+ * files: `drawImage` appears in 2 (both classify `raster`, so both were already on the
+ * VLM path); `putImageData`, `createPattern` and `strokeRect` are 0 everywhere.
+ */
+export const HIDING_OPS: readonly string[] = [
+  'drawImage',
+  'putImageData',
+  'createPattern',
+  'strokeRect',
+];
+
+/**
+ * ★ `fillRect` is BOUNDED, not excluded — and this is the one clause resting on an
+ * empirical rather than structural fact.
+ *
+ * `fillRect` never reaches the wash test (that lives inside the `fill(path)` handler),
+ * produces no segments, and pdf.js also uses it for shading fills and image masks. But
+ * excluding it is not the fix: it is present in 87 of 87 corpus files and 23 of 23 gate
+ * candidates, so `fillRect === 0` would disable the never-gate exactly as `Σ opaque === 0`
+ * would. The distinguisher is the COUNT, and it is sharp — exactly 1.00 per page across
+ * the corpus, the pdf.js `beginDrawing` page-background fill. A SECOND fill on a page is
+ * one pdf.js did not need for the background, and it opens the gate.
+ *
+ * ⚠ NOT symmetrically safe: more background fills fail closed (routed to the VLM), but
+ * ZERO would let a hiding fill become the first on its page and be admitted. No
+ * count-based clause can close that, which is why the assumption is ASSERTED per page,
+ * every run, by `scripts/chart-measure-acceptance.ts` rather than reasoned about — and
+ * why `pdfjs-dist` is pinned exact.
+ */
+export const MAX_STRUCTURAL_FILLRECT = 1;
+
+/**
+ * Was everything painted on THIS PAGE observed as geometry?
+ *
+ * ```
+ * complete  ⟺  no OBSERVABILITY warning                                  (per page)
+ *              ∧ drawImage + putImageData + createPattern + strokeRect == 0
+ *              ∧ fillRect <= 1
+ * ```
+ *
+ * `false` never means "bad chart" — it means "do not trust the measurement here", which
+ * routes the page to the whole-page VLM instead of gating it.
+ */
+export function isGeometryComplete(geo: {
+  warnings: readonly string[];
+  opaque: Readonly<Record<string, number>>;
+}): boolean {
+  if (geo.warnings.some((w) => OBSERVABILITY_WARNINGS.includes(w))) return false;
+  for (const op of HIDING_OPS) if ((geo.opaque[op] ?? 0) > 0) return false;
+  return (geo.opaque.fillRect ?? 0) <= MAX_STRUCTURAL_FILLRECT;
+}

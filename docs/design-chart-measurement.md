@@ -615,3 +615,38 @@ The B1 harness is the gate and must stay at **464/464 with `PARITY: clean`** —
 `measurePage` additions above are additive and must not move it. New unit tests cover
 spans → bars, normalization, `absNumber` density, the completeness precondition, and
 hash-mismatch rejection. The split contract's server half is testable without a browser.
+
+## Decided while building B2b (not re-litigation — the spec did not say)
+
+Three questions the sections above leave open, answered here so the next reader finds
+them beside the rules they qualify rather than in a PR description.
+
+1. **Where the never-gate sits in the route's numbered sequence.** After the
+   already-exists pre-check, before the key resolve and the vision call. "Runs the vision
+   call **unconditionally**" (§Payload and route extension step 2) means *not conditional
+   on the roadmap branch* — a never-gate that fired after the call it exists to save
+   would be pointless. An existing row still wins over the gate: a row is a fact the
+   client can use, the gate is a policy about future spend.
+2. **The roadmap discriminator is the BUILT calibration's roadmap, not the model's.**
+   `buildCalibrationFromVision` drops structurally-unbindable markers before anything is
+   persisted, so a chart whose only markers were dropped has no roadmap to protect and
+   takes the measured path. The rule the branch enforces is "never install measured bars
+   under markers that will be STORED".
+3. **Disposition is whole-CHART, not per page** — every page notation ∧ complete to
+   measure, every page not-notation ∧ complete to gate, anything else falls back. The
+   per-page predicates are evaluated per page and folded once, at the end.
+   **★ Measured 2026-09-03, 87-file corpus: ZERO files mix classifications** (62 notation
+   throughout, 23 not-notation, 2 raster). So whole-chart granularity costs nothing
+   today, and it avoids shipping a half-measured overlay whose unmeasured pages would
+   read as a bug rather than as a fallback.
+
+`System.verdict` is the persisted form of §Verdicts the engine emits — five values,
+runtime-enum-checked at the same boundary that range-checks `confidence`. The engine's
+`ProvisionalVerdict` is a separate declaration (that module imports nothing, by design)
+and a test pins it as a subset so the two cannot drift.
+
+The measured never-gate is DISCLOSED, not silent: it arrives as `ConvertState = 'gated'`
+on the readiness strip with a line naming what was found and the hand-calibrate CTA — the
+same shape as the two row-level gates, and still with no override (that remains its own
+unstarted design, because `chart_library.role` is identity, so correcting it is a MOVE
+between slots rather than a patch).

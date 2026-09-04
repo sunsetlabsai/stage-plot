@@ -165,6 +165,26 @@ describe('PerformReadinessStrip', () => {
     expect(onBuildOverlay).toHaveBeenCalledTimes(1);
   });
 
+  it('none + gated → names what we found, offers Calibrate, and NEVER offers a retry', () => {
+    // The third never-gate (B2b): zero staves on every page, in geometry we could fully
+    // observe. Distinct from `error` on purpose — the answer is deterministic for these
+    // bytes, so a "Try again" that always loses would be a lie. Gated still means "we
+    // won't spend AI on it", never "you can't set it up".
+    const onCalibrate = vi.fn();
+    const onBuildOverlay = vi.fn();
+    render(
+      <PerformReadinessStrip
+        {...props({ view: ready({ state: 'none' }), convertState: 'gated', onCalibrate, onBuildOverlay })}
+      />,
+    );
+    expect(screen.getByText(/No staves found/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Build overlay' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Calibrate' }));
+    expect(onCalibrate).toHaveBeenCalledWith('sections');
+    expect(onBuildOverlay).not.toHaveBeenCalled();
+  });
+
   it('convertState is scoped to `none` — it never disturbs a state that HAS a map', () => {
     // A stale 'running'/'error' must not leak into the draft/verified copy: those
     // states already have a calibration, so building is not the next step.

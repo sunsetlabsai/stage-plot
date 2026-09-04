@@ -45,3 +45,14 @@ describe('buildOverlayStep', () => {
     );
   });
 });
+
+// ── B2b: the measured never-gate must degrade SAFELY if a caller forgets it ──
+describe('buildOverlayStep — not_notation', () => {
+  it('maps to `failed`, never `refetch`', () => {
+    // page.tsx handles 'not_notation' explicitly, ahead of this call, and shows the
+    // gated line. This asserts the fallback if some future caller does not: a gate means
+    // NO row was written, so refetching would 404 and report a load error instead. An
+    // unhandled gate must land on the honest dead-stop, not on a phantom fetch.
+    expect(buildOverlayStep({ generated: false, reason: 'not_notation' })).toBe('failed');
+  });
+});

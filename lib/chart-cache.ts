@@ -62,6 +62,35 @@ export async function cacheChart(chart: Chart, response: Response): Promise<void
   await cache.put(new Request(key), response);
 }
 
+/**
+ * Drop every cached copy of this chart's bytes.
+ *
+ * Lives here because `CACHE_NAME` is module-private — this genuinely cannot live
+ * anywhere else. It exists for ONE caller: the measurement client, after the convert
+ * route rejects a `source_hash` it computed from a stale Cache-API copy
+ * (docs/design-chart-measurement.md §Cache eviction — two helpers, not one). It is only
+ * half the job: `loadPdfDoc` memoizes the parsed document AND its hash in a module-level
+ * map, so `evictChartDoc` (lib/pdf-viewer.ts) has to run too or the next load hands back
+ * the same stale bytes with the same stale hash.
+ *
+ * Deletes by fileId PREFIX, not just the current version key: the point is that no
+ * cached copy of this file may satisfy the next read, and a stale entry can only cost a
+ * re-download. Never throws — a cache that cannot be opened is already not serving
+ * anything.
+ */
+export async function evictChartCache(chart: Chart): Promise<void> {
+  if (!chart.fileId) return;
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    const prefix = `/api/chart-cache/${chart.fileId}/`;
+    for (const req of await cache.keys()) {
+      if (new URL(req.url).pathname.startsWith(prefix)) await cache.delete(req);
+    }
+  } catch {
+    // No Cache API / private browsing / insecure context — nothing cached to evict.
+  }
+}
+
 export interface DownloadProgress {
   total: number;
   done: number;

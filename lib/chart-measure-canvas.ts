@@ -298,9 +298,16 @@ export interface PageGeometry {
   /** Counts of paint that produced no geometry, keyed by canvas op. */
   opaque: Record<string, number>;
   /**
-   * Non-empty when the engine could not observe everything it painted. Any warning
-   * means the geometry is INCOMPLETE and the page must fall through to the VLM rather
-   * than be scored — a partial segment stream scores as confidently as a full one.
+   * Emitted when something about the paint deserves a caveat. A partial segment stream
+   * scores as confidently as a full one, so an unobserved-paint warning means the page
+   * must fall through to the VLM rather than be scored.
+   *
+   * ⚠ But NOT every warning means that, and B1's original blanket wording here ("any
+   * warning means INCOMPLETE") was too strong: `anisotropic-ctm` is a PRECISION caveat —
+   * the geometry *was* observed — and 4 corpus files carry it while validating 53/53
+   * systems. The one predicate that decides this is `isGeometryComplete`
+   * (`lib/chart-measure.ts`), which reads the OBSERVABILITY warnings and the opaque-op
+   * counts as separate categories. Do not re-derive a completeness rule from this field.
    */
   warnings: string[];
 }

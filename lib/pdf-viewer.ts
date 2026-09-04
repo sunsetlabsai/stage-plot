@@ -63,17 +63,35 @@ function evictOldest() {
 // will be parsed from, so the hash and the parse share identical bytes.
 // Exported for the share button (tier-1 file share reuses this exact
 // cache/proxy path — do NOT duplicate it).
-export async function fetchChartBytes(chart: Chart, accessToken?: string): Promise<ArrayBuffer | null> {
+export interface FetchChartOptions {
+  /**
+   * Skip the Cache API read and go straight to the network.
+   *
+   * Needed because the cache read below happens BEFORE any URL is considered, so a
+   * version-stamped URL alone cannot escape a stale entry — the fetch would never reach
+   * it. The one caller is the hash-mismatch retry, after `evictChartCache`; belt and
+   * braces, since eviction alone already gets us here.
+   */
+  bypassCache?: boolean;
+}
+
+export async function fetchChartBytes(
+  chart: Chart,
+  accessToken?: string,
+  opts?: FetchChartOptions,
+): Promise<ArrayBuffer | null> {
   // The cache READ is guarded too (Codex R1-3 on chunk 8). `caches` is absent outside a
   // secure context and `caches.open()` can reject in private browsing; before this guard
   // that rejection escaped uncaught — ahead of the try below — and failed the render
   // outright rather than degrading to the network. A cache problem must never be fatal in
   // either direction.
-  try {
-    const cachedBlob = await getCachedChartBlob(chart);
-    if (cachedBlob) return await cachedBlob.arrayBuffer();
-  } catch {
-    // fall through to the network
+  if (!opts?.bypassCache) {
+    try {
+      const cachedBlob = await getCachedChartBlob(chart);
+      if (cachedBlob) return await cachedBlob.arrayBuffer();
+    } catch {
+      // fall through to the network
+    }
   }
 
   try {
@@ -144,7 +162,29 @@ export async function fetchChartBytes(chart: Chart, accessToken?: string): Promi
   }
 }
 
-export async function loadPdfDoc(chart: Chart, accessToken?: string): Promise<LoadedPdf | null> {
+/**
+ * Forget the in-memory document for this chart — the second half of the hash-mismatch
+ * eviction (docs/design-chart-measurement.md §Cache eviction — two helpers, not one).
+ * `evictChartCache` alone is NOT sufficient: this map memoizes by `fileId:modifiedTime`
+ * and would hand back the same stale document *and its stale hash* on the next load.
+ *
+ * ★ It does NOT destroy the document. The caller (the open viewer) is very likely still
+ * holding and rendering it; destroying a doc mid-render throws inside pdf.js and blanks
+ * a chart the performer is looking at. What must stop is this map SERVING it again —
+ * ownership passes to whoever holds the reference, and the orphan is one document, freed
+ * by GC once the viewer swaps to the reloaded one.
+ */
+export function evictChartDoc(chart: Chart): void {
+  const key = cacheKey(chart);
+  docCache.delete(key);
+  failedKeys.delete(key);
+}
+
+export async function loadPdfDoc(
+  chart: Chart,
+  accessToken?: string,
+  opts?: FetchChartOptions,
+): Promise<LoadedPdf | null> {
   if (!chart.fileId) return null;
 
   const key = cacheKey(chart);
@@ -152,13 +192,15 @@ export async function loadPdfDoc(chart: Chart, accessToken?: string): Promise<Lo
   // Skip known-failed loads (prevents retry churn on private files)
   if (failedKeys.has(key)) return null;
 
-  const cached = docCache.get(key);
+  // A bypass caller is explicitly asking for the authoritative bytes, so the memoized
+  // document — which is exactly what it is trying to get past — must not answer either.
+  const cached = opts?.bypassCache ? undefined : docCache.get(key);
   if (cached) {
     cached.lastAccess = Date.now();
     return { doc: cached.doc, sourceHash: cached.sourceHash };
   }
 
-  const bytes = await fetchChartBytes(chart, accessToken);
+  const bytes = await fetchChartBytes(chart, accessToken, opts);
   if (!bytes) {
     failedKeys.add(key);
     return null;
