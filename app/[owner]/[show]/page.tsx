@@ -72,7 +72,8 @@ import {
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart, fetchChartBytes } from '@/lib/pdf-viewer';
 import { isUnsupportedChartMime, overlaySkipReason } from '@/lib/chart-converter';
-import { triggerOverlayCreate, buildOverlayStep } from '@/lib/chart-upload';
+import { buildOverlayStep } from '@/lib/chart-upload';
+import { buildOverlayWithMeasurement } from '@/lib/chart-measure-client';
 import { parseChartDeepLink, buildChartShareUrl, buildShowShareUrl, chartShareFilename } from '@/lib/share';
 import ShareButton from '@/components/ShareButton';
 import ManageChartsModal from '@/components/ManageChartsModal';
@@ -3577,11 +3578,45 @@ function ChartNavigator({
   const buildOverlay = useCallback(async () => {
     // sourceHash is required, not incidental: without the hash of the bytes we
     // loaded there is nothing to address the result to.
-    if (!calibrationChartId || !sourceHash) return;
+    if (!calibrationChartId || !activeChart || !sourceHash) return;
     const gen = calGenRef.current;
     setConvertState('running');
-    const result = await triggerOverlayCreate(calibrationChartId);
+    // Measure in the browser, let the server pay for the VLM and own the write (the
+    // split contract). The document on screen IS the thing measured, so the geometry
+    // and the bytes cannot disagree — except when those bytes came from a stale
+    // offline cache, which the server's hash check catches and this call recovers from
+    // ONCE by evicting both caches and re-measuring.
+    const built = await buildOverlayWithMeasurement({
+      chart: activeChart,
+      chartId: calibrationChartId,
+      doc: docRef.current,
+      sourceHash,
+      accessToken,
+    });
     if (calGenRef.current !== gen) return; // chart changed under us — drop it
+    // A recovered mismatch means the storage object changed under the open viewer: the
+    // overlay was built for the FRESH bytes, so the viewer has to adopt them too, or we
+    // would draw an overlay over bytes it does not describe.
+    let hash = sourceHash;
+    if (built.reloaded) {
+      docRef.current = built.reloaded.doc;
+      hash = built.reloaded.sourceHash;
+      setSourceHash(hash);
+      setNumPages(built.reloaded.doc.numPages);
+      if (canvasRef.current) {
+        await renderPage(built.reloaded.doc, 1, canvasRef.current);
+        if (calGenRef.current !== gen) return;
+        setPageNum(1);
+        updateCanvasBox();
+      }
+    }
+    const result = built.result;
+    // The measured never-gate: zero staves on every page, in geometry we could fully
+    // observe. Distinct from a failure — there is nothing to retry.
+    if (result && !result.generated && result.reason === 'not_notation') {
+      setConvertState('gated');
+      return;
+    }
     if (buildOverlayStep(result) === 'failed') {
       setConvertState('error');
       return;
@@ -3595,7 +3630,7 @@ function ChartNavigator({
     // bytes is adopted no matter who inserted it.
     try {
       const res = await fetch(
-        `/api/charts/calibration?chart_id=${encodeURIComponent(calibrationChartId)}&hash=${sourceHash}`,
+        `/api/charts/calibration?chart_id=${encodeURIComponent(calibrationChartId)}&hash=${hash}`,
       );
       if (calGenRef.current !== gen) return;
       if (!res.ok) {
@@ -3609,7 +3644,7 @@ function ChartNavigator({
     } catch {
       if (calGenRef.current === gen) setConvertState('error');
     }
-  }, [calibrationChartId, sourceHash, applyLoadedCalibration]);
+  }, [calibrationChartId, activeChart, sourceHash, accessToken, applyLoadedCalibration, updateCanvasBox]);
 
   useEffect(() => {
     let cancelled = false;

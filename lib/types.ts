@@ -92,6 +92,24 @@ export interface SectionAnchor {
 // A System is a horizontal band on a PDF page containing one or more bars (a
 // "staff system" or "chord chart line"). Coords are PDF-relative / normalized
 // 0..1 so they survive zoom, rotation, and device size.
+// How much the geometry of a system can be trusted, and on what evidence
+// (docs/design-chart-review-step.md §Confidence verdicts). The measurement engine
+// emits only the first three — the other two REQUIRE an independent VLM opinion, which
+// the split contract puts server-side with a key the browser never sees.
+//
+//  - `validated`    — measured span count equals the printed measure-number delta.
+//  - `unscored`     — no printed delta was available to check against (page-tail system,
+//                     first system of a continuation page). Deliberate, not a failure.
+//  - `uncertain`    — measured disagrees with printed; needs a human or the per-system
+//                     VLM fallback (deferred: 0 corpus systems need it today).
+//  - `corroborated` — no printed numbers, but an independent VLM opinion agrees.
+//  - `estimated`    — VLM geometry only (raster page).
+//
+// `lib/chart-measure.ts` carries `ProvisionalVerdict`, the engine-emittable SUBSET, as
+// its own declaration because that module imports nothing by design. A test pins the two
+// together, so the subset relation cannot drift silently.
+export type ChartVerdict = 'validated' | 'corroborated' | 'uncertain' | 'estimated' | 'unscored';
+
 export interface System {
   id: string;
   page: number;     // 1-based
@@ -100,6 +118,10 @@ export interface System {
   xStart: number;   // normalized 0..1 (left edge)
   xEnd: number;     // normalized 0..1 (right edge; xEnd > xStart)
   confidence?: number; // 0..1; populated by the auto-converter, cleared on manual edit
+  // What the geometry is worth, per system. Absent on every pre-B2 row and on
+  // hand-drawn systems — absence means "nobody scored this", not "it failed".
+  // Optional-field forward-compat, same pattern as `confidence`: no schema bump.
+  verdict?: ChartVerdict;
 }
 
 // A Bar is a barline-delimited region within a System. absNumber is the global
@@ -113,6 +135,23 @@ export interface Bar {
   absNumber: number;      // 1-based global bar number in reading order
   sectionId: string | null; // FK to SectionAnchor.id; null until assignment
   confidence?: number;    // 0..1; populated by the auto-converter, cleared on manual edit
+  // How many MUSICAL measures this one VISIBLE bar represents — a multirest is one
+  // drawn bar and N measures. Absent ⇒ 1 (the overwhelming case), so no schema bump
+  // and no migration; integer ≥ 1 when present.
+  //
+  // ★ Why this and not "make absNumber the musical measure number": absNumber is bar
+  // IDENTITY. It keys the conductor, the chrome and bar selection, and
+  // isValidCalibration enforces it dense 1..n over READING ORDER. Making it musical
+  // would relax that invariant and ripple through every consumer. Dense-over-visible
+  // changes nothing downstream and the musical number stays derivable as
+  // `1 + Σ(measures of preceding bars)`.
+  //
+  // ⚠ Written ONLY at conversion, because the write is generate-once (insert-only,
+  // conflict-as-no-op, no same-hash machine re-run) and `measures` has no editing
+  // surface — the Calibrate tools expose sections, bars and roadmap, not musical
+  // measure counts. A chart converted without it never acquires it, by machine or by
+  // hand, short of new bytes.
+  measures?: number;
 }
 
 // A position reference — used by nav/temporal layers so they never assume bar

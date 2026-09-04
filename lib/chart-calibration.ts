@@ -1,4 +1,4 @@
-import type { Bar, ChartCalibration, RoadmapMarker, SectionAnchor, System } from './types';
+import type { Bar, ChartCalibration, ChartVerdict, RoadmapMarker, SectionAnchor, System } from './types';
 import { compileRoadmap, initVM, stepVM } from './roadmap-vm';
 import type { TraversalStep, RoadmapError } from './roadmap-vm';
 
@@ -1002,6 +1002,24 @@ export function isValidSectionAnchor(s: unknown): s is SectionAnchor {
   );
 }
 
+// The verdict vocabulary, as a RUNTIME set — the DB boundary has to reject an unknown
+// value rather than ignore it (docs/design-chart-measurement.md §Verdicts the engine
+// emits), and a TypeScript union cannot do that to a JSON payload. Same boundary that
+// range-checks `confidence`.
+export const CHART_VERDICTS: readonly ChartVerdict[] = [
+  'validated',
+  'corroborated',
+  'uncertain',
+  'estimated',
+  'unscored',
+];
+
+// Optional measurement verdict: absent is valid (nobody scored it); when present it
+// must be one of the five. An unknown string is INVALID, not ignored.
+function isValidVerdict(v: unknown): boolean {
+  return v === undefined || (typeof v === 'string' && (CHART_VERDICTS as readonly string[]).includes(v));
+}
+
 export function isValidSystem(s: unknown): s is System {
   if (!s || typeof s !== 'object') return false;
   const sys = s as Record<string, unknown>;
@@ -1014,7 +1032,8 @@ export function isValidSystem(s: unknown): s is System {
     typeof sys.xStart === 'number' && Number.isFinite(sys.xStart) && sys.xStart >= 0 && sys.xStart <= 1 &&
     typeof sys.xEnd === 'number' && Number.isFinite(sys.xEnd) && sys.xEnd >= 0 && sys.xEnd <= 1 &&
     sys.xStart < sys.xEnd &&
-    isValidConfidence(sys.confidence)
+    isValidConfidence(sys.confidence) &&
+    isValidVerdict(sys.verdict)
   );
 }
 
@@ -1029,7 +1048,12 @@ export function isValidBar(b: unknown): b is Bar {
     bar.xStart < bar.xEnd &&
     typeof bar.absNumber === 'number' && Number.isInteger(bar.absNumber) && bar.absNumber >= 1 &&
     (bar.sectionId === null || (typeof bar.sectionId === 'string' && bar.sectionId.length > 0)) &&
-    isValidConfidence(bar.confidence)
+    isValidConfidence(bar.confidence) &&
+    // Musical measures per visible bar: absent ⇒ 1. Present means an integer ≥ 1 —
+    // 0 or a fraction is not a measure count, and a non-integer would silently corrupt
+    // the derived musical numbering of every following bar.
+    (bar.measures === undefined ||
+      (typeof bar.measures === 'number' && Number.isInteger(bar.measures) && bar.measures >= 1))
   );
 }
 

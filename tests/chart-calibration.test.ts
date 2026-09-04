@@ -31,6 +31,7 @@ import {
   tapToBar,
   isValidSystem,
   isValidBar,
+  CHART_VERDICTS,
   hashPdfBytes,
   findSystem,
   barsForPage,
@@ -2349,5 +2350,67 @@ describe('calibrationGetResponse (the graph is served ONLY on 200)', () => {
     expect(r.status).toBe(404);
     expect(r.body).not.toHaveProperty('calibration');
     expect(Object.keys(r.body)).toEqual(['error']);
+  });
+});
+
+// ── B2b: the two new optional fields at the DB boundary ──────────────────────
+//
+// Both are optional-field forward-compat (same pattern as `confidence`), so the risk is
+// not rejection — it is ACCEPTING nonsense. A fractional `measures` would silently
+// corrupt the derived musical number of every following bar; an unrecognised verdict
+// would sail into the review sheet as a value nothing can rank.
+
+describe('isValidBar — measures', () => {
+  const bar = {
+    id: 'b1', systemId: 's1', xStart: 0.1, xEnd: 0.5, absNumber: 1, sectionId: null,
+  };
+
+  it('absent is valid — that IS the common case, and it means 1', () => {
+    expect(isValidBar(bar)).toBe(true);
+  });
+
+  it('accepts an integer ≥ 1', () => {
+    for (const measures of [1, 2, 4, 32]) expect(isValidBar({ ...bar, measures })).toBe(true);
+  });
+
+  it('rejects 0, negatives, fractions, NaN and strings', () => {
+    for (const measures of [0, -1, 1.5, NaN, Infinity, '4', null]) {
+      expect(isValidBar({ ...bar, measures })).toBe(false);
+    }
+  });
+});
+
+describe('isValidSystem — verdict', () => {
+  const system = { id: 's1', page: 1, yTop: 0.1, yBottom: 0.2, xStart: 0.1, xEnd: 0.9 };
+
+  it('absent is valid — nobody scored it, which is not a failure', () => {
+    expect(isValidSystem(system)).toBe(true);
+  });
+
+  it('accepts every member of the vocabulary', () => {
+    for (const verdict of CHART_VERDICTS) expect(isValidSystem({ ...system, verdict })).toBe(true);
+  });
+
+  it('an unknown verdict is INVALID, not ignored', () => {
+    for (const verdict of ['validated ', 'VALIDATED', 'probably', '', 1, null]) {
+      expect(isValidSystem({ ...system, verdict })).toBe(false);
+    }
+  });
+
+  it('the whole calibration fails on a bad verdict or measures — one gate, not two', () => {
+    const cal = {
+      schemaVersion: 3,
+      status: 'draft' as const,
+      sections: [],
+      systems: [{ ...system, verdict: 'nonsense' }],
+      bars: [{ id: 'b1', systemId: 's1', xStart: 0.1, xEnd: 0.5, absNumber: 1, sectionId: null }],
+    };
+    expect(isValidCalibration(cal)).toBe(false);
+    expect(isValidCalibration({ ...cal, systems: [system] })).toBe(true); // positive control
+    expect(isValidCalibration({
+      ...cal,
+      systems: [system],
+      bars: [{ ...cal.bars[0], measures: 0 }],
+    })).toBe(false);
   });
 });

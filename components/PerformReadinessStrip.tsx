@@ -20,7 +20,14 @@ export type CalTool = 'sections' | 'bars' | 'roadmap'; // matches page.tsx calTo
 // and we are telling them it can't. Upload can't be the trigger (it's a reflex,
 // not a demand) and "first conductor open" can't either — Conduct only renders
 // under `barMode`, which already presupposes the overlay this would build.
-export type ConvertState = 'idle' | 'running' | 'error';
+//
+// 'gated' is the third never-gate answering (`not_notation`), and it belongs HERE rather
+// than beside `skipReason`: the row-level gates are known before the owner touches
+// anything, while this one is only knowable by measuring the bytes — i.e. it is an
+// outcome of a build attempt, which is exactly what this type models. It is still a
+// never-gate: no retry CTA is offered, because the answer is deterministic for these
+// bytes and a "Try again" that always loses is a lie.
+export type ConvertState = 'idle' | 'running' | 'error' | 'gated';
 
 export interface PerformReadinessStripProps {
   view: PerformReadinessView;
@@ -127,6 +134,15 @@ function readyLine(
           // Never a dead end — retry is one tap, Calibrate is one tap in the
           // header. A failed build leaves the chart exactly as it was.
           return { text: "Couldn't build an overlay for this chart.", cta: { kind: 'build', label: 'Try again' } };
+        case 'gated':
+          // We looked inside the PDF and found no staves anywhere, in geometry we could
+          // fully observe. Names the property of THIS chart that decided it, like the
+          // other two gates — and keeps the hand-calibrate route, because gated means
+          // "we won't spend AI on it", never "you can't set it up".
+          return {
+            text: 'No staves found on any page — nothing to detect. Calibrate to set up Perform.',
+            cta: { kind: 'calibrate', label: 'Calibrate', tool: 'sections' },
+          };
         case 'idle':
           return { text: 'No overlay for these bytes.', cta: { kind: 'build', label: 'Build overlay' } };
       }
