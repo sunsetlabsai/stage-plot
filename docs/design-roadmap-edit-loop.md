@@ -1,13 +1,32 @@
 # ShowRunr — Roadmap Builder Edit Loop (chunk 5 / "5c regenerate") DESIGN
 
-**Status:** DESIGN-ONLY. No build until Graham GO + Codex review.
+**Status: SHIPPED.** Both mechanisms of §2 are live; this doc is now a record of
+*why* it is built the way it is, not a proposal.
+
+| Shipped | Where |
+| --- | --- |
+| Re-open a saved builder chart | **Edit** on builder rows in `ManageChartsModal` → `startEdit` → `GET /api/charts/roadmap/[chartId]` → `RoadmapBuilder` mounted with `editChart` |
+| Manual edit (scalpel) — §2 | structure CRUD (`+ Add section`, per-section remove) and per-bar chord entry (click a bar → inline input → `onCommitBar`) |
+| Regenerate (hammer) — §2 / §5 | `onRegenerate`, guarded by a "Regenerate will replace your manual edits" confirm |
+| Save replaces in place | `POST /api/charts/roadmap/save` with `old_storage_path` |
+
+Merged in `95080e0` ("roadmap builder edit loop (5c) — reopen, edit/regenerate,
+save"). Two follow-ons build directly on it: `90da2c4` persists the authoring prompt
+so Regenerate is live on a re-opened chart (`design-roadmap-prompt-persistence.md`),
+and `ca52814` bakes the Numbers⇄Letters toggle into the saved chart
+(`design-roadmap-notation-toggle.md`).
+
 Companion to `docs/design-roadmap-builder.md` (chunks 0–4 shipped; re-key chunk 4
 merged main `8404b81`). This is chunk 5 of that doc's build sequence ("Edit loop:
 re-open spec from a saved builder chart → re-render → replace").
 
+> **Known gap, tracked separately:** chord entry is fully built but has **no
+> affordance** — nothing indicates a bar is clickable, so the capability reads as
+> missing to anyone looking at the structure list. See issue #173.
+
 ---
 
-## 1. The problem (a saved builder chart is a dead end)
+## 1. The problem this closed (historical — a saved builder chart *was* a dead end)
 
 The builder authors **new** charts: `ManageChartsModal` shows "Build a chart with
 AI" only when a role is **free** (`free.length > 0`), and it opens an empty
@@ -20,9 +39,9 @@ section, change a chord, or re-derive the whole thing from a better description 
 your only option is to delete it and start over, re-typing the entire song from
 scratch. The authored `source_spec` we carefully persist is **write-once**.
 
-This is the gap chunk 5 closes: make a builder chart **re-editable** — the
+This was the gap chunk 5 closed: making a builder chart **re-editable** — the
 property the builder design doc promised (§"Re-editable: re-open the spec, tweak,
-re-render").
+re-render"). It is now shipped; the paragraphs above describe the pre-`95080e0` state.
 
 ## 2. Two mechanisms — scalpel and hammer (Graham's framing)
 
@@ -48,15 +67,16 @@ regenerate is the headline because it's the mechanism that was missing a home.
 
 The edit loop is mostly assembled — three load-bearing pieces are already live:
 
-1. **In-session Regenerate.** `RoadmapBuilder.generate(true)`
-   (`components/RoadmapBuilder.tsx:63`) already re-runs the parse route and
+1. **In-session Regenerate.** `RoadmapBuilder.generate(reset=true)`
+   (`components/RoadmapBuilder.tsx:162`, confirm at `:165`, called from
+   `onRegenerate` at `:241`) already re-runs the parse route and
    `setView(specToView(spec))` — a whole-spec replace — behind a confirm
    ("Regenerate will replace your manual edits. Continue?"). The Review pane's
    left "refine" rail already hosts the description box + Regenerate button.
 2. **Save is already replace-by-role.** `POST /api/charts/roadmap/save` →
    `save_builder_chart` RPC upserts on `(owner, song_key, role)` and returns
    `old_storage_path` so the previous hash-addressed PDF is reclaimed
-   (`route.ts:152–158`). Saving an edited chart to the **same role** overwrites
+   (`save/route.ts:149` for the RPC call, `:193-194` where `old_storage_path` comes back). Saving an edited chart to the **same role** overwrites
    file + calibration + `source_spec` atomically. The replace-by-role mechanism
    is unchanged — but the **edit path** adds one thing the create path never
    needed: an optimistic-concurrency precondition, so a stale edit can't clobber a
@@ -71,7 +91,7 @@ The renderer is deterministic, so **re-opening and saving an unedited chart with
 unchanged render metadata re-derives byte-identical PDF/calibration → same hash →
 an idempotent no-op overwrite.** The narrowing matters: *render metadata* = the
 **`song_title` from the save request** + the **`artist` reloaded from the `songs`
-row** at save time (`route.ts:76–85`) — title rides the request, only artist is
+row** at save time (`save/route.ts:105-110`) — title rides the request, only artist is
 re-read server-side. If either changed since the chart was built, the music-body
 geometry/calibration stays stable but the header re-renders to a **new hash** —
 still correct, just not byte-identical. So the precise claim is *same spec + same
@@ -140,7 +160,7 @@ the create path does (carrying the chunk-4 `is_builder`/`authored_key` contract)
 
 ### 4.4 Stale-edit guard (the one save-side change)
 Today's save commits by `(owner, song_key, role)` with **no precondition on which
-chart currently holds that slot** (`save_builder_chart`, `route.ts:121`). For the
+chart currently holds that slot** (`save_builder_chart`, `save/route.ts:149`). For the
 **create** flow that's correct — a free role has nothing to clobber. But an **edit**
 loads chart X from a slot, then saves it back, and the save has no idea the slot may
 have changed in between. The dangerous interleave:
@@ -229,19 +249,22 @@ spec→view→spec survival (distinct from the manual-retype loss in the first b
 `barsPerLine` because it carries through and a regression would silently re-flow the
 chart on save. This is the guard that makes "open + save = no-op" true.
 
-## 7. v1 vs deferred — persist the last-used prompt
+## 7. Persist the last-used prompt — SHIPPED in `90da2c4`
 
-**v1:** no stored prompt. The refine box is empty on re-open; a regenerate means
-re-describing the song. The spec is the source of truth; the manual editor covers
-"I just want to nudge it."
+Graham's follow-on to 5c, deferred at design time and built immediately after. A
+re-opened chart **pre-fills the refine box** with the prompt that built it, so
+regenerate becomes *"edit the prompt, not the spec"* — change a clause and re-derive.
 
-**Deferred follow-on (Graham's idea):** persist the **last-used description**
-alongside the chart (`chart_library.source_prompt text`, written by the save route
-from a new `prompt` field on the save body) so a re-opened chart **pre-fills the
-refine box** with the prompt that built it. Then regenerate becomes *"edit the
-prompt, not the spec"* — change a clause and re-derive. This is additive (nullable
-column, empty for existing charts) and explicitly **out of scope for 5c** — it's
-the natural next increment once the loop exists.
+| mechanism | where |
+|---|---|
+| column | `chart_library.source_prompt`, threaded through the `save_builder_chart` RPC as `p_source_prompt default null` (`017_builder_source_notation.sql:47`) |
+| write | `source_prompt` on the save body (`charts/roadmap/save/route.ts:26`); blank/absent stores null |
+| read | `GET /api/charts/roadmap/[chartId]` returns it (`route.ts:67`) |
+| seed | `useState(editChart?.sourcePrompt ?? '')` (`RoadmapBuilder.tsx:145`) — empty for a fresh build or a legacy chart with no stored prompt |
+
+Design detail in `design-roadmap-prompt-persistence.md`. Additive and nullable, so
+charts saved before it simply open with an empty box — the pre-persistence behaviour
+this section used to describe as "v1" survives as the legacy case, not as the design.
 
 ## 8. Re-key interplay (clean by construction)
 
@@ -265,7 +288,10 @@ should surface that explicitly or leave it to the existing key toggle.)
 - **Escape hatches:** close without saving = no change; Delete still available on
   the row; Replace-with-file still available (and now cleanly de-builders the slot).
 
-## 10. Build sketch (when GREEN to build)
+## 10. What was built (the sketch this doc shipped against)
+
+All six items below are live; kept as the record of *how* the loop was assembled and
+which section motivated each piece, not as work outstanding.
 
 1. **GET route** `app/api/charts/roadmap/[chartId]/route.ts` — owner-gated read of
    `source_spec` + role + song_title + `updated_at`; `validateRoadmapSpec` →
@@ -284,17 +310,19 @@ should surface that explicitly or leave it to the existing key toggle.)
    including a 409-on-save "reload, this chart changed" path.
 5. **Round-trip golden test** (§6) — the fidelity guard, incl. `held` +
    `barsPerLine`.
-6. **(Deferred, NOT 5c)** `source_prompt` column + save-body `prompt` + refine
-   pre-fill (§7).
+6. **`source_prompt` column + save-body field + refine pre-fill** (§7) — deferred out
+   of 5c at design time, shipped straight after in `90da2c4`.
 
 ## 11. Resolved decisions (Graham + Codex R1)
 
 1. **Edit vs Replace labeling — RESOLVED.** Keep both actions; **reword "Replace" →
    "Replace with file"** on builder rows so Edit (= spec) vs Replace-with-file
    (= static import) reads unambiguously (§4.1).
-2. **Empty refine box on re-open — RESOLVED: ship v1.** Manual-editor default,
-   regenerate opt-in, empty refine box. Prompt persistence (`source_prompt`, §7) is
-   the clean separate follow-on, not pulled into 5c.
+2. **Empty refine box on re-open — RESOLVED at design time: ship 5c without it.**
+   Manual-editor default, regenerate opt-in, empty refine box; prompt persistence
+   kept as a clean separate follow-on rather than pulled into 5c. ⚠ **That decision
+   is history, not current behaviour** — the follow-on shipped in `90da2c4`, so a
+   re-opened chart pre-fills the box today unless it was saved before that (§7).
 3. **Authored-key edit surface (§8) — RESOLVED.** The existing Numbers⇄Letters key
    toggle (which already sets `renderKey`) suffices; no separate "change authored
    key" affordance in 5c.
@@ -314,4 +342,5 @@ was designed to be, and because the save route is already a deterministic,
 replace-by-role, born-verified re-render, the loop is mostly *wiring existing parts*
 rather than new machinery. Scalpel and hammer share one door; the deterministic
 render makes "open and save changed nothing" literally true; and prompt-persistence
-waits in the wings as the next clean increment.
+landed straight after as the next clean increment (§7), which is what turned
+regenerate from "re-describe the song" into "edit the clause you got wrong".
