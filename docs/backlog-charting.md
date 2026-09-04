@@ -93,7 +93,11 @@ Graham's call: keep the code, delete the design. `docs/design-retire-drive.md` w
 full retirement spec that sat PRE-CODEX from PR #153 (2026-08-25) until it was deleted
 2026-09-04. **Do not re-derive it.** What is worth keeping from it:
 
-- **Drive is live but vestigial.** Measured 2026-08-25: `select count(*), count(config->>'chartsRootFolderId') from shows` → **6 shows, 0 with a Drive folder.**
+- **Drive is live but vestigial.** ⚠ **External measurement, not pinned by any repo
+  artifact** — run against the prod DB 2026-08-25:
+  `select count(*), count(config->>'chartsRootFolderId') from shows` → **6 shows, 0 with a
+  Drive folder.** Re-run it before relying on it; nothing in the repo will tell you if it
+  stops being true.
   So the runtime cost is zero; the cost is only that `app/api/drive/*` (4 routes),
   `lib/drive.ts`, and Drive branches in `page.tsx`, `chart-converter.ts`,
   `chart-cache.ts`, `pdf-viewer.ts`, `show-file.ts` read as live architecture.
@@ -107,8 +111,9 @@ full retirement spec that sat PRE-CODEX from PR #153 (2026-08-25) until it was d
   3. `lib/show-file.ts`'s `chartsSource`: the retirement's rule was "stop writing, KEEP
      reading" — old YAML exports carry it and loading one must not error. **That rule was
      never applied**: `serializeShow` still WRITES it (`lib/show-file.ts:55-56`, guarded by
-     `config.chartsRootFolderId`) and `parseShowFile` reads it (`:100-101`). Verified
-     2026-09-04. Only the read half is load-bearing today, since no show has the folder id.
+     `config.chartsRootFolderId`) and `deserializeShow` → `fromYaml` reads it (`:100-101`).
+     Verified 2026-09-04. Only the read half is load-bearing today, since no show has the
+     folder id.
 - Google OAuth *login* (`/api/auth/google`) is separate and unaffected either way.
 
 ## Tune-ups nobody has claimed

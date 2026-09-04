@@ -52,70 +52,91 @@ function docFiles(dir: string, base = 'docs'): string[] {
  * so a typo would read as fine and this test would be the only thing that ever
  * noticed. A bare filename in backticks has exactly one spelling.
  */
+const ENTRY_ROW = /^\|\s*`([^`]+\.md)`\s*\|\s*([A-Z-]+)\s*\|/;
+
 function entries(index: string): { path: string; state: string; line: number }[] {
-  return visible(index).flatMap(({ text, line }) => {
-    const m = text.match(/^\|\s*`([^`]+\.md)`\s*\|\s*([A-Z-]+)\s*\|/);
+  return partition(index).shown.flatMap(({ text, line }) => {
+    const m = text.match(ENTRY_ROW);
     return m ? [{ path: `docs/${m[1]}`, state: m[2], line }] : [];
   });
 }
 
+/** The opening marker of a fence line — '`' or '~' — or null if not a fence. */
+function fenceOf(text: string): string | null {
+  const m = text.match(/^ {0,3}(`{3,}|~{3,})/);
+  return m ? m[1][0] : null;
+}
+
 /**
- * Lines a reader actually sees — fenced code blocks and HTML comments removed.
+ * Split into what a reader sees and what is hidden from them.
  *
- * Codex found the hole this closes: the parser used to scan raw lines, so the
- * 75 real rows could be wrapped in an HTML comment and the visible table
- * replaced with wrong states, and every assertion here would still pass while
- * the rendered page lied. An index that is only correct in its hidden copy is
- * exactly the two-homes failure this whole file exists to prevent.
+ * Three rounds of Codex have gone at this, and every break was the same
+ * shape: some region that Markdown hides but the parser read, or vice versa.
+ * R1 was HTML comments, R2 was a fence nested inside a comment, R3 was `~~~`
+ * — which Markdown fences with and this only matched on backticks.
+ *
+ * So the hidden half is returned too, and `no hidden entry rows` below makes
+ * a hidden row a failure in its own right. That kills the class rather than
+ * the instance: it no longer matters whether a future hiding trick is one
+ * this parser models, because any entry-shaped row that a reader cannot see
+ * fails the suite regardless of how it was hidden.
  */
-function visible(src: string): { text: string; line: number }[] {
-  const out: { text: string; line: number }[] = [];
-  let fenced = false;
+function partition(src: string): {
+  shown: { text: string; line: number }[];
+  hidden: { text: string; line: number }[];
+} {
+  const shown: { text: string; line: number }[] = [];
+  const hidden: { text: string; line: number }[] = [];
+  let fence: string | null = null;
   let commented = false;
   src.split('\n').forEach((raw, i) => {
+    const line = i + 1;
     let t = raw;
 
-    // Order matters, and getting it wrong is how the first version of this
-    // was defeated: it toggled the fence flag BEFORE looking at comment
-    // state, so a ``` line inside an HTML comment flipped the parser out of
-    // step with how Markdown actually renders. Codex used exactly that to
-    // show 72 entries for 72 files while the visible table said OPS for
-    // every row. Whichever context is already open wins.
-
-    // 1. Already inside a comment: nothing is a fence, only `-->` matters.
+    // 1. Inside a comment: nothing is a fence, only `-->` matters.
     if (commented) {
       const end = t.indexOf('-->');
-      if (end === -1) return;
+      if (end === -1) {
+        hidden.push({ text: t, line });
+        return;
+      }
       commented = false;
+      hidden.push({ text: t.slice(0, end), line });
       t = t.slice(end + 3);
     }
 
-    // 2. Already inside a fence: `<!--` is literal code, only a closing fence
-    //    matters. Fenced lines render as code, never as a table row.
-    if (fenced) {
-      if (/^\s*```/.test(t)) fenced = false;
+    // 2. Inside a fence: `<!--` is literal code; only a matching fence closes.
+    if (fence) {
+      hidden.push({ text: t, line });
+      if (fenceOf(t) === fence) fence = null;
       return;
     }
 
-    // 3. Normal text: remove complete comments, then honour an opener that
-    //    does not close on this line.
-    t = t.replace(/<!--[\s\S]*?-->/g, '');
+    // 3. Normal text: complete comments are hidden, then an unclosed opener.
+    t = t.replace(/<!--[\s\S]*?-->/g, (m) => {
+      hidden.push({ text: m, line });
+      return '';
+    });
     const open = t.indexOf('<!--');
     if (open !== -1) {
       commented = true;
+      hidden.push({ text: t.slice(open), line });
       t = t.slice(0, open);
     }
 
-    if (/^\s*```/.test(t)) {
-      fenced = true;
+    const f = fenceOf(t);
+    if (f) {
+      fence = f;
+      hidden.push({ text: t, line });
       return;
     }
-    out.push({ text: t, line: i + 1 });
+    shown.push({ text: t, line });
   });
-  return out;
+  return { shown, hidden };
 }
 
 const INDEX_SRC = readFileSync(join(REPO, INDEX), 'utf8');
+const { hidden: HIDDEN } = partition(INDEX_SRC);
 const ENTRIES = entries(INDEX_SRC);
 const FILES = docFiles(DOCS).filter((p) => p !== INDEX);
 
@@ -181,6 +202,18 @@ describe('docs/INDEX.md accounts for every doc', () => {
       '| `design-perform-tab.md` | SHIPPED-RECORD | visible |',
     ].join('\n');
     expect(entries(commentInFence).map((e) => e.path)).toEqual(['docs/design-perform-tab.md']);
+  });
+
+  it('hides no entry rows from the reader', () => {
+    // The class-killer. Every bypass so far worked by keeping the real rows
+    // in a region Markdown hides — an HTML comment (R1), a fence nested in a
+    // comment (R2), a ~~~ fence (R3). Rather than model each hiding trick,
+    // this makes ANY hidden entry-shaped row a failure, so the next trick
+    // fails too whether or not the parser understands it.
+    const buried = HIDDEN.filter((h) => ENTRY_ROW.test(h.text.trim())).map(
+      (h) => `line ${h.line}: ${h.text.trim().slice(0, 60)}`,
+    );
+    expect(buried, 'index rows must not live inside comments or code fences').toEqual([]);
   });
 
   it('gives every entry a legal state', () => {

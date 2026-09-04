@@ -49,7 +49,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 |---|---|---|
 | `design-roadmap-builder.md` | SHIPPED-RECORD | Migration `009`, `components/RoadmapBuilder.tsx`. |
 | `design-roadmap-key-resolution.md` | SHIPPED-RECORD | `relabelSection` (`lib/chart-calibration.ts:101`). |
-| `design-roadmap-edit-loop.md` | SHIPPED-RECORD | Re-open + replace-on-save. Already self-labelled correctly. |
+| `design-roadmap-edit-loop.md` | SHIPPED-RECORD | Re-open a saved builder chart and replace it on save. |
 | `design-roadmap-authoring-fidelity.md` | SHIPPED-RECORD | Transcribe-then-fold pipeline (`lib/roadmap-parse.ts:20-26`). |
 | `design-roadmap-expressiveness.md` | PARTIAL | Gap 1 shipped (`alter?` + `drawAccidental`). Gap 2 (`keyShift`) unbuilt. |
 | `design-roadmap-fit-to-width.md` | SHIPPED-RECORD | Wrap + both render bugs (`lib/roadmap-layout.ts:174`). |
@@ -88,7 +88,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | Doc | State | Note |
 |---|---|---|
 | `design-single-backend.md` | SHIPPED-RECORD | All chunks incl. 4 (`b0bed1c`, `components/SettingsOverlay.tsx`). Only the Vercel env teardown remains, and that is outside the repo. |
-| `design-supabase-backend.md` | PARTIAL | The four items its banner lists as unbuilt are closed. **But its "What Goes Away" table still specifies killing Google Drive (`:81-82`), which has not happened and is not going to** — Drive stays, ruled 2026-09-04; see `backlog-charting.md` §Google Drive stays. |
+| `design-supabase-backend.md` | PARTIAL | Shows, charts, auth, songs, profiles and collaborators on Supabase — all shipped. The one part that will never ship is its retirement of Google Drive: Drive stays, ruled 2026-09-04 (`backlog-charting.md` §Google Drive stays). |
 | `design-owner-namespacing.md` | SHIPPED-RECORD | Migration `005` + the `[owner]/[show]` route. |
 | `design-owner-onboarding.md` | PARTIAL | Claim flow shipped. The `ADMIN_SECRET` bearer auth is dead — replaced by `requirePlatformAdmin()`. |
 | `design-ai-key-availability.md` | PARTIAL | Probe + panel + recovery shipped. **§13 (one key resolver for all three AI surfaces) unbuilt** — parse and convert still call `getAdminConfig` directly. |
