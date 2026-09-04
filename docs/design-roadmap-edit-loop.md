@@ -67,15 +67,16 @@ regenerate is the headline because it's the mechanism that was missing a home.
 
 The edit loop is mostly assembled — three load-bearing pieces are already live:
 
-1. **In-session Regenerate.** `RoadmapBuilder.generate(true)`
-   (`components/RoadmapBuilder.tsx:63`) already re-runs the parse route and
+1. **In-session Regenerate.** `RoadmapBuilder.generate(reset=true)`
+   (`components/RoadmapBuilder.tsx:162`, confirm at `:165`, called from
+   `onRegenerate` at `:241`) already re-runs the parse route and
    `setView(specToView(spec))` — a whole-spec replace — behind a confirm
    ("Regenerate will replace your manual edits. Continue?"). The Review pane's
    left "refine" rail already hosts the description box + Regenerate button.
 2. **Save is already replace-by-role.** `POST /api/charts/roadmap/save` →
    `save_builder_chart` RPC upserts on `(owner, song_key, role)` and returns
    `old_storage_path` so the previous hash-addressed PDF is reclaimed
-   (`route.ts:152–158`). Saving an edited chart to the **same role** overwrites
+   (`save/route.ts:149` for the RPC call, `:193-194` where `old_storage_path` comes back). Saving an edited chart to the **same role** overwrites
    file + calibration + `source_spec` atomically. The replace-by-role mechanism
    is unchanged — but the **edit path** adds one thing the create path never
    needed: an optimistic-concurrency precondition, so a stale edit can't clobber a
@@ -90,7 +91,7 @@ The renderer is deterministic, so **re-opening and saving an unedited chart with
 unchanged render metadata re-derives byte-identical PDF/calibration → same hash →
 an idempotent no-op overwrite.** The narrowing matters: *render metadata* = the
 **`song_title` from the save request** + the **`artist` reloaded from the `songs`
-row** at save time (`route.ts:76–85`) — title rides the request, only artist is
+row** at save time (`save/route.ts:105-110`) — title rides the request, only artist is
 re-read server-side. If either changed since the chart was built, the music-body
 geometry/calibration stays stable but the header re-renders to a **new hash** —
 still correct, just not byte-identical. So the precise claim is *same spec + same
@@ -159,7 +160,7 @@ the create path does (carrying the chunk-4 `is_builder`/`authored_key` contract)
 
 ### 4.4 Stale-edit guard (the one save-side change)
 Today's save commits by `(owner, song_key, role)` with **no precondition on which
-chart currently holds that slot** (`save_builder_chart`, `route.ts:121`). For the
+chart currently holds that slot** (`save_builder_chart`, `save/route.ts:149`). For the
 **create** flow that's correct — a free role has nothing to clobber. But an **edit**
 loads chart X from a slot, then saves it back, and the save has no idea the slot may
 have changed in between. The dangerous interleave:
