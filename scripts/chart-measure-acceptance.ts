@@ -69,9 +69,9 @@ interface FileResult {
   validated: number;
   scored: number;
   /**
-   * Total `fillRect` calls across this file's pages.
+   * `fillRect` calls PER PAGE, indexed page 1 → `[0]`. Every entry must be exactly 1.
    *
-   * ★ Exists to pin ONE empirical assumption the never-gate rests on (see
+   * ★ Pins ONE empirical assumption the never-gate rests on (see
    * docs/design-chart-measurement.md §`fillRect` is bounded, not excluded). The
    * completeness predicate admits `fillRect <= 1` per page because pdf.js emits exactly
    * one structural page-background fill. That bound is NOT symmetrically safe: extra
@@ -79,8 +79,16 @@ interface FileResult {
    * and be admitted. No count-based clause can close that, so the assumption is asserted
    * every run rather than reasoned about — a silent drift to zero is the failure mode,
    * and it is invisible in every other number this harness prints.
+   *
+   * ★★ PER PAGE, not a file total (Codex, #176). A file sum is the WRONG SHAPE for a
+   * per-page predicate: a 2-page file counting [0, 2] sums to 2 over 2 pages and passes,
+   * while page 1 has lost its background fill (fails OPEN — a hiding fill would be
+   * admitted as the first on that page) and page 2 carries an extra one. The aggregate
+   * hides both. Keep the categories the predicate is written over.
    */
-  fillRect: number;
+  fillRectByPage: number[];
+  /** Pages whose MediaBox origin is not (0,0) — see the text-flip note at the call site. */
+  shiftedOrigin: number[];
   failures: string[];
 }
 
@@ -184,24 +192,37 @@ async function measureFile(browser: Page, nodePdfjs: typeof import('pdfjs-dist')
     spans: 0,
     validated: 0,
     scored: 0,
-    fillRect: 0,
+    fillRectByPage: [],
+    shiftedOrigin: [],
     failures: [],
   };
 
   for (let p = 1; p <= pages; p++) {
     const geo = await browser.evaluate((u, n, s) => globalThis.__extract(u, n, s), url, p, SCALE);
     if (geo.warnings.length) result.failures.push(`p${p} WARN ${geo.warnings.join(',')}`);
-    result.fillRect += geo.opaque.fillRect ?? 0;
+    result.fillRectByPage.push(geo.opaque.fillRect ?? 0);
     const pdfPage = await doc.getPage(p);
     const text = await pdfPage.getTextContent();
-    // B1 flipped text with `view[3]` alone, i.e. assuming a MediaBox origin at (0,0).
-    // Kept verbatim rather than "corrected" to `view[3] - view[1]`: that would move
-    // measured output on any page with a shifted origin, and parity is the gate.
-    const [, , pageWidth, pageHeight] = pdfPage.view;
+
+    // ★ Two DIFFERENT quantities, deliberately not the same expression (Codex, #176).
+    //
+    // `textFlipY` is the baseline B1 flips text against. B1 used `view[3]` raw, i.e.
+    // assuming a MediaBox origin at (0,0), and that is preserved verbatim: "correcting"
+    // it would move measured output on a shifted-origin page, and parity is the gate.
+    //
+    // The page DIMENSIONS are a different thing and must be honest, because B2
+    // normalizes bar geometry against them — a wrong denominator puts every bar in the
+    // wrong place. pdf.js viewport dimensions are the view box's EXTENT, not its far
+    // corner. Conflating the two (as the first cut of this PR did) silently exports B1's
+    // origin assumption into B2's normalization.
+    const [vx0, vy0, vx1, vy1] = pdfPage.view;
+    const textFlipY = vy1;
+    if (vx0 !== 0 || vy0 !== 0) result.shiftedOrigin.push(p);
+
     const m = measurePage(
       geo.segments,
-      toPositionedText(text.items as { str: string; transform: number[] }[], pageHeight),
-      { number: p, width: pageWidth, height: pageHeight },
+      toPositionedText(text.items as { str: string; transform: number[] }[], textFlipY),
+      { number: p, width: vx1 - vx0, height: vy1 - vy0 },
     );
     result.classification[m.classification] = (result.classification[m.classification] ?? 0) + 1;
     result.staves += m.staffCount;
@@ -271,14 +292,33 @@ async function main() {
   // ★ The pinned assumption behind the never-gate's `fillRect <= 1` clause. Asserted
   // rather than reported, because the dangerous direction — pdf.js emitting NO page
   // background fill — fails OPEN and shows up in no other number here.
-  const fillRect = results.reduce((a, r) => a + r.fillRect, 0);
-  const pageTotal = results.reduce((a, r) => a + r.pages, 0);
-  const offenders = results.filter((r) => r.fillRect !== r.pages);
-  console.log(`fillRect=${fillRect} over ${pageTotal} pages (expect exactly 1/page)`);
+  //
+  // Evaluated PER PAGE. A file total would let [0, 2] pass as "2 over 2 pages" while
+  // both of its pages violate the predicate in opposite directions.
+  const offenders: string[] = [];
+  let pagesChecked = 0;
+  let fillRectTotal = 0;
+  for (const r of results) {
+    for (const [i, n] of r.fillRectByPage.entries()) {
+      pagesChecked++;
+      fillRectTotal += n;
+      if (n !== 1) offenders.push(`  FILLRECT ${r.file} p${i + 1}: ${n} (expected 1)`);
+    }
+  }
+  console.log(
+    `fillRect: ${fillRectTotal} over ${pagesChecked} pages, ` +
+      `${pagesChecked - offenders.length}/${pagesChecked} pages exactly 1`,
+  );
+  const shifted = results.flatMap((r) => r.shiftedOrigin.map((p) => `${r.file} p${p}`));
+  console.log(
+    shifted.length === 0
+      ? 'MediaBox origin: (0,0) on every page — B1\'s raw view[3] text flip is exact here'
+      : `MediaBox origin: SHIFTED on ${shifted.length} page(s) — ${shifted.slice(0, 3).join(', ')}`,
+  );
   if (offenders.length > 0) {
-    for (const r of offenders) console.log(`  FILLRECT ${r.file}: ${r.fillRect} over ${r.pages} pages`);
+    for (const line of offenders) console.log(line);
     console.log(
-      `\nFILLRECT ASSERTION FAILED — ${offenders.length} file(s) not exactly 1 per page.\n` +
+      `\nFILLRECT ASSERTION FAILED — ${offenders.length} page(s) not exactly 1.\n` +
         `  The completeness predicate admits fillRect <= 1 assuming one structural\n` +
         `  background fill per page. Re-measure before trusting the never-gate: a drop\n` +
         `  toward zero fails OPEN (docs/design-chart-measurement.md).`,
