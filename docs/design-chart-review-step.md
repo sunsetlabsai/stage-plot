@@ -1,7 +1,10 @@
 # Design — Chart review step v2 (measured geometry + pick-a-split)
 
-Status: **build state in `docs/INDEX.md`, not here.** Merged and frozen; the review
-sheet it specifies is chunk C.
+Status: **build state in `docs/INDEX.md`, not here.** The review sheet it specifies is
+chunk C, and §Chunk C — build spec is what that chunk builds against. Frozen 2026-09-02
+apart from dated amendments carrying a ruling of Graham's; the live ones are §Amendment
+2026-09-06 (the sheet gains an owner-initiated entry point) and the `unscored` amendment
+under §Confidence verdicts.
 Extends `design-chart-converter.md` (its "Review queue" section and open-Q1 "vision
 coordinate quality"); complements `design-barline-calibration.md` (the manual drag editor
 stays as the deep fallback). Nothing here changes verify/`canVerify` or the show view.
@@ -160,6 +163,47 @@ Which split looks right?
   wherever its chip renders; tapping opens the same sheet. It never re-prompts on its
   own — the badge just sits there until resolved or ignored forever.
 - **Raster charts** get the chart-level "estimated" badge and the same opt-in flow.
+- **Owner-initiated, any system.** *(Added 2026-09-06 — see the amendment below.)* In
+  calibrate mode's bars tool, a selected system offers **"Check this line"**, which opens
+  the same sheet. The machine flag decides whether we *proactively ask*; it does not
+  decide whether the sheet is *reachable*.
+
+## Amendment 2026-09-06 (Graham's ruling) — the flag is not the only door
+
+**The measurement.** `buildMeasuredPayload` was run over the whole 87-file / 550-system
+corpus (the shipped acceptance harness cannot do this — it scores `measurePage`'s
+`ProvisionalVerdict` and never calls the payload builder, which is why 464/464 never
+covered it). Result: **`validated` 464, `unscored` 86, `uncertain` 0.** Both machine
+outcomes are *silent* in the table above, so **the sheet as originally specified has no
+input on any chart we hold.**
+
+That answers the question §Multirests deferred here — **multirest over-demotion is 0 of
+550 systems**, and it is not marginal: 12 systems carry multirests (18 in total), every
+H-bar is contained with a minimum margin of **4.75pt** against a 0.75pt tolerance (6.3×),
+and **zero of the 18 spend any tolerance at all** — containment alone decides every case,
+so `MULTIREST_CONTAINMENT_TOL` is currently earning nothing and its ⚠ "must never grow
+into a search radius" has ample headroom. Verified with a positive control: forcing the
+tolerance negative demotes exactly those 12 and the rig reports them, so the zero is a
+real zero and not a blind harness.
+
+**The ruling.** A verdict decides whether the app *volunteers* the sheet. It does not
+decide whether the sheet exists. Principles §"Ask only about systems that failed. Silent
+when confident." governs *prompting* — it was never a statement that a confident line is
+unopenable. So the sheet gains the owner-initiated entry point above and is built whole.
+
+**Why this is the non-punting shape.** The failure mode that actually reaches a band is
+not the engine flagging itself — it is the engine being **confident and wrong**, which the
+owner discovers at rehearsal. Today their only recourse is calibrate mode plus per-barline
+dragging, which this doc itself calls the deep fallback. "Which split looks right? / none
+of these → how many bars do you count?" is strictly better for a non-reader, and routing
+the owner to it makes every path here exercisable on all 87 charts today rather than on a
+case we have never seen.
+
+**Consequence for candidates.** On an owner-opened confident system there is one candidate
+— the stored measured split (a measured chart stores no competing VLM geometry). The sheet
+degenerates to "is this right? → no → how many bars?", and **the count fallback carries
+that path.** It is therefore the part that must be scored, not the picker; see §Chunk C
+acceptance.
 
 ## Persistence and re-runs
 
@@ -176,21 +220,224 @@ Which split looks right?
 - Replace semantics unchanged: new bytes → new hash → new calibration target, converted
   from scratch by the then-current pipeline.
 
+## Chunk C — build spec
+
+Five parts. C1–C2 are the plumbing the sheet needs and are independently correct without
+it; C3–C4 are the sheet; C5 is what says it works.
+
+⚠ **Chunk C is not UI-only.** C4 requires a small additive change to the measurement
+engine (clusters must carry the per-cluster stroke-width and endpoint residual that stage 2
+currently discards), so the acceptance harness is in scope and its baseline must hold.
+
+### C1 — verdict actually drives review
+
+`reviewFlags` (`lib/chart-review.ts:43`) reads **only `confidence`** today, and
+`installMeasured` deliberately writes **no** `confidence` on measured systems — its own
+comment calls inventing one "a lie the review sheet then ranks by"
+(`lib/chart-measured.ts:293-295`). Net effect today: **a measured chart flags zero systems
+and the toolbar reads "✓ Reviewed" no matter what its verdicts say.** The v2 signal is
+persisted and nothing reads it.
+
+Implement §Confidence verdicts' exclusivity rule as written: per system, a **present**
+verdict is the sole flag signal (`uncertain` flags, everything else is silent); an
+**absent** verdict keeps today's numeric roll-up untouched. Sections and markers are
+unchanged. `count`/`ordered` keep their existing shape so the stepper needs no change.
+
+⚠ On the current corpus this still yields zero flags — that is the correct outcome, not a
+regression, and it is why C5 does not score itself on flag volume.
+
+### C2 — the verdict lifecycle, and two live defects
+
+`'confirmed'` and `'edited'` exist only in this document. They are absent from
+`ChartVerdict` (`lib/types.ts:111`) and from `CHART_VERDICTS` (`lib/chart-calibration.ts:1009`),
+so `isValidVerdict` would **reject** either today. Add both to the type and the runtime
+enum, then close the two paths that are wrong right now:
+
+- **Stale verdict survives a band drag.** `resizeSystemBand` does
+  `withoutConfidence({ ...s, yTop, yBottom })` (`lib/chart-calibration.ts:405`) — the
+  spread **preserves `verdict`**, so a system dragged anywhere still claims `validated`.
+  This is open-Q1's "stale non-`edited` verdict", and it is reachable today.
+- Per §Lifecycle, every authoring helper that changes a system's geometry **or any of its
+  bars** writes `verdict: 'edited'` on the parent system, in the same move that already
+  clears the touched element's `confidence`: `resizeSystemBand`, `moveBarBoundary`,
+  `addBarline`, `removeBarline`, `autoDistributeBars`. `addSystem` is excluded — a new
+  system has no verdict to stale, and absent is already the right value.
+
+⚠ **Decide at review:** CV barline snap routes through `moveBarBoundary`
+(`lib/chart-snap.ts:8`) and so inherits `'edited'`. That reads right — snap is
+owner-initiated and owner-owned — but it is a *machine* placement being stamped with a
+human-owned verdict, so it is called out rather than absorbed.
+
+**Open-Q1 is otherwise narrower than it reads, measured:** there is no calibration
+undo/history stack (the only undo in the app is the one-level setlist-import undo,
+`page.tsx:626-688`), and `/api/charts/calibration` PUT has exactly one caller
+(`page.tsx:3550`). So the helper set above is the complete edit surface.
+
+### C3 — the sheet
+
+New component `components/ChartReviewSheet.tsx` (presentational, jsdom-testable, the
+`PerformReadinessStrip` pattern) over a new pure module `lib/chart-resegment.ts`. One
+system at a time, per §The interaction.
+
+- **The strip** is a `renderPageOffscreen` crop (`lib/pdf-viewer.ts:283`) of the system's
+  band — the same call the CV snap path already makes at `page.tsx:3170`. Two known traps
+  to carry: pdf.js paints on a **transparent** canvas (check alpha before luma, as
+  `buildBandProfile` does at `page.tsx:1877`), and the stored band is the staff's own
+  extent with **no padding** (`chart-measured.ts:180-185`), so a crop at exactly
+  `yTop`/`yBottom` clips ledger lines and chord symbols. The strip needs vertical padding
+  outward — the opposite of what snap does when it crops inward.
+- **Candidates**, deduplicated, never more than three: the stored split; the
+  printed-number-implied split where `expectedSpans` exists and disagrees; the VLM split
+  where the chart took the VLM path. Identical splits collapse to one option.
+- **"None of these" → "How many bars do you count in this line?"** N is visible
+  barline-delimited spans, per §The interaction.
+
+### C4 — what an answer writes
+
+The sheet re-runs the measurement engine on that one page to recover the candidate
+verticals, which were never persisted (only the resulting bars were). This is legitimate
+under §Persistence: generate-once forbids **machine** re-runs that overwrite, and this is
+a human-initiated edit inside "the human/verify flow that owns the row after generation".
+
+- **The floor is NECESSARY, NOT SUFFICIENT** *(conceded to Codex R1, #180)*. The rule that
+  every one of the N−1 interior boundaries must be an **observed vertical** — nothing
+  invented to reach N — is a real constraint and it is kept: a system with too few detected
+  verticals fails immediately rather than being fitted, the same discipline as the
+  never-gate's "evidence of absence, never absence of evidence". But it does not *select*,
+  and an earlier draft of this section wrote it as though it did. When more candidates exist
+  than N−1, a wrong subset is still "all observed". Codex's counterexample is exact: a
+  line-start begin-repeat cluster is a span **start**, not an interior divider
+  (`lib/chart-measure.ts:489-512`), so at N=2 choosing it is fully observed and wrong.
+- **THE ENDPOINT CONTRACT** *(conceded to Codex R2 — the floor constrained interior
+  boundaries only, which does not stop a fake SPAN).* A wrong N+1 could be reached without
+  inventing any interior vertical: promote the true trailing barline to an interior
+  boundary and let the staff edge stand in as the new trailing edge. So the contract is
+  stated over span EDGES, matching how the engine actually builds bars
+  (`lib/chart-measure.ts:509-514`): **every span's right edge is an observed cluster. The
+  only non-cluster edge in a system is the LEADING edge (the staff start `x0`), and only
+  when the begin-repeat did not fire.** A staff edge may never stand in as a right edge.
+  N spans therefore require exactly N cluster right-edges — the promotion trick has no
+  trailing cluster left to use, and fails.
+- **The selector's input needs an engine addition** *(conceded to Codex R2)*. An earlier
+  draft ranked surplus candidates by "modal stroke-width agreement and staff-endpoint
+  adherence" — **evidence the pipeline has already thrown away by the time clusters
+  exist.** `verticalsOnStaff` reduces endpoint adherence to a pass/fail and emits
+  `{x, w, thick}` (`lib/chart-measure.ts:299-312`); clustering then keeps only `{x, thick}`
+  (`:477-486`), discarding `w` and the modal-width margin the filter just computed. Ranking
+  over evidence the interface does not carry is not a ranking.
+  **So chunk C needs a small additive engine change: clusters carry their per-cluster
+  stroke-width and endpoint residual through stage 2.** This is B2a's shape repeating —
+  and the same lesson as §B1's public shape cannot assign the count, where
+  `multirests: number[]` had to become `{count, xStart, xEnd}[]` because the count alone
+  could not say *which bar*. Here the cluster position alone cannot say *which cluster is
+  the better barline*. The addition must not move the harness baseline.
+  **The ranking function itself stays build-time work**; what is fixed here is its input,
+  the floor, the endpoint contract, and that C5 scores it.
+- ⚠ **The holdout is a DISCIPLINE, not an interface guarantee — and I claimed otherwise.**
+  An earlier draft said the selector "must not read `MeasuredSystem.bars` or `spans`" as
+  though withholding them made C5 honest. It does not: `spans = clusters.length −
+  (lineStartRepeat ? 1 : 0)` exactly (`lib/chart-measure.ts:489-501`), so **the engine's own
+  span count is plain arithmetic over the two inputs the selector legitimately needs.** Any
+  implementation can re-derive it and short-circuit. Withholding the field is still
+  required, but it buys discipline, not proof — which is why C5 arm 2 is load-bearing
+  rather than supplementary.
+- **Floor not cleared → "Open calibration"**, deep-linked to that page with the system
+  selected and the count pre-set to N. That hand-off is the existing count-stepper plus
+  barline-drag flow, so the raster case needs no new machinery.
+- ⚠ **Amends §The interaction**, which specified "on raster charts, the count re-prompts
+  the VLM with N pinned". Dropped — but as a **cost/product tradeoff, not because it adds
+  nothing** *(conceded to Codex R1; an earlier draft claimed it "buys nothing", which
+  overclaims)*. An N-pinned re-prompt would buy proposed **placement geometry**, which
+  count-plus-drag does not. It is dropped because it costs a server leg and the owner's AI
+  budget to improve the starting position of a drag the owner is already doing, on the 2
+  raster charts of 87. Revisit if raster volume rises.
+- **`measures` is re-derived, not carried.** A re-split invalidates the old multirest
+  attribution by definition — the counts were attached to bars that just moved — so the
+  sheet re-attributes from the fresh engine output using the shipped containment rule. This
+  also gives `measures` its **first recovery path**: today `autoDistributeBars`
+  (`lib/chart-calibration.ts:487-494`) builds fresh bars with no `measures` at all, which
+  under generate-once is **permanent, silent loss** on exactly the 12 corpus systems that
+  carry multirests. The rule becomes: *geometry re-derived from evidence re-derives
+  `measures`; geometry authored by hand drops it.* The stepper keeps dropping (correctly —
+  it has no evidence to attribute from); the sheet is how you get them back.
+- Picking a candidate or answering the count writes `verdict: 'confirmed'`; these remain
+  its only writers.
+
+⚠ This changes a claim with **four homes**. Two are code and move with the BUILD PR:
+`lib/types.ts:152-159` ("no editing surface … never acquires it, by machine or by hand,
+short of new bytes") and the ★ note at `lib/chart-measured.ts:74-79` that defers the
+demotion question to chunk C — now answered, above. Two are docs and carry a forward note
+already: `docs/design-chart-measurement.md:468-476`, and
+`docs/design-song-form-from-lyrics.md:435-437` *(the fourth, found by Codex R1 — my sweep
+grepped the phrasings "no editing surface / never acquires / short of new bytes" and this
+doc says "never acquire it **by machine** — an owner overwrite (PUT) is the only path",
+which the pattern missed. **Grep the claim, not its wording.**)*
+
+### C5 — acceptance: the count fallback is scored on the corpus
+
+The picker cannot be scored (no disagreeing candidates exist on our charts), but the count
+fallback can be, and it is the path that does the real work.
+
+⚠ **The holdout, and its limit.** The splitter's ONLY inputs are the stage-2 cluster output
+and the pinned N; the expected split is held out and compared after it returns. If the
+harness lets it see `MeasuredSystem.bars`/`spans` and short-circuit when `N === spans`, then
+464/464 is guaranteed **by construction** — the same shape as #177's sum guard, invariant
+under mis-assignment, and the same lesson as "a test that cannot fail is not a test" (#170).
+
+**But withholding those fields does not prove anything** (see C4's third bullet): `spans`
+is exact arithmetic over `clusters.length` and `lineStartRepeat`, so a splitter can always
+re-derive it. **Arm 1 is therefore not self-protecting, and arm 2 is what makes this a real
+test** — at N ≠ spans there is no engine answer to fall back on.
+
+1. **True N — the fidelity arm.** For each of the 464 `validated` systems, pin N to its
+   known span count; the result must reproduce that system's measured split exactly —
+   **464/464**. A validated system's count is agreed by measurement *and* by the engraver's
+   printed numbers, so this is a real objective function on real charts. Its live
+   discriminator is the begin-repeat set, which has one more cluster than interior
+   boundaries. ⚠ Where the candidate set already forces the answer this arm is close to
+   vacuous, so **report how many of the 464 had a forced answer** — that number is the
+   honest measure of how much arm 1 proves, and it must be reported, not assumed small.
+2. **Perturbed N — the load-bearing arm.** Re-run at N ± 1, where no engine answer exists.
+   The splitter must either return a segmentation that genuinely satisfies the floor **and
+   the endpoint contract**, or fail. It must never invent an interior vertical, and never
+   promote a staff edge into a right edge to manufacture a span. **Report how often a wrong
+   N is accepted** — that number *is* the measured size of C4's necessary-not-sufficient
+   gap, and it is the thing to drive down.
+
+Report the floor's false-reject rate at true N on the same run.
+
+This is added to the existing acceptance harness, which must also hold its current
+baseline unmoved: **464/464, 550 staves, 3044 spans, PARITY clean, `fillRect === 1` on
+every one of 115 pages.**
+
 ## Non-goals
 
 - No change to `verify`/`canVerify` — the queue remains guidance, never a wall.
 - No show-view or conductor changes; overlay only.
 - Does not ship the measurement heuristic itself (prerequisite, tracked separately).
 - No notation-literate editing surface beyond what already exists.
+- **No per-system VLM fallback leg** (deferred by `design-chart-measurement.md` §Scope
+  ruling and still unearned: 0 `uncertain` systems on the corpus). The sheet's VLM
+  candidate is read from geometry a chart already has, never newly requested.
 
 ## Open questions (Codex)
 
-1. **Exclusive precedence residual** — verdict now shadows the numeric child-bar
-   roll-up entirely for verdict-bearing systems; any real case where that hides a flag
-   worth surfacing, or an edit path (undo/history, replace) that bypasses the authoring
-   helpers and leaves a stale non-`edited` verdict?
-2. **Plausibility floor** — the N-span re-run's scoring floor is build-time work; flag
-   any real layout where *visible-span counting itself* is ambiguous to a non-reader
-   (the case that would defeat the count fallback entirely).
-3. **Strip rendering** — per-system raster crops on mobile: acceptable cost, or
-   pre-render at conversion time?
+1. **Exclusive precedence residual** — verdict now shadows the numeric child-bar roll-up
+   entirely for verdict-bearing systems. The edit-path half of this question is answered
+   in C2 (no undo stack, single PUT caller, helper set enumerated). What remains: is there
+   a real case where shadowing the child-bar roll-up hides a flag worth surfacing?
+2. **Plausibility floor** — took two rounds. R1: the all-observed rule is **necessary, not
+   sufficient**. R2: it constrained interior boundaries only, so C4 now carries an explicit
+   **endpoint contract** (every span's right edge is an observed cluster; a staff edge may
+   never stand in), and the selector's ranking inputs turned out not to survive stage 2, so
+   C4 also specifies the engine addition that carries them. **Still open: the ranking
+   function itself** — the one piece here with no settled shape. Also still worth flagging
+   any real layout where *visible-span counting itself* is ambiguous to a non-reader, since
+   that would defeat the count fallback regardless of the floor.
+3. ~~**Strip rendering**~~ — answered by the amendment: the sheet is opened one system at a
+   time, on demand, so it renders one crop per view. Pre-rendering at conversion time would
+   pay for every system of every chart to serve the few ever opened.
+4. **New.** C4 re-runs the engine client-side at review time, so a system's candidate
+   verticals are recovered from the PDF rather than from the stored calibration. Does that
+   inherit the stale-bytes hazard `design-chart-measurement.md` §Cache eviction describes,
+   and should the sheet re-hash before trusting what it measured?
