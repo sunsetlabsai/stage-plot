@@ -168,8 +168,11 @@ remains the authority afterward.
 
 ## Non-goals
 
-- The review sheet UI (chunk C — `design-chart-review-step.md` §Chunk C — build spec) and
-  the trigger UX (chunk A).
+- The review sheet (chunk C — `design-chart-review-step.md` §Chunk C — build spec) and the
+  trigger UX (chunk A). ⚠ Chunk C is *not* purely UI: its C4 adds per-cluster stroke-width
+  and endpoint-residual carry to stage 2 of this engine, because the count fallback has to
+  rank surplus barline candidates and clustering currently discards exactly that evidence
+  (`lib/chart-measure.ts:477-486`). Additive, and it must not move the harness baseline.
 - Re-measuring existing calibrations (generate-once stands; improved engines benefit
   new conversions and replaces only).
 - Cross-page measure-number chaining (scores page-tail systems; future accuracy

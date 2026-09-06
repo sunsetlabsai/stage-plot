@@ -225,6 +225,10 @@ acceptance.
 Five parts. C1–C2 are the plumbing the sheet needs and are independently correct without
 it; C3–C4 are the sheet; C5 is what says it works.
 
+⚠ **Chunk C is not UI-only.** C4 requires a small additive change to the measurement
+engine (clusters must carry the per-cluster stroke-width and endpoint residual that stage 2
+currently discards), so the acceptance harness is in scope and its baseline must hold.
+
 ### C1 — verdict actually drives review
 
 `reviewFlags` (`lib/chart-review.ts:43`) reads **only `confidence`** today, and
@@ -304,17 +308,39 @@ a human-initiated edit inside "the human/verify flow that owns the row after gen
   than N−1, a wrong subset is still "all observed". Codex's counterexample is exact: a
   line-start begin-repeat cluster is a span **start**, not an interior divider
   (`lib/chart-measure.ts:489-512`), so at N=2 choosing it is fully observed and wrong.
-- **So the selector is specified, not just the floor.** Input is the engine's **stage-2
-  cluster output** — cluster positions, thick flags, and the line-start-begin-repeat
-  determination — because that determination is precisely what says whether the leftmost
-  cluster can be an interior boundary at all, and no set of raw verticals carries it.
-  Ranking among surplus candidates is by barline evidence the engine already computes
-  (modal stroke-width agreement, staff-endpoint adherence) — surplus clusters are by
-  definition the ones that only just cleared those filters. **The exact ranking function is
-  build-time work; what is fixed here is its input, its floor, and that C5 scores it.**
-- ⚠ **It must NOT read `MeasuredSystem.bars` or `spans`.** The pinned N *replaces* the
-  engine's own span count; consuming the engine's chosen split would make C5 true by
-  construction (see C5).
+- **THE ENDPOINT CONTRACT** *(conceded to Codex R2 — the floor constrained interior
+  boundaries only, which does not stop a fake SPAN).* A wrong N+1 could be reached without
+  inventing any interior vertical: promote the true trailing barline to an interior
+  boundary and let the staff edge stand in as the new trailing edge. So the contract is
+  stated over span EDGES, matching how the engine actually builds bars
+  (`lib/chart-measure.ts:509-514`): **every span's right edge is an observed cluster. The
+  only non-cluster edge in a system is the LEADING edge (the staff start `x0`), and only
+  when the begin-repeat did not fire.** A staff edge may never stand in as a right edge.
+  N spans therefore require exactly N cluster right-edges — the promotion trick has no
+  trailing cluster left to use, and fails.
+- **The selector's input needs an engine addition** *(conceded to Codex R2)*. An earlier
+  draft ranked surplus candidates by "modal stroke-width agreement and staff-endpoint
+  adherence" — **evidence the pipeline has already thrown away by the time clusters
+  exist.** `verticalsOnStaff` reduces endpoint adherence to a pass/fail and emits
+  `{x, w, thick}` (`lib/chart-measure.ts:299-312`); clustering then keeps only `{x, thick}`
+  (`:477-486`), discarding `w` and the modal-width margin the filter just computed. Ranking
+  over evidence the interface does not carry is not a ranking.
+  **So chunk C needs a small additive engine change: clusters carry their per-cluster
+  stroke-width and endpoint residual through stage 2.** This is B2a's shape repeating —
+  and the same lesson as §B1's public shape cannot assign the count, where
+  `multirests: number[]` had to become `{count, xStart, xEnd}[]` because the count alone
+  could not say *which bar*. Here the cluster position alone cannot say *which cluster is
+  the better barline*. The addition must not move the harness baseline.
+  **The ranking function itself stays build-time work**; what is fixed here is its input,
+  the floor, the endpoint contract, and that C5 scores it.
+- ⚠ **The holdout is a DISCIPLINE, not an interface guarantee — and I claimed otherwise.**
+  An earlier draft said the selector "must not read `MeasuredSystem.bars` or `spans`" as
+  though withholding them made C5 honest. It does not: `spans = clusters.length −
+  (lineStartRepeat ? 1 : 0)` exactly (`lib/chart-measure.ts:489-501`), so **the engine's own
+  span count is plain arithmetic over the two inputs the selector legitimately needs.** Any
+  implementation can re-derive it and short-circuit. Withholding the field is still
+  required, but it buys discipline, not proof — which is why C5 arm 2 is load-bearing
+  rather than supplementary.
 - **Floor not cleared → "Open calibration"**, deep-linked to that page with the system
   selected and the count pre-set to N. That hand-off is the existing count-stepper plus
   barline-drag flow, so the raster case needs no new machinery.
@@ -352,26 +378,31 @@ which the pattern missed. **Grep the claim, not its wording.**)*
 The picker cannot be scored (no disagreeing candidates exist on our charts), but the count
 fallback can be, and it is the path that does the real work.
 
-⚠ **The holdout, stated explicitly** *(conceded to Codex R1, #180 — this was underspecified
-and would otherwise be circular).* The splitter's ONLY inputs are the stage-2 cluster
-output and the pinned N. If the harness lets it see `MeasuredSystem.bars` or `spans` and
-short-circuit when `N === spans`, then 464/464 is guaranteed **by construction** and the
-test cannot fail — the same shape as the sum guard that was invariant under mis-assignment
-in #177, and the same lesson as "a test that cannot fail is not a test" (#170). The
-expected split is **held out** and compared only after the splitter has returned.
+⚠ **The holdout, and its limit.** The splitter's ONLY inputs are the stage-2 cluster output
+and the pinned N; the expected split is held out and compared after it returns. If the
+harness lets it see `MeasuredSystem.bars`/`spans` and short-circuit when `N === spans`, then
+464/464 is guaranteed **by construction** — the same shape as #177's sum guard, invariant
+under mis-assignment, and the same lesson as "a test that cannot fail is not a test" (#170).
 
-Two arms, because the first alone is weak where the candidate set already forces the answer:
+**But withholding those fields does not prove anything** (see C4's third bullet): `spans`
+is exact arithmetic over `clusters.length` and `lineStartRepeat`, so a splitter can always
+re-derive it. **Arm 1 is therefore not self-protecting, and arm 2 is what makes this a real
+test** — at N ≠ spans there is no engine answer to fall back on.
 
-1. **True N.** For each of the 464 `validated` systems, pin N to its known span count.
-   The result must reproduce that system's measured split exactly — **464/464**. A validated
-   system's count is agreed by measurement *and* by the engraver's printed numbers, so this
-   is a real objective function on real charts, not a synthetic fixture. Its live
-   discriminator is the begin-repeat set: those systems have one more cluster than interior
-   boundaries, so a selector that mishandles them fails here.
-2. **Perturbed N.** Re-run at N ± 1. The splitter must either return a segmentation that is
-   genuinely all-observed, or fail the floor — it must **never invent a boundary** to reach
-   the wrong N. Report how often a wrong N is accepted: that number *is* the measured size
-   of the necessary-not-sufficient gap in C4, and it is the thing to drive down.
+1. **True N — the fidelity arm.** For each of the 464 `validated` systems, pin N to its
+   known span count; the result must reproduce that system's measured split exactly —
+   **464/464**. A validated system's count is agreed by measurement *and* by the engraver's
+   printed numbers, so this is a real objective function on real charts. Its live
+   discriminator is the begin-repeat set, which has one more cluster than interior
+   boundaries. ⚠ Where the candidate set already forces the answer this arm is close to
+   vacuous, so **report how many of the 464 had a forced answer** — that number is the
+   honest measure of how much arm 1 proves, and it must be reported, not assumed small.
+2. **Perturbed N — the load-bearing arm.** Re-run at N ± 1, where no engine answer exists.
+   The splitter must either return a segmentation that genuinely satisfies the floor **and
+   the endpoint contract**, or fail. It must never invent an interior vertical, and never
+   promote a staff edge into a right edge to manufacture a span. **Report how often a wrong
+   N is accepted** — that number *is* the measured size of C4's necessary-not-sufficient
+   gap, and it is the thing to drive down.
 
 Report the floor's false-reject rate at true N on the same run.
 
@@ -395,13 +426,14 @@ every one of 115 pages.**
    entirely for verdict-bearing systems. The edit-path half of this question is answered
    in C2 (no undo stack, single PUT caller, helper set enumerated). What remains: is there
    a real case where shadowing the child-bar roll-up hides a flag worth surfacing?
-2. **Plausibility floor** — *partly* answered in C4, and Codex R1 corrected the first
-   answer: the all-observed rule is **necessary, not sufficient**, so C4 now also specifies
-   the selector's input (stage-2 clusters, including the begin-repeat determination) and
-   C5 arm 2 measures the residual gap. **Still open: the ranking function among surplus
-   candidates is build-time work**, and it is the one piece here without a settled shape.
-   Also still worth flagging any real layout where *visible-span counting itself* is
-   ambiguous to a non-reader, since that would defeat the count fallback regardless.
+2. **Plausibility floor** — took two rounds. R1: the all-observed rule is **necessary, not
+   sufficient**. R2: it constrained interior boundaries only, so C4 now carries an explicit
+   **endpoint contract** (every span's right edge is an observed cluster; a staff edge may
+   never stand in), and the selector's ranking inputs turned out not to survive stage 2, so
+   C4 also specifies the engine addition that carries them. **Still open: the ranking
+   function itself** — the one piece here with no settled shape. Also still worth flagging
+   any real layout where *visible-span counting itself* is ambiguous to a non-reader, since
+   that would defeat the count fallback regardless of the floor.
 3. ~~**Strip rendering**~~ — answered by the amendment: the sheet is opened one system at a
    time, on demand, so it renders one crop per view. Pre-rendering at conversion time would
    pay for every system of every chart to serve the few ever opened.
