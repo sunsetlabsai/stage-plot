@@ -13,7 +13,12 @@ import {
   type MeasuredPageResult,
   type MeasuredPayload,
 } from '../lib/chart-measured';
-import { CHART_VERDICTS, isValidCalibration, barsInOrder } from '../lib/chart-calibration';
+import {
+  CHART_VERDICTS,
+  HUMAN_VERDICTS,
+  isValidCalibration,
+  barsInOrder,
+} from '../lib/chart-calibration';
 
 // ── B2b: the client↔server measured contract ─────────────────────────────────
 //
@@ -444,9 +449,22 @@ describe('verdict vocabulary', () => {
     for (const v of engine) expect(CHART_VERDICTS).toContain(v);
   });
 
-  it('the DB vocabulary is the full five, including the two only the server can assign', () => {
+  it('the DB vocabulary is the full seven — engine, server-assigned, and human-owned', () => {
     expect([...CHART_VERDICTS].sort()).toEqual(
-      ['corroborated', 'estimated', 'uncertain', 'unscored', 'validated'],
+      ['confirmed', 'corroborated', 'edited', 'estimated', 'uncertain', 'unscored', 'validated'],
     );
+  });
+
+  it('the engine can never emit a human-owned verdict', () => {
+    // The subset test above says every engine verdict is accepted by the DB. It does
+    // NOT say the engine is barred from the human-owned two, and that is the direction
+    // that matters now: `confirmed` and `edited` mean a person answered, so a machine
+    // path emitting either would silently claim human review that never happened.
+    const engine: ProvisionalVerdict[] = ['validated', 'uncertain', 'unscored'];
+    for (const v of HUMAN_VERDICTS) expect(engine).not.toContain(v);
+  });
+
+  it('human-owned verdicts are a subset of the DB vocabulary', () => {
+    for (const v of HUMAN_VERDICTS) expect(CHART_VERDICTS).toContain(v);
   });
 });

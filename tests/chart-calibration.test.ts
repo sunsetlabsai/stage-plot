@@ -48,7 +48,7 @@ import {
   calibrationGetDisposition,
   calibrationGetResponse,
 } from '../lib/chart-calibration';
-import type { ChartCalibration, System, Bar, RoadmapMarker } from '../lib/types';
+import type { ChartCalibration, System, Bar, RoadmapMarker, ChartVerdict } from '../lib/types';
 
 function cal(over: Partial<ChartCalibration> = {}): ChartCalibration {
   return { ...emptyCalibration(), ...over };
@@ -2412,5 +2412,111 @@ describe('isValidSystem — verdict', () => {
       systems: [system],
       bars: [{ ...cal.bars[0], measures: 0 }],
     })).toBe(false);
+  });
+});
+
+// ── C2: the edit-owns-it move at SYSTEM granularity ─────────────────────────
+// docs/design-chart-review-step.md §Lifecycle. Every authoring helper that changes a
+// system's geometry OR any of its bars stamps `verdict: 'edited'` on the parent system.
+
+function verdictChart(n: number, verdict?: ChartVerdict): ChartCalibration {
+  const c = barsChart(n);
+  return {
+    ...c,
+    systems: [{ ...c.systems![0], ...(verdict !== undefined ? { verdict } : {}) }],
+  };
+}
+const verdictOf = (c: ChartCalibration, id = 'sys1') =>
+  c.systems?.find((s) => s.id === id)?.verdict;
+
+describe('verdict lifecycle — hand edits take ownership (C2)', () => {
+  it('resizeSystemBand stamps `edited` — the stale-verdict defect', () => {
+    // The shipped spread preserved `verdict`, so a band dragged anywhere still
+    // claimed `validated`. This is the regression test for that exact bug.
+    const before = verdictChart(4, 'validated');
+    const after = resizeSystemBand(before, 'sys1', 0.5, 0.7);
+    expect(verdictOf(before)).toBe('validated'); // input not mutated
+    expect(verdictOf(after)).toBe('edited');
+  });
+
+  it('resizeSystemBand still clears the band confidence it always cleared', () => {
+    const c = verdictChart(4, 'validated');
+    const withConf = { ...c, systems: [{ ...c.systems![0], confidence: 0.4 }] };
+    const after = resizeSystemBand(withConf, 'sys1', 0.5, 0.7);
+    expect(after.systems?.[0].confidence).toBeUndefined();
+    expect(verdictOf(after)).toBe('edited');
+  });
+
+  it('moveBarBoundary stamps the PARENT system from a bar-level edit', () => {
+    const after = moveBarBoundary(verdictChart(4, 'validated'), 'sys1', 2, 0.55);
+    expect(verdictOf(after)).toBe('edited');
+  });
+
+  it('addBarline stamps the parent system', () => {
+    const after = addBarline(verdictChart(4, 'validated'), 'sys1', 0.125);
+    expect(verdictOf(after)).toBe('edited');
+  });
+
+  it('removeBarline stamps the parent system', () => {
+    const after = removeBarline(verdictChart(4, 'validated'), 'sys1', 2);
+    expect(verdictOf(after)).toBe('edited');
+  });
+
+  it('autoDistributeBars stamps the parent system', () => {
+    const after = autoDistributeBars(verdictChart(4, 'validated'), 'sys1', 6);
+    expect(verdictOf(after)).toBe('edited');
+  });
+
+  it('stamps a verdict-LESS system too — it must leave the numeric queue as well', () => {
+    // Deliberately unconditional: an absent verdict means the numeric roll-up owns the
+    // system, and a hand edit has to take it out of that queue, not just the verdict one.
+    const after = moveBarBoundary(verdictChart(4), 'sys1', 2, 0.55);
+    expect(verdictOf(after)).toBe('edited');
+  });
+
+  it('is idempotent and never downgrades a human verdict', () => {
+    const once = moveBarBoundary(verdictChart(4, 'confirmed'), 'sys1', 2, 0.55);
+    expect(verdictOf(once)).toBe('edited');
+    const twice = moveBarBoundary(once, 'sys1', 1, 0.2);
+    expect(verdictOf(twice)).toBe('edited');
+  });
+
+  it('stamps ONLY the touched system, leaving siblings alone', () => {
+    const base = verdictChart(4, 'validated');
+    const two: ChartCalibration = {
+      ...base,
+      systems: [
+        base.systems![0],
+        { id: 'sys2', page: 1, yTop: 0.5, yBottom: 0.7, xStart: 0, xEnd: 1, verdict: 'validated' },
+      ],
+    };
+    const after = moveBarBoundary(two, 'sys1', 2, 0.55);
+    expect(verdictOf(after, 'sys1')).toBe('edited');
+    expect(verdictOf(after, 'sys2')).toBe('validated');
+  });
+
+  it('a rejected edit stamps nothing', () => {
+    // Guard clauses return `cal` unchanged; the stamp must not ride a no-op.
+    const c = verdictChart(4, 'validated');
+    expect(verdictOf(resizeSystemBand(c, 'nope', 0.5, 0.7))).toBe('validated');
+    expect(verdictOf(moveBarBoundary(c, 'nope', 2, 0.55))).toBe('validated');
+    expect(verdictOf(addBarline(c, 'sys1', 0.0001))).toBe('validated'); // too narrow to split
+    expect(verdictOf(removeBarline(c, 'sys1', 99))).toBe('validated'); // out of range
+  });
+
+  it('the stamped calibration still validates at the DB boundary', () => {
+    // `edited` must be in CHART_VERDICTS, or isValidVerdict rejects the whole payload.
+    const after = resizeSystemBand(verdictChart(4, 'validated'), 'sys1', 0.5, 0.7);
+    expect(isValidCalibration(after)).toBe(true);
+    expect(isValidSystem(after.systems?.[0])).toBe(true);
+  });
+
+  it('autoDistributeBars drops Bar.measures — documented, and the sheet is the way back', () => {
+    // Not a bug to fix here: an even redistribution has no evidence to attribute
+    // multirest counts from. Pinned so the loss stays deliberate and visible.
+    const c = verdictChart(4, 'validated');
+    const withMeasures = { ...c, bars: c.bars!.map((b, i) => (i === 1 ? { ...b, measures: 4 } : b)) };
+    const after = autoDistributeBars(withMeasures, 'sys1', 4);
+    expect(after.bars?.every((b) => b.measures === undefined)).toBe(true);
   });
 });

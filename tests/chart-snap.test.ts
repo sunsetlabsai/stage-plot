@@ -309,3 +309,38 @@ describe('snapBarsToLines — degrade & no-ops', () => {
     expect(r.accepted).toBe(0);
   });
 });
+
+// ── C2: snap inherits the human-owned verdict through moveBarBoundary ────────
+// docs/design-chart-review-step.md §C2 flagged this for a decision rather than
+// absorbing it: CV snap is a MACHINE placement, but it is OWNER-INITIATED, and it
+// routes through moveBarBoundary, so it stamps `verdict: 'edited'` like any hand drag.
+// Ruled correct — the owner asked for it and owns the result. Pinned here because it is
+// a cross-module consequence that neither module's own tests would catch.
+
+describe('snap and the system verdict', () => {
+  function verdicted(edges: number[]): ChartCalibration {
+    const c = customSystem(edges);
+    return { ...c, systems: [{ ...c.systems![0], verdict: 'validated' }] };
+  }
+
+  it('a snap that MOVES a boundary stamps the system `edited`', () => {
+    const cal = verdicted([0, 0.5, 1]);
+    const lines: DetectedLine[] = [
+      { x: 0, strength: 1 },
+      { x: 0.62, strength: 1 },
+      { x: 1, strength: 1 },
+    ];
+    const out = snapBarsToLines(cal, 'sys1', lines);
+    expect(out.accepted).toBeGreaterThan(0);
+    expect(out.calibration.systems?.[0].verdict).toBe('edited');
+  });
+
+  it('a snap that accepts NOTHING leaves the verdict untouched', () => {
+    // The no-op guard matters: a snap the owner ran but that moved nothing must not
+    // silently convert a machine `validated` into a human `edited`.
+    const cal = verdicted([0, 0.5, 1]);
+    const out = snapBarsToLines(cal, 'sys1', []);
+    expect(out.accepted).toBe(0);
+    expect(out.calibration.systems?.[0].verdict).toBe('validated');
+  });
+});
