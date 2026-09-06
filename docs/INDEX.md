@@ -87,7 +87,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 
 | Doc | State | Note |
 |---|---|---|
-| `design-single-backend.md` | SHIPPED-RECORD | All chunks incl. 4 (`b0bed1c`, `components/SettingsOverlay.tsx`). Only the Vercel env teardown remains, and that is outside the repo. |
+| `design-single-backend.md` | SHIPPED-RECORD | All chunks incl. 4 (`b0bed1c`, `components/SettingsOverlay.tsx`). Vercel env teardown done 2026-09-04. |
 | `design-supabase-backend.md` | PARTIAL | Shows, charts, auth, songs, profiles and collaborators on Supabase — all shipped. The one part that will never ship is its retirement of Google Drive: Drive stays, ruled 2026-09-04 (`backlog-charting.md` §Google Drive stays). |
 | `design-owner-namespacing.md` | SHIPPED-RECORD | Migration `005` + the `[owner]/[show]` route. |
 | `design-owner-onboarding.md` | PARTIAL | Claim flow shipped. The `ADMIN_SECRET` bearer auth is dead — replaced by `requirePlatformAdmin()`. |
