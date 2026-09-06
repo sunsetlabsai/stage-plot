@@ -2,8 +2,7 @@
 
 **Status.** Build state is tracked in `docs/INDEX.md`, not here — every chunk this
 document specifies, including chunk 4 (the BYOA settings overlay, §3), has shipped.
-One infrastructure action remains and is Graham's to run: remove the now-unused
-`REDIS_URL` and `ADMIN_SECRET` env vars from Vercel (§2). Everything else here is the durable design record — the
+Everything else here is the durable design record — the
 invariants, the security requirements, and the rulings that constrain future work
 — in the present tense. History lives in git; this document does not carry its own
 changelog.
@@ -63,19 +62,9 @@ This ledger records which PR carried each chunk; it is history, not status.
 | 6 | ✅ | #158 (`0a2141f`) | collaborators view-only; `show_collaborators.role` dropped; migration `014` |
 | 4 | ✅ | `b0bed1c` | the BYOA settings overlay — §3 below; `components/SettingsOverlay.tsx` |
 
-**Infrastructure teardown (not code — Graham's to run).** The `redis` package and
-the `showrunr-kv` Marketplace store are gone, but two env vars are still set in
-Vercel Production + Preview and should be removed:
-
-```
-vercel env rm REDIS_URL production
-vercel env rm REDIS_URL preview
-vercel env rm ADMIN_SECRET production
-vercel env rm ADMIN_SECRET preview
-```
-
-`REDIS_URL` is the tail of chunk 5; `ADMIN_SECRET` is the tail of chunk 1. Neither
-is visible in the repository — an env-var claim can only be settled against Vercel.
+Infrastructure teardown is complete: the `redis` package and the `showrunr-kv`
+Marketplace store are gone, and the `REDIS_URL` and `ADMIN_SECRET` env vars were
+removed from Vercel Production + Preview on 2026-09-04.
 
 ---
 
