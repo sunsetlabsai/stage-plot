@@ -436,6 +436,11 @@ Every one of these degrades to review, never to a silent result.
      Pre-B2 calibrations never acquire it by machine — an owner overwrite (PUT) is the
      only path. So the sweep's corpus is *post-B2 charts*, and it must report the
      unmeasurable remainder rather than silently comparing against a default of 1.
+     ⚠ *True of shipped code; chunk C makes that owner overwrite concrete.*
+     `design-chart-review-step.md` §C4 gives the review sheet a re-derivation path —
+     it re-runs the engine on one page and re-attributes `measures` from fresh output —
+     so post-chunk-C the remainder is reducible by owner action rather than only by
+     new bytes. The sweep should still report it, not assume it.
    When it runs it compares `Σ section.bars` (lyrics) against `Σ Bar.measures`
    (calibration) — never `max(absNumber)`.
 

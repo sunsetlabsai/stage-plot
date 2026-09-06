@@ -295,18 +295,36 @@ verticals, which were never persisted (only the resulting bars were). This is le
 under §Persistence: generate-once forbids **machine** re-runs that overwrite, and this is
 a human-initiated edit inside "the human/verify flow that owns the row after generation".
 
-- **Segmentation from N.** Choose the N-span segmentation whose N−1 interior boundaries
-  are **all observed verticals**. This *is* the plausibility floor (open-Q2), and it is
-  stated as a presence test on purpose: nothing may be invented to reach N, so a system
-  with fewer than N−1 detected verticals fails immediately rather than being fitted. Same
-  discipline as the never-gate's "evidence of absence, never absence of evidence".
+- **The floor is NECESSARY, NOT SUFFICIENT** *(conceded to Codex R1, #180)*. The rule that
+  every one of the N−1 interior boundaries must be an **observed vertical** — nothing
+  invented to reach N — is a real constraint and it is kept: a system with too few detected
+  verticals fails immediately rather than being fitted, the same discipline as the
+  never-gate's "evidence of absence, never absence of evidence". But it does not *select*,
+  and an earlier draft of this section wrote it as though it did. When more candidates exist
+  than N−1, a wrong subset is still "all observed". Codex's counterexample is exact: a
+  line-start begin-repeat cluster is a span **start**, not an interior divider
+  (`lib/chart-measure.ts:489-512`), so at N=2 choosing it is fully observed and wrong.
+- **So the selector is specified, not just the floor.** Input is the engine's **stage-2
+  cluster output** — cluster positions, thick flags, and the line-start-begin-repeat
+  determination — because that determination is precisely what says whether the leftmost
+  cluster can be an interior boundary at all, and no set of raw verticals carries it.
+  Ranking among surplus candidates is by barline evidence the engine already computes
+  (modal stroke-width agreement, staff-endpoint adherence) — surplus clusters are by
+  definition the ones that only just cleared those filters. **The exact ranking function is
+  build-time work; what is fixed here is its input, its floor, and that C5 scores it.**
+- ⚠ **It must NOT read `MeasuredSystem.bars` or `spans`.** The pinned N *replaces* the
+  engine's own span count; consuming the engine's chosen split would make C5 true by
+  construction (see C5).
 - **Floor not cleared → "Open calibration"**, deep-linked to that page with the system
   selected and the count pre-set to N. That hand-off is the existing count-stepper plus
   barline-drag flow, so the raster case needs no new machinery.
 - ⚠ **Amends §The interaction**, which specified "on raster charts, the count re-prompts
-  the VLM with N pinned". Dropped: with N already known, a VLM re-prompt buys nothing over
-  count-plus-drag and costs a server leg and the owner's AI budget. Even division into N is
-  reached only through the existing stepper, where it is already the shipped behaviour.
+  the VLM with N pinned". Dropped — but as a **cost/product tradeoff, not because it adds
+  nothing** *(conceded to Codex R1; an earlier draft claimed it "buys nothing", which
+  overclaims)*. An N-pinned re-prompt would buy proposed **placement geometry**, which
+  count-plus-drag does not. It is dropped because it costs a server leg and the owner's AI
+  budget to improve the starting position of a drag the owner is already doing, on the 2
+  raster charts of 87. Revisit if raster volume rises.
 - **`measures` is re-derived, not carried.** A re-split invalidates the old multirest
   attribution by definition — the counts were attached to bars that just moved — so the
   sheet re-attributes from the fresh engine output using the shipped containment rule. This
@@ -319,21 +337,43 @@ a human-initiated edit inside "the human/verify flow that owns the row after gen
 - Picking a candidate or answering the count writes `verdict: 'confirmed'`; these remain
   its only writers.
 
-⚠ This changes a claim with **three homes** that must move in the same PR: `lib/types.ts:152-159`
-("no editing surface … never acquires it, by machine or by hand, short of new bytes"),
-`docs/design-chart-measurement.md:468-476`, and the ★ note at `lib/chart-measured.ts:74-79`
-that defers the demotion question to chunk C — now answered, above.
+⚠ This changes a claim with **four homes**. Two are code and move with the BUILD PR:
+`lib/types.ts:152-159` ("no editing surface … never acquires it, by machine or by hand,
+short of new bytes") and the ★ note at `lib/chart-measured.ts:74-79` that defers the
+demotion question to chunk C — now answered, above. Two are docs and carry a forward note
+already: `docs/design-chart-measurement.md:468-476`, and
+`docs/design-song-form-from-lyrics.md:435-437` *(the fourth, found by Codex R1 — my sweep
+grepped the phrasings "no editing surface / never acquires / short of new bytes" and this
+doc says "never acquire it **by machine** — an owner overwrite (PUT) is the only path",
+which the pattern missed. **Grep the claim, not its wording.**)*
 
 ### C5 — acceptance: the count fallback is scored on the corpus
 
 The picker cannot be scored (no disagreeing candidates exist on our charts), but the count
-fallback can be, and it is the path that does the real work:
+fallback can be, and it is the path that does the real work.
 
-**For each of the 464 `validated` systems, pin N to its known span count and re-segment.
-The result must reproduce that system's measured split exactly — 464/464.** A validated
-system's span count is agreed by measurement *and* by the engraver's printed numbers, so
-this is a real objective function on real charts, not a synthetic fixture. Report the
-plausibility floor's false-reject rate on the same run.
+⚠ **The holdout, stated explicitly** *(conceded to Codex R1, #180 — this was underspecified
+and would otherwise be circular).* The splitter's ONLY inputs are the stage-2 cluster
+output and the pinned N. If the harness lets it see `MeasuredSystem.bars` or `spans` and
+short-circuit when `N === spans`, then 464/464 is guaranteed **by construction** and the
+test cannot fail — the same shape as the sum guard that was invariant under mis-assignment
+in #177, and the same lesson as "a test that cannot fail is not a test" (#170). The
+expected split is **held out** and compared only after the splitter has returned.
+
+Two arms, because the first alone is weak where the candidate set already forces the answer:
+
+1. **True N.** For each of the 464 `validated` systems, pin N to its known span count.
+   The result must reproduce that system's measured split exactly — **464/464**. A validated
+   system's count is agreed by measurement *and* by the engraver's printed numbers, so this
+   is a real objective function on real charts, not a synthetic fixture. Its live
+   discriminator is the begin-repeat set: those systems have one more cluster than interior
+   boundaries, so a selector that mishandles them fails here.
+2. **Perturbed N.** Re-run at N ± 1. The splitter must either return a segmentation that is
+   genuinely all-observed, or fail the floor — it must **never invent a boundary** to reach
+   the wrong N. Report how often a wrong N is accepted: that number *is* the measured size
+   of the necessary-not-sufficient gap in C4, and it is the thing to drive down.
+
+Report the floor's false-reject rate at true N on the same run.
 
 This is added to the existing acceptance harness, which must also hold its current
 baseline unmoved: **464/464, 550 staves, 3044 spans, PARITY clean, `fillRect === 1` on
@@ -355,10 +395,13 @@ every one of 115 pages.**
    entirely for verdict-bearing systems. The edit-path half of this question is answered
    in C2 (no undo stack, single PUT caller, helper set enumerated). What remains: is there
    a real case where shadowing the child-bar roll-up hides a flag worth surfacing?
-2. ~~**Plausibility floor**~~ — answered in C4: all N−1 interior boundaries must be
-   observed verticals, nothing invented. Still worth flagging any real layout where
-   *visible-span counting itself* is ambiguous to a non-reader, since that would defeat the
-   count fallback regardless of the floor.
+2. **Plausibility floor** — *partly* answered in C4, and Codex R1 corrected the first
+   answer: the all-observed rule is **necessary, not sufficient**, so C4 now also specifies
+   the selector's input (stage-2 clusters, including the begin-repeat determination) and
+   C5 arm 2 measures the residual gap. **Still open: the ranking function among surplus
+   candidates is build-time work**, and it is the one piece here without a settled shape.
+   Also still worth flagging any real layout where *visible-span counting itself* is
+   ambiguous to a non-reader, since that would defeat the count fallback regardless.
 3. ~~**Strip rendering**~~ — answered by the amendment: the sheet is opened one system at a
    time, on demand, so it renders one crop per view. Pre-rendering at conversion time would
    pay for every system of every chart to serve the few ever opened.
