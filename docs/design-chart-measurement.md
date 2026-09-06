@@ -168,7 +168,8 @@ remains the authority afterward.
 
 ## Non-goals
 
-- The review sheet UI (chunk C, frozen spec) and the trigger UX (chunk A).
+- The review sheet UI (chunk C — `design-chart-review-step.md` §Chunk C — build spec) and
+  the trigger UX (chunk A).
 - Re-measuring existing calibrations (generate-once stands; improved engines benefit
   new conversions and replaces only).
 - Cross-page measure-number chaining (scores page-tail systems; future accuracy
@@ -474,6 +475,12 @@ surface at all** — the Calibrate tools expose sections, bars and roadmap, not 
 measure counts — so for multirests specifically there is no human path either. (Contrast
 the roadmap in §The roadmap is NOT separable semantics, which *is* hand-repairable and
 is deferred partly for that reason.)
+
+⚠ *True of shipped code; chunk C changes it.* `design-chart-review-step.md` §C4 gives
+`measures` its first recovery path — the review sheet re-runs the engine on one page and
+re-attributes from fresh output, so geometry re-derived **from evidence** re-derives the
+counts, while geometry authored by hand (the count stepper, which has nothing to attribute
+from) still drops them. Until that ships, this paragraph stands as written.
 
 It is also free. The engine already reads multirest counts to compute
 `printed delta = visible spans + Σ(multirest − 1)` — the arithmetic that produces the

@@ -29,7 +29,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | `design-chart-converter.md` | SHIPPED-RECORD | Uploaded PDF → VLM → draft calibration. Live at `/api/charts/convert`. |
 | `design-chart-library.md` | SHIPPED-RECORD | `chart_library` + upload. Migration `003_chart_library.sql`. |
 | `design-chart-measurement.md` | SHIPPED-RECORD | Measurement engine, B1 **and** B2 (`lib/chart-measured.ts:297` → `convert/route.ts:227`). |
-| `design-chart-review-step.md` | PARTIAL | Verdict vocabulary shipped (`lib/types.ts:96`, `chart-calibration.ts:1005`). The pick-a-split review sheet is **chunk C, unbuilt** — today's review UI is still the v1 confidence queue it set out to replace. |
+| `design-chart-review-step.md` | PARTIAL | Verdict vocabulary shipped (`lib/types.ts:96`, `chart-calibration.ts:1005`) but **nothing reads it** — `reviewFlags` is confidence-only (`lib/chart-review.ts:43`) and measured systems carry no confidence, so a measured chart flags zero systems. The review sheet is **chunk C, unbuilt**; §Chunk C — build spec is what it builds against. |
 | `design-chart-offline-fixes.md` | SHIPPED-RECORD | Both fixes live (`page.tsx:6208`, `songs/route.ts:83`). |
 | `design-chart-role-overrides.md` | UNBUILT-DESIGN | No `chartOverrides`/`sourceRole` anywhere. One role per chart still. |
 | `design-barline-calibration.md` | SHIPPED-RECORD | `moveBarBoundary` (`lib/chart-calibration.ts:526`). |
