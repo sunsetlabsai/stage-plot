@@ -410,6 +410,38 @@ This is added to the existing acceptance harness, which must also hold its curre
 baseline unmoved: **464/464, 550 staves, 3044 spans, PARITY clean, `fillRect === 1` on
 every one of 115 pages.**
 
+#### ★ Measured 2026-09-06 (first run of both arms)
+
+Baseline held exactly. The arms say three things, and the third changes C3.
+
+| | result |
+|---|---|
+| Arm 1, true N | **464/464 exact** |
+| …of which the answer was **forced** | **464/464 — the ranking never ran** |
+| Arm 2, **N+1** accepted | **0 of 464** |
+| Arm 2, **N−1** accepted | **464 of 464** |
+| Edges invented, any N | **0** |
+
+1. **The endpoint contract holds on real data.** An overcount was refused on every one of
+   464 systems — trap 2 is closed in practice, not just in a fixture.
+2. **Arm 1 proves less than it looks, exactly as predicted.** Every validated system has
+   precisely as many usable clusters as spans, so there was never a choice to make.
+   `clusterScore` is exercised **only** by arm 2's N−1 cases (464 of them, none inventing
+   an edge) and by unit tests. **The corpus cannot score the ranking function**, so it must
+   not be described as corpus-validated. That is the honest limit of C5.
+3. ⚠ **The floor is blind to an UNDERCOUNT, totally.** N−1 was accepted 464/464 — and it
+   should be: dropping a real barline yields a fully-observed, wrong split, which is
+   precisely the case a presence test cannot see. The asymmetry is stark and worth stating
+   plainly: **if the owner counts too high we refuse; if they count too low we accept
+   silently**, and `confirmed` is never machine-overwritten.
+
+**Consequence for C3 (required, not optional):** the count answer must be **shown back as
+a picture before it commits** — the same strip, with the proposed split drawn on it, and an
+explicit confirm. The measurement says no arithmetic downstream of the count can catch an
+undercount, so the owner's own eye is the only remaining check, and the sheet already has
+the strip on screen. Where `N < available clusters`, say so in plain words ("we found more
+barlines than that") rather than silently dropping the surplus.
+
 ## Non-goals
 
 - No change to `verify`/`canVerify` — the queue remains guidance, never a wall.

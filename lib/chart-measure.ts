@@ -150,6 +150,32 @@ export interface MeasuredBar {
   xEnd: number;
 }
 
+/**
+ * One barline cluster, WITH the evidence that made it one (chunk C4).
+ *
+ * Stage 2 used to reduce a cluster to `{ x, thick }`, throwing away the stroke width and
+ * the endpoint residual the filter had just computed. That is fine for counting spans —
+ * every survivor is equally a barline once it is kept — but the review sheet's count
+ * fallback has to RANK surplus candidates when a human says "this line has N bars" and
+ * more than N clusters survived. Ranking over evidence the interface does not carry is
+ * not a ranking, so the evidence is carried.
+ *
+ * Same shape of fix as `multirests: number[]` → `{ count, xStart, xEnd }[]` in B2: the
+ * count alone could not say WHICH bar, and the position alone cannot say WHICH cluster is
+ * the better barline. Evidence only — the scoring function lives in `chart-resegment.ts`,
+ * so this module stays a measurement, not a policy.
+ */
+export interface MeasuredCluster {
+  /** Page-space x of the cluster (the rightmost vertical merged into it). */
+  x: number;
+  /** True when any vertical in the cluster was a thick (repeat/final) stroke. */
+  thick: boolean;
+  /** Stroke width of the best-supported vertical in the cluster, pt. 0 when filled. */
+  w: number;
+  /** That vertical's worst endpoint residual, pt. Lower is better evidence. */
+  endMiss: number;
+}
+
 export interface MeasuredSystem {
   /** Page-space y of the top and bottom staff lines. */
   yTop: number;
@@ -159,6 +185,21 @@ export interface MeasuredSystem {
   x1: number;
   /** Page-space x of each span divider, left to right. */
   barlines: number[];
+  /**
+   * The same dividers, WITH their barline evidence — the input the C4 re-segmenter
+   * ranks over. `barlines` is kept as-is because callers depend on the bare positions.
+   */
+  clusters: MeasuredCluster[];
+  /**
+   * True when the leftmost cluster was ruled a line-start begin-repeat, i.e. a span
+   * START rather than an interior divider.
+   *
+   * ⚠ This is the fact a re-segmenter cannot recover from positions alone, and it is why
+   * `clusters` alone is not a sufficient input. It also means `spans` is derivable —
+   * `spans === clusters.length - (lineStartRepeat ? 1 : 0)` — so withholding `spans` from
+   * the re-segmenter is a discipline, not a guarantee. See `chart-resegment.ts`.
+   */
+  lineStartRepeat: boolean;
   /** Number of measures the geometry says this system holds. */
   spans: number;
   /**
@@ -206,6 +247,12 @@ export interface PageMeasurement {
   classification: PageClass;
   staffCount: number;
   systems: MeasuredSystem[];
+  /**
+   * The page's modal thin-barline width, pt — the reference the cluster filter used.
+   * Carried so the C4 re-segmenter can score a cluster's width agreement without
+   * recomputing a page-level statistic from a single system. 0 on a page with no staves.
+   */
+  modalWidth: number;
 }
 
 interface MergedRule {
@@ -219,6 +266,13 @@ interface Vertical {
   x: number;
   w: number;
   thick: boolean;
+  /**
+   * Worst endpoint residual in pt — how far this vertical's ends missed the outer staff
+   * lines. `verticalsOnStaff` already computes both residuals to make a pass/fail
+   * decision; keeping the magnitude costs nothing and is the only continuous evidence
+   * of barline-ness the filter produces (chunk C4).
+   */
+  endMiss: number;
 }
 
 // ─── Stage 1: staves ─────────────────────────────────────────────────────────
@@ -302,9 +356,16 @@ function verticalsOnStaff(verticals: MeasuredSegment[], yTop: number, yBot: numb
   for (const v of verticals) {
     const lo = Math.min(v.y0, v.y1);
     const hi = Math.max(v.y0, v.y1);
-    if (Math.abs(lo - yTop) <= tol && Math.abs(hi - yBot) <= tol) {
+    const missTop = Math.abs(lo - yTop);
+    const missBot = Math.abs(hi - yBot);
+    if (missTop <= tol && missBot <= tol) {
       const w = v.strokeW ?? 0;
-      out.push({ x: (v.x0 + v.x1) / 2, w, thick: w > THICK_STROKE_PT });
+      out.push({
+        x: (v.x0 + v.x1) / 2,
+        w,
+        thick: w > THICK_STROKE_PT,
+        endMiss: Math.max(missTop, missBot),
+      });
     }
   }
   out.sort((p, q) => p.x - q.x);
@@ -398,6 +459,7 @@ export function measurePage(
       classification: hasText ? 'not-notation' : 'raster',
       staffCount: 0,
       systems: [],
+      modalWidth: 0,
     };
   }
 
@@ -474,16 +536,25 @@ export function measurePage(
   // Span counting runs AFTER text, because the modal width is a page-level statistic.
   const modalW = modalStrokeWidth(staves);
   const systems: MeasuredSystem[] = staves.map((s) => {
-    const clusters: { x: number; thick: boolean }[] = [];
+    const clusters: MeasuredCluster[] = [];
     const keep = s.verts.filter(
       (v) => v.thick || v.w === 0 || Math.abs(v.w - modalW) < MODAL_WIDTH_TOL,
     );
     for (const v of keep) {
       const last = clusters[clusters.length - 1];
       if (last && v.x - last.x < BARLINE_CLUSTER_GAP) {
+        // `x` keeps taking the rightmost vertical, exactly as before — the cluster's
+        // position semantics are unchanged and parity depends on it. The EVIDENCE,
+        // though, comes from the best-supported member: a repeat's thin partner is
+        // usually the cleaner barline, and taking the last one's residual would make
+        // the evidence depend on merge order rather than on the ink.
         last.x = v.x;
         last.thick = last.thick || v.thick;
-      } else clusters.push({ x: v.x, thick: v.thick });
+        if (v.endMiss < last.endMiss) {
+          last.endMiss = v.endMiss;
+          last.w = v.w;
+        }
+      } else clusters.push({ x: v.x, thick: v.thick, w: v.w, endMiss: v.endMiss });
     }
 
     let spans = clusters.length;
@@ -519,6 +590,8 @@ export function measurePage(
       x0: s.x0,
       x1: s.x1,
       barlines: clusters.map((c) => c.x),
+      clusters,
+      lineStartRepeat,
       spans,
       bars,
       printedNumber: s.printedNumber,
@@ -546,6 +619,7 @@ export function measurePage(
     classification: 'notation',
     staffCount: groups.length,
     systems,
+    modalWidth: modalW,
   };
 }
 

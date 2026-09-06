@@ -40,6 +40,8 @@ function sys(over: Partial<MeasuredSystem> = {}): MeasuredSystem {
     x0: 61.2, // 0.1 of width
     x1: 550.8, // 0.9 of width
     barlines: [],
+    clusters: [],
+    lineStartRepeat: false,
     spans: 2,
     bars: [
       { xStart: 61.2, xEnd: 306 },
@@ -60,6 +62,7 @@ function page(over: Partial<PageMeasurement> = {}): PageMeasurement {
     pageHeight: PAGE.H,
     classification: 'notation',
     staffCount: 1,
+    modalWidth: 0.8,
     systems: [sys()],
     ...over,
   };
