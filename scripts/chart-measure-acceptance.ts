@@ -294,6 +294,9 @@ async function measureFile(browser: Page, nodePdfjs: typeof import('pdfjs-dist')
               Math.abs(b.xStart - s.bars[i].xStart) < 1e-9 &&
               Math.abs(b.xEnd - s.bars[i].xEnd) < 1e-9,
           );
+        if (got.ok && got.bars!.some((b) => b.xStart < s.x0 || b.xEnd > s.x1)) {
+          result.arm1Failures.push(`p${p} y${Math.round(s.yTop)} OUT OF STAFF BOUNDS`);
+        }
         if (same) result.arm1Exact++;
         else
           result.arm1Failures.push(
@@ -321,9 +324,13 @@ async function measureFile(browser: Page, nodePdfjs: typeof import('pdfjs-dist')
           } else result.arm2AcceptedPlus++;
           const edges = new Set(s.clusters.map((c) => c.x));
           const leading = s.lineStartRepeat && s.clusters.length ? s.clusters[0].x : s.x0;
+          // Two separate properties, deliberately not one expression (Codex R1, #182):
+          // an edge can be perfectly OBSERVED and still lie outside the staff, so the
+          // membership test alone cannot catch an out-of-extent span.
           const invented =
             out.bars!.some((b) => !edges.has(b.xEnd)) ||
-            (out.bars!.length > 0 && out.bars![0].xStart !== leading);
+            (out.bars!.length > 0 && out.bars![0].xStart !== leading) ||
+            out.bars!.some((b) => b.xStart < leading || b.xEnd > s.x1);
           if (invented) {
             result.arm2Invented.push(`p${p} y${Math.round(s.yTop)} n=${n} INVENTED AN EDGE`);
           }
