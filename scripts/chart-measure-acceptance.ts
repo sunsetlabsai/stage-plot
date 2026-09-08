@@ -31,6 +31,7 @@ import { createHash } from 'node:crypto';
 import ts from 'typescript';
 import puppeteer, { type Page } from 'puppeteer-core';
 import { measurePage, toPositionedText, type MeasuredSegment } from '../lib/chart-measure';
+import { resegment } from '../lib/chart-resegment';
 import { RENDER_SCALE } from '../lib/chart-measure-canvas';
 
 /** Installed on the page by PAGE_HTML below; only this script ever calls them. */
@@ -87,6 +88,33 @@ interface FileResult {
    * hides both. Keep the categories the predicate is written over.
    */
   fillRectByPage: number[];
+  /**
+   * C5 — the count fallback, scored on real charts (docs/design-chart-review-step.md §C5).
+   *
+   * Arm 1 (fidelity): for every `validated` system, pin N to its known span count and
+   * re-segment from the stage-2 clusters ALONE. The split must come back identical.
+   *
+   * ⚠ Arm 1 is NOT self-protecting. `spans === clusters.length - (lineStartRepeat ? 1 : 0)`
+   * exactly, so a re-segmenter could re-derive the engine's own answer and echo it. That
+   * is why `forced` is reported: where the cluster count already equals N there was no
+   * choice to make and the arm proves nothing about ranking.
+   *
+   * Arm 2 (load-bearing): ask for N ± 1, a count the engine never produced. There is no
+   * answer to echo, so the only honest outcomes are a genuinely all-observed segmentation
+   * or a refusal. `wrongAccepted` is the measured size of the floor's
+   * necessary-not-sufficient gap.
+   */
+  arm1Total: number;
+  arm1Exact: number;
+  arm1Forced: number;
+  arm1Failures: string[];
+  arm2Total: number;
+  arm2Accepted: number;
+  /** Accepted split by direction — an undercount and an overcount fail very differently. */
+  arm2AcceptedMinus: number;
+  arm2AcceptedPlus: number;
+  arm2RankedMinus: number;
+  arm2Invented: string[];
   /** Pages whose MediaBox origin is not (0,0) — see the text-flip note at the call site. */
   shiftedOrigin: number[];
   failures: string[];
@@ -195,6 +223,16 @@ async function measureFile(browser: Page, nodePdfjs: typeof import('pdfjs-dist')
     fillRectByPage: [],
     shiftedOrigin: [],
     failures: [],
+    arm1Total: 0,
+    arm1Exact: 0,
+    arm1Forced: 0,
+    arm1Failures: [],
+    arm2Total: 0,
+    arm2Accepted: 0,
+    arm2AcceptedMinus: 0,
+    arm2AcceptedPlus: 0,
+    arm2RankedMinus: 0,
+    arm2Invented: [],
   };
 
   for (let p = 1; p <= pages; p++) {
@@ -232,6 +270,71 @@ async function measureFile(browser: Page, nodePdfjs: typeof import('pdfjs-dist')
       if (s.verdict === 'validated') {
         result.validated++;
         result.scored++;
+
+        // ── C5 arm 1 — fidelity at the true N ──────────────────────────────
+        // The re-segmenter sees clusters + lineStartRepeat + the staff bounds and the
+        // pinned count. It is NOT handed `s.bars` or `s.spans`; the expected split is
+        // held out here and compared only after it returns.
+        const inp = {
+          clusters: s.clusters,
+          lineStartRepeat: s.lineStartRepeat,
+          x0: s.x0,
+          x1: s.x1,
+          modalWidth: m.modalWidth,
+        };
+        result.arm1Total++;
+        const usable = s.lineStartRepeat ? s.clusters.length - 1 : s.clusters.length;
+        if (usable === s.spans) result.arm1Forced++;
+        const got = resegment(inp, s.spans);
+        const same =
+          got.ok &&
+          got.bars!.length === s.bars.length &&
+          got.bars!.every(
+            (b, i) =>
+              Math.abs(b.xStart - s.bars[i].xStart) < 1e-9 &&
+              Math.abs(b.xEnd - s.bars[i].xEnd) < 1e-9,
+          );
+        if (got.ok && got.bars!.some((b) => b.xStart < s.x0 || b.xEnd > s.x1)) {
+          result.arm1Failures.push(`p${p} y${Math.round(s.yTop)} OUT OF STAFF BOUNDS`);
+        }
+        if (same) result.arm1Exact++;
+        else
+          result.arm1Failures.push(
+            `p${p} y${Math.round(s.yTop)} n=${s.spans} clusters=${s.clusters.length} ` +
+              `lsr=${s.lineStartRepeat} ${got.ok ? 'MISMATCH' : `refused:${got.reason}`}`,
+          );
+
+        // ── C5 arm 2 — a count the engine never produced ───────────────────
+        // No engine answer exists at N ± 1, so a splitter cannot echo one. Accepting
+        // a wrong N is not automatically a bug — a surplus cluster can make N-1 or N+1
+        // genuinely all-observed — but the RATE is the measured size of the gap, and
+        // inventing an edge is always a bug, so both are reported.
+        for (const delta of [-1, 1]) {
+          const n = s.spans + delta;
+          if (n < 1) continue;
+          result.arm2Total++;
+          const out = resegment(inp, n);
+          if (!out.ok) continue;
+          result.arm2Accepted++;
+          if (delta < 0) {
+            result.arm2AcceptedMinus++;
+            // usable > n here means the ranking actually had to choose which cluster to
+            // drop — the only place on this corpus where clusterScore runs at all.
+            if (usable > n) result.arm2RankedMinus++;
+          } else result.arm2AcceptedPlus++;
+          const edges = new Set(s.clusters.map((c) => c.x));
+          const leading = s.lineStartRepeat && s.clusters.length ? s.clusters[0].x : s.x0;
+          // Two separate properties, deliberately not one expression (Codex R1, #182):
+          // an edge can be perfectly OBSERVED and still lie outside the staff, so the
+          // membership test alone cannot catch an out-of-extent span.
+          const invented =
+            out.bars!.some((b) => !edges.has(b.xEnd)) ||
+            (out.bars!.length > 0 && out.bars![0].xStart !== leading) ||
+            out.bars!.some((b) => b.xStart < leading || b.xEnd > s.x1);
+          if (invented) {
+            result.arm2Invented.push(`p${p} y${Math.round(s.yTop)} n=${n} INVENTED AN EDGE`);
+          }
+        }
       } else if (s.verdict === 'uncertain') {
         result.scored++;
         result.failures.push(
@@ -288,6 +391,65 @@ async function main() {
   console.log(
     `zero-staff files=${zeroStaff.length} (not-notation=${notNotation}, raster=${zeroStaff.length - notNotation})`,
   );
+
+  // ── C5: the count fallback's score ─────────────────────────────────────────
+  const a1Total = results.reduce((a, r) => a + r.arm1Total, 0);
+  const a1Exact = results.reduce((a, r) => a + r.arm1Exact, 0);
+  const a1Forced = results.reduce((a, r) => a + r.arm1Forced, 0);
+  const a2Total = results.reduce((a, r) => a + r.arm2Total, 0);
+  const a2Accepted = results.reduce((a, r) => a + r.arm2Accepted, 0);
+  const invented = results.flatMap((r) => r.arm2Invented.map((f) => `${r.file} ${f}`));
+  const a1Fails = results.flatMap((r) => r.arm1Failures.map((f) => `${r.file} ${f}`));
+
+  console.log(`\nC5 arm 1 (true N): ${a1Exact}/${a1Total} exact`);
+  // ★ Reported, not buried: where the cluster count already equals N the re-segmenter had
+  // no choice to make, so arm 1 proves nothing about ranking for those systems. A high
+  // forced fraction means arm 2 is carrying the test, which is exactly what §C5 says.
+  console.log(
+    `  forced (no choice available): ${a1Forced}/${a1Total}` +
+      ` — ${a1Total - a1Forced} systems actually exercised the ranking`,
+  );
+  for (const f of a1Fails.slice(0, 10)) console.log(`  FAIL ${f}`);
+  const a2Minus = results.reduce((a, r) => a + r.arm2AcceptedMinus, 0);
+  const a2Plus = results.reduce((a, r) => a + r.arm2AcceptedPlus, 0);
+  const a2Ranked = results.reduce((a, r) => a + r.arm2RankedMinus, 0);
+  console.log(
+    `C5 arm 2 (N±1): ${a2Accepted}/${a2Total} accepted` +
+      ` — the measured size of the floor's necessary-not-sufficient gap`,
+  );
+  // The two directions are different failures and must not be reported as one number.
+  // N+1 accepted would mean the endpoint contract leaks (trap 2). N-1 accepted is
+  // expected: dropping a real barline yields a fully-observed, wrong split, which is
+  // precisely what the floor cannot see.
+  console.log(
+    `  by direction: N-1 accepted ${a2Minus}, N+1 accepted ${a2Plus}` +
+      ` (N+1 must be 0 — that is trap 2)`,
+  );
+  console.log(`  ranking exercised on ${a2Ranked} of the N-1 cases`);
+  if (a2Plus > 0) {
+    console.log(`\n*** C5 ARM 2: an overcount was accepted — endpoint contract leaks ***`);
+    process.exitCode = 1;
+  }
+  for (const f of invented.slice(0, 10)) console.log(`  ${f}`);
+
+  // Arm 1 is a hard gate: at the true N the re-segmenter must reproduce the engine.
+  if (a1Exact !== a1Total) {
+    console.log(`\n*** C5 ARM 1 FAILED: ${a1Total - a1Exact} systems did not reproduce ***`);
+    process.exitCode = 1;
+  }
+  // ...and ANY arm-1 failure line fails the run, not just a reproduction miss (Codex R2,
+  // #182). An out-of-bounds split that is nonetheless exact against equally out-of-bounds
+  // engine bars would satisfy the count check above, print its failure line, and exit 0 —
+  // a reported failure that does not fail is the same non-test as no check at all.
+  if (a1Fails.length > 0) {
+    console.log(`\n*** C5 ARM 1: ${a1Fails.length} failure line(s) reported ***`);
+    process.exitCode = 1;
+  }
+  // Inventing an edge is unconditionally a bug at ANY N — the floor's one absolute.
+  if (invented.length > 0) {
+    console.log(`\n*** C5 ARM 2 FAILED: ${invented.length} segmentations invented an edge ***`);
+    process.exitCode = 1;
+  }
 
   // ★ The pinned assumption behind the never-gate's `fillRect <= 1` clause. Asserted
   // rather than reported, because the dangerous direction — pdf.js emitting NO page
