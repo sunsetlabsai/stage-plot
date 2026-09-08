@@ -164,11 +164,46 @@ describe('resegment — refusals', () => {
     }
   });
 
-  it('refuses a degenerate span rather than emitting a zero-width bar', () => {
-    // A cluster at or before the leading edge cannot start a span.
+  it('drops a cluster at or before the leading edge rather than spanning backwards', () => {
     const r = resegment(input({ clusters: [cl(0), cl(50)], x0: 0 }), 2);
     expect(r.ok).toBe(false);
+    expect(r.reason).toBe('insufficient-evidence');
+    expect(r.available).toBe(1);
+  });
+
+  it('refuses a degenerate span if clusters ever arrive out of order', () => {
+    // Defensive: the contract says left-to-right, and the bounds filter makes this
+    // unreachable for well-formed input. Kept because a caller error here would otherwise
+    // emit a negative-width bar into a permanent, human-confirmed calibration.
+    const r = resegment(input({ clusters: [cl(60), cl(30)], x0: 0, x1: 100 }), 2);
+    expect(r.ok).toBe(false);
     expect(r.reason).toBe('degenerate-span');
+  });
+
+  it('★ a cluster OUTSIDE the staff can never become a right edge', () => {
+    // verticalsOnStaff admits on y-endpoints alone and never checks x, so a stroke well
+    // right of the staff (a bracket, page furniture, a neighbouring rule) is an ordinary
+    // cluster. Before the bounds filter this returned ok with a bar ending at 150.
+    const r = resegment(input({ clusters: [cl(25), cl(50), cl(150)], x0: 0, x1: 100 }), 3);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('insufficient-evidence');
+    expect(r.available).toBe(2);
+    // NEGATIVE CONTROL: the same three clusters inside a staff that really is that wide.
+    const ok = resegment(input({ clusters: [cl(25), cl(50), cl(150)], x0: 0, x1: 200 }), 3);
+    expect(ok.ok).toBe(true);
+    expect(ok.bars?.at(-1)?.xEnd).toBe(150);
+  });
+
+  it('every returned bar stays within [leading, x1]', () => {
+    const r = resegment(input({ clusters: [cl(25), cl(50), cl(99)], x0: 10, x1: 100 }), 3);
+    expect(r.ok).toBe(true);
+    expect(r.bars?.every((b) => b.xStart >= 10 && b.xEnd <= 100)).toBe(true);
+  });
+
+  it('a barline exactly ON the staff end is legal — the boundary is inclusive', () => {
+    const r = resegment(input({ clusters: [cl(50), cl(100)], x0: 0, x1: 100 }), 2);
+    expect(r.ok).toBe(true);
+    expect(r.bars?.at(-1)?.xEnd).toBe(100);
   });
 
   it('handles an empty system without throwing', () => {

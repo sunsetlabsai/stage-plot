@@ -93,13 +93,32 @@ export function clusterScore(c: MeasuredCluster, modalWidth: number): number {
  * as false positives and the weakest are dropped by `clusterScore`.
  */
 export function resegment(input: ResegmentInput, n: number): ResegmentResult {
-  const { clusters, lineStartRepeat, x0, modalWidth } = input;
+  const { clusters, lineStartRepeat, x0, x1, modalWidth } = input;
   if (!Number.isInteger(n) || n < 1) return { ok: false, reason: 'invalid-count' };
 
   // The leading edge is the staff start, unless the begin-repeat consumed the first
   // cluster — in which case that cluster IS the start and is not available as a right edge.
   const leading = lineStartRepeat && clusters.length > 0 ? clusters[0].x : x0;
-  const usable = lineStartRepeat ? clusters.slice(1) : clusters;
+
+  // ⚠ A right edge must lie WITHIN THE STAFF (Codex R1, #182). `verticalsOnStaff` admits
+  // a vertical on its y-endpoints ALONE — it never checks x — so a stroke well to the
+  // right of the staff whose ends happen to align with the staff lines (a bracket, page
+  // furniture, a neighbouring system's rule) is a perfectly ordinary cluster. Without
+  // this bound a span could end 50pt past the staff, and the C5 "invented an edge" check
+  // could not see it, because such an edge IS observed.
+  //
+  // The engine never had to care: `buildMeasuredPayload` clamps every bar into its parent
+  // system before persisting, precisely because "a barline drawn a hair past the staff
+  // rule would otherwise invalidate the whole calibration". That clamp is downstream of
+  // here, and C3 previews this geometry before it ever reaches it.
+  //
+  // Bound rather than clamp, and the corpus says that is safe: clamping two out-of-bound
+  // clusters would collapse them onto x1 and invent a zero-width span, while dropping
+  // them costs nothing measurable — arm 1 stays 464/464 with this filter in place, so no
+  // real system depends on an out-of-staff cluster to reach its true count.
+  const usable = (lineStartRepeat ? clusters.slice(1) : clusters).filter(
+    (c) => c.x > leading && c.x <= x1,
+  );
 
   if (usable.length < n) {
     return { ok: false, reason: 'insufficient-evidence', available: usable.length };
