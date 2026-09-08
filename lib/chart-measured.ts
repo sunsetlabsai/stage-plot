@@ -16,7 +16,13 @@
 import type { Bar, ChartCalibration, SectionAnchor, System } from './types';
 import { CALIBRATION_SCHEMA_VERSION, isValidBar, isValidSystem } from './chart-calibration';
 import { THICK_STROKE_PT } from './chart-measure';
-import type { MeasuredSystem, PageClass, PageMeasurement } from './chart-measure';
+import type {
+  MeasuredBar,
+  MeasuredMultirest,
+  MeasuredSystem,
+  PageClass,
+  PageMeasurement,
+} from './chart-measure';
 
 /**
  * What one page turned out to be, and whether we could see all of it.
@@ -101,13 +107,16 @@ const MULTIREST_CONTAINMENT_TOL = THICK_STROKE_PT / 2;
  * Page space throughout — normalization is a later, monotone step and would only add
  * rounding to a comparison that is already deciding a permanent write.
  */
-function attributeMultirests(sys: MeasuredSystem): number[] | null {
-  const measures = sys.bars.map(() => 1);
+export function attributeMultirestsToBars(
+  multirests: MeasuredMultirest[],
+  bars: MeasuredBar[],
+): number[] | null {
+  const measures = bars.map(() => 1);
   const claimed = new Set<number>();
-  for (const mr of sys.multirests) {
+  for (const mr of multirests) {
     let target = -1;
-    for (let i = 0; i < sys.bars.length; i++) {
-      const b = sys.bars[i];
+    for (let i = 0; i < bars.length; i++) {
+      const b = bars[i];
       const inside =
         mr.xStart >= b.xStart - MULTIREST_CONTAINMENT_TOL &&
         mr.xEnd <= b.xEnd + MULTIREST_CONTAINMENT_TOL;
@@ -125,6 +134,16 @@ function attributeMultirests(sys: MeasuredSystem): number[] | null {
     measures[target] = mr.count;
   }
   return measures;
+}
+
+/**
+ * The conversion-time caller. Kept as a thin wrapper so the containment rule has exactly
+ * ONE implementation: chunk C's review sheet re-attributes against a DIFFERENT set of
+ * bars (the ones a human just re-split), and two copies of this rule is how the machine
+ * path and the human path would come to disagree about where a multirest lives.
+ */
+function attributeMultirests(sys: MeasuredSystem): number[] | null {
+  return attributeMultirestsToBars(sys.multirests, sys.bars);
 }
 
 /**

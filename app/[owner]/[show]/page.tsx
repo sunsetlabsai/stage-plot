@@ -103,6 +103,7 @@ import {
   resizeSystemBand,
   moveBarBoundary,
   autoDistributeBars,
+  confirmSystemSplit,
   addBarline,
   removeBarline,
   systemsForPage,
@@ -110,6 +111,19 @@ import {
 } from '@/lib/chart-calibration';
 import type { TraversalStep } from '@/lib/chart-calibration';
 import PerformReadinessStrip, { type CalTool, type ConvertState } from '@/components/PerformReadinessStrip';
+import { ChartReviewSheet } from '@/components/ChartReviewSheet';
+import { ChartSystemStrip } from '@/components/ChartSystemStrip';
+import {
+  buildCandidates,
+  matchMeasuredSystem,
+  proposeFromCount,
+  splitToPageBars,
+  type Candidate,
+  type CountOutcome,
+} from '@/lib/chart-review-sheet';
+import { measureOnePage } from '@/lib/chart-measure-client';
+import { attributeMultirestsToBars } from '@/lib/chart-measured';
+import type { MeasuredSystem, PageMeasurement } from '@/lib/chart-measure';
 import {
   detectBarlines,
   snapBarsToLines,
@@ -2935,6 +2949,17 @@ function ChartNavigator({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [calTool, setCalTool] = useState<'sections' | 'bars' | 'roadmap'>('sections');
   const [selectedSystemId, setSelectedSystemId] = useState<string | null>(null);
+  // ── Review sheet (chunk C3) ──
+  // `open` carries everything the sheet needs that the calibration does not: the fresh
+  // page measurement (barline clusters were never persisted, only the bars they made)
+  // and whether the machine flagged this line or the owner opened it themselves.
+  const [reviewSheet, setReviewSheet] = useState<{
+    systemId: string;
+    flagged: boolean;
+    measured: MeasuredSystem | null;
+    page: PageMeasurement | null;
+  } | null>(null);
+  const [reviewSheetBusy, setReviewSheetBusy] = useState(false);
   // ── Bars-tool cardinality edits (add / remove a single barline) ──
   // addBarMode = the "＋ Add barline" toggle (a tap inside a band splits at x);
   // selectedBoundary = an interior tick tapped (not dragged) for removal. The
@@ -3018,6 +3043,14 @@ function ChartNavigator({
   useEffect(() => {
     calibrationRef.current = calibration;
   }, [calibration]);
+
+  // Same latest-value trick for the sheet: `confirmReviewSplit` runs inside a
+  // setCalibration updater and must read the measurement that arrived asynchronously,
+  // not the one captured when the callback was created.
+  const reviewSheetRef = useRef(reviewSheet);
+  useEffect(() => {
+    reviewSheetRef.current = reviewSheet;
+  }, [reviewSheet]);
 
   // The bars-tool selection is page-local — a selected system (and any tick
   // selection / snap result on it) lives on the current page. When the page
@@ -3151,6 +3184,74 @@ function ChartNavigator({
     setSelectedBoundary(null);
     setSnapResult(null);
   };
+  // ── Review sheet: open, answer, hand off (chunk C3) ──
+  //
+  // Opening re-measures ONE page to recover that system's barline clusters. They were
+  // never persisted — only the bars they produced were — and the count fallback has to
+  // rank real barline candidates rather than divide the band evenly. Legitimate under
+  // generate-once: that rule forbids MACHINE re-runs that overwrite, and this is a
+  // human-initiated edit inside the flow that owns the row after generation.
+  const openReviewSheet = useCallback(
+    async (systemId: string, flagged: boolean) => {
+      if (reviewSheetBusy) return;
+      const system = (calibrationRef.current?.systems ?? []).find((s) => s.id === systemId);
+      if (!system) return;
+      setReviewSheetBusy(true);
+      // Show the sheet immediately with no measurement: pick-a-split works off the
+      // STORED bars, so the owner is never staring at a spinner for the common answer.
+      // Only the count fallback needs the measurement, and it arrives before they can
+      // reach it.
+      setReviewSheet({ systemId, flagged, measured: null, page: null });
+      try {
+        const doc = docRef.current;
+        if (!doc) return;
+        const one = await measureOnePage(doc, system.page);
+        if (!one) return;
+        const best = matchMeasuredSystem(
+          system,
+          one.measurement.systems,
+          one.measurement.pageHeight,
+        );
+        setReviewSheet((cur) =>
+          cur && cur.systemId === systemId
+            ? { ...cur, measured: best, page: one.measurement }
+            : cur,
+        );
+      } finally {
+        setReviewSheetBusy(false);
+      }
+    },
+    [reviewSheetBusy],
+  );
+
+  // Commit an answer. The ONLY writer of `verdict: 'confirmed'`, together with the count
+  // fallback that also lands here.
+  const confirmReviewSplit = useCallback(
+    (systemId: string, xs: number[]) => {
+      setCalibration((c) => {
+        if (!c) return c;
+        const sheet = reviewSheetRef.current;
+        const system = (c.systems ?? []).find((s) => s.id === systemId);
+        let measures: number[] | undefined;
+        // Re-derive `measures` against the bars the human just chose. A re-split
+        // invalidates the old attribution by definition — those counts were attached to
+        // bars that no longer exist — and this is the ONLY path by which a chart can
+        // regain multirest counts, since the count stepper drops them and no machine
+        // re-runs under generate-once. Null attribution means the counts are genuinely
+        // unplaceable, not that they default to 1 silently.
+        if (sheet?.measured && sheet.page && system) {
+          const pageBars = splitToPageBars(system, xs, sheet.page.pageWidth);
+          measures = attributeMultirestsToBars(sheet.measured.multirests, pageBars) ?? undefined;
+        }
+        return confirmSystemSplit(c, systemId, xs, measures);
+      });
+      setReviewSheet(null);
+      setSelectedBoundary(null);
+      setSnapResult(null);
+    },
+    [],
+  );
+
   // CV barline snap (#2): render the page offscreen, read the selected system's
   // band darkness, detect printed barlines, and snap the auto-distributed
   // boundaries onto them — all through moveBarBoundary (so every #94 invariant
@@ -3280,6 +3381,15 @@ function ChartNavigator({
     setSelectedBarId(null);
     setEndingDraft(null);
     setEditingId(ref.type === 'section' ? ref.id : null);
+    // A flagged system with a VERDICT is a chunk-C question, so it gets the sheet; a
+    // verdict-less one was flagged by the numeric roll-up and keeps the v1 behaviour of
+    // simply selecting the band. Same exclusivity rule `reviewFlags` applies, so the two
+    // queues cannot disagree about which system belongs to which.
+    if (ref.type === 'system') {
+      const sys = (calibration?.systems ?? []).find((x) => x.id === ref.id);
+      if (sys?.verdict) void openReviewSheet(ref.id, true);
+      else setReviewSheet(null);
+    } else setReviewSheet(null);
   };
 
   const pushMarker = (marker: RoadmapMarker) => {
@@ -4190,6 +4300,17 @@ function ChartNavigator({
                       : 'tap a barline to remove · drag a tick to align'}
                 </span>
                 <span className="text-zinc-600">·</span>
+                {/* The review sheet's owner-initiated door (chunk C3). The machine flag
+                    decides whether we PROACTIVELY ask; it does not decide whether the
+                    sheet is reachable — the failure that actually reaches a band is the
+                    engine being confident and WRONG, which the owner finds at rehearsal.
+                    Deliberately worded as a question about the line, not about bars. */}
+                <button
+                  onClick={() => openReviewSheet(selectedSystem.id, false)}
+                  className="px-2 h-6 rounded font-bold bg-zinc-800 text-zinc-200 hover:bg-zinc-700 shrink-0"
+                >
+                  Check this line
+                </button>
                 <button
                   onClick={() => deleteSystem(selectedSystem.id)}
                   className="text-zinc-500 hover:text-red-400 underline shrink-0"
@@ -4249,6 +4370,70 @@ function ChartNavigator({
           </div>
         </div>
       )}
+
+      {/* Review sheet (chunk C3). Sits above the calibrate toolbar as a bottom sheet:
+          it is a focused one-line-at-a-time surface, deliberately NOT the calibrate
+          canvas — the editor is the deep fallback, not the front line. */}
+      {reviewSheet && calibration && (() => {
+        const system = (calibration.systems ?? []).find((s) => s.id === reviewSheet.systemId);
+        if (!system) return null;
+        const pageSystems = systemsForPage(calibration, system.page);
+        const lineNumber = pageSystems.findIndex((s) => s.id === system.id) + 1;
+        const flaggedOrder = (reviewFlagSet?.ordered ?? []).filter((r) => r.type === 'system');
+        const queueIndex = flaggedOrder.findIndex((r) => r.id === system.id);
+        const pageWidth = reviewSheet.page?.pageWidth ?? 0;
+        const candidates: Candidate[] = buildCandidates(
+          calibration.bars ?? [],
+          system,
+          reviewSheet.measured,
+          pageWidth,
+        );
+        // Offer counts AROUND what is on screen rather than a fixed 1..n: the answer is
+        // nearly always within one or two of the current split, and a long pad turns a
+        // two-second question into a form.
+        const base = candidates[0]?.xs.length ?? 4;
+        const countChoices = [base - 2, base - 1, base, base + 1, base + 2].filter((n) => n >= 1);
+        return (
+          <div className="border-t border-zinc-800">
+            <ChartReviewSheet
+              lineNumber={lineNumber > 0 ? lineNumber : 1}
+              queueTotal={reviewSheet.flagged ? flaggedOrder.length : null}
+              queueIndex={reviewSheet.flagged && queueIndex >= 0 ? queueIndex : null}
+              flagged={reviewSheet.flagged}
+              candidates={candidates}
+              countChoices={countChoices}
+              renderStrip={(xs, tone) => (
+                <ChartSystemStrip doc={docRef.current} system={system} xs={xs} tone={tone} />
+              )}
+              onProposeCount={(n): CountOutcome => {
+                // No measurement (still in flight, or this page could not be measured)
+                // ⇒ refuse and hand off rather than divide the band evenly. An even
+                // split is the thing Graham ruled "worse than none at all".
+                if (!reviewSheet.measured || !reviewSheet.page) {
+                  return { kind: 'refused', reason: 'insufficient-evidence', available: 0 };
+                }
+                return proposeFromCount(
+                  reviewSheet.measured,
+                  reviewSheet.page.pageWidth,
+                  reviewSheet.page.modalWidth,
+                  n,
+                );
+              }}
+              onConfirm={(xs) => confirmReviewSplit(system.id, xs)}
+              onDismiss={() => setReviewSheet(null)}
+              onOpenCalibrate={(n) => {
+                // Hand off with the line already selected and the count carried over —
+                // the owner should not have to find their place again.
+                setReviewSheet(null);
+                enterCalibrate('bars');
+                setPageNum(system.page);
+                setSelectedSystemId(system.id);
+                if (n && n >= 1) setSystemBars(system.id, n);
+              }}
+            />
+          </div>
+        );
+      })()}
 
       {/* Perform bar transport — ONE bottom slot, honesty-first priority
           (3b chunk 5, design-conductor-3b §10-5): prompt form (a missing input
