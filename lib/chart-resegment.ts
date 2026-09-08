@@ -51,7 +51,9 @@ export type ResegmentFailure =
   /** N < 1, or a non-integer — not a count a human can have meant. */
   | 'invalid-count'
   /** A chosen subset produced a zero- or negative-width span. */
-  | 'degenerate-span';
+  | 'degenerate-span'
+  /** An edge fell outside the staff. Contradictory geometry — hand off, never guess. */
+  | 'out-of-staff';
 
 export interface ResegmentResult {
   ok: boolean;
@@ -100,6 +102,16 @@ export function resegment(input: ResegmentInput, n: number): ResegmentResult {
   // cluster — in which case that cluster IS the start and is not available as a right edge.
   const leading = lineStartRepeat && clusters.length > 0 ? clusters[0].x : x0;
 
+  // ⚠ The begin-repeat leading edge is a CLUSTER, so it needs the same bound the right
+  // edges get (Codex R2, #182 — my first bounds fix constrained only right edges and left
+  // this end open). It is reachable: the stage-2 begin-repeat test is
+  // `clusters[0].x - x0 < FACTOR * median`, and a cluster LEFT of the staff makes that
+  // difference negative, so it passes trivially. Contradictory geometry — the engine
+  // called it a line-start repeat while placing it outside the staff — so refuse rather
+  // than reinterpret it as `x0`, which would silently overrule a stage-2 decision while
+  // still excluding that cluster from the usable set.
+  if (!(leading >= x0 && leading <= x1)) return { ok: false, reason: 'out-of-staff' };
+
   // ⚠ A right edge must lie WITHIN THE STAFF (Codex R1, #182). `verticalsOnStaff` admits
   // a vertical on its y-endpoints ALONE — it never checks x — so a stroke well to the
   // right of the staff whose ends happen to align with the staff lines (a bracket, page
@@ -143,6 +155,20 @@ export function resegment(input: ResegmentInput, n: number): ResegmentResult {
     if (!(c.x > prevX)) return { ok: false, reason: 'degenerate-span', available: usable.length };
     bars.push({ xStart: prevX, xEnd: c.x });
     prevX = c.x;
+  }
+
+  // ★ ASSERT THE PROPERTY, NOT THE TWO KNOWN INSTANCES.
+  //
+  // Both out-of-staff bugs found in review were the same class reached from opposite
+  // ends — a right edge past `x1`, then a leading edge before `x0` — and the second was
+  // introduced by a fix that closed only the first. Filters upstream stop the two paths
+  // we know about; this stops the shape itself, including whatever third path exists that
+  // nobody has thought of yet. Every edge this function emits lies within the staff, and
+  // that is checked on the OUTPUT rather than argued about over the inputs.
+  //
+  // Cheap, and it is the last gate before geometry a human confirms permanently.
+  if (bars.some((b) => b.xStart < x0 || b.xEnd > x1)) {
+    return { ok: false, reason: 'out-of-staff', available: usable.length };
   }
 
   return { ok: true, bars, available: usable.length };

@@ -194,6 +194,67 @@ describe('resegment — refusals', () => {
     expect(ok.bars?.at(-1)?.xEnd).toBe(150);
   });
 
+  it('★ a begin-repeat cluster OUTSIDE the staff cannot become the leading edge', () => {
+    // The other end of the same class, and the one my first bounds fix missed. Reachable:
+    // stage 2 rules a line-start repeat on `clusters[0].x - x0 < FACTOR * median`, which a
+    // cluster left of the staff satisfies trivially by making that difference negative.
+    const r = resegment(
+      input({
+        clusters: [cl(-10, { thick: true, w: 2.4 }), cl(50), cl(100)],
+        lineStartRepeat: true,
+        x0: 0,
+        x1: 100,
+      }),
+      2,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('out-of-staff');
+    // NEGATIVE CONTROL: the same repeat placed legally inside the staff works fine.
+    const ok = resegment(
+      input({
+        clusters: [cl(8, { thick: true, w: 2.4 }), cl(50), cl(100)],
+        lineStartRepeat: true,
+        x0: 0,
+        x1: 100,
+      }),
+      2,
+    );
+    expect(ok.ok).toBe(true);
+    expect(ok.bars?.[0].xStart).toBe(8);
+  });
+
+  it('refuses when the staff start itself is past the staff end', () => {
+    // Degenerate system bounds must not produce geometry either.
+    const r = resegment(input({ clusters: [cl(50)], x0: 120, x1: 100 }), 1);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('out-of-staff');
+  });
+
+  it('no emitted edge ever falls outside the staff, across a sweep of inputs', () => {
+    // The PROPERTY, not the two known instances. Both out-of-staff bugs were this shape
+    // reached from opposite ends, and the second arrived in the fix for the first — so
+    // the invariant is asserted over outputs rather than argued over inputs.
+    const xs = [-30, -1, 0, 12, 50, 99, 100, 101, 250];
+    for (const a of xs) {
+      for (const b of xs) {
+        for (const lsr of [false, true]) {
+          for (const n of [1, 2, 3]) {
+            const r = resegment(
+              input({ clusters: [cl(a), cl(b), cl(75)], lineStartRepeat: lsr, x0: 0, x1: 100 }),
+              n,
+            );
+            if (!r.ok) continue;
+            for (const bar of r.bars!) {
+              expect(bar.xStart, `x0=${a} x1=${b} lsr=${lsr} n=${n}`).toBeGreaterThanOrEqual(0);
+              expect(bar.xEnd, `x0=${a} x1=${b} lsr=${lsr} n=${n}`).toBeLessThanOrEqual(100);
+              expect(bar.xEnd).toBeGreaterThan(bar.xStart);
+            }
+          }
+        }
+      }
+    }
+  });
+
   it('every returned bar stays within [leading, x1]', () => {
     const r = resegment(input({ clusters: [cl(25), cl(50), cl(99)], x0: 10, x1: 100 }), 3);
     expect(r.ok).toBe(true);
