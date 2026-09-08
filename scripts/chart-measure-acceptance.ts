@@ -437,6 +437,14 @@ async function main() {
     console.log(`\n*** C5 ARM 1 FAILED: ${a1Total - a1Exact} systems did not reproduce ***`);
     process.exitCode = 1;
   }
+  // ...and ANY arm-1 failure line fails the run, not just a reproduction miss (Codex R2,
+  // #182). An out-of-bounds split that is nonetheless exact against equally out-of-bounds
+  // engine bars would satisfy the count check above, print its failure line, and exit 0 —
+  // a reported failure that does not fail is the same non-test as no check at all.
+  if (a1Fails.length > 0) {
+    console.log(`\n*** C5 ARM 1: ${a1Fails.length} failure line(s) reported ***`);
+    process.exitCode = 1;
+  }
   // Inventing an edge is unconditionally a bug at ANY N — the floor's one absolute.
   if (invented.length > 0) {
     console.log(`\n*** C5 ARM 2 FAILED: ${invented.length} segmentations invented an edge ***`);
