@@ -70,6 +70,27 @@ function withoutConfidence<T extends { confidence?: number }>(o: T): T {
   return next;
 }
 
+/**
+ * Stamp `verdict: 'edited'` on ONE system — the parent of whatever the human just touched
+ * (docs/design-chart-review-step.md §Lifecycle, C2).
+ *
+ * The edit-owns-it move at SYSTEM granularity. `withoutConfidence` clears the touched
+ * element and nothing else, which is right for the numeric queue but cannot express "this
+ * system's geometry is no longer the machine's" — a bar drag leaves the parent's
+ * machine verdict untouched, so a system measured `validated` would keep claiming that
+ * after a human moved its barlines. Because a present verdict is the EXCLUSIVE flag signal
+ * (`lib/chart-review.ts`), stamping here also makes any leftover numeric confidence on
+ * untouched sibling bars inert: there is no numeric-fallback path that can re-flag a
+ * human-owned system, so the queue never strands a touched item.
+ *
+ * Deliberately unconditional rather than "only when a verdict is present": an ABSENT
+ * verdict on a VLM-path system means the numeric roll-up still owns it, and a hand edit
+ * must take it out of that queue too. Idempotent, and a no-op for an unknown id.
+ */
+function markSystemEdited(systems: System[], systemId: string): System[] {
+  return systems.map((s) => (s.id === systemId ? { ...s, verdict: 'edited' as const } : s));
+}
+
 export function addSection(
   cal: ChartCalibration,
   page: number,
@@ -402,7 +423,13 @@ export function resizeSystemBand(
   const top = clamp01(Math.min(yTop, yBottom));
   const bot = clamp01(Math.max(yTop, yBottom));
   if (top >= bot) return cal; // degenerate band — ignore
-  const nextSystems = systems.map((s) => (s.id === id ? withoutConfidence({ ...s, yTop: top, yBottom: bot }) : s));
+  // Both moves, not just the first: clear the band's converter confidence AND stamp the
+  // human-owned verdict. The spread alone preserved `verdict`, so a system dragged
+  // anywhere still claimed `validated` (C2's first live defect).
+  const nextSystems = markSystemEdited(
+    systems.map((s) => (s.id === id ? withoutConfidence({ ...s, yTop: top, yBottom: bot }) : s)),
+    id,
+  );
   return {
     ...cal,
     status: 'draft',
@@ -499,6 +526,11 @@ export function autoDistributeBars(
   return {
     ...cal,
     status: 'draft',
+    // Hand-authored geometry: the parent system becomes human-owned. Note this path
+    // legitimately DROPS `Bar.measures` — the fresh bars carry none — because an even
+    // redistribution has no evidence to attribute multirest counts from. The review
+    // sheet (C4) is the path that re-derives them.
+    systems: markSystemEdited(systems, systemId),
     bars: nextBars,
     // Cascade: the old bars for this system were replaced with fresh ids, so
     // prune roadmap markers that referenced the now-deleted bars (same
@@ -582,10 +614,12 @@ export function moveBarBoundary(
   const merged = [...others, ...nextSysBars].map((b) =>
     movedIds.has(b.id) ? withoutConfidence(b) : b,
   );
+  const nextSystems = markSystemEdited(cal.systems ?? [], systemId);
   return {
     ...cal,
     status: 'draft',
-    bars: renumberBars(merged, cal.systems ?? []),
+    systems: nextSystems,
+    bars: renumberBars(merged, nextSystems),
   };
 }
 
@@ -764,6 +798,7 @@ export function removeBarline(
   const after: ChartCalibration = {
     ...cal,
     status: 'draft',
+    systems: markSystemEdited(cal.systems ?? [], systemId),
     bars: nextBars,
     roadmap: pruneRoadmap(roadmap, new Set(nextBars.map((b) => b.id))),
   };
@@ -811,6 +846,7 @@ export function addBarline(
   const after: ChartCalibration = {
     ...cal,
     status: 'draft',
+    systems: markSystemEdited(cal.systems ?? [], systemId),
     bars: nextBars,
     roadmap: pruneRoadmap(roadmap, new Set(nextBars.map((b) => b.id))),
   };
@@ -1012,10 +1048,18 @@ export const CHART_VERDICTS: readonly ChartVerdict[] = [
   'uncertain',
   'estimated',
   'unscored',
+  // Human-owned, written only by the authoring helpers below and by the review sheet.
+  // The engine cannot emit either; `ProvisionalVerdict` stays a strict subset.
+  'confirmed',
+  'edited',
 ];
 
+// Verdicts a human owns. Never flagged for review, and never machine-overwritten — the
+// queue must not strand an item a human has already answered.
+export const HUMAN_VERDICTS: readonly ChartVerdict[] = ['confirmed', 'edited'];
+
 // Optional measurement verdict: absent is valid (nobody scored it); when present it
-// must be one of the five. An unknown string is INVALID, not ignored.
+// must be one of the seven. An unknown string is INVALID, not ignored.
 function isValidVerdict(v: unknown): boolean {
   return v === undefined || (typeof v === 'string' && (CHART_VERDICTS as readonly string[]).includes(v));
 }

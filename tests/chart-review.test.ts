@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { reviewFlags, REVIEW_CONFIDENCE_THRESHOLD } from '../lib/chart-review';
 import { resolveRoadmap } from '../lib/chart-calibration';
-import type { ChartCalibration, SectionAnchor, System, Bar, RoadmapMarker } from '../lib/types';
+import type { ChartCalibration, SectionAnchor, System, Bar, RoadmapMarker, ChartVerdict } from '../lib/types';
 
 function sec(id: string, page: number, x: number, y: number, conf?: number): SectionAnchor {
   return { id, page, x, y, label: 'X', ...(conf !== undefined ? { confidence: conf } : {}) };
@@ -139,5 +139,114 @@ describe('reviewFlags — ordering, count, disjointness', () => {
     const f = reviewFlags(build());
     expect(f.count).toBe(0);
     expect(f.ordered).toEqual([]);
+  });
+});
+
+// ── C1: verdict is the exclusive flag signal for a system ────────────────────
+
+function vsys(id: string, page: number, yTop: number, verdict?: ChartVerdict, conf?: number): System {
+  return {
+    id,
+    page,
+    yTop,
+    yBottom: yTop + 0.1,
+    xStart: 0,
+    xEnd: 1,
+    ...(conf !== undefined ? { confidence: conf } : {}),
+    ...(verdict !== undefined ? { verdict } : {}),
+  };
+}
+
+describe('reviewFlags — verdict exclusivity (C1)', () => {
+  it('flags `uncertain` and stays silent for every other verdict', () => {
+    // The whole vocabulary, so a new verdict cannot be added without landing here.
+    const silent: ChartVerdict[] = [
+      'validated',
+      'unscored',
+      'corroborated',
+      'estimated',
+      'confirmed',
+      'edited',
+    ];
+    for (const v of silent) {
+      const f = reviewFlags(build({ systems: [vsys('sysA', 1, 0.2, v)] }));
+      expect(f.systemIds.has('sysA'), `${v} must be silent`).toBe(false);
+    }
+    const f = reviewFlags(build({ systems: [vsys('sysB', 1, 0.2, 'uncertain')] }));
+    expect(f.systemIds.has('sysB')).toBe(true);
+    expect(f.count).toBe(1);
+  });
+
+  it('a measured system with NO confidence still flags — the defect C1 fixes', () => {
+    // installMeasured deliberately writes no `confidence`, so before C1 this
+    // calibration flagged nothing at all and the toolbar read "✓ Reviewed".
+    const cal = build({ systems: [vsys('sysA', 1, 0.2, 'uncertain')] });
+    expect(cal.systems?.[0].confidence).toBeUndefined();
+    expect(reviewFlags(cal).count).toBe(1);
+  });
+
+  it('a present verdict SHADOWS a low child-bar confidence', () => {
+    // The exclusivity rule: `validated` geometry is vector-measured, so a VLM-seeded
+    // child confidence is stale metadata, not evidence about this system.
+    const cal = build({
+      systems: [vsys('sysA', 1, 0.2, 'validated')],
+      bars: [bar('b1', 'sysA', 0.0, 1, 0.1)],
+    });
+    expect(reviewFlags(cal).systemIds.size).toBe(0);
+  });
+
+  it('a present verdict SHADOWS a low confidence on the band itself', () => {
+    const cal = build({ systems: [vsys('sysA', 1, 0.2, 'validated', 0.1)] });
+    expect(reviewFlags(cal).systemIds.size).toBe(0);
+  });
+
+  it('`uncertain` flags even when confidence is high — the verdict wins both ways', () => {
+    const cal = build({ systems: [vsys('sysA', 1, 0.2, 'uncertain', 0.99)] });
+    expect(reviewFlags(cal).systemIds.has('sysA')).toBe(true);
+  });
+
+  it('an ABSENT verdict leaves the numeric roll-up byte-for-byte unchanged', () => {
+    const lowBand = build({ systems: [vsys('sysA', 1, 0.2, undefined, T - 0.01)] });
+    expect(reviewFlags(lowBand).systemIds.has('sysA')).toBe(true);
+
+    const lowChild = build({
+      systems: [vsys('sysB', 1, 0.2)],
+      bars: [bar('b1', 'sysB', 0.0, 1, T - 0.01)],
+    });
+    expect(reviewFlags(lowChild).systemIds.has('sysB')).toBe(true);
+
+    const clean = build({
+      systems: [vsys('sysC', 1, 0.2)],
+      bars: [bar('b1', 'sysC', 0.0, 1, 0.99)],
+    });
+    expect(reviewFlags(clean).systemIds.size).toBe(0);
+  });
+
+  it('verdict-bearing and verdict-less systems coexist in one calibration', () => {
+    // A chart can legitimately carry both: measured systems with verdicts, and
+    // hand-added ones with neither. Each takes its own path.
+    const cal = build({
+      systems: [
+        vsys('measured-ok', 1, 0.1, 'validated'),
+        vsys('measured-bad', 1, 0.3, 'uncertain'),
+        vsys('legacy-low', 1, 0.5, undefined, T - 0.01),
+        vsys('legacy-ok', 1, 0.7, undefined, 0.99),
+      ],
+    });
+    const f = reviewFlags(cal);
+    expect([...f.systemIds].sort()).toEqual(['legacy-low', 'measured-bad']);
+  });
+
+  it('sections and markers are untouched by verdicts', () => {
+    const cal = build({
+      sections: [sec('s1', 1, 0.1, 0.1, T - 0.01)],
+      systems: [vsys('sysA', 1, 0.2, 'validated')],
+      bars: [bar('b1', 'sysA', 0.0, 1)],
+      roadmap: [{ id: 'm1', kind: 'segno', barId: 'b1', edge: 'start', confidence: 0.4 }],
+    });
+    const f = reviewFlags(cal);
+    expect(f.sectionIds.has('s1')).toBe(true);
+    expect(f.markerIds.has('m1')).toBe(true);
+    expect(f.systemIds.size).toBe(0);
   });
 });

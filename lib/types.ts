@@ -105,10 +105,23 @@ export interface SectionAnchor {
 //  - `corroborated` — no printed numbers, but an independent VLM opinion agrees.
 //  - `estimated`    — VLM geometry only (raster page).
 //
+// The last two are HUMAN-owned. Neither machine path can write them, and neither is ever
+// flagged for review — the queue must not strand something a human already answered:
+//
+//  - `confirmed`    — a human answered via the review sheet's pick-a-split or bar count.
+//  - `edited`       — a human moved the system's geometry, or any of its bars, by hand.
+//
 // `lib/chart-measure.ts` carries `ProvisionalVerdict`, the engine-emittable SUBSET, as
 // its own declaration because that module imports nothing by design. A test pins the two
 // together, so the subset relation cannot drift silently.
-export type ChartVerdict = 'validated' | 'corroborated' | 'uncertain' | 'estimated' | 'unscored';
+export type ChartVerdict =
+  | 'validated'
+  | 'corroborated'
+  | 'uncertain'
+  | 'estimated'
+  | 'unscored'
+  | 'confirmed'
+  | 'edited';
 
 export interface System {
   id: string;
