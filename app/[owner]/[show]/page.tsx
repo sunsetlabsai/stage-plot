@@ -2953,13 +2953,32 @@ function ChartNavigator({
   // `open` carries everything the sheet needs that the calibration does not: the fresh
   // page measurement (barline clusters were never persisted, only the bars they made)
   // and whether the machine flagged this line or the owner opened it themselves.
+  //
+  // ★★ `gen` + `hash` ARE THE IDENTITY, and `systemId` is NOT (Codex H1, #184).
+  // `buildMeasuredPayload` assigns system ids `s1`, `s2`, … by position
+  // (`chart-measured.ts:196`), so EVERY measured chart reuses them. An async tail guarded
+  // on `systemId` alone therefore passes across two DIFFERENT charts: open on chart A's
+  // `s1`, switch to chart B (which also has an `s1`), and A's measurement lands on B's
+  // geometry — after which `confirmReviewSplit` attributes A's multirests against B's bars
+  // and stamps `confirmed`, which under generate-once is PERMANENT and never machine-
+  // overwritten. `calGenRef` is the existing per-chart-load generation (`buildOverlay`
+  // guards its own async tail with it) and `sourceHash` is the bytes those clusters were
+  // measured from — neither collides, and both are checked on the tail AND AGAIN at commit.
   const [reviewSheet, setReviewSheet] = useState<{
     systemId: string;
     flagged: boolean;
     measured: MeasuredSystem | null;
     page: PageMeasurement | null;
+    /** Chart-load generation at open. */
+    gen: number;
+    /** Hash of the bytes on screen at open. */
+    hash: string | null;
   } | null>(null);
-  const [reviewSheetBusy, setReviewSheetBusy] = useState(false);
+  // Bumped by every open. The newest request owns the sheet: an in-flight measurement
+  // whose token has moved on is DROPPED, rather than the newer open being refused (Codex
+  // M2, #184 — a `busy` early-return let `stepReview` walk the queue while the sheet stayed
+  // on the old line and then ate the old line's measurement).
+  const reviewReqRef = useRef(0);
   // ── Bars-tool cardinality edits (add / remove a single barline) ──
   // addBarMode = the "＋ Add barline" toggle (a tap inside a band splits at x);
   // selectedBoundary = an interior tick tapped (not dragged) for removal. The
@@ -3007,6 +3026,10 @@ function ChartNavigator({
   const exitCalibrate = () => {
     resetCalSelections();
     setCalMode('perform');
+    // The sheet is a calibrate-mode surface but renders outside the calibrate block, so
+    // leaving the editor with it open would leave it mounted over the perform view — and
+    // in reach of "Build overlay", which can swap the document under it (`:3711`).
+    setReviewSheet(null);
   };
   // ── Review queue (converter chunk 3) ──
   // reviewIdx = position in the page→top→left walk of flagged elements; the
@@ -3051,6 +3074,16 @@ function ChartNavigator({
   useEffect(() => {
     reviewSheetRef.current = reviewSheet;
   }, [reviewSheet]);
+
+  // And the same for the hash, because it is half of the sheet's identity check and the
+  // check has to compare against the CURRENT bytes, not the ones a closure captured.
+  // `buildOverlay` can replace `sourceHash` and `docRef.current` mid-life without bumping
+  // `calGenRef` (`:3711-3714`, the stale-cache recovery), so the generation alone would
+  // not see those new bytes arrive.
+  const sourceHashRef = useRef(sourceHash);
+  useEffect(() => {
+    sourceHashRef.current = sourceHash;
+  }, [sourceHash]);
 
   // The bars-tool selection is page-local — a selected system (and any tick
   // selection / snap result on it) lives on the current page. When the page
@@ -3193,35 +3226,34 @@ function ChartNavigator({
   // human-initiated edit inside the flow that owns the row after generation.
   const openReviewSheet = useCallback(
     async (systemId: string, flagged: boolean) => {
-      if (reviewSheetBusy) return;
       const system = (calibrationRef.current?.systems ?? []).find((s) => s.id === systemId);
       if (!system) return;
-      setReviewSheetBusy(true);
+      // SUPERSEDE, never refuse. A newer open always wins; the older measurement is
+      // dropped when it lands rather than being applied to whatever the sheet moved on to.
+      const req = ++reviewReqRef.current;
+      const gen = calGenRef.current;
+      const hash = sourceHashRef.current;
       // Show the sheet immediately with no measurement: pick-a-split works off the
       // STORED bars, so the owner is never staring at a spinner for the common answer.
       // Only the count fallback needs the measurement, and it arrives before they can
       // reach it.
-      setReviewSheet({ systemId, flagged, measured: null, page: null });
-      try {
-        const doc = docRef.current;
-        if (!doc) return;
-        const one = await measureOnePage(doc, system.page);
-        if (!one) return;
-        const best = matchMeasuredSystem(
-          system,
-          one.measurement.systems,
-          one.measurement.pageHeight,
-        );
-        setReviewSheet((cur) =>
-          cur && cur.systemId === systemId
-            ? { ...cur, measured: best, page: one.measurement }
-            : cur,
-        );
-      } finally {
-        setReviewSheetBusy(false);
-      }
+      setReviewSheet({ systemId, flagged, measured: null, page: null, gen, hash });
+      const doc = docRef.current;
+      if (!doc) return;
+      const one = await measureOnePage(doc, system.page);
+      // Three ways to be stale, and `systemId` is not one of them: a newer open (`req`),
+      // a different chart (`gen`), or different bytes for the same chart (`hash`).
+      if (reviewReqRef.current !== req) return;
+      if (calGenRef.current !== gen || sourceHashRef.current !== hash) return;
+      if (!one) return;
+      const best = matchMeasuredSystem(system, one.measurement.systems, one.measurement.pageHeight);
+      setReviewSheet((cur) =>
+        cur && cur.gen === gen && cur.hash === hash && cur.systemId === systemId
+          ? { ...cur, measured: best, page: one.measurement }
+          : cur,
+      );
     },
-    [reviewSheetBusy],
+    [],
   );
 
   // Commit an answer. The ONLY writer of `verdict: 'confirmed'`, together with the count
@@ -3231,6 +3263,14 @@ function ChartNavigator({
       setCalibration((c) => {
         if (!c) return c;
         const sheet = reviewSheetRef.current;
+        // ★ THE SECOND HALF OF THE IDENTITY CHECK, and the one that actually protects the
+        // write. Passing the check at measure time only says the measurement was fresh
+        // WHEN IT LANDED; this write is permanent, so it re-asks the same question at the
+        // moment it commits. A sheet whose chart or bytes moved underneath it writes
+        // NOTHING — there is no repair to attempt, because the geometry the owner was
+        // looking at is no longer the geometry on screen.
+        if (!sheet || sheet.systemId !== systemId) return c;
+        if (sheet.gen !== calGenRef.current || sheet.hash !== sourceHashRef.current) return c;
         const system = (c.systems ?? []).find((s) => s.id === systemId);
         let measures: number[] | undefined;
         // Re-derive `measures` against the bars the human just chose. A re-split
@@ -3239,7 +3279,7 @@ function ChartNavigator({
         // regain multirest counts, since the count stepper drops them and no machine
         // re-runs under generate-once. Null attribution means the counts are genuinely
         // unplaceable, not that they default to 1 silently.
-        if (sheet?.measured && sheet.page && system) {
+        if (sheet.measured && sheet.page && system) {
           const pageBars = splitToPageBars(system, xs, sheet.page.pageWidth);
           measures = attributeMultirestsToBars(sheet.measured.multirests, pageBars) ?? undefined;
         }
@@ -3781,6 +3821,10 @@ function ChartNavigator({
       setReviewIdx(-1);
       setEverReviewed(false);
       setConvertState('idle');
+      // The sheet holds a MEASUREMENT of the outgoing chart. Leaving it up across a chart
+      // change is how chart A's clusters end up offered as chart B's answer (Codex H1) —
+      // the identity checks make that unwritable, but the honest state is "closed".
+      setReviewSheet(null);
       calGenRef.current += 1;
     };
     if (!chartFileId) {
@@ -4381,12 +4425,11 @@ function ChartNavigator({
         const lineNumber = pageSystems.findIndex((s) => s.id === system.id) + 1;
         const flaggedOrder = (reviewFlagSet?.ordered ?? []).filter((r) => r.type === 'system');
         const queueIndex = flaggedOrder.findIndex((r) => r.id === system.id);
-        const pageWidth = reviewSheet.page?.pageWidth ?? 0;
         const candidates: Candidate[] = buildCandidates(
           calibration.bars ?? [],
           system,
           reviewSheet.measured,
-          pageWidth,
+          reviewSheet.page,
         );
         // Offer counts AROUND what is on screen rather than a fixed 1..n: the answer is
         // nearly always within one or two of the current split, and a long pad turns a
@@ -4402,8 +4445,14 @@ function ChartNavigator({
               flagged={reviewSheet.flagged}
               candidates={candidates}
               countChoices={countChoices}
-              renderStrip={(xs, tone) => (
-                <ChartSystemStrip doc={docRef.current} system={system} xs={xs} tone={tone} />
+              renderStrip={(xs, tone, variant) => (
+                <ChartSystemStrip
+                  doc={docRef.current}
+                  system={system}
+                  xs={xs}
+                  tone={tone}
+                  variant={variant}
+                />
               )}
               onProposeCount={(n): CountOutcome => {
                 // No measurement (still in flight, or this page could not be measured)

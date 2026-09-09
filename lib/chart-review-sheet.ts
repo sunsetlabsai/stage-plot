@@ -21,12 +21,30 @@ import { resegment, type ResegmentFailure } from './chart-resegment';
  */
 export const CANDIDATE_DEDUPE_TOL = 0.004;
 
-export type CandidateSource = 'measured' | 'printed' | 'vlm' | 'current';
+/**
+ * Where a candidate picture came from.
+ *
+ * ⚠ There is deliberately no `'vlm'` member, and its absence is the point. §The interaction
+ * lists measured / VLM / printed-number-implied as the three sources, but a VLM split is
+ * NOT CONSTRUCTIBLE at review time: the converter persists exactly one split per system,
+ * so on a VLM-path chart the stored split IS the VLM's and arrives here as `'current'`.
+ * Nothing second-guesses it because nothing second opinion was ever written down.
+ *
+ * A `'vlm'` member no emitter can produce is the same dead-enum shape that hid the missing
+ * printed candidate for a whole review round (`'printed'` sat unused in this union while
+ * `buildCandidates` never built one). So it is deleted rather than reserved.
+ */
+export type CandidateSource = 'measured' | 'printed' | 'current';
 
 export interface Candidate {
   /** Right edge of each span, normalized [0,1], reading order. `length` is the bar count. */
   xs: number[];
-  /** Where this picture came from. Shown to nobody — it is for debugging and ordering. */
+  /**
+   * Where this picture came from. Used for ordering and dedupe-merging, and `'printed'`
+   * alone reaches the owner — as a plain-words line under the option, because when two
+   * pictures are both plausible "this is what the numbers printed on your chart say"
+   * is the one piece of provenance that helps a non-reader choose between them.
+   */
   sources: CandidateSource[];
 }
 
@@ -54,6 +72,19 @@ export function dedupeCandidates(cands: Candidate[]): Candidate[] {
   return out.slice(0, 3);
 }
 
+/**
+ * The one line of provenance an option is allowed to show, or null.
+ *
+ * Only the printed candidate gets one. "Measured" and "what's saved now" are machine
+ * biography — a non-reader cannot act on either, and §Principles says every question is
+ * about the picture. But when two pictures are both plausible, *the numbers printed on
+ * your own chart say this one* is a fact the owner can check with their eyes, on paper,
+ * without knowing anything about the engine.
+ */
+export function candidateNote(c: Candidate): string | null {
+  return c.sources.includes('printed') ? 'Matches the numbers printed on your chart' : null;
+}
+
 /** The split currently stored for a system, as a candidate. */
 export function currentSplit(bars: Bar[], systemId: string): Candidate {
   const xs = bars
@@ -63,23 +94,49 @@ export function currentSplit(bars: Bar[], systemId: string): Candidate {
   return { xs, sources: ['current'] };
 }
 
+/** The page facts a candidate build needs. Both come from one `PageMeasurement`. */
+export interface CandidatePage {
+  pageWidth: number;
+  /** The page's modal thin-barline width — what the printed candidate's re-segment scores by. */
+  modalWidth: number;
+}
+
 /**
  * What the sheet offers for one system.
  *
- * ⚠ On a measured chart there is usually exactly ONE candidate — the stored split — because
- * measurement replaced the VLM's geometry, so no competing opinion was ever persisted. That
- * is the expected shape for the owner-initiated entry point, not a degenerate case: the
- * sheet becomes "is this right? → no → how many bars?", and the count fallback carries it.
+ * Three sources, in the order §C3 lists them: the stored split, the printed-number-implied
+ * split, the freshly measured split. `dedupeCandidates` collapses any that agree, so on a
+ * healthy system this returns ONE option and the sheet becomes "is this right? → no → how
+ * many bars?".
+ *
+ * ★ THE PRINTED CANDIDATE IS THE WHOLE REASON THE PICKER EARNS ITS PLACE, and it was
+ * missing until Codex M1 (#184). `expectedSpans` is what the chart's own printed measure
+ * numbers say this line should hold, and `verdict: 'uncertain'` is assigned by
+ * `measurePage` precisely when it DISAGREES with the measured span count
+ * (`chart-measure.ts:612`). So on the exact system the sheet was built for, the stored and
+ * the measured splits are the same known-wrong picture, and without this the sheet offered
+ * "Yes, 4 bars" as its only answer and could stamp `confirmed` on it permanently. The
+ * disagreeing count is not a guess — it is read off the chart — and `resegment` turns it
+ * into geometry made entirely of barlines the engine actually saw, or refuses.
+ *
+ * A refusal is silent here. The printed numbers disagreeing does not entitle us to a
+ * picture; when the evidence cannot support that count the count fallback is the honest
+ * route, and it is one tap away.
  */
 export function buildCandidates(
   storedBars: Bar[],
   system: System,
   measured?: MeasuredSystem | null,
-  pageWidth?: number,
+  page?: CandidatePage | null,
 ): Candidate[] {
   const cands: Candidate[] = [currentSplit(storedBars, system.id)];
-  if (measured && pageWidth && pageWidth > 0) {
-    const xs = measured.bars.map((b) => b.xEnd / pageWidth);
+  if (measured && page && page.pageWidth > 0) {
+    const { expectedSpans } = measured;
+    if (expectedSpans !== null && expectedSpans !== measured.spans) {
+      const printed = proposeFromCount(measured, page.pageWidth, page.modalWidth, expectedSpans);
+      if (printed.kind === 'ok') cands.push({ xs: printed.xs, sources: ['printed'] });
+    }
+    const xs = measured.bars.map((b) => b.xEnd / page.pageWidth);
     if (xs.length) cands.push({ xs, sources: ['measured'] });
   }
   return dedupeCandidates(cands);

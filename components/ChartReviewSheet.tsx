@@ -2,23 +2,31 @@
 
 import { useState } from 'react';
 import type { Candidate, CountOutcome } from '@/lib/chart-review-sheet';
-import { refusalMessage, surplusWarning } from '@/lib/chart-review-sheet';
+import { candidateNote, refusalMessage, surplusWarning } from '@/lib/chart-review-sheet';
 
 // ── The chart review sheet (docs/design-chart-review-step.md §C3) ────────────
 //
 // PURE and presentational, like PerformReadinessStrip: props in, one callback out, no
 // PDF, no fetch, no calibration mutation. The owner-facing rules it enforces:
 //
-//   - NO NOTATION VOCABULARY. Every question is "pick the picture that looks right" or
-//     "count the bars in this line". Nothing here says measure, span, multirest or
-//     barline-cluster. "Barline" appears once, in the surplus warning, because there is
-//     no plainer word for the thing the owner is looking at.
+//   - NO NOTATION VOCABULARY, and no ENGINE vocabulary either. Every question is "pick
+//     the picture that looks right" or "count the bars in this line". Nothing here says
+//     measure, span, multirest, barline-cluster — or `split`, which is what the code
+//     calls the thing and what an earlier draft of this component asked the owner about
+//     (Codex L2, #184). "Barline" appears once, in the surplus warning, because there is
+//     no plainer word for the thing the owner is looking at. `tests/chart-review-sheet-ui`
+//     harvests this component's rendered text and enforces the ban — the earlier version
+//     only checked the copy HELPERS, so these literals went unchecked and the UI test
+//     locked the wrong wording in.
 //   - NEVER MANDATORY. Every screen can be left without answering, and leaving saves the
 //     chart exactly as it already was.
-//   - ★ THE COUNT IS ALWAYS SHOWN BACK BEFORE IT COMMITS. Not politeness — the corpus
-//     measurement says an undercount is accepted by the geometry every single time
+//   - ★ NOTHING COMMITS THAT THE OWNER HAS NOT SEEN AT FULL SIZE. Not politeness — the
+//     corpus measurement says an undercount is accepted by the geometry every single time
 //     (N-1 accepted 464/464) and nothing downstream can catch it, while `confirmed` is
-//     never machine-overwritten. The owner's eye is the last check that exists.
+//     never machine-overwritten. The owner's eye is the last check that exists. That rule
+//     is why every option carries a PICTURE (Codex H2, #184: options reading only "N bars"
+//     make two different 4-bar geometries indistinguishable) and why picking one of
+//     several goes through a full-size preview before it writes.
 
 export type SheetStep = 'choose' | 'count' | 'preview' | 'refused';
 
@@ -32,8 +40,17 @@ export interface ChartReviewSheetProps {
   flagged: boolean;
   /** The candidate splits, already deduped. `renderStrip` draws them. */
   candidates: Candidate[];
-  /** Draws the system band with an optional split overlaid. Supplied by the page. */
-  renderStrip: (xs: number[] | null, tone?: 'proposed' | 'confirmed') => React.ReactNode;
+  /**
+   * Draws the system band with an optional split overlaid. Supplied by the page.
+   *
+   * `variant: 'mini'` is the same picture at option size — every candidate gets one, so
+   * two same-count geometries are told apart by the thing that actually differs.
+   */
+  renderStrip: (
+    xs: number[] | null,
+    tone?: 'proposed' | 'confirmed',
+    variant?: 'full' | 'mini',
+  ) => React.ReactNode;
   /** Counts offered on the pad. The page picks the range around what it measured. */
   countChoices: number[];
   /** Resolve a count to a proposed split — pure, injected so the sheet stays testable. */
@@ -82,35 +99,50 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
   // ── the ask ──
   if (step === 'choose') {
     // One candidate is the NORMAL case on a measured chart: measurement replaced the
-    // VLM's geometry, so no competing opinion was ever stored to disagree with.
+    // VLM's geometry, so no competing opinion was ever stored to disagree with. Two or
+    // more means the chart's own printed numbers disagree with what we measured — the
+    // case the picker exists for, and the case where telling the options apart requires
+    // seeing them.
     const single = candidates.length === 1;
+    // The big strip tracks the selection, so the answer to "which one" is on screen at
+    // full size the moment it is picked, not only after a commit.
+    const shown = picked !== null && picked >= 0 ? candidates[picked].xs : single ? candidates[0].xs : null;
     return (
       <Shell heading={heading} counter={counter}>
         <p className={`text-sm mb-3 ${flagged ? 'text-amber-400' : 'text-zinc-400'}`}>
           {flagged ? "This line didn't check out." : 'Nothing flagged this line — you did.'}
         </p>
-        <div className="mb-1">{renderStrip(single ? candidates[0].xs : null)}</div>
+        <div className="mb-1">{renderStrip(shown)}</div>
         <p className="text-sm font-semibold mt-3 mb-2">
-          {single ? 'Does this look right?' : 'Which split looks right?'}
+          {single ? 'Does this look right?' : 'Which one looks right?'}
         </p>
         <div className="flex flex-col gap-2 mb-3">
-          {candidates.map((c, i) => (
-            <button
-              key={i}
-              type="button"
-              aria-pressed={picked === i}
-              onClick={() => setPicked(i)}
-              className={`flex items-center gap-3 w-full text-left rounded-lg px-3 py-2 text-sm border ${
-                picked === i
-                  ? 'border-sky-400 bg-sky-950'
-                  : 'border-zinc-700 bg-zinc-800 hover:bg-zinc-700'
-              }`}
-            >
-              <span className="flex-1">
-                {single ? `Yes, ${c.xs.length} bars` : `${c.xs.length} bars`}
-              </span>
-            </button>
-          ))}
+          {candidates.map((c, i) => {
+            const note = candidateNote(c);
+            return (
+              <button
+                key={i}
+                type="button"
+                aria-pressed={picked === i}
+                onClick={() => setPicked(i)}
+                className={`flex items-center gap-3 w-full text-left rounded-lg px-3 py-2 text-sm border ${
+                  picked === i
+                    ? 'border-sky-400 bg-sky-950'
+                    : 'border-zinc-700 bg-zinc-800 hover:bg-zinc-700'
+                }`}
+              >
+                <Radio on={picked === i} />
+                {/* The picture IS the option. The count is the caption on it. */}
+                <span className="block flex-1 min-w-0">{renderStrip(c.xs, 'proposed', 'mini')}</span>
+                <span className="shrink-0 text-right">
+                  <span className="block tabular-nums">
+                    {single ? `Yes, ${c.xs.length} bars` : `${c.xs.length} bars`}
+                  </span>
+                  {note ? <span className="block text-[10px] text-zinc-400">{note}</span> : null}
+                </span>
+              </button>
+            );
+          })}
           <button
             type="button"
             aria-pressed={picked === -1}
@@ -120,7 +152,8 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
             }}
             className="flex items-center gap-3 w-full text-left rounded-lg px-3 py-2 text-sm border border-zinc-700 bg-zinc-800 hover:bg-zinc-700"
           >
-            {single ? 'No — let me count' : 'None of these'}
+            <Radio on={false} />
+            <span className="flex-1">{single ? 'No — let me count' : 'None of these'}</span>
           </button>
         </div>
         <Actions>
@@ -131,7 +164,19 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
             kind="primary"
             disabled={picked === null || picked < 0}
             onClick={() => {
-              if (picked !== null && picked >= 0) onConfirm(candidates[picked].xs);
+              if (picked === null || picked < 0) return;
+              // ★ One candidate ⇒ the big strip above IS that candidate, already at full
+              // size, so "Use this" commits exactly what is on screen. SEVERAL candidates
+              // ⇒ go through the preview anyway. The whole finding was that the owner
+              // could commit a picture they had only seen as a label; a mini beside a
+              // radio narrows that gap but does not close it at option size.
+              if (single) return onConfirm(candidates[picked].xs);
+              // Drop any count answered earlier in this sheet, so the preview below
+              // routes on `picked` and cannot read a stale `outcome` from a count the
+              // owner has since backed out of.
+              setCount(null);
+              setOutcome(null);
+              setStep('preview');
             }}
           >
             Use this
@@ -169,6 +214,28 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
         <Actions>
           <Btn onClick={() => setStep('choose')} kind="ghost">
             Back
+          </Btn>
+        </Actions>
+      </Shell>
+    );
+  }
+
+  // ── show a PICKED candidate back at full size, before anything is written ──
+  if (step === 'preview' && count === null && picked !== null && picked >= 0) {
+    const c = candidates[picked];
+    return (
+      <Shell heading={heading} counter="check this">
+        <p className="text-sm text-zinc-400 mb-3">Here&apos;s what you picked.</p>
+        <div className="mb-1">{renderStrip(c.xs, 'proposed')}</div>
+        <p className="mt-3 mb-3 text-xs text-zinc-500">
+          Nothing re-checks this afterwards — your answer is kept exactly as given.
+        </p>
+        <Actions>
+          <Btn onClick={() => setStep('choose')} kind="ghost">
+            Back
+          </Btn>
+          <Btn kind="confirm" onClick={() => onConfirm(c.xs)}>
+            Keep {c.xs.length} bars
           </Btn>
         </Actions>
       </Shell>
@@ -237,6 +304,20 @@ function Shell(props: { heading: string; counter: string; children: React.ReactN
       </div>
       {props.children}
     </section>
+  );
+}
+
+/** The chosen-ness of an option, as an affordance rather than a colour change alone. */
+function Radio(props: { on: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`shrink-0 w-[15px] h-[15px] rounded-full border-[1.5px] grid place-items-center ${
+        props.on ? 'border-sky-400' : 'border-zinc-500'
+      }`}
+    >
+      {props.on ? <span className="w-[7px] h-[7px] rounded-full bg-sky-400" /> : null}
+    </span>
   );
 }
 

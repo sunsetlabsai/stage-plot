@@ -125,16 +125,31 @@ Line 7 of 12 — this line didn't check out
 ┌──────────────────────────────────┐
 │  [rendered system strip]         │
 └──────────────────────────────────┘
-Which split looks right?
+Which one looks right?
   (•) ┃····┃····┃····┃····┃   4 bars
   ( ) ┃···┃···┃···┃···┃···┃  5 bars
   ( ) None of these
 ```
 
+*(Wording amended during the C3 build: this asked "Which **split** looks right?" until Codex
+L1/L2 on #184. `split` is what the code calls it; the principle here is pick the PICTURE, and
+a person who cannot read notation cannot be asked which implementation noun looks right. The
+question is the only thing that changed — the shape of the screen is as drawn.)*
+
 - The strip is a pdf.js raster crop of the system's band (geometry already known from
   staff detection). Candidates: **measured**, **VLM**, and **printed-number-implied**
   splits, deduplicated — two agreeing sources show as one option. Never more than three.
-- Tap one → that split is applied and the system becomes `confirmed`.
+  ⚠ **The VLM candidate turned out not to be constructible** *(measured during the C3
+  build)*: the converter persists exactly ONE split per system, so on a VLM-path chart the
+  stored split **is** the VLM's and arrives as the `current` candidate. There is no second
+  opinion written down anywhere to offer beside it. The real set is therefore stored /
+  printed-implied / measured, and `CandidateSource` carries no `'vlm'` member —
+  see `lib/chart-review-sheet.ts`.
+- Tap one → that split is applied and the system becomes `confirmed`. ⚠ Amended during the
+  C3 build: where there is more than one candidate, tapping SELECTS and the split is shown
+  back at full size before it writes. An option-sized picture is enough to tell two
+  candidates apart and not enough to commit a permanent, never-machine-overwritten answer
+  on. A single candidate is already on screen full size, so it commits directly.
 - "None of these" → **"How many bars do you count in this line?"** N is defined as
   **visible barline-delimited spans** — exactly what a non-reader counts by eye — and
   never played or written measures: a multirest is one span, a pickup bar changes
@@ -194,7 +209,7 @@ unopenable. So the sheet gains the owner-initiated entry point above and is buil
 **Why this is the non-punting shape.** The failure mode that actually reaches a band is
 not the engine flagging itself — it is the engine being **confident and wrong**, which the
 owner discovers at rehearsal. Today their only recourse is calibrate mode plus per-barline
-dragging, which this doc itself calls the deep fallback. "Which split looks right? / none
+dragging, which this doc itself calls the deep fallback. "Which one looks right? / none
 of these → how many bars do you count?" is strictly better for a non-reader, and routing
 the owner to it makes every path here exercisable on all 87 charts today rather than on a
 case we have never seen.
@@ -287,8 +302,18 @@ system at a time, per §The interaction.
   `yTop`/`yBottom` clips ledger lines and chord symbols. The strip needs vertical padding
   outward — the opposite of what snap does when it crops inward.
 - **Candidates**, deduplicated, never more than three: the stored split; the
-  printed-number-implied split where `expectedSpans` exists and disagrees; the VLM split
-  where the chart took the VLM path. Identical splits collapse to one option.
+  printed-number-implied split where `expectedSpans` exists and disagrees; the freshly
+  measured split. Identical splits collapse to one option. **Every option carries a
+  picture of itself** — a count alone cannot distinguish two different 4-bar geometries,
+  which is exactly the disagreement the picker exists to resolve.
+  ⚠ The **VLM** candidate this section originally listed third is not constructible; see
+  §The interaction for why the stored split subsumes it.
+  ★ The printed-implied one is the load-bearing member: `verdict: 'uncertain'` is assigned
+  precisely when `expectedSpans` disagrees with the measured span count
+  (`chart-measure.ts:612`), so on the system the sheet exists for, stored and measured are
+  the SAME wrong picture and the printed count is the only disagreeing evidence there is.
+  Where `resegment` cannot support that count the option is simply not offered — a
+  disagreement does not entitle us to a picture.
 - **"None of these" → "How many bars do you count in this line?"** N is visible
   barline-delimited spans, per §The interaction.
 
