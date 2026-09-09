@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildCandidates,
+  candidateNote,
   currentSplit,
   dedupeCandidates,
   proposeFromCount,
@@ -18,6 +19,8 @@ import type { MeasuredCluster, MeasuredSystem } from '../lib/chart-measure';
 // ── C3: what the review sheet DECIDES ────────────────────────────────────────
 
 const W = 600;
+/** The page facts `buildCandidates` needs: width to normalize by, modal width to score by. */
+const PAGE = { pageWidth: W, modalWidth: 0.8 };
 
 function cl(x: number): MeasuredCluster {
   return { x, thick: false, w: 0.8, endMiss: 0 };
@@ -92,8 +95,8 @@ describe('candidates', () => {
     const out = dedupeCandidates([
       { xs: [0.5, 1], sources: ['current'] },
       { xs: [0.3, 0.6, 1], sources: ['measured'] },
-      { xs: [0.2, 0.4, 0.6, 1], sources: ['vlm'] },
-      { xs: [0.1, 0.2, 0.3, 0.4, 1], sources: ['printed'] },
+      { xs: [0.2, 0.4, 0.6, 1], sources: ['printed'] },
+      { xs: [0.1, 0.2, 0.3, 0.4, 1], sources: ['current'] },
     ]);
     expect(out).toHaveLength(3);
   });
@@ -106,21 +109,67 @@ describe('candidates', () => {
     // Measurement replaced the VLM's geometry, so nothing competing was ever stored.
     // This is the owner-initiated shape, not a degenerate case.
     const stored = bars([0.25, 0.5, 0.75, 1]);
-    const out = buildCandidates(stored, sys(), msys(), W);
+    const out = buildCandidates(stored, sys(), msys(), PAGE);
     expect(out).toHaveLength(1);
     expect(out[0].sources).toEqual(['current', 'measured']);
   });
 
   it('offers two when the stored split and a fresh measurement disagree', () => {
     const stored = bars([0.33, 0.66, 1]);
-    const out = buildCandidates(stored, sys(), msys(), W);
+    const out = buildCandidates(stored, sys(), msys(), PAGE);
     expect(out).toHaveLength(2);
     expect(out.map((c) => c.xs.length)).toEqual([3, 4]);
   });
 
   it('works with no measurement at all', () => {
-    const out = buildCandidates(bars([0.5, 1]), sys(), null, W);
+    const out = buildCandidates(bars([0.5, 1]), sys(), null, PAGE);
     expect(out).toHaveLength(1);
+  });
+
+  it('★ offers the printed-number-implied split on the exact system the sheet exists for', () => {
+    // THE `uncertain` CASE (Codex M1, #184 — this candidate was specified and never
+    // built). A spurious vertical at x=220 made the engine see FIVE spans while the
+    // chart's own printed measure numbers say four, which is precisely how
+    // `measurePage` assigns `uncertain`. Stored === measured === the same known-wrong
+    // picture, so without this the sheet's only offer is "Yes, 5 bars" — and stamping
+    // `confirmed` on it is permanent under generate-once.
+    const spurious: MeasuredCluster = { x: 220, thick: false, w: 0.3, endMiss: 3 };
+    const m = msys({
+      clusters: [cl(150), spurious, cl(300), cl(450), cl(600)],
+      spans: 5,
+      bars: [
+        { xStart: 0, xEnd: 150 }, { xStart: 150, xEnd: 220 }, { xStart: 220, xEnd: 300 },
+        { xStart: 300, xEnd: 450 }, { xStart: 450, xEnd: 600 },
+      ],
+      expectedSpans: 4,
+      verdict: 'uncertain',
+    });
+    const stored = bars([0.25, 220 / 600, 0.5, 0.75, 1]);
+    const out = buildCandidates(stored, sys(), m, PAGE);
+    expect(out).toHaveLength(2);
+    const printed = out.find((c) => c.sources.includes('printed'));
+    // The weakest vertical is the one dropped — every remaining edge is a real barline.
+    expect(printed?.xs).toEqual([0.25, 0.5, 0.75, 1]);
+  });
+
+  it('adds no printed option when the printed numbers agree with the geometry', () => {
+    // NEGATIVE CONTROL for the test above: `validated` means expectedSpans === spans,
+    // and a second identical picture is not a choice.
+    const out = buildCandidates(bars([0.25, 220 / 600, 0.5, 0.75, 1]), sys(), msys(), PAGE);
+    expect(out.some((c) => c.sources.includes('printed'))).toBe(false);
+  });
+
+  it('stays silent rather than inventing when the printed count has too little evidence', () => {
+    // expectedSpans of 6 over 4 clusters: `resegment` refuses, and a refusal is not an
+    // option the owner gets shown. The count fallback is the honest route from here.
+    const out = buildCandidates(bars([0.5, 1]), sys(), msys({ expectedSpans: 6 }), PAGE);
+    expect(out.some((c) => c.sources.includes('printed'))).toBe(false);
+  });
+
+  it('names the printed option in words the owner can check against the paper', () => {
+    expect(candidateNote({ xs: [0.5, 1], sources: ['printed'] })).toMatch(/printed on your chart/);
+    // Machine biography stays off-screen — there is nothing a non-reader can do with it.
+    expect(candidateNote({ xs: [0.5, 1], sources: ['current', 'measured'] })).toBeNull();
   });
 });
 
