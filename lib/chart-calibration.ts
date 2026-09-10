@@ -490,6 +490,76 @@ function renumberBars(bars: Bar[], systems: System[]): Bar[] {
   return result;
 }
 
+/**
+ * Commit a split the HUMAN answered for, from the review sheet (chunk C3).
+ *
+ * The only writer of `verdict: 'confirmed'`, together with the count fallback that also
+ * lands here. Distinct from `autoDistributeBars` in three ways that all matter:
+ *
+ *  - the spans are EVIDENCED (each right edge is a barline the engine actually measured),
+ *    not an even division of the band;
+ *  - it carries `measures`, re-derived from the fresh engine output against these new
+ *    bars — this is the ONLY path by which a chart can regain multirest counts, since
+ *    the count stepper drops them and generate-once means no machine ever re-runs;
+ *  - it writes `confirmed`, not `edited`. Both are human-owned and neither is ever
+ *    flagged, but `confirmed` records that a person answered the specific question the
+ *    sheet asked, which is what makes it safe to never ask again.
+ *
+ * `xs` are normalized [0,1] page coordinates, in reading order, one per span: each is
+ * that span's RIGHT edge, with the system's own `xStart` (or the previous edge) as the
+ * left. `measures[i]` is the musical measure count for span i, defaulting to 1.
+ */
+export function confirmSystemSplit(
+  cal: ChartCalibration,
+  systemId: string,
+  xs: number[],
+  measures?: number[],
+): ChartCalibration {
+  const systems = cal.systems ?? [];
+  const system = systems.find((s) => s.id === systemId);
+  if (!system || xs.length === 0) return cal;
+
+  // Reject rather than repair: these coordinates came from the re-segmenter, which
+  // already enforces the staff bound and strict ordering. Anything violating them here
+  // means the caller bypassed it, and a silent clamp would hide that.
+  let prev = system.xStart;
+  for (const x of xs) {
+    if (!(x > prev) || x > system.xEnd) return cal;
+    prev = x;
+  }
+
+  const otherBars = (cal.bars ?? []).filter((b) => b.systemId !== systemId);
+  const newBars: Bar[] = [];
+  let left = system.xStart;
+  for (let i = 0; i < xs.length; i++) {
+    const count = measures?.[i];
+    newBars.push({
+      id: crypto.randomUUID(),
+      systemId,
+      xStart: left,
+      xEnd: xs[i],
+      absNumber: 0, // placeholder — renumber below
+      sectionId: null,
+      ...(count !== undefined && count > 1 ? { measures: count } : {}),
+    });
+    left = xs[i];
+  }
+
+  const nextSystems = systems.map((s) =>
+    s.id === systemId ? withoutConfidence({ ...s, verdict: 'confirmed' as const }) : s,
+  );
+  const nextBars = renumberBars([...otherBars, ...newBars], nextSystems);
+  return {
+    ...cal,
+    status: 'draft',
+    systems: nextSystems,
+    bars: nextBars,
+    // Same cascade as autoDistributeBars: this system's old bars are gone, so roadmap
+    // markers that referenced them can no longer bind.
+    roadmap: pruneRoadmap(cal.roadmap, new Set(nextBars.map((b) => b.id))),
+  };
+}
+
 // Distribute `count` even bars across a system's width. Replaces any existing
 // bars for this system. Global renumber. sectionId left null (assignment
 // deferred). Resets to draft.

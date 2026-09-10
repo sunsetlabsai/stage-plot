@@ -25,35 +25,58 @@ export async function measureDocument(doc: PDFDocumentProxy): Promise<MeasuredPa
   try {
     const pages: MeasuredPageResult[] = [];
     for (let p = 1; p <= doc.numPages; p++) {
-      const page = await doc.getPage(p);
-      const geo = await extractPageGeometry(page);
-      const text = await page.getTextContent();
-
-      // ★ Two DIFFERENT quantities from one array, deliberately not the same expression.
-      //
-      // `textFlipY` is the baseline text is flipped against, and it stays B1's RAW
-      // `view[3]` — i.e. it carries B1's assumption of a MediaBox origin at (0,0).
-      // "Correcting" it would move measured output on a shifted-origin page, and corpus
-      // parity is the engine's gate. (Measured: origin is (0,0) on all 115 corpus pages,
-      // so the two agree there — this is about not exporting a silent assumption.)
-      //
-      // The page DIMENSIONS must be honest, because bar geometry normalizes against
-      // them and a wrong denominator puts every bar in the wrong place. pdf.js view
-      // dimensions are the box's EXTENT, not its far corner.
-      const [vx0, vy0, vx1, vy1] = page.view;
-      const measurement = measurePage(
-        geo.segments,
-        toPositionedText(text.items as { str: string; transform: number[] }[], vy1),
-        { number: p, width: vx1 - vx0, height: vy1 - vy0 },
-      );
-
-      // PER PAGE. `isGeometryComplete` is a per-page predicate and the payload carries
-      // its answer per page, all the way to the fold in `measuredDisposition` — a
-      // chart-level "was everything complete" boolean computed here would be the wrong
-      // shape and would hide exactly the mixed pages the fold exists to catch.
-      pages.push({ measurement, complete: isGeometryComplete(geo) });
+      const one = await measureOnePage(doc, p);
+      if (!one) return null;
+      pages.push(one);
     }
     return buildMeasuredPayload(pages);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Measure ONE page. Extracted so the review sheet (chunk C3) can recover a system's
+ * barline clusters at review time without re-measuring the whole document — the clusters
+ * were never persisted, only the bars they produced.
+ *
+ * Deliberately the same code path as conversion rather than a second, simpler one: if the
+ * sheet measured a page even slightly differently from the converter, the split it offers
+ * would not be the split the chart actually has, and the owner would be asked to confirm
+ * a picture nothing else agrees with.
+ */
+export async function measureOnePage(
+  doc: PDFDocumentProxy,
+  p: number,
+): Promise<MeasuredPageResult | null> {
+  try {
+    const page = await doc.getPage(p);
+    const geo = await extractPageGeometry(page);
+    const text = await page.getTextContent();
+
+    // ★ Two DIFFERENT quantities from one array, deliberately not the same expression.
+    //
+    // `textFlipY` is the baseline text is flipped against, and it stays B1's RAW
+    // `view[3]` — i.e. it carries B1's assumption of a MediaBox origin at (0,0).
+    // "Correcting" it would move measured output on a shifted-origin page, and corpus
+    // parity is the engine's gate. (Measured: origin is (0,0) on all 115 corpus pages,
+    // so the two agree there — this is about not exporting a silent assumption.)
+    //
+    // The page DIMENSIONS must be honest, because bar geometry normalizes against
+    // them and a wrong denominator puts every bar in the wrong place. pdf.js view
+    // dimensions are the box's EXTENT, not its far corner.
+    const [vx0, vy0, vx1, vy1] = page.view;
+    const measurement = measurePage(
+      geo.segments,
+      toPositionedText(text.items as { str: string; transform: number[] }[], vy1),
+      { number: p, width: vx1 - vx0, height: vy1 - vy0 },
+    );
+
+    // PER PAGE. `isGeometryComplete` is a per-page predicate and the payload carries
+    // its answer per page, all the way to the fold in `measuredDisposition` — a
+    // chart-level "was everything complete" boolean computed here would be the wrong
+    // shape and would hide exactly the mixed pages the fold exists to catch.
+    return { measurement, complete: isGeometryComplete(geo) };
   } catch {
     return null;
   }

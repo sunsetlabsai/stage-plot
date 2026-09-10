@@ -286,18 +286,22 @@ export async function renderPageOffscreen(
   scale: number,
 ): Promise<HTMLCanvasElement | null> {
   if (pageNum < 1 || pageNum > doc.numPages) return null;
-  const page = await doc.getPage(pageNum);
-  const viewport = page.getViewport({ scale });
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.ceil(viewport.width));
-  canvas.height = Math.max(1, Math.ceil(viewport.height));
-  const task: RenderTask = page.render({ canvas, viewport });
+  // ⚠ `doc.getPage` used to sit OUTSIDE the try (Codex L1, #184), so a rejection from it —
+  // a destroyed worker during teardown is the ordinary way to get one — escaped as an
+  // unhandled promise rejection instead of the documented `null`. Every caller already
+  // treats null as "no raster"; nothing wanted the throw.
   try {
+    const page = await doc.getPage(pageNum);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.ceil(viewport.width));
+    canvas.height = Math.max(1, Math.ceil(viewport.height));
+    const task: RenderTask = page.render({ canvas, viewport });
     await task.promise;
+    return canvas;
   } catch {
     return null;
   }
-  return canvas;
 }
 
 export function destroyAllDocs() {
