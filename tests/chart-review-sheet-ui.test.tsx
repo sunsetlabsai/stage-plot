@@ -211,6 +211,62 @@ describe('ChartReviewSheet — the count', () => {
   });
 });
 
+describe('ChartReviewSheet — a stale pick can never index a list that moved', () => {
+  // ★ Codex R2, #184. `picked` is an INDEX into `candidates`, and `candidates` is rebuilt
+  // by the PARENT on every render. Two ways it moves under a live pick:
+  //
+  //   1. The sheet is handed a different system without unmounting — `stepReview` calls
+  //      `openReviewSheet` for the next flagged line and the component instance is
+  //      reused. Fixed in the parent, which now KEYS the sheet on the same
+  //      gen/hash/systemId tuple that gates the write.
+  //   2. `candidates` collapses under one sheet. The sheet is a bottom sheet over a LIVE
+  //      calibrate canvas: an edit to this system's bars changes the stored split, and if
+  //      that makes it equal the measured one, dedupe merges two options into one while
+  //      `picked` still says 1.
+  //
+  // The key cannot fix (2) — same system, same bytes, same key. So the component owns
+  // the invariant too, in ONE place: an index that no longer resolves is not a pick.
+
+  it('does not crash, show, or commit when the candidate list shrinks under a pick', () => {
+    const onConfirm = vi.fn();
+    const two = [
+      { xs: [0.25, 0.5, 0.75, 1], sources: ['current' as const] },
+      { xs: [0.33, 0.66, 1], sources: ['measured' as const] },
+    ];
+    const { rerender } = render(<ChartReviewSheet {...props({ onConfirm, candidates: two })} />);
+    fireEvent.click(screen.getByText('3 bars')); // picked = 1
+    fireEvent.click(screen.getByText('Use this')); // → candidate preview
+    expect(screen.getByText('Keep 3 bars')).toBeTruthy();
+
+    // The second option disappears while the preview is on screen.
+    rerender(<ChartReviewSheet {...props({ onConfirm, candidates: [two[0]] })} />);
+
+    // Falls back to the ask rather than rendering nothing or dereferencing candidates[1].
+    expect(screen.getByText('Does this look right?')).toBeTruthy();
+    expect(screen.queryByText('Keep 3 bars')).toBeNull();
+    expect(onConfirm).not.toHaveBeenCalled();
+    // And nothing is pre-selected on the owner's behalf.
+    expect((screen.getByText('Use this') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('strip').getAttribute('data-xs')).toBe('0.25,0.5,0.75,1');
+  });
+
+  it('a stale pick never commits a candidate the owner did not select', () => {
+    // The worst shape of (1): the pick survives, the list is a DIFFERENT system's, and
+    // "Use this" writes `confirmed` — permanent — on geometry nobody chose.
+    const onConfirm = vi.fn();
+    const a = [
+      { xs: [0.25, 0.5, 0.75, 1], sources: ['current' as const] },
+      { xs: [0.33, 0.66, 1], sources: ['measured' as const] },
+    ];
+    const b = [{ xs: [0.5, 1], sources: ['current' as const] }];
+    const { rerender } = render(<ChartReviewSheet {...props({ onConfirm, candidates: a })} />);
+    fireEvent.click(screen.getByText('3 bars'));
+    rerender(<ChartReviewSheet {...props({ onConfirm, candidates: b })} />);
+    fireEvent.click(screen.getByText('Use this'));
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+});
+
 describe('ChartReviewSheet — the words the owner actually sees', () => {
   // ★ THE BAN IS ENFORCED ON THE COMPONENT, NOT JUST THE COPY HELPERS (Codex L2, #184).
   // The old vocabulary test covered `surplusWarning`/`refusalMessage` only, so the

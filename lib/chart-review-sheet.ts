@@ -85,6 +85,36 @@ export function candidateNote(c: Candidate): string | null {
   return c.sources.includes('printed') ? 'Matches the numbers printed on your chart' : null;
 }
 
+/**
+ * WHAT AN OPEN SHEET IS ABOUT. One expression, two jobs — deliberately the same one.
+ *
+ * The sheet holds a measurement of one line of one document, and two separate things have
+ * to agree about when that stops being true:
+ *
+ *  - the COMMIT guard, because `verdict: 'confirmed'` is permanent under generate-once and
+ *    must never be written against geometry that has moved (Codex H1, #184: system ids are
+ *    `s1`, `s2`… assigned by position, so `systemId` alone matches across two different
+ *    charts);
+ *  - the React KEY, because the sheet's local step/pick/count is an answer *to this line*
+ *    and a reused instance hands the next line the previous line's half-finished answer
+ *    (Codex R2, #184).
+ *
+ * They were separate expressions, which is two chances to change one and not the other.
+ * If an identity is not good enough to commit under, it is not good enough to keep a
+ * half-finished answer under either — so there is one function and both call it.
+ *
+ * `gen` is the chart-load generation; `hash` is the hash of the bytes on screen, which is
+ * NOT redundant with it (the overlay build's stale-cache recovery swaps the document and
+ * the hash without bumping the generation).
+ */
+export function reviewSheetKey(s: {
+  gen: number;
+  hash: string | null;
+  systemId: string;
+}): string {
+  return `${s.gen}:${s.hash ?? ''}:${s.systemId}`;
+}
+
 /** The split currently stored for a system, as a candidate. */
 export function currentSplit(bars: Bar[], systemId: string): Candidate {
   const xs = bars
