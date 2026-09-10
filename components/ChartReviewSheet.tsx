@@ -78,10 +78,28 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
     onOpenCalibrate,
   } = props;
 
-  const [step, setStep] = useState<SheetStep>('choose');
+  const [rawStep, setStep] = useState<SheetStep>('choose');
   const [picked, setPicked] = useState<number | null>(null);
   const [count, setCount] = useState<number | null>(null);
   const [outcome, setOutcome] = useState<CountOutcome | null>(null);
+
+  // ★ `picked` IS AN INDEX INTO A LIST THIS COMPONENT DOES NOT OWN (Codex R2, #184).
+  // The parent rebuilds `candidates` every render — the async measurement lands and adds
+  // options, and a calibrate edit underneath this sheet can collapse two options into one
+  // — so an index that resolved when it was chosen may not resolve now. Resolving it ONCE,
+  // here, is the whole guard: below this line there is no `candidates[picked]`, so there
+  // is no second site to forget. An index that no longer resolves is not a pick.
+  //
+  // `picked === -1` is the separate "none of these" marker and is deliberately not a
+  // candidate. The parent ALSO keys this component on gen/hash/systemId, which throws all
+  // of this state away when the sheet is handed a different line; that covers the swap,
+  // and this covers the list moving under a single line.
+  const pickedCandidate = picked !== null && picked >= 0 ? (candidates[picked] ?? null) : null;
+
+  // A preview of a candidate that has vanished is not a screen — fall back to the ask
+  // rather than rendering nothing at the owner.
+  const step: SheetStep =
+    rawStep === 'preview' && count === null && !pickedCandidate ? 'choose' : rawStep;
 
   const heading = `Line ${lineNumber}`;
   const counter =
@@ -106,7 +124,7 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
     const single = candidates.length === 1;
     // The big strip tracks the selection, so the answer to "which one" is on screen at
     // full size the moment it is picked, not only after a commit.
-    const shown = picked !== null && picked >= 0 ? candidates[picked].xs : single ? candidates[0].xs : null;
+    const shown = pickedCandidate ? pickedCandidate.xs : single ? candidates[0].xs : null;
     return (
       <Shell heading={heading} counter={counter}>
         <p className={`text-sm mb-3 ${flagged ? 'text-amber-400' : 'text-zinc-400'}`}>
@@ -162,15 +180,15 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
           </Btn>
           <Btn
             kind="primary"
-            disabled={picked === null || picked < 0}
+            disabled={!pickedCandidate}
             onClick={() => {
-              if (picked === null || picked < 0) return;
+              if (!pickedCandidate) return;
               // ★ One candidate ⇒ the big strip above IS that candidate, already at full
               // size, so "Use this" commits exactly what is on screen. SEVERAL candidates
               // ⇒ go through the preview anyway. The whole finding was that the owner
               // could commit a picture they had only seen as a label; a mini beside a
               // radio narrows that gap but does not close it at option size.
-              if (single) return onConfirm(candidates[picked].xs);
+              if (single) return onConfirm(pickedCandidate.xs);
               // Drop any count answered earlier in this sheet, so the preview below
               // routes on `picked` and cannot read a stale `outcome` from a count the
               // owner has since backed out of.
@@ -221,8 +239,8 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
   }
 
   // ── show a PICKED candidate back at full size, before anything is written ──
-  if (step === 'preview' && count === null && picked !== null && picked >= 0) {
-    const c = candidates[picked];
+  if (step === 'preview' && count === null && pickedCandidate) {
+    const c = pickedCandidate;
     return (
       <Shell heading={heading} counter="check this">
         <p className="text-sm text-zinc-400 mb-3">Here&apos;s what you picked.</p>

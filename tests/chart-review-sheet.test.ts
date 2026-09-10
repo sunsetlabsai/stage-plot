@@ -5,6 +5,7 @@ import {
   currentSplit,
   dedupeCandidates,
   proposeFromCount,
+  reviewSheetKey,
   matchMeasuredSystem,
   refusalMessage,
   splitToPageBars,
@@ -170,6 +171,43 @@ describe('candidates', () => {
     expect(candidateNote({ xs: [0.5, 1], sources: ['printed'] })).toMatch(/printed on your chart/);
     // Machine biography stays off-screen — there is nothing a non-reader can do with it.
     expect(candidateNote({ xs: [0.5, 1], sources: ['current', 'measured'] })).toBeNull();
+  });
+});
+
+describe('reviewSheetKey — what an open sheet is about', () => {
+  const base = { gen: 4, hash: 'abc', systemId: 's1' };
+
+  it('★ separates two charts that both call their first line `s1`', () => {
+    // THE H1 SHAPE. Measured system ids are assigned by position, so `systemId` alone is
+    // not identity — every measured chart has an `s1`. This is the whole reason the key
+    // exists, on both the commit guard and the React key.
+    expect(reviewSheetKey(base)).not.toBe(reviewSheetKey({ ...base, gen: 5 }));
+  });
+
+  it('separates two byte-versions of the SAME chart', () => {
+    // Not redundant with `gen`: the overlay build's stale-cache recovery swaps the
+    // document and the hash without bumping the chart-load generation.
+    expect(reviewSheetKey(base)).not.toBe(reviewSheetKey({ ...base, hash: 'def' }));
+  });
+
+  it('separates two lines of the same chart', () => {
+    // THE R2 SHAPE. Walking the flag queue re-points the sheet at the next system without
+    // unmounting it; a key that did not move here would hand the new line the old line's
+    // half-finished answer.
+    expect(reviewSheetKey(base)).not.toBe(reviewSheetKey({ ...base, systemId: 's2' }));
+  });
+
+  it('is stable for the same line of the same bytes, so an open sheet is not reset', () => {
+    expect(reviewSheetKey(base)).toBe(reviewSheetKey({ ...base }));
+  });
+
+  it('an absent hash cannot collide with a present one, or with another field', () => {
+    // A pre-calibration sheet has no hash yet. `null` must not stringify into something a
+    // real hash could equal, and no field's value may bleed across the separator.
+    expect(reviewSheetKey({ ...base, hash: null })).not.toBe(reviewSheetKey(base));
+    expect(reviewSheetKey({ gen: 1, hash: null, systemId: 's1' })).not.toBe(
+      reviewSheetKey({ gen: 1, hash: '', systemId: ':s1' }),
+    );
   });
 });
 

@@ -117,6 +117,7 @@ import {
   buildCandidates,
   matchMeasuredSystem,
   proposeFromCount,
+  reviewSheetKey,
   splitToPageBars,
   type Candidate,
   type CountOutcome,
@@ -3248,7 +3249,7 @@ function ChartNavigator({
       if (!one) return;
       const best = matchMeasuredSystem(system, one.measurement.systems, one.measurement.pageHeight);
       setReviewSheet((cur) =>
-        cur && cur.gen === gen && cur.hash === hash && cur.systemId === systemId
+        cur && reviewSheetKey(cur) === reviewSheetKey({ gen, hash, systemId })
           ? { ...cur, measured: best, page: one.measurement }
           : cur,
       );
@@ -3269,8 +3270,13 @@ function ChartNavigator({
         // moment it commits. A sheet whose chart or bytes moved underneath it writes
         // NOTHING — there is no repair to attempt, because the geometry the owner was
         // looking at is no longer the geometry on screen.
-        if (!sheet || sheet.systemId !== systemId) return c;
-        if (sheet.gen !== calGenRef.current || sheet.hash !== sourceHashRef.current) return c;
+        if (
+          !sheet ||
+          reviewSheetKey(sheet) !==
+            reviewSheetKey({ gen: calGenRef.current, hash: sourceHashRef.current, systemId })
+        ) {
+          return c;
+        }
         const system = (c.systems ?? []).find((s) => s.id === systemId);
         let measures: number[] | undefined;
         // Re-derive `measures` against the bars the human just chose. A re-split
@@ -4439,6 +4445,17 @@ function ChartNavigator({
         return (
           <div className="border-t border-zinc-800">
             <ChartReviewSheet
+              // ★ THE SHEET'S LOCAL STATE IS ABOUT ONE LINE, SO IT DIES WITH THAT LINE
+              // (Codex R2, #184). `stepReview` hands the sheet the NEXT flagged system by
+              // calling `openReviewSheet` (`:3430`) — `reviewSheet` stays non-null, so
+              // React reuses the instance and the new line inherits the old line's step,
+              // pick and count. Worst case it commits `confirmed` — permanent — on
+              // geometry the owner never selected.
+              //
+              // Keyed by the SAME expression the commit guard uses, deliberately — see
+              // `reviewSheetKey`. If the identity is not good enough to commit under, it
+              // is not good enough to keep a half-finished answer under either.
+              key={reviewSheetKey(reviewSheet)}
               lineNumber={lineNumber > 0 ? lineNumber : 1}
               queueTotal={reviewSheet.flagged ? flaggedOrder.length : null}
               queueIndex={reviewSheet.flagged && queueIndex >= 0 ? queueIndex : null}
