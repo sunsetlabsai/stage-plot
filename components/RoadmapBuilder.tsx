@@ -271,8 +271,12 @@ function Compose({
   onGenerate: () => void;
 }) {
   return (
-    <main className="flex-1 flex items-center justify-center p-6 overflow-auto">
-      <div className="w-full max-w-2xl">
+    // m-auto, not items-/justify-center: centring with the container's alignment
+    // pushes an overflowing child's top ABOVE the scroll origin, out of reach (the
+    // heading was unreachable at 375×500 with an open read-back — Codex R3 on #187).
+    // Auto margins centre when it fits and collapse to 0 when it doesn't.
+    <main className="flex-1 flex p-6 overflow-auto">
+      <div className="w-full max-w-2xl m-auto">
         <h2 className="text-2xl font-semibold text-white text-center mb-2">
           What does the song look like?
         </h2>
