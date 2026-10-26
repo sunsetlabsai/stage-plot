@@ -59,6 +59,27 @@ step, or refuse with a reason. The UI never edits `bars`, `chords`, `repeat` or
 `navigation` directly. The existing bar-count field becomes "insert/delete at the end"
 through the same operations, which closes the nav-shrink edge.
 
+**Second rule: no edit may silently disable a marker.** Moving references with their
+bars keeps a marker on the right bar, but cannot guarantee it still *takes effect*: a
+repeat or ending built around it changes how the VM reaches it. (Codex R4: a Verse ×2
+with D.C. on bar 2; making bar 2 the 1st ending keeps the D.C. on that bar, both specs
+validate, but the ending's exit wins on pass 1 and pass 2 skips the bar — the D.C. never
+fires, and the song silently loses its second tour.) So every op is followed by a
+**navigation-liveness check**, `navLive(spec)`:
+
+- walk the VM to completion under the resolver's cap — the `resolveRoadmap` loop
+  (`lib/chart-calibration.ts:974`), returning the **final `VMState`** as well as the
+  traversal (a small sibling of `resolveRoadmap`; the loop and cap are unchanged);
+- **live** when: the walk terminates; if there is a jump, `fired[jumpId]` is true; if
+  it is al Coda, `flags.toCodaFired` is true; if it is al Fine, the traversal ends on
+  the Fine bar.
+
+An op that turns a live chart not-live is **refused**, naming the marker ("this would
+stop the D.C. from being played — move it first"). A chart that was already not-live
+does not block edits (so the author can fix it). The check is generic — it does not
+enumerate which op/marker/repeat combinations are dangerous, so new combinations are
+covered without a new rule.
+
 ## 4. Merge repeated sections on parse (fixes §1.1)
 
 A new pure step, `mergeRepeatedSections(spec)`, runs in `foldAndValidateDraft`
@@ -186,6 +207,9 @@ naming it — replaces today's silent drop of the whole navigation block.
   (c) `chords.length === bars`, (d) no op writes into or
   reads from a blank bar (the `C, G, blank` delete is a fixed fixture), (e) volta fixtures include endings
   listed out of position order.
+- **Liveness:** Codex R4's fixture (Verse ×2, D.C. on bar 2, addEndings(1)) is refused;
+  the same op with the D.C. on a bar outside the section is allowed; the property test
+  asserts no step turns a live chart not-live.
 - **UI:** bar action row reachable by tap; repeat control disabled at 1 bar;
   confirms name what is removed.
 
