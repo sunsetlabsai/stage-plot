@@ -78,10 +78,9 @@ A **run** of 2+ *adjacent* sections merges into the first, with
   `buildCalibration` → `resolveRoadmap` (`lib/chart-calibration.ts:974`), which walks
   the VM to completion **under the resolver's existing termination cap**; a capped or
   failed walk counts as *not equivalent*. Each `TraversalStep.barId` is looked up in
-  the layout to its `(section, bar)`, and that bar's **effective chord** is taken: its
-  own chords, or if null, the nearest preceding non-null bar in **written order**
-  (across section boundaries) — what a player reading the page sounds. The two
-  sequences of effective chords must be identical, step for step. This is the test that matters
+  the layout to its `(section, bar)`, and that bar's **written content** is taken
+  as-is — its own chords, or *blank*. Blank bars are never resolved to a chord (§8.5).
+  The two sequences of written content must be identical, step for step. This is the test that matters
   when a jump is present: the VM keeps a repeat's pass count when a D.C./D.S. fires
   (`roadmap-vm.ts:497,506`), so a repeat replayed by a jump is played **once** — two
   identical Verses before a D.C. play 4 times longhand but 3 times merged, and that run
@@ -132,7 +131,7 @@ so it works on touch (no hover — `uat-plan-v1.md` S16 / issue #173):
 | Op | Behaviour |
 |---|---|
 | `splitBar(sec, bar)` | A bar with k ≥ 2 chords becomes k bars, one chord each, whole bar. Disabled for k = 1. Exactly Graham's `D E` → `D \| E`. |
-| `insertBar(sec, at)` | New bar is empty (inherits the previous chord — the sparse convention). |
+| `insertBar(sec, at)` | New bar is blank. |
 | `deleteBar(sec, bar)` | Refused on the section's only bar. Refused on the last body bar of a volta section ("the repeat needs a bar before its endings — remove the endings first"). Bar carries a marker → confirm, removes the marker (and its dependents, §5.4). Only bar of an ending → confirm, removes the endings. Leaves a plain repeat at 1 bar → confirm, drops the repeat. |
 
 **Remap rule — references follow BARS, not positions.** Each op is defined as a map
@@ -148,15 +147,10 @@ from every old bar to its new bar(s); every reference then follows its bar:
   did.
 - **Deleted bar:** its refs are removed under the confirm above; never shifted onto a
   neighbour.
-- **Chords follow bars too.** A null bar inherits the preceding chord
-  (`roadmap-view.ts:36`), so an op can change what a *surviving* bar sounds without
-  touching it: with `C, G, null`, deleting the G leaves `C, null` — the third bar now
-  sounds C, and the spec is still valid, so nothing catches it. Rule: compute every
-  bar's effective chord (written-order inheritance, as in §4) before the op; after it,
-  any surviving bar whose effective chord changed has that chord **written in
-  explicitly**. Applies to every op in this layer, including section remove and
-  drag-reorder, since §3 routes all structure edits through it. A newly inserted bar is
-  not "surviving" — it inherits by design.
+- **Blank bars stay blank.** No op ever writes a chord into a blank bar or reads one
+  out of a neighbour (§8.5). A blank's meaning is left to common practice and to the
+  chart's author, who can type a chord in. So deleting the G from `C, G, blank` leaves
+  `C, blank` — by design.
 - **Volta groups.** Each bar belongs to one group: the **body** (every bar before the
   **earliest** ending's `start` — `endings[]` order is not position order: the
   validator and VM sort ranges, `roadmap-spec.ts:425`, `roadmap-vm.ts:250`), one of the
@@ -189,8 +183,8 @@ naming it — replaces today's silent drop of the whole navigation block.
   lands on the same musical bar — tracked by a **synthetic stable id** the harness
   attaches to each bar and carries through the op's bar map (rendered bar ids are
   positional, `roadmap-layout.ts:182`, so they can't prove this),
-  (c) `chords.length === bars`, (d) every surviving bar's effective chord is unchanged
-  (the `C, G, null` delete case is a fixed fixture), (e) volta fixtures include endings
+  (c) `chords.length === bars`, (d) no op writes into or
+  reads from a blank bar (the `C, G, blank` delete is a fixed fixture), (e) volta fixtures include endings
   listed out of position order.
 - **UI:** bar action row reachable by tap; repeat control disabled at 1 bar;
   confirms name what is removed.
@@ -217,6 +211,10 @@ C and D are thin on it.
    are placeable by hand (§5.4). Graham likes the idea as a later feature — it would be
    an explicit "compress to a roadmap" action the owner invokes, never a parse default.
 4. **No automatic 1st/2nd endings** for near-identical runs; built by hand (§5.2).
-5. **A null bar's effective chord is the previous bar on the PAGE** (written order), not
-   the previous bar played — including the first bar of a 2nd ending, which inherits
-   from the end of the 1st ending as printed. This is the inheritance §4 and §5.3 use.
+5. **Blank bars are never interpreted.** The system does not compute what chord a
+   blank bar "inherits" — not in merge, unroll, or any edit. A blank stays blank; the
+   musician plays it by common practice, and the author types a chord in where they
+   want to direct it. Why: any computed rule is wrong somewhere — a 2nd ending is
+   entered from the body, not from the 1st ending printed before it; a repeated
+   section's first bar follows different chords on different passes — and neither the
+   PDF nor the conductor resolves blanks.
