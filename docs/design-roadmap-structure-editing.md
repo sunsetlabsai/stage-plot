@@ -1,6 +1,6 @@
 # ShowRunr — Roadmap Builder: Repeats, Markers and Bar Editing DESIGN
 
-**Status: PROPOSED (2026-10-26).** Not built. Companion to `design-roadmap-builder.md`
+**Status: PROPOSED (2026-10-26), §8 ruled by Graham.** Not built. Companion to `design-roadmap-builder.md`
 (the spec model) and `design-roadmap-edit-loop.md` (the editor this extends).
 
 ## 1. What UAT found (2026-10-26, Graham)
@@ -161,16 +161,13 @@ naming it — replaces today's silent drop of the whole navigation block.
 A fixes the reported "2x" problem on its own and needs no UI. B is the foundation;
 C and D are thin on it.
 
-## 8. Open questions for Graham
+## 8. Rulings (Graham, 2026-10-26)
 
-1. **Merge always, or only when the prompt says "2x"?** Proposed: always, for adjacent
-   identical sections — a chord chart writes identical consecutive sections as a
-   repeat, and §5.1 Unroll is the escape hatch. Prompt-phrasing detection would be a
-   guess.
-2. **`Verse 1` + `Verse 2` with identical chords — merge?** Proposed: yes (§4 base
-   label). Lyrics differ, but the chart carries no lyrics.
-3. **Non-adjacent repeats (verse / chorus / verse / chorus) → D.S. / Coda roadmap?**
-   Proposed: **out of scope.** That is an arranging choice, not a mechanical one, and
-   the parser should never invent jumps. Markers are placeable by hand (§5.4).
-4. **Near-identical runs (same except the last bar) → automatic 1st/2nd endings?**
-   Proposed: not automatic; build by hand with §5.2.
+1. **Merge always** — adjacent identical sections fold into a repeat whatever the
+   prompt's phrasing. Every target display is a phone; vertical space is the scarce
+   resource. §5.1 Unroll is the escape hatch.
+2. **`Verse 1` + `Verse 2` with identical chords merge** (§4 base label).
+3. **No automatic D.S. / Coda for non-adjacent repeats** in this work, provided markers
+   are placeable by hand (§5.4). Graham likes the idea as a later feature — it would be
+   an explicit "compress to a roadmap" action the owner invokes, never a parse default.
+4. **No automatic 1st/2nd endings** for near-identical runs; built by hand (§5.2).

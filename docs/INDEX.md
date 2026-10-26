@@ -56,7 +56,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | `design-roadmap-line-measure-numbers.md` | SHIPPED-RECORD | Both surfaces (`roadmap-render.ts:260`, `RoadmapBuilder.tsx:906`). |
 | `design-roadmap-notation-toggle.md` | SHIPPED-RECORD | Migration `017` + builder toggle. |
 | `design-roadmap-prompt-persistence.md` | SHIPPED-RECORD | Migration `016`, read+write doors both wired. |
-| `design-roadmap-structure-editing.md` | PROPOSED | Merge "2x" sections into repeats on parse; editor repeat / endings / marker / bar ops (UAT 2026-10-26). |
+| `design-roadmap-structure-editing.md` | PROPOSED (§8 ruled) | Merge "2x" sections into repeats on parse; editor repeat / endings / marker / bar ops (UAT 2026-10-26). |
 | `design-song-form-from-lyrics.md` | UNBUILT-DESIGN | No lyrics parser, no second proposer. Feeds `lib/song-structure.ts`, which does exist. |
 
 ## Conductor — authority, clock, transport
