@@ -124,7 +124,7 @@ failure.
 | 1 | New owner · phone | Sign in by email code, claim a handle | PL-05, PL-10 |
 | 2 | Owner · laptop | Create a show, confirm the URL | SH-01 |
 | 3 | Owner · laptop | Build the stage plot, inputs, mixes by hand; link inputs to performers | SH-18 |
-| 4 | Owner · laptop | Same with the AI co-designer on an empty show, then once on a hand-tuned show | SH-27, SH-28 |
+| 4 | Owner · laptop | Same with the AI co-designer on an empty show, then on two separate hand-tuned shows | SH-27, SH-28, SH-28b |
 | 5 | Owner · laptop | Delete a middle monitor mix; check the plot still points at the right wedges | SH-20 |
 | 6 | Owner · laptop | Import the setlist from a Google Sheet, then add one song from the library | SH-13, SH-11 |
 | 7 | Owner · laptop | Upload PDF charts; build one chart from words; save it to a role | CH-10, RB-01, RB-02 |
@@ -194,8 +194,9 @@ noted) · **Laptop** (Chrome).
 - [SH-24] Share a chart PDF to Messages — Chart open in viewer · Share → Messages · PDF attached to a Messages draft. **Known intermittent**: Messages may not come to the front; note how often, and PWA vs Safari · Anon · Phone
 - [SH-25] Chart deep link — Copy a shared chart link (`?song=3&chart=Guitar`) · Open signed-out · Viewer opens on song 3's Guitar chart · Anon · Phone
 - [SH-26] Bad link — Mistyped show slug; then network off on a never-visited show · Open each · "Show not found" with no tabs; "Connection error" + Retry · Anon · Phone
-- [SH-27] AI co-designer first run — Empty show · AI tab → "7-piece: drums, bass, keys, 2 gtr, sax+tpt, lead vox" → Apply each card · Plot, inputs (kit expanded) **including both a Sax and a Trumpet input**, monitors filled; Mix tab renders it · EXPECT TODAY: Trumpet missing if the AI makes one combined Sax/Tpt slot (S18) · Owner · Laptop
-- [SH-28] AI plot apply wipes hand edits (known behaviour) — Show with hand-tuned inputs · Ask AI to "move keys to USL" → Apply the stage-plot card; then, separately, ask AI to "change the kick mic to a Beta 91" → Apply the inputs card · **Expected today**: the first regenerates the input list and monitors; the second replaces the whole input list; in both, hand edits and input↔performer links are lost with no warning — record, not a pass · Owner · Laptop
+- [SH-27] AI co-designer first run — Empty show · AI tab → "8-piece: drums, bass, keys, 2 gtr, sax+tpt, lead vox" → Apply each card · Plot, inputs (kit expanded) **including both a Sax and a Trumpet input**, monitors filled; Mix tab renders it · EXPECT TODAY: Trumpet missing if the AI makes one combined Sax/Tpt slot (S18) · Owner · Laptop
+- [SH-28] AI plot apply wipes hand edits (known behaviour) — Show with hand-tuned inputs, each linked to a performer · Ask AI to "move keys to USL" → Apply the stage-plot card · **Expected today**: input list and monitors are regenerated; hand edits and input↔performer links are lost, no warning — record, not a pass · Owner · Laptop
+- [SH-28b] AI inputs apply wipes performer links (known behaviour) — **Fresh** show with hand-tuned inputs, each linked to a performer (not the show SH-28 just ran on — that apply already removed the links) · Ask AI to "change the kick mic to a Beta 91" → Apply the inputs card · **Expected today**: the whole input list is replaced and every input↔performer link is lost, with no stage-plot card involved — record, not a pass · Owner · Laptop
 - [SH-29] Library CRUD — /library · Add song, edit key, Duplicate, Delete a song used in 2 shows · Delete prompt names "2 shows"; song gone from those setlists and its charts deleted · Owner · Laptop
 - [SH-30] Rename a library-linked song — Song used in a setlist · In Config the title is read-only with "Rename in Library"; rename it in /library · Show reloads with new title and charts still attached · Owner · Laptop
 
