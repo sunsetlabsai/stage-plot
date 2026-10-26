@@ -201,7 +201,9 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
     // backdrop (onClick=onClose), so clicks here must not close the host modal.
     <div
       onClick={(e) => e.stopPropagation()}
-      className="fixed inset-0 z-[60] bg-zinc-950 text-zinc-200 flex flex-col"
+      // Below lg the Review panes stack and the overlay scrolls; at lg they sit
+      // side by side and each pane scrolls itself.
+      className="fixed inset-0 z-[60] bg-zinc-950 text-zinc-200 flex flex-col overflow-y-auto lg:overflow-hidden"
     >
       <header className="border-b border-zinc-800 px-6 py-3 flex items-center justify-between shrink-0">
         <div>
@@ -489,7 +491,11 @@ function Review({
   const markers = navMarkers(view.navigation);
 
   return (
-    <div className="flex-1 grid grid-cols-1 lg:grid-cols-[300px_1fr_340px] min-h-0">
+    // Stacked (<lg): flex-none so the grid takes its content height and the
+    // overlay scrolls. A height-bound stacked grid squeezed the Refine row to 33px
+    // at 375×500 (56px at 375×812) — its panes are scroll containers, so their
+    // grid rows have no content floor (UAT 2026-10-26, Codex R2 on #187).
+    <div className="flex-none lg:flex-1 grid grid-cols-1 lg:grid-cols-[300px_1fr_340px] lg:min-h-0">
       {/* Left — refine / re-prompt */}
       <aside className="border-b lg:border-b-0 lg:border-r border-zinc-800 p-4 flex flex-col gap-3 overflow-auto">
         <h3 className="text-xs uppercase tracking-wide text-zinc-500">Refine</h3>
