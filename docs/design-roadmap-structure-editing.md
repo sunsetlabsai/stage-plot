@@ -217,3 +217,6 @@ C and D are thin on it.
    are placeable by hand (§5.4). Graham likes the idea as a later feature — it would be
    an explicit "compress to a roadmap" action the owner invokes, never a parse default.
 4. **No automatic 1st/2nd endings** for near-identical runs; built by hand (§5.2).
+5. **A null bar's effective chord is the previous bar on the PAGE** (written order), not
+   the previous bar played — including the first bar of a 2nd ending, which inherits
+   from the end of the 1st ending as printed. This is the inheritance §4 and §5.3 use.
