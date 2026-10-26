@@ -136,5 +136,6 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 
 | Doc | State | Note |
 |---|---|---|
-| `uat-readiness-gaps.md` | OPS | Findings. Nothing scheduled until Graham cuts the line. |
+| `uat-plan-v1.md` | OPS | v1 UAT plan, dated 2026-10-07: measured baseline, re-verified gap list, gig-day P0 run, case catalogue. |
+| `uat-readiness-gaps.md` | SUPERSEDED | Aug 2026 audit. Every finding re-verified into `uat-plan-v1.md` §2. Kept only because `design-core-path-tier1.md` cites it as its source. |
 | `uat-realtime-chart-control-step1.md` | OPS | Historical manual UAT pass. |
