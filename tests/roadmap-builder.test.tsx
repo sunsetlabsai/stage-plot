@@ -375,3 +375,34 @@ describe('RoadmapBuilder — Review can Share the saved chart', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument());
   });
 });
+
+// UAT 2026-10-26: on Review the read-back took the panel's height and squeezed the
+// refine box to one line. It now collapses to a one-line summary there (the chart
+// shows the same read); on Compose it only appears beside a failed parse, where it
+// is the diagnosis, so it stays open.
+describe('RoadmapBuilder — the read-back collapses on Review', () => {
+  const TALLY = ['Intro: 4 bars — 1×4', 'Turnaround: 2 bars — 1×2'];
+  const readBack = () => screen.getByText(/^Read-back · 2 sections$/).closest('details') as HTMLDetailsElement;
+
+  it('is collapsed after a successful parse, and expands on click', async () => {
+    vi.stubGlobal('fetch', mockFetchOnce({ ok: true, spec: SPEC, tally: TALLY }));
+    render(<RoadmapBuilder songTitle="9 to 5" charts={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '4/4 in F. 4-bar intro, 2-bar turnaround.' } });
+    fireEvent.click(screen.getByRole('button', { name: /generate chart/i }));
+    await screen.findByRole('button', { name: /regenerate/i });
+
+    expect(readBack().open).toBe(false);
+    fireEvent.click(screen.getByText(/^Read-back · 2 sections$/));
+    await waitFor(() => expect(readBack().open).toBe(true));
+  });
+
+  it('is open on Compose beside a failed parse', async () => {
+    vi.stubGlobal('fetch', mockFetchOnce({ ok: false, errors: ['Intro: 3 bars, expected 4'], tally: TALLY }));
+    render(<RoadmapBuilder songTitle="9 to 5" charts={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '4/4 in F. 4-bar intro, 2-bar turnaround.' } });
+    fireEvent.click(screen.getByRole('button', { name: /generate chart/i }));
+
+    await screen.findByText(/^Read-back · 2 sections$/);
+    expect(readBack().open).toBe(true);
+  });
+});

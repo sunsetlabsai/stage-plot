@@ -201,7 +201,9 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
     // backdrop (onClick=onClose), so clicks here must not close the host modal.
     <div
       onClick={(e) => e.stopPropagation()}
-      className="fixed inset-0 z-[60] bg-zinc-950 text-zinc-200 flex flex-col"
+      // Below lg the Review panes stack and the overlay scrolls; at lg they sit
+      // side by side and each pane scrolls itself.
+      className="fixed inset-0 z-[60] bg-zinc-950 text-zinc-200 flex flex-col overflow-y-auto lg:overflow-hidden"
     >
       <header className="border-b border-zinc-800 px-6 py-3 flex items-center justify-between shrink-0">
         <div>
@@ -269,8 +271,12 @@ function Compose({
   onGenerate: () => void;
 }) {
   return (
-    <main className="flex-1 flex items-center justify-center p-6 overflow-auto">
-      <div className="w-full max-w-2xl">
+    // m-auto, not items-/justify-center: centring with the container's alignment
+    // pushes an overflowing child's top ABOVE the scroll origin, out of reach (the
+    // heading was unreachable at 375×500 with an open read-back — Codex R3 on #187).
+    // Auto margins centre when it fits and collapse to 0 when it doesn't.
+    <main className="flex-1 flex p-6 overflow-auto">
+      <div className="w-full max-w-2xl m-auto">
         <h2 className="text-2xl font-semibold text-white text-center mb-2">
           What does the song look like?
         </h2>
@@ -288,7 +294,7 @@ function Compose({
           className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-3 text-base text-white outline-none focus:border-blue-500 resize-none leading-relaxed"
         />
         <ParseErrors error={error} specErrors={specErrors} />
-        {tally.length > 0 && <ReadBack tally={tally} />}
+        {tally.length > 0 && <ReadBack tally={tally} defaultOpen />}
         <div className="flex items-center justify-between mt-4">
           <label className="inline-flex items-center gap-2 text-xs text-zinc-500">
             Key
@@ -489,7 +495,11 @@ function Review({
   const markers = navMarkers(view.navigation);
 
   return (
-    <div className="flex-1 grid grid-cols-1 lg:grid-cols-[300px_1fr_340px] min-h-0">
+    // Stacked (<lg): flex-none so the grid takes its content height and the
+    // overlay scrolls. A height-bound stacked grid squeezed the Refine row to 33px
+    // at 375×500 (56px at 375×812) — its panes are scroll containers, so their
+    // grid rows have no content floor (UAT 2026-10-26, Codex R2 on #187).
+    <div className="flex-none lg:flex-1 grid grid-cols-1 lg:grid-cols-[300px_1fr_340px] lg:min-h-0">
       {/* Left — refine / re-prompt */}
       <aside className="border-b lg:border-b-0 lg:border-r border-zinc-800 p-4 flex flex-col gap-3 overflow-auto">
         <h3 className="text-xs uppercase tracking-wide text-zinc-500">Refine</h3>
@@ -502,7 +512,10 @@ function Review({
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           rows={8}
-          className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-blue-500 resize-none leading-relaxed"
+          // shrink-0: a textarea is a scroll container, so as a flex item its min
+          // height is 0 and a long read-back below squeezed it to one line (UAT
+          // 2026-10-26). resize-y lets the owner drag it taller for a long prompt.
+          className="w-full shrink-0 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-blue-500 resize-y leading-relaxed"
         />
         <button
           onClick={onRegenerate}
@@ -512,11 +525,11 @@ function Review({
           {generating ? 'Generating…' : 'Regenerate'}
         </button>
         <ParseErrors error={error} specErrors={specErrors} />
-        {tally.length > 0 && <ReadBack tally={tally} />}
-        <p className="text-[11px] text-zinc-600 mt-auto">
+        <p className="text-[11px] text-zinc-600">
           Tip: click a bar — &ldquo;1&rdquo; or &ldquo;IV&rdquo; for a whole bar, &ldquo;5 4&rdquo; to
           split evenly, &ldquo;1 - 4 5&rdquo; to tie (2 of 1, then 4, then 5).
         </p>
+        {tally.length > 0 && <ReadBack tally={tally} />}
       </aside>
 
       {/* Center — chart system hero. overflow-Y only: the chart is fit-to-width,
@@ -751,10 +764,20 @@ function SortableSectionRow({
 
 // L4 read-back echo: the per-section bar totals the parse produced, straight from
 // the SpanList — so a dropped span shows up as a wrong total before you ever save.
-function ReadBack({ tally }: { tally: string[] }) {
+// Collapsed by default on Review, where the chart itself already shows the same
+// read (UAT 2026-10-26); open on Compose, where it only appears beside a failed
+// parse and is the diagnosis.
+function ReadBack({ tally, defaultOpen = false }: { tally: string[]; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 space-y-1">
-      <h4 className="text-[11px] uppercase tracking-wide text-zinc-500">Read-back</h4>
+    <details
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+      className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 space-y-1"
+    >
+      <summary className="cursor-pointer text-[11px] uppercase tracking-wide text-zinc-500 hover:text-zinc-300">
+        Read-back · {tally.length} section{tally.length === 1 ? '' : 's'}
+      </summary>
       <ul className="space-y-0.5 text-xs text-zinc-300">
         {tally.map((line, i) => (
           <li key={i} className="font-mono leading-snug">
@@ -763,7 +786,7 @@ function ReadBack({ tally }: { tally: string[] }) {
         ))}
       </ul>
       <p className="text-[11px] text-zinc-600">Check the bar counts. If a section is short, refine and regenerate.</p>
-    </div>
+    </details>
   );
 }
 
