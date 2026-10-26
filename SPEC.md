@@ -293,7 +293,7 @@ its setlist and charts keep working on that device with no signal.
 
 **Offline / PWA**
 25. Installable PWA: `start_url: '/'`, standalone, 192/512 icons (`app/manifest.ts`). The service worker is registered when a show page loads (`page.tsx:557`), not globally.
-26. SW (`public/sw.js`): precaches `/` + PDF worker; `/_next/static/*` cache-first; page navigations network-first with fallback to the cached page, then cached `/`; `/api/*` never cached; `/api/chart-cache/*` served only from the chart cache.
+26. SW (`public/sw.js`): precaches `/` + PDF worker; on registration the page also sends the current URL and its loaded static assets to the worker to warm the cache (`lib/chart-cache.ts:247`, `sw.js:33`) — relevant when diagnosing an offline launch; `/_next/static/*` cache-first; page navigations network-first with fallback to the cached page, then cached `/`; `/api/*` never cached; `/api/chart-cache/*` served only from the chart cache.
 27. Every viewer (owner or not) caches the show config in localStorage on load (`page.tsx:544-555`); a network error or 5xx falls back to it (`:469-487,505,590`); 4xx does not.
 28. Every viewer auto-downloads all Supabase-hosted charts into Cache API `stageplot-charts-v1`, keyed `/api/chart-cache/{chartId}/{updated_at ms}` (`lib/chart-cache.ts:8-14`; `page.tsx:559-566`); Perform shows "Caching n/N" → "N charts cached" or "x of N cached" (`page.tsx:1106-1120`). The chart viewer reads cache first, then network, and writes back on fetch (`lib/pdf-viewer.ts:88-130`). A replaced chart gets a new key; old versions are deleted (`lib/chart-cache.ts:54-60`).
 29. Launching the PWA offline at `/` redirects to the last-viewed show (`app/page.tsx:39-46`, `showrunr-last-show`). Chart viewer shows an "OFFLINE" pill (`page.tsx:3889`).
@@ -350,7 +350,7 @@ its setlist and charts keep working on that device with no signal.
 3. Upload stores the file and stops. It never generates an overlay (`lib/chart-upload.ts:6-12,134-160`; `ManageChartsModal.tsx:88-91`).
 4. Only the owner can write. Insert, update and delete are owner-only in RLS (`003:58-68`). Delete removes the DB row first, then the stored file (`app/api/charts/delete/route.ts:20-34`). Collaborators can read the owner's whole library, not just this show's songs (`003:46-56`).
 5. Opening a show attaches charts fresh from the library by normalized title, using the service-role client, so no login is needed (`app/api/shows/[owner]/[show]/route.ts:97-136`). Shows store no chart data. Blank titles are skipped (`normalizeSongKeySafe`, `:98-100`).
-6. One Manage-Charts modal serves both the library row and the setlist row (`app/library/page.tsx:233`, `P:6814`). Owners can add, replace, delete (with `confirm()`), and build with AI. Everyone can preview and Share (`ManageChartsModal.tsx:178,244-246,319`). On a setlist row, the Manage button shows for owners, and for others only when charts exist (`P:4932`).
+6. One Manage-Charts modal serves both the library row and the setlist row (`app/library/page.tsx:233`, `P:6814`). Owners can add, replace, delete (with `confirm()`), and build with AI; preview and Share are in the same modal (`ManageChartsModal.tsx:178,244-246,319`). In a show, the setlist row that opens it is in the Config tab, which is owner-only (`P:749,830`; row `P:4932`, `ConfigTab` `P:6095`) — so a non-owner never reaches the modal from a show. The row's non-owner branch (Manage shown when charts exist, `P:4932`) is unreachable today.
 7. Adding a library song to a show attaches its charts straight away and caches them for offline use, with no reload (`app/api/songs/route.ts:70-98`, `P:6790-6808`). Opening a show caches all of its library charts for every viewer (`P:557-567`). The manual "Download for offline" button appears only on Drive/anonymous shows (`P:6925-6926`). The Drive-era chart-wipe effect skips library-backed shows (`P:6209`).
 
 **Viewer**
@@ -376,7 +376,7 @@ its setlist and charts keep working on that device with no signal.
 
 **Readiness strip and on-demand overlay build**
 22. When there's no bar transport, the Perform view shows one line explaining why and one next step (`components/PerformReadinessStrip.tsx:77-164`, mounted `P:4438`). Non-owners only ever see "Tap a section to seek." or nothing.
-23. "Build overlay" on the strip is the only place an overlay gets generated (`P:3578-3646`).
+23. In the show, "Build overlay" on the strip is the only place an overlay gets generated (`P:3578-3646`). Outside the show, the platform-admin backfill (`app/api/admin/backfill-chart-overlays/route.ts:69,81`) also generates and inserts overlays, under the same never-gate.
     - The chart must have no overlay for these bytes and must not be a known-never chart: a builder chart ("Built in ShowRunr…") or role `lyrics` ("Lyrics sheet…"). The same rule is checked on the client and on the server (`lib/chart-converter.ts:74-81`, `convert/route.ts:108-112`).
     - The browser measures the PDF (`lib/chart-measure-client.ts:88-122`) and POSTs it to `/api/charts/convert`. The server re-hashes the stored file and returns 409 if the hash doesn't match. The client then clears both caches, re-measures once, and gives up after a second mismatch.
     - If the PDF has no staves on any page and the drawing was fully readable, the strip shows "No staves found on any page…" with no retry (`convert/route.ts:167`).
@@ -659,7 +659,9 @@ example a horn chart following the piano chart) is not built.
 - **Single writer.** Only the conductor issues sequence numbers. Followers never commit a change
   themselves. Baton numbers come from the relay (authority §4, 3b §4).
 - **Every failure degrades to self-driving, never to a wrong position.** A follower whose chart
-  doesn't match gets an honest banner, never a guess (3b §7, authority §2.2.0).
+  doesn't match gets an honest banner, never a guess (3b §7, authority §2.2.0). **Not yet true
+  for conductor loss:** the follower stays session-driven and its chart taps are ignored
+  (`page.tsx:3402, 3512`) — see Appendix A.
 - **Any joined device may claim the baton, behind a confirm.** "Owner ≠ conductor" (3b D4; owner
   gate dropped in 3b chunk 5).
 - Session identity is the full triple {sessionId, songRef, programHash}. A recalibration mid-song
