@@ -72,10 +72,19 @@ A **run** of 2+ *adjacent* sections merges into the first, with
 - identical `bars` and identical `changes` (exact equality of the folded spec — no fuzzy match);
 - none carries a `repeat` already;
 - `bars >= 2` (the plain-repeat precondition — a 1-bar run stays longhand);
-- no nav ref points into any section of the run except the first.
+- no nav ref points into any section of the run except the first;
+- **the merged chart plays the same as the longhand one.** Compile both
+  (`layoutRoadmap` → `buildCalibration` → `compileRoadmap`) and walk each to the end
+  with `initVM` / `stepVM` (`lib/roadmap-vm.ts`); the played sequence of bar contents
+  (chords with inheritance resolved) must be identical. This is the test that matters
+  when a jump is present: the VM keeps a repeat's pass count when a D.C./D.S. fires
+  (`roadmap-vm.ts:497,506`), so a repeat replayed by a jump is played **once** — two
+  identical Verses before a D.C. play 4 times longhand but 3 times merged, and that run
+  must stay longhand. Without a jump the walk is a cheap confirmation.
 
-Merged section keeps the first section's `id` and the base label. Nav refs to later
-sections have their section index decremented. A run that fails any test stays
+Merged section keeps the first section's `id` and the base label. Nav refs are
+remapped through an old-index → new-index map built after all merges (a run of N
+removes N − 1 sections, and several runs accumulate). A run that fails any test stays
 longhand — the step never guesses.
 
 **Read-back.** Today the tally is built from the pre-fold SpanList, so it is already
@@ -103,7 +112,8 @@ The right-panel repeat badge becomes a control: **— / ×2 / ×3 / ×4 / Ending
 `addEndings(sec, lastN)`: "make the last N bars the 1st ending". Appends N new bars as
 the 2nd ending (chords copied from ending 1, then editable), sets
 `volta{ endings: [{start: bars-N+1, count: N, passes:[1]}, {start: bars+1, count: N, passes:[2]}] }`.
-Refused if it would make `start <= 1`. `removeEndings(sec)` deletes the 2nd-ending
+Requires an integer `1 <= lastN < bars` (so ending 1 starts at bar ≥ 2 and neither
+ending is empty), else refused. `removeEndings(sec)` deletes the 2nd-ending
 bars and drops the repeat (confirm). Three-plus endings and pass lists other than
 `[1],[2]` stay prompt-only.
 
@@ -118,13 +128,26 @@ so it works on touch (no hover — `uat-plan-v1.md` S16 / issue #173):
 |---|---|
 | `splitBar(sec, bar)` | A bar with k ≥ 2 chords becomes k bars, one chord each, whole bar. Disabled for k = 1. Exactly Graham's `D E` → `D \| E`. |
 | `insertBar(sec, at)` | New bar is empty (inherits the previous chord — the sparse convention). |
-| `deleteBar(sec, bar)` | Refused on the section's only bar. If it carries a marker or is the only bar of an ending → confirm, naming the marker / ending. If it leaves a plain repeat at 1 bar → confirm, drops the repeat. |
+| `deleteBar(sec, bar)` | Refused on the section's only bar. Refused on the last body bar of a volta section ("the repeat needs a bar before its endings — remove the endings first"). Bar carries a marker → confirm, removes the marker (and its dependents, §5.4). Only bar of an ending → confirm, removes the endings. Leaves a plain repeat at 1 bar → confirm, drops the repeat. |
 
-**Remap rule** for a change of `d` bars at position `p` in section S (insert/split
-`d > 0`, delete `d < 0`): every nav ref in S with `bar > p` shifts by `d`; a volta
-ending entirely after `p` shifts `start`; an ending containing `p` grows/shrinks
-`count`; an ending shrunk to 0 is removed, and fewer than 2 endings drops the repeat
-(this is the confirm above).
+**Remap rule — references follow BARS, not positions.** Each op is defined as a map
+from every old bar to its new bar(s); every reference then follows its bar:
+
+- **Unchanged bars** keep their refs, wherever they move. `insertBefore(p)` puts the
+  new bar at p and old bar p becomes p+1 — its markers go with it; `insertAfter(p)`
+  leaves p and its markers in place.
+- **Split** maps bar p to k bars. A **start-edge** marker (segno, coda —
+  `roadmap-render.ts` emits `edge:'start'`) goes to the **first** new bar; an
+  **end-edge** marker (To Coda, Fine, D.S./D.C. departure — `edge:'end'`,
+  `roadmap-render.ts:185`) goes to the **last**, so the musical bar still ends where it
+  did.
+- **Deleted bar:** its refs are removed under the confirm above; never shifted onto a
+  neighbour.
+- **Volta groups.** Each bar belongs to one group: the body (before ending 1), ending i,
+  or none. A new bar joins the group of the bar it was inserted relative to; split
+  bars stay in their bar's group. Each ending's `{start, count}` is recomputed from its
+  group's bars after the op. A group emptied by a delete is handled by the refusals /
+  confirms above, so `start > 1` and `count >= 1` always hold.
 
 ### 5.4 Navigation markers
 
@@ -140,11 +163,15 @@ naming it — replaces today's silent drop of the whole navigation block.
 
 - **Merge (§4):** fixtures per condition — merges, and the near-miss that must not
   (differs by one chord; 1-bar run; nav ref into copy 2; non-adjacent; existing repeat;
-  `Verse` vs `Chorus` with identical chords). Tally lines match the merged spec.
+  `Verse` vs `Chorus` with identical chords; **two identical Verses before a D.C.** —
+  Codex R1's counterexample; **three identical Verses then an Outro with a ref** — the
+  index remap). Tally lines match the merged spec.
 - **Ops (§5):** each op's refusal cases, plus one **property test**: random sequences
   of ops over the existing builder fixtures, asserting after every step that
   (a) `viewToSpec` → `validateRoadmapSpec` is ok, (b) every nav ref and ending still
-  lands on the same musical bar (tracked with bar ids in the test harness),
+  lands on the same musical bar — tracked by a **synthetic stable id** the harness
+  attaches to each bar and carries through the op's bar map (rendered bar ids are
+  positional, `roadmap-layout.ts:182`, so they can't prove this),
   (c) `chords.length === bars`.
 - **UI:** bar action row reachable by tap; repeat control disabled at 1 bar;
   confirms name what is removed.
