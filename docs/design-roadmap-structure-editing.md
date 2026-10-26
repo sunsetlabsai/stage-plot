@@ -73,10 +73,15 @@ A **run** of 2+ *adjacent* sections merges into the first, with
 - none carries a `repeat` already;
 - `bars >= 2` (the plain-repeat precondition — a 1-bar run stays longhand);
 - no nav ref points into any section of the run except the first;
-- **the merged chart plays the same as the longhand one.** Compile both
-  (`layoutRoadmap` → `buildCalibration` → `compileRoadmap`) and walk each to the end
-  with `initVM` / `stepVM` (`lib/roadmap-vm.ts`); the played sequence of bar contents
-  (chords with inheritance resolved) must be identical. This is the test that matters
+- **the merged chart plays the same as the longhand one** — the **playback-equivalence
+  check**, defined once here and reused by §5.1. For each spec: `layoutRoadmap` →
+  `buildCalibration` → `resolveRoadmap` (`lib/chart-calibration.ts:974`), which walks
+  the VM to completion **under the resolver's existing termination cap**; a capped or
+  failed walk counts as *not equivalent*. Each `TraversalStep.barId` is looked up in
+  the layout to its `(section, bar)`, and that bar's **effective chord** is taken: its
+  own chords, or if null, the nearest preceding non-null bar in **written order**
+  (across section boundaries) — what a player reading the page sounds. The two
+  sequences of effective chords must be identical, step for step. This is the test that matters
   when a jump is present: the VM keeps a repeat's pass count when a D.C./D.S. fires
   (`roadmap-vm.ts:497,506`), so a repeat replayed by a jump is played **once** — two
   identical Verses before a D.C. play 4 times longhand but 3 times merged, and that run
@@ -105,7 +110,7 @@ The right-panel repeat badge becomes a control: **— / ×2 / ×3 / ×4 / Ending
 | Op | Behaviour |
 |---|---|
 | `setPlainRepeat(sec, times \| null)` | `bars < 2` → refused ("a 1-bar section can't repeat"). From volta → confirm ("removes the 1st/2nd endings"). |
-| `unrollRepeat(sec)` | Plain ×N → N adjacent copies, no repeat. Copy 1 keeps the `id` and any nav refs; copies get fresh ids. The inverse of §4, for a chart that should be written out. |
+| `unrollRepeat(sec)` | Plain ×N → N adjacent copies, no repeat. Copy 1 keeps the `id` and any nav refs; copies get fresh ids. For a chart that should be written out. **Gated by the §4 playback-equivalence check:** refused when unrolling would change what is played — e.g. a Verse ×2 replayed by a D.C. plays 3 passes as a repeat but 4 written out ("this repeat is replayed by the D.C.; writing it out would add a pass"). |
 
 ### 5.2 1st / 2nd endings
 
@@ -143,8 +148,19 @@ from every old bar to its new bar(s); every reference then follows its bar:
   did.
 - **Deleted bar:** its refs are removed under the confirm above; never shifted onto a
   neighbour.
-- **Volta groups.** Each bar belongs to one group: the body (before ending 1), ending i,
-  or none. A new bar joins the group of the bar it was inserted relative to; split
+- **Chords follow bars too.** A null bar inherits the preceding chord
+  (`roadmap-view.ts:36`), so an op can change what a *surviving* bar sounds without
+  touching it: with `C, G, null`, deleting the G leaves `C, null` — the third bar now
+  sounds C, and the spec is still valid, so nothing catches it. Rule: compute every
+  bar's effective chord (written-order inheritance, as in §4) before the op; after it,
+  any surviving bar whose effective chord changed has that chord **written in
+  explicitly**. Applies to every op in this layer, including section remove and
+  drag-reorder, since §3 routes all structure edits through it. A newly inserted bar is
+  not "surviving" — it inherits by design.
+- **Volta groups.** Each bar belongs to one group: the **body** (every bar before the
+  **earliest** ending's `start` — `endings[]` order is not position order: the
+  validator and VM sort ranges, `roadmap-spec.ts:425`, `roadmap-vm.ts:250`), one of the
+  endings, or none. Refusals that name "the last body bar" use this definition. A new bar joins the group of the bar it was inserted relative to; split
   bars stay in their bar's group. Each ending's `{start, count}` is recomputed from its
   group's bars after the op. A group emptied by a delete is handled by the refusals /
   confirms above, so `start > 1` and `count >= 1` always hold.
@@ -164,7 +180,8 @@ naming it — replaces today's silent drop of the whole navigation block.
 - **Merge (§4):** fixtures per condition — merges, and the near-miss that must not
   (differs by one chord; 1-bar run; nav ref into copy 2; non-adjacent; existing repeat;
   `Verse` vs `Chorus` with identical chords; **two identical Verses before a D.C.** —
-  Codex R1's counterexample; **three identical Verses then an Outro with a ref** — the
+  Codex R1's counterexample, and its mirror for §5.1 (Unroll of a Verse ×2 before a D.C.
+  is refused); **three identical Verses then an Outro with a ref** — the
   index remap). Tally lines match the merged spec.
 - **Ops (§5):** each op's refusal cases, plus one **property test**: random sequences
   of ops over the existing builder fixtures, asserting after every step that
@@ -172,7 +189,9 @@ naming it — replaces today's silent drop of the whole navigation block.
   lands on the same musical bar — tracked by a **synthetic stable id** the harness
   attaches to each bar and carries through the op's bar map (rendered bar ids are
   positional, `roadmap-layout.ts:182`, so they can't prove this),
-  (c) `chords.length === bars`.
+  (c) `chords.length === bars`, (d) every surviving bar's effective chord is unchanged
+  (the `C, G, null` delete case is a fixed fixture), (e) volta fixtures include endings
+  listed out of position order.
 - **UI:** bar action row reachable by tap; repeat control disabled at 1 bar;
   confirms name what is removed.
 
