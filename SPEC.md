@@ -495,7 +495,7 @@ The saved chart can be re-opened and edited later.
 - `chart_library.source_spec jsonb` (009), `source_prompt text` (016), `source_notation text check in ('numbers','letters')` (017); `is_builder` = `source_spec IS NOT NULL`. RPC `save_builder_chart` (17 args, `FOR UPDATE` slot lock, PT409, service_role only).
 - `chart_calibration (chart_id, source_hash)` row written `verified` by the RPC.
 - Pure libs: `roadmap-spec.ts` (model+validator) · `roadmap-authoring.ts` (key L0, grammar L1, fold L3, tally L4) · `roadmap-parse.ts` (model transport) · `roadmap-merge.ts` (repeated-section merge, server-only) · `roadmap-view.ts` (editor bridge, chord grammar, letters) · `roadmap-layout.ts` (shared layout, pdf-lib-free) · `roadmap-render.ts` (PDF+calibration) · `roadmap-rhythm.ts` (slash rule) · `roadmap-save.ts` (parity).
-- Routes: `/api/charts/roadmap/parse` · `/save` · `/[chartId]` (GET). UI: `components/RoadmapBuilder.tsx`, `components/ManageChartsModal.tsx`, `app/library/page.tsx`. Stub prototype: `app/mockup/roadmap-builder/page.tsx`.
+- Routes: `/api/charts/roadmap/parse` · `/save` · `/[chartId]` (GET). UI: `components/RoadmapBuilder.tsx`, `components/ManageChartsModal.tsx`, `app/library/page.tsx`.
 
 ### 5.3 Settled rulings
 

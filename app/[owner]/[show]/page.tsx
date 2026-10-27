@@ -38,7 +38,7 @@ import type {
   Bar,
   RoadmapMarker,
 } from '@/lib/types';
-import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES, POSITIONS } from '@/lib/setlist';
+import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, deleteMixPrompt, groupByPos, countLinkedInputs, deleteStageSlot, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES, POSITIONS } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import { planChanges, planGenerateShow, replaceShowPrompt, replaceCounts, isShowEmpty, describeProblems, validateNotes, notesReplacePrompt, summaryLines, type SummaryLine, type SummarySection } from '@/lib/ai-ops';
@@ -46,6 +46,8 @@ import SetlistImportPreview from '@/components/SetlistImportPreview';
 import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
 import { ByoaKeySettings } from '@/components/ByoaKeySettings';
 import { SettingsOverlay } from '@/components/SettingsOverlay';
+import { SlotDeleteDialog } from '@/components/SlotDeleteDialog';
+import { importShowPrompt, restoreImportUndo, type ImportUndo } from '@/lib/import-undo';
 import { resolveAvailability, canSendMessage, effectiveProbe, probeCapabilities, type FetchedProbe } from '@/lib/agent-availability';
 import { rememberPrompt } from '@/lib/prompt-cache';
 import { visibleTab, type ShowTab } from '@/lib/show-tabs';
@@ -660,9 +662,10 @@ function ShowWorkspace() {
     };
   }, []);
 
-  // One-level, in-memory undo for a setlist import (design §7). Null ⇒ no
-  // affordance. Not persisted: a reload drops it, which is the specified scope.
-  const [importUndo, setImportUndo] = useState<SetlistSong[] | null>(null);
+  // One-level, in-memory undo for a setlist import (design §7) or an Import Show
+  // (UAT S7) — see lib/import-undo. Null ⇒ no affordance. Not persisted: a
+  // reload drops it, which is the specified scope.
+  const [importUndo, setImportUndo] = useState<ImportUndo<AppConfig> | null>(null);
 
   const updateConfig = useCallback((
     fn: (prev: AppConfig) => AppConfig,
@@ -713,16 +716,26 @@ function ShowWorkspace() {
     // rows arrive on, and slot-only normalization left every imported song with
     // no `id` — the defect this fix exists for.
     setConfig((prev) => withStableIds({ ...prev, setlist: merged }));
-    setImportUndo(before);
+    setImportUndo({ kind: 'setlist', setlist: before });
+  }, []);
+
+  // Config → Import Show (UAT S7): replaces the WHOLE show, so undo restores the
+  // whole show. Same lifetime and same bypass of updateConfig as the setlist
+  // import above, so it cannot clear the snapshot it just armed. The read-only
+  // refusal updateConfig would have made is repeated here for that reason.
+  const applyShowImport = useCallback((imported: AppConfig, before: AppConfig) => {
+    if (isReadOnlyRef.current) return;
+    setConfig(withStableIds(imported));
+    setImportUndo({ kind: 'show', config: before });
   }, []);
 
   // No side effect inside a state updater: React may invoke an updater twice in
   // StrictMode, so the snapshot is read from scope and each setState is called once.
   const undoImport = useCallback(() => {
     if (!importUndo) return;
-    // Same reason as applyImportMerge: undo restores the pre-import setlist, whose
-    // rows may themselves predate id-minting.
-    setConfig((prev) => withStableIds({ ...prev, setlist: importUndo }));
+    // Same reason as applyImportMerge: undo restores pre-import rows, which may
+    // themselves predate id-minting.
+    setConfig((prev) => withStableIds(restoreImportUndo(prev, importUndo)));
     setImportUndo(null);
   }, [importUndo]);
 
@@ -784,6 +797,12 @@ function ShowWorkspace() {
 
   const band = configToBand(config);
   const isReadOnly = !isOwner;
+  // ★ UAT S1. Until THIS show loads, `config` is the built-in demo band (or, on
+  // a show change, the previous show), so no panel may render from it. Compared
+  // to the path, not a boolean: on the render after a route change the load
+  // effect hasn't reset loadedPath yet, and the old path must not count. The
+  // offline fallback sets loadedPath too, so a cached show still opens offline.
+  const showReady = loadedPath === `/${owner}/${slug}`;
   // ★ `tab` survives a show change (same route, new params → no remount), so an
   // owner sitting on Config who navigates to a show they only collaborate on
   // would otherwise keep the editor. Hiding the buttons is not enough — the
@@ -903,7 +922,8 @@ function ShowWorkspace() {
           )}
           <button
             onClick={() => setShowPrintModal(true)}
-            className="p-2 text-gray-500 hover:text-black transition-colors print:hidden"
+            disabled={!showReady}
+            className="p-2 text-gray-500 hover:text-black transition-colors print:hidden disabled:opacity-30"
             title="Print / Save PDF"
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -965,16 +985,19 @@ function ShowWorkspace() {
       )}
 
       {/* ── Content ────────────────────────────────────────────────────── */}
-      {shownTab === 'perform' && (
-        <PerformTab setlist={config.setlist} setlistReady={loadedPath === `/${owner}/${slug}`} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} chartCacheProgress={chartCacheProgress} />
+      {!showReady && (
+        <p role="status" className="text-gray-400 text-center py-16">Loading show…</p>
       )}
-      {shownTab === 'mix' && (
+      {showReady && shownTab === 'perform' && (
+        <PerformTab setlist={config.setlist} setlistReady={showReady} onOpenConfig={isReadOnly ? undefined : () => goToTab('config')} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} chartCacheProgress={chartCacheProgress} />
+      )}
+      {showReady && shownTab === 'mix' && (
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
       )}
-      {shownTab === 'config' && (
-        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} onImportApply={applyImportMerge} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} />
+      {showReady && shownTab === 'config' && (
+        <ConfigTab config={config} updateConfig={updateConfig} onBpmChange={handleBpmChange} onImportApply={applyImportMerge} onShowImport={applyShowImport} googleToken={googleToken} googleError={googleError} onDisconnectGoogle={() => { clearGoogleToken(); setGoogleToken(null); }} showId={showId} ownerId={showOwnerId} isOwner={isOwner} />
       )}
-      {shownTab === 'ai' && (
+      {showReady && shownTab === 'ai' && (
         <div className="p-4 md:p-8">
           <div className="max-w-4xl mx-auto">
             <AgentChat key={currentUserId ?? ''} config={config} updateConfig={updateConfig} owner={owner} slug={slug} userId={currentUserId ?? ''} />
@@ -1049,11 +1072,13 @@ function ShowWorkspace() {
 // PERFORM TAB — musician's gig-day view
 // ════════════════════════════════════════════════════════════════════════════
 
-function PerformTab({ setlist, setlistReady, showInfo, isOffline, accessToken, slug, owner, isOwner, chartCacheProgress }: {
+export function PerformTab({ setlist, setlistReady, onOpenConfig, showInfo, isOffline, accessToken, slug, owner, isOwner, chartCacheProgress }: {
   setlist: SetlistSong[];
   // True once THIS show's setlist has loaded — until then `setlist` can be the
   // built-in demo band (UAT S1), which a deep link must not be resolved against.
   setlistReady: boolean;
+  // Owner only: the empty-setlist state links to where songs are added (S1).
+  onOpenConfig?: () => void;
   showInfo: { bandName: string; eventDate: string; venue: string; showName?: string };
   isOffline: boolean;
   accessToken?: string;
@@ -1223,7 +1248,16 @@ function PerformTab({ setlist, setlistReady, showInfo, isOffline, accessToken, s
 
         {/* Setlist */}
         {setlist.length === 0 ? (
-          <p className="text-zinc-500 text-center py-12">No setlist yet.</p>
+          <div className="text-center py-12">
+            <p className="text-zinc-500">No setlist yet.</p>
+            {onOpenConfig ? (
+              <button onClick={onOpenConfig} className="mt-3 text-sm font-semibold text-white underline hover:text-zinc-300">
+                Add songs in Config
+              </button>
+            ) : (
+              <p className="mt-1 text-sm text-zinc-600">The band hasn&apos;t added any songs.</p>
+            )}
+          </div>
         ) : (
           <div className="space-y-0.5">
             {setlist.map((song, idx) => {
@@ -6154,6 +6188,7 @@ function ConfigTab({
   updateConfig,
   onBpmChange,
   onImportApply,
+  onShowImport,
   googleToken,
   googleError,
   onDisconnectGoogle,
@@ -6170,6 +6205,9 @@ function ConfigTab({
   // Commits an import merge AND arms one-level undo, in Page so the affordance
   // survives this tab's remount (design §7). Deliberately not updateConfig.
   onImportApply: (merged: SetlistSong[], before: SetlistSong[]) => void;
+  // Config → Import Show: replaces the whole show AND arms undo (UAT S7). Same
+  // reason as onImportApply for living in Page.
+  onShowImport: (imported: AppConfig, before: AppConfig) => void;
   googleToken: GoogleToken | null;
   googleError?: string;
   onDisconnectGoogle: () => void;
@@ -6194,6 +6232,9 @@ function ConfigTab({
   const [chartsError, setChartsError] = useState('');
   // Title of the song whose charts the shared Manage-Charts modal is open for.
   const [manageChartsSong, setManageChartsSong] = useState<string | null>(null);
+  // The slot whose delete is waiting on the linked-inputs choice (UAT S8).
+  const [pendingSlotDelete, setPendingSlotDelete] = useState<{ slotId: string; name: string; linkedCount: number } | null>(null);
+  const cancelSlotDelete = useCallback(() => setPendingSlotDelete(null), []);
 
   // Count songs with resolved charts
   const chartsMatchCount = config.setlist.filter((s) => s.charts && s.charts.length > 0).length;
@@ -6405,6 +6446,21 @@ function ConfigTab({
 
   return (
     <div className="p-4 md:p-8">
+      {pendingSlotDelete && (
+        <SlotDeleteDialog
+          slotName={pendingSlotDelete.name}
+          linkedCount={pendingSlotDelete.linkedCount}
+          onKeepLinks={() => {
+            updateConfig((p) => deleteStageSlot(p, pendingSlotDelete.slotId, 'keep'));
+            setPendingSlotDelete(null);
+          }}
+          onClearLinks={() => {
+            updateConfig((p) => deleteStageSlot(p, pendingSlotDelete.slotId, 'clear'));
+            setPendingSlotDelete(null);
+          }}
+          onCancel={cancelSlotDelete}
+        />
+      )}
       <div className="max-w-4xl mx-auto space-y-8">
 
         {/* ── 1. Show Info ────────────────────────────────────────────── */}
@@ -6600,30 +6656,18 @@ function ConfigTab({
                       <button
                         className={btnRemove}
                         onClick={() => {
-                          const linked = slot.id
-                            ? config.inputs.filter((i) => i.slotId === slot.id)
-                            : [];
-                          // Delete-time prompt is the primary guard when inputs are linked;
-                          // the needs-attention badge is the backstop. OK = keep & flag,
-                          // Cancel = clear their link.
-                          const keep =
-                            linked.length === 0 ||
-                            window.confirm(
-                              `${linked.length} input${linked.length > 1 ? 's are' : ' is'} linked to “${slotLabel(slot, blockIndexOf(config.stagePlot, idx))}”.\n\n` +
-                                `OK: keep them (they'll be flagged to relink).\n` +
-                                `Cancel: clear their link.`,
-                            );
-                          updateConfig((p) => ({
-                            ...p,
-                            stagePlot: p.stagePlot.filter((_, i) => i !== idx),
-                            // Kept inputs keep their slotId and get flagged by the
-                            // normalizer (dangling → needsReview). Cleared inputs drop it.
-                            inputs: keep
-                              ? p.inputs
-                              : p.inputs.map((i) =>
-                                  i.slotId === slot.id ? { ...i, slotId: undefined, needsReview: false } : i,
-                                ),
-                          }));
+                          const linked = slot.id ? countLinkedInputs(slot.id, config.inputs) : 0;
+                          // Linked inputs: ask, with a real Cancel (UAT S8). An
+                          // unlinked slot deletes on one click, like every other row X.
+                          if (slot.id && linked > 0) {
+                            setPendingSlotDelete({
+                              slotId: slot.id,
+                              name: slotLabel(slot, blockIndexOf(config.stagePlot, idx)),
+                              linkedCount: linked,
+                            });
+                            return;
+                          }
+                          updateConfig((p) => ({ ...p, stagePlot: p.stagePlot.filter((_, i) => i !== idx) }));
                         }}
                       >
                         X
@@ -7083,7 +7127,12 @@ function ConfigTab({
                   reader.onload = () => {
                     try {
                       const imported = deserializeShow(reader.result as string, file.name);
-                      updateConfig(() => withStableIds(imported));
+                      // Confirm with counts before the replace, which autosaves
+                      // within seconds; undo is the second line (UAT S7). Read
+                      // `config` here, at load, as the snapshot to restore.
+                      const ask = importShowPrompt(config, file.name);
+                      if (ask && !window.confirm(ask)) return;
+                      onShowImport(imported, config);
                     } catch (err) {
                       alert(err instanceof Error ? err.message : 'Could not read file.');
                     }
