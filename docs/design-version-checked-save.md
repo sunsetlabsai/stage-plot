@@ -1,6 +1,6 @@
 # Version-checked show save (UAT S5, and S3 rebuilt on it)
 
-**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1 folded (§3.1, §3.3–§3.6, §4.2, §7); awaiting Codex R2. Nothing here is built.
+**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1 + R2 folded (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R3. Nothing here is built.
 **Supersedes:** the client-side reconcile in PR #200 (`lib/offline-sync.ts` `reconcileOnLoad`,
 the set-aside store and its Restore/Discard banner, the page's reconnect effect). #200's S2 (offline owner editing) and S4 (flush on page hide)
 stand; its S3 is rebuilt on §3–§5 once this merges.
@@ -119,6 +119,11 @@ in a tab opened before the deploy, and it is never silent.
 Two trigger functions, `security definer`, `set search_path = public`, execute revoked
 from `public`/`anon`/`authenticated`:
 
+- **Lock order.** `rpc_save_show` locks the show, then rewrites its entries. `rpc_delete_song`
+  deletes entries first, and the entries trigger would then lock the show — the opposite
+  order, so the two can deadlock (Codex R2 on #201; Postgres aborts one, so it fails loud,
+  not silent). `018` re-states `rpc_delete_song` to lock the affected shows `FOR UPDATE`
+  (ordered by id) **before** deleting entries, so both take show-then-entries.
 - **`setlist_entries`** — AFTER INSERT / UPDATE / DELETE, statement-level with transition
   tables: `update shows set updated_at = now() where id in (affected show_ids)`. Covers
   `rpc_delete_song` and any future entries writer. Inside `rpc_save_show` it touches the
@@ -141,9 +146,15 @@ because that is the setlist the owner chose to keep.
   count(*) from shows` → `t | 8`, nothing left to migrate. Both did read-then-replace of
   entries with no version check (Codex R1 on #201, finding 2); deleting them is cheaper
   than checking them.
-- **`POST /api/shows` (plain create) sets `setlist_migrated = true` when the config's
-  setlist is empty** — an empty setlist has nothing to migrate. So no new legacy shows
-  appear, and §4.4's migration-timing change (Q2) affects no show in practice.
+- **`POST /api/shows` never creates a legacy show** (Codex R2 on #201). Today a request
+  with a non-empty `config.setlist` and no `setlist_songs` takes the plain insert
+  (`app/api/shows/route.ts:117`), leaving a show with no entries for §3.5 to track — the
+  dashboard always sends `setlist_songs`, but the API and an older cached client need not.
+  After: a non-empty `config.setlist` with no `setlist_songs` has `setlist_songs` derived
+  from it server-side (title/key/lead/notes per row) and takes the RPC path, with the same
+  400 for an unnormalizable title that an explicit `setlist_songs` gets. An empty setlist
+  still takes the plain insert, now with `setlist_migrated = true` (nothing to migrate).
+  So no new legacy show can appear, and §4.4's migration-timing change (Q2) affects none.
 
 ## 4. Client (`lib/use-show.ts`)
 
@@ -168,6 +179,21 @@ marker stays and the pending copy goes next. The same rule governs the 409 path:
 made while §4.3's GET is in flight bumps the sequence, so step 3's "equal content → clear"
 compares and clears against the LATEST copy at the moment the GET returns, never the one
 that was sent.
+
+### 4.2a Persistence failures are loud
+
+Everything above assumes the owner's copy is in the cache under a marker. Storage can
+refuse either write (quota, private mode, blocked site data), and #200 swallowed both
+(Codex R2 on #201). Rule:
+
+1. **Marker first, then cache.** If the cache write then fails, the marker sits over the
+   previous copy — which is still a correct thing to recover, never a newer one lost.
+2. **Either write throwing is shown, not swallowed:** the pill reads "Couldn't keep your
+   changes on this device — keep this page open until they save." Saving to the server
+   carries on unchanged; once the latest edit is confirmed the warning clears with it.
+3. A failed marker write never lets the next load treat the cache as clean: the load
+   reads the marker, and a missing marker over a cache that holds the owner's edit is
+   exactly the case step 2 has already told the owner about.
 
 ### 4.3 A 409
 
@@ -258,6 +284,14 @@ for them, and their screen must not change under them mid-gig.
 | 2 | admin migration replaces a successful save; script missing from the inventory | §3.6: both retired; no unmigrated shows exist |
 | 3 | an older save's success clears the marker | §4.2 marker rule (latest sequence only, incl. during the 409 GET) |
 | 4 | old tabs' rejected edit lost on reload | §3.4: not recovered, but never silent — the 428 says it was not saved |
+
+**Codex R2 on #201:**
+
+| # | Finding | Closed by |
+|---|---|---|
+| 1 | a failed marker/cache write silently loses the recovery path | §4.2a: marker first; any persistence failure is shown |
+| 2 | API / old client can still create a legacy show | §3.6: derived `setlist_songs`, RPC path; empty setlist created migrated |
+| — | `rpc_delete_song` vs `rpc_save_show` lock order (non-blocking) | §3.5: delete locks shows first |
 | — | collaborator at the matching version | §3.3: explicit owner check before either path |
 
 ## 8. Tests (written with the build)
@@ -272,7 +306,12 @@ for them, and their screen must not change under them mid-gig.
   change bumps every show referencing it, a bpm-only change bumps none; `rpc_delete_song`
   bumps the affected shows; inside `rpc_save_show` the returned `updated_at` equals the
   row's final value.
-- **Create:** an empty-setlist show is created `setlist_migrated = true`.
+- **Create:** an empty-setlist show is created `setlist_migrated = true`; a non-empty
+  `config.setlist` without `setlist_songs` goes through the RPC with derived songs.
+- **Persistence:** a throwing marker write or cache write sets the "Couldn't keep your
+  changes on this device" pill; the marker is written before the cache.
+- **Lock order (SQL):** concurrent `rpc_save_show` and `rpc_delete_song` on the same show
+  both complete (no deadlock), one after the other.
 - **Hook:** one save in flight (a second edit waits, then goes with the new base); 409 →
   GET → equal content adopts silently; 409 → different content holds saves, keeps this
   copy on screen and the marker set; edits while held are cached, not sent; *Keep mine*
