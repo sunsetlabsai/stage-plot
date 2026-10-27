@@ -202,7 +202,7 @@ export function planChanges<C extends ShowLists>(
         const tag = `${op.entity}.${key}`;
         if (!warned.has(tag)) {
           warned.add(tag);
-          warnings.push(`Ignored "${key}" — ${NOUN[op.entity]}s have no such field.`);
+          warnings.push(`Ignored "${key}" — ${PLURAL[op.entity]} have no such field.`);
         }
         continue;
       }
@@ -276,7 +276,7 @@ export function planChanges<C extends ShowLists>(
   // violate it, but pass 3 below relies on it, so it is checked, not assumed.
   for (const entity of OP_ENTITIES) {
     const ids = lists[entity].map((r) => r.id);
-    if (new Set(ids).size !== ids.length) return { ok: false, problems: [{ message: `two ${NOUN[entity]}s ended up with the same id — ask again` }] };
+    if (new Set(ids).size !== ids.length) return { ok: false, problems: [{ message: `two ${PLURAL[entity]} ended up with the same id — ask again` }] };
   }
 
   // Pass 3 — positional numbers an add may omit (§3.5). Assigned after every op
@@ -438,6 +438,125 @@ export function notesReplacePrompt(current: readonly GeneralNote[], incoming: re
     `Replace the general notes?\n\nThis removes or rewrites ${lost.length === 1 ? '1 existing note' : `${lost.length} existing notes`}:\n` +
     lost.map((n) => `  • ${n.label || '(no label)'}`).join('\n')
   );
+}
+
+// ── The approve card's diff (§7) ─────────────────────────────────────────────
+
+export interface SummaryLine {
+  kind: 'add' | 'remove' | 'patch' | 'join' | 'warn';
+  text: string;
+}
+
+export interface SummarySection {
+  title: string;
+  lines: SummaryLine[];
+}
+
+/** Field names as the tables label them, where the type's name would mean nothing to a performer. */
+const FIELD_LABEL: Record<string, string> = { slotId: 'performer', pos: 'position', inst: 'source', needsReview: 'review flag' };
+const fieldLabel = (f: string) => FIELD_LABEL[f] ?? f;
+
+/** Past this many patched rows in one list, the card counts instead of listing (§7). */
+export const SUMMARY_ROW_LIMIT = 5;
+
+const PLURAL: Record<OpEntity, string> = { stagePlot: 'performers', inputs: 'inputs', monitors: 'monitor mixes' };
+const TITLE: Record<OpEntity, string> = { stagePlot: 'Stage plot', inputs: 'Inputs', monitors: 'Monitors' };
+
+/**
+ * `ChangeSummary` as plain-language lines, grouped by list. A raw op list is
+ * worse than useless to a performer; this is what they approve. `prev`/`next`
+ * resolve a `slotId` to the performer it names, so a re-link reads
+ * "→ DSR — Ray", never a UUID.
+ */
+export function summaryLines(summary: ChangeSummary, prev: ShowLists, next: ShowLists): SummarySection[] {
+  // Two lookups, not one: a `from` names the performer as they were BEFORE
+  // Apply, a `to` as they will be after. One shared map let a same-batch
+  // rename overwrite the old name (Codex R1 on #196).
+  const names = (list: StageSlot[]) =>
+    new Map(list.map((s, idx) => [s.id, `${s.pos} — ${slotLabel(s, blockIndexOf(list, idx))}`] as const));
+  const before = names(prev.stagePlot);
+  const after = names(next.stagePlot);
+  const show = (field: string, v: unknown, side: 'from' | 'to'): string => {
+    if (v === undefined && field === 'needsReview') return 'no'; // absent flag = off
+    if (field === 'mix' && v === 0) return 'none'; // the unassigned sentinel
+    if (v === undefined || v === '') return field === 'slotId' ? 'none' : '—';
+    if (field === 'slotId') return (side === 'from' ? before : after).get(String(v)) ?? 'a removed performer';
+    if (typeof v === 'boolean') return v ? 'yes' : 'no';
+    return String(v);
+  };
+  const changeText = (c: FieldChange) => `${fieldLabel(c.field)} ${show(c.field, c.from, 'from')} → ${show(c.field, c.to, 'to')}`;
+
+  // An ADDED row lists EVERY field it sets, in `RULES` order. Choosing which
+  // fields "matter" was the defect — Codex found a missing one twice (routing
+  // in R1, stand/needs/power in R2). `RULES` is keyed `Record<keyof T, …>`, so
+  // a field added to lib/types.ts is shown here without anyone remembering to.
+  const HEAD: Record<OpEntity, string[]> = { stagePlot: ['pos', 'name'], inputs: ['ch', 'inst'], monitors: ['mix', 'name'] };
+  const headText: Record<OpEntity, (r: Record<string, unknown>) => string> = {
+    stagePlot: (r) => after.get(String(r.id)) ?? `${String(r.pos)} — ${String(r.name)}`,
+    inputs: (r) => `ch ${String(r.ch)} ${String(r.inst)}`.trim(),
+    monitors: (r) => `Mix ${String(r.mix)}${r.name ? ` (${String(r.name)})` : ''}`,
+  };
+  const addedText = (entity: OpEntity): string[] =>
+    (next[entity] as unknown as Record<string, unknown>[])
+      .filter((r) => !prevIds.has(String(r.id)))
+      .map((r) => {
+        // Every REQUIRED field, blank ones as "—" (Apply writes them), plus
+        // every optional field the row sets. An input's link is always shown:
+        // "no performer" is a state the user must see before Apply, not an
+        // absence (Codex R3 on #196 — the #195 marker had been lost).
+        const rest = Object.entries(RULES[entity])
+          .filter(([f, rule]) => f !== 'id' && !HEAD[entity].includes(f) && (rule.required || r[f] !== undefined || (entity === 'inputs' && f === 'slotId')))
+          .map(([f]) => (f === 'slotId' && r[f] === undefined ? 'no performer' : `${fieldLabel(f)} ${show(f, r[f], 'to')}`));
+        // A performer nobody's input links to is flagged, in both directions.
+        if (entity === 'stagePlot' && !next.inputs.some((i) => i.slotId === r.id)) rest.push('no inputs');
+        return rest.length > 0 ? `${headText[entity](r)} — ${rest.join(', ')}` : headText[entity](r);
+      });
+  const prevIds = new Set([...prev.stagePlot, ...prev.inputs, ...prev.monitors].map((r) => String(r.id)));
+
+  const sections: SummarySection[] = [];
+  for (const entity of OP_ENTITIES) {
+    const changes = summary[entity];
+    const lines: SummaryLine[] = [];
+    for (const label of changes.removed) lines.push({ kind: 'remove', text: label });
+    for (const text of addedText(entity)) lines.push({ kind: 'add', text });
+
+    const patched = changes.patched
+      .map((p) => ({ label: p.label, changes: p.changes.filter((c) => !isAutoCleared(c, p.changes)) }))
+      .filter((p) => p.changes.length > 0);
+    if (patched.length > SUMMARY_ROW_LIMIT) {
+      // Grouped by fields AND destination values, so "type → IEM" and
+      // "type → Side-fill" never collapse into one line (Codex R1 on #196).
+      const groups = new Map<string, typeof patched>();
+      for (const p of patched) {
+        const key = p.changes.map((c) => `${fieldLabel(c.field)} → ${show(c.field, c.to, 'to')}`).join('; ');
+        groups.set(key, [...(groups.get(key) ?? []), p]);
+      }
+      for (const [key, rows] of groups) {
+        lines.push({
+          kind: 'patch',
+          text: rows.length === 1 ? `${rows[0].label}: ${rows[0].changes.map(changeText).join('; ')}` : `${rows.length} ${PLURAL[entity]} — ${key}`,
+        });
+      }
+    } else {
+      for (const p of patched) lines.push({ kind: 'patch', text: `${p.label}: ${p.changes.map(changeText).join('; ')}` });
+    }
+    if (entity === 'monitors') {
+      for (const j of summary.joins) lines.push({ kind: 'join', text: `Mix ${j.mix} is back, so performers still on it rejoin: ${j.names.join(', ')}` });
+    }
+    if (lines.length > 0) sections.push({ title: TITLE[entity], lines });
+  }
+  if (summary.warnings.length > 0) sections.push({ title: 'Ignored', lines: summary.warnings.map((w) => ({ kind: 'warn' as const, text: w })) });
+  return sections;
+}
+
+/**
+ * The one change the card leaves out: a review flag cleared BECAUSE the same
+ * row was re-linked (step 2 item 7) — bookkeeping that follows the link line
+ * already shown. Any other flag change, including one an op set explicitly,
+ * is shown (Codex R1 on #196).
+ */
+function isAutoCleared(c: FieldChange, rowChanges: readonly FieldChange[]): boolean {
+  return c.field === 'needsReview' && c.from === true && c.to === false && rowChanges.some((o) => o.field === 'slotId');
 }
 
 /** One sentence for the refused card and for the model's `tool_result` (§5.4, §5.5). */

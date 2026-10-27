@@ -114,7 +114,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 |---|---|---|
 | `design-agent-codesigner.md` | SHIPPED-RECORD | Zone grid + BYOA/try-it modes (`lib/agent.ts:7-18`). |
 | `design-core-path-tier1.md` | SHIPPED-RECORD | §1 shipped (#144). §2 superseded by `design-ai-op-contract.md`. §3 mix identity shipped (`lib/setlist.ts` `renumberMix`; §3.6 lists choices made while building). |
-| `design-ai-op-contract.md` | PARTIAL | Steps 0–3 shipped (#147–#149, #194, step 3 PR). The AI builds or replaces a whole show via `generate_show` (`planGenerateShow`); the cascade and the whole-list tools are gone. **Step 4 unbuilt:** no `apply_changes`, so the AI cannot make a targeted edit yet. §14 records choices made while building. |
+| `design-ai-op-contract.md` | SHIPPED-RECORD | All steps shipped (#147–#149, #194, #195, step 4 PR). `apply_changes` → `planChanges` (`lib/ai-ops.ts`) with the §7 diff card (`summaryLines`); `generate_show` builds or replaces; no cascade, no whole-list edit tool. §14 records choices made while building, incl. step 4 item 6: the spike measured its own prompt, not the shipped one. |
 
 ## Show, setlist, inputs, sharing
 

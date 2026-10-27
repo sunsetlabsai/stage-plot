@@ -935,3 +935,58 @@ safe on its own — so no deploy in the sequence is a half-wired state.
    problem, not the defence). Shapes are validated, and any existing note the new
    list does not keep verbatim is named on the card ("Replace notes") and
    confirmed. The prompt and tool description say the list is whole.
+
+### Step 4 — `apply_changes` wired, the diff card
+
+1. **No second confirm after Apply.** The card IS the confirmation: it renders
+   the diff `planChanges` computes, the same call apply then runs (§6, §7). A mix
+   brought back at an orphaned number is a `↺` line naming who rejoins
+   (step 2 item 2), so tier-1 §3.6 item 7's "confirmed with names" is met before
+   the click, not by a dialog after it.
+2. **A plan that would be refused says so on the pending card**, before the
+   click. Apply then records `'refused'` and Claude gets the reason (§5.4,
+   §5.5). The button is not hidden while pending: the refusal has to reach
+   Claude, and Apply is how it does.
+3. **The approved diff is stored on the tool call at Apply** (`sections`).
+   Re-planning after Apply would run against the changed config and describe
+   nothing, so an applied card would lose its record of what it did.
+4. **Card text is pure `lib/`** (`summaryLines`), and **every line says what
+   Apply will write** — Codex R1 on #196 found four places it did not:
+   - an ADDED row lists every **required** field (a blank one as "—", since
+     Apply writes it) and every optional field it sets, in `RULES` order; an
+     input always shows its link ("no performer" when unlinked) and a performer
+     no input links to says "no inputs" (Codex R3 on #196 — the #195 markers had
+     been lost when the pending card moved to this formatter). Before that,
+     (`+ ch 7 BGV — mic SM58, stand Straight, performer DSC — Dee`). R1's fix
+     chose the "important" fields and R2 found more it missed; choosing was the
+     defect. `RULES` is `Record<keyof T>`, so a new field appears without anyone
+     remembering it, and a test changes each field of each entity in turn and
+     requires the line to change. The `generate_show` card now renders through
+     the same planner and formatter (its hand-written preview had omitted slot
+     mix and input notes);
+   - past `SUMMARY_ROW_LIMIT` (5) patched rows the card counts, grouped by
+     fields **and destination values** (*"4 monitor mixes — type → IEM"*,
+     *"2 … — type → Side-fill"*); a group of one is shown in full;
+   - a `from` names the performer as they were BEFORE Apply, a `to` as after
+     (two lookups — a same-batch rename no longer rewrites the old name);
+   - only the review-flag clear that follows a re-link is hidden; any other
+     flag change, including one an op sets, is shown.
+   `slotId`/`pos`/`inst`/`needsReview` read as performer/position/source/review
+   flag, and performers are named (`DSR — Ray`), never ids.
+5. **The prompt reuses the spike's tested rules verbatim where it can** (§10.1),
+   plus three the spike's harness did not need: `null` clears an optional field
+   (step 2 item 6), a monitor's mix number is never changed (step 2 item 1), and
+   `generate_show` only on an empty show or "start over".
+6. **The shipped prompt was measured, not inferred: 7/7 on `claude-sonnet-4-6`
+   (2026-10-26).** The spike had measured its own prompt; what ships embeds the
+   rules in the larger codesigner prompt, with four tools and no `thinking`.
+   `~/op-spike-shipped.mts` sends exactly `SYSTEM_PROMPT` + `TOOLS` as the route
+   does, and judges every plan with the real `planChanges` as well as the
+   spike's verdicts. Two passes worth knowing:
+   - **C3 asked, but the wrong question** — names and positions, not "new
+     singers or existing players?" (§4). The rule held (no confident call); the
+     reading it asked about did not. UAT SH-28(c) checks it by hand.
+   - **E renumbered a mix by remove + add** (Junior: Mix 4 removed, Mix 6
+     added, slot patched 4 → 6). Consistent, and fully visible on the card as
+     three lines, so not refused — but it is a renumber the patch rule (step 2
+     item 1) does not see. Recorded, not fixed.

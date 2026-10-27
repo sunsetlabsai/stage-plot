@@ -2,6 +2,7 @@
 // See docs/design-agent-codesigner.md for full design
 
 import { POSITIONS } from './setlist';
+import { OP_ACTIONS, OP_ENTITIES } from './ai-ops';
 
 export const SYSTEM_PROMPT = `You are a live sound engineer and stage manager assistant. You help musicians and engineers set up shows by translating natural language descriptions into structured technical configurations.
 
@@ -45,8 +46,21 @@ Always use the provided tools to make changes. Never just describe what you woul
 
 The current show configuration is provided in each message.
 - If the show has no stage plot, inputs or monitors yet, build it with generate_show.
-- If the show already has content, generate_show REPLACES its stage plot, inputs and monitors (never the setlist, charts, notes or show info), and the user is asked to confirm first. Use it only when the user wants to start over or regenerate.
-- For a targeted change to a show that already has content ("Beta 91 on the kick", "add a BGV mic for the bassist"), do NOT regenerate. Tell the user targeted AI edits are not available yet: they can make the change directly in the tables, or ask you to regenerate the whole show.
+- If the show already has content, change it with apply_changes. generate_show would REPLACE its stage plot, inputs and monitors (the user is asked to confirm first); use it only when the user asks to start over or regenerate.
+
+Editing with apply_changes. Every row in the configuration carries a stable "id". Call apply_changes ONCE with a list of ops:
+- Touch ONLY the rows you intend to change. Rows you do not mention are left exactly as they are. Never re-send an unchanged row.
+- "patch" MERGES: give the row's id and ONLY the fields that change. Fields you omit keep their current values. Send null to clear an optional field (e.g. slotId to unlink an input).
+- "remove" deletes an existing row. Give its id, nothing else.
+- "add" creates a new row. Never give an id — the app assigns it.
+- To reference a row you are creating in this same batch, put a "tempId" on the add and use that same string wherever an id is expected. A tempId MUST start with "new:" and must be unique within the batch. Example: a slot added with tempId "new:alicia" is referenced by an input whose slotId is "new:alicia".
+- A change often spans lists. A performer's stage slot and their input channels travel together: removing a performer means removing both, and adding a performer usually means adding both. Put every op in the one call.
+- inputs.slotId links an input to a performer's stage slot. A new input for a performer who is ALREADY on the stage plot must carry that performer's EXISTING slotId — do not create a second stage slot for them.
+- stagePlot.mix is the monitor mix a performer listens to. Any value of 1 or more must name a monitor that exists after your changes are applied. 0 means "no monitor assigned" and is always allowed.
+- Never change an existing monitor's mix number: that is a renumber, which moves its performers, and the user does it in the Monitor Mixes table.
+- inputs.ch and monitors.mix may be omitted on an add — the app assigns the next free number.
+
+If the request is ambiguous about WHICH existing rows it affects, or about whether a person is new or already on the stage plot, ASK rather than guess. A wrong guess costs the user more than a question does.
 - update_notes REPLACES the whole notes list. To add or change one note, send every existing note you are keeping as well.
 - You cannot change the setlist or charts. Point the user to setlist import or the Setlist tab.
 - If a tool result says a change was refused, it tells you why. Fix the problem and try again, or ask the user.`;
@@ -125,6 +139,45 @@ export const TOOLS = [
     },
   },
   {
+    // design-ai-op-contract §3: the ONLY edit tool. Rows it does not name
+    // cannot change (O1), so there is no whole-list write to get wrong.
+    name: 'apply_changes',
+    description:
+      'Apply a set of targeted changes to the stage plot, inputs and monitor mixes. Only the rows named in ops are affected; every other row is left untouched. The user approves the whole set or none of it.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        ops: {
+          type: 'array' as const,
+          description: 'The ops to apply, in order.',
+          items: {
+            type: 'object' as const,
+            properties: {
+              entity: { type: 'string' as const, enum: [...OP_ENTITIES], description: 'Which list this op targets.' },
+              action: {
+                type: 'string' as const,
+                enum: [...OP_ACTIONS],
+                description: 'add = create a row (no id); remove = delete by id; patch = merge changed fields into the row named by id.',
+              },
+              id: { type: 'string' as const, description: 'The id of an EXISTING row (or a tempId added earlier in this batch). Required for remove and patch. Never set on add.' },
+              tempId: {
+                type: 'string' as const,
+                description: 'add only. A handle for the row being created, so other ops in this batch can reference it. MUST start with "new:" and be unique in the batch.',
+              },
+              values: {
+                type: 'object' as const,
+                description: 'add: the fields of the new row. patch: ONLY the fields that change. Omit for remove. Never put id or tempId in here.',
+                additionalProperties: true,
+              },
+            },
+            required: ['entity', 'action'],
+          },
+        },
+      },
+      required: ['ops'],
+    },
+  },
+  {
     name: 'update_notes',
     description: 'Replace the general notes section. This is the WHOLE list: include every existing note you are keeping.',
     input_schema: {
@@ -183,4 +236,4 @@ export interface ContentBlock {
   is_error?: boolean;
 }
 
-export type ToolName = 'generate_show' | 'update_notes' | 'update_show_info';
+export type ToolName = 'generate_show' | 'apply_changes' | 'update_notes' | 'update_show_info';

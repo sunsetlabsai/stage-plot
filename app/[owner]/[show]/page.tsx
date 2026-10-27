@@ -41,7 +41,7 @@ import type {
 import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES, POSITIONS } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
-import { planGenerateShow, replaceShowPrompt, replaceCounts, isShowEmpty, describeProblems, validateNotes, notesReplacePrompt } from '@/lib/ai-ops';
+import { planChanges, planGenerateShow, replaceShowPrompt, replaceCounts, isShowEmpty, describeProblems, validateNotes, notesReplacePrompt, summaryLines, type SummaryLine, type SummarySection } from '@/lib/ai-ops';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
 import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
 import { ByoaKeySettings } from '@/components/ByoaKeySettings';
@@ -5274,6 +5274,9 @@ interface AgentMessage {
     // (design-ai-op-contract §5.4). `reason` is shown and sent back to Claude.
     status: 'pending' | 'applied' | 'rejected' | 'refused';
     reason?: string;
+    // apply_changes: the diff the user approved, kept so the card still shows
+    // it after Apply (re-planning against the changed config would be wrong).
+    sections?: SummarySection[];
   }>;
   // §5.2a.2b: the stream opened and then died. The turn stays visible — the
   // partial content WAS delivered and billed — but it is excluded from API
@@ -5507,11 +5510,11 @@ function AgentChat({
     return null;
   }
 
-  function setToolStatus(msgIdx: number, toolIdx: number, status: 'applied' | 'refused', reason?: string) {
+  function setToolStatus(msgIdx: number, toolIdx: number, status: 'applied' | 'refused', reason?: string, sections?: SummarySection[]) {
     setMessages((prev) => {
       const updated = [...prev];
       const msg = { ...updated[msgIdx], toolCalls: [...(updated[msgIdx].toolCalls || [])] };
-      msg.toolCalls![toolIdx] = { ...msg.toolCalls![toolIdx], status, ...(reason ? { reason } : {}) };
+      msg.toolCalls![toolIdx] = { ...msg.toolCalls![toolIdx], status, ...(reason ? { reason } : {}), ...(sections ? { sections } : {}) };
       updated[msgIdx] = msg;
       return updated;
     });
@@ -5540,6 +5543,21 @@ function AgentChat({
       setToolStatus(msgIdx, toolIdx, 'applied');
       // Only the three lists are swapped in, onto the LATEST config, so the
       // setlist, charts, notes and show info cannot be lost to a stale copy.
+      updateConfig((p) => ({ ...p, stagePlot: plan.next.stagePlot, inputs: plan.next.inputs, monitors: plan.next.monitors }));
+      return;
+    }
+
+    if (tc.name === 'apply_changes') {
+      // §6: one call → one planChanges → all ops or none. The card already
+      // showed this plan's diff (computed by the same function), so there is
+      // no second confirm; a mix brought back at an orphaned number names who
+      // rejoins it ON the card (§14 item 2).
+      const plan = planChanges(configRef.current, tc.input.ops);
+      if (!plan.ok) {
+        setToolStatus(msgIdx, toolIdx, 'refused', describeProblems(plan.problems));
+        return;
+      }
+      setToolStatus(msgIdx, toolIdx, 'applied', undefined, summaryLines(plan.summary, configRef.current, plan.next));
       updateConfig((p) => ({ ...p, stagePlot: plan.next.stagePlot, inputs: plan.next.inputs, monitors: plan.next.monitors }));
       return;
     }
@@ -5691,6 +5709,7 @@ function AgentChat({
 
   const toolNameLabels: Record<string, string> = {
     generate_show: 'Stage Plot, Inputs & Monitors',
+    apply_changes: 'Changes',
     update_notes: 'General Notes',
     update_show_info: 'Show Info',
   };
@@ -5757,7 +5776,19 @@ function AgentChat({
                       Update: {toolNameLabels[tc.name] || tc.name}
                     </p>
                     <div className="text-xs text-gray-600 mb-2 max-h-32 overflow-y-auto">
-                      <ToolCallPreview name={tc.name} input={tc.input} />
+                      {tc.name === 'generate_show' && tc.status === 'pending' ? (
+                        <GeneratePreview config={config} input={tc.input} />
+                      ) : tc.name === 'apply_changes' ? (
+                        tc.status === 'pending' ? (
+                          <ChangesPreview config={config} ops={tc.input.ops} />
+                        ) : tc.sections ? (
+                          <SummaryList sections={tc.sections} />
+                        ) : (
+                          <p>{Array.isArray(tc.input.ops) ? tc.input.ops.length : 0} proposed changes</p>
+                        )
+                      ) : (
+                        <ToolCallPreview name={tc.name} input={tc.input} />
+                      )}
                     </div>
                     {/* §9.2a: a replace states its cost in rows BEFORE the click, and
                         its button never reads "Apply" — the same click must not mean
@@ -5881,6 +5912,63 @@ function AgentChat({
           Send
         </button>
       </div>
+    </div>
+  );
+}
+
+// §7: an apply_changes card is a plain-language diff of what Apply will do,
+// from the same `planChanges` the apply runs — so it cannot describe a
+// different change. A plan that would be refused says so here, before the
+// click; Apply then records the refusal and tells Claude why.
+const SUMMARY_MARK: Record<SummaryLine['kind'], { mark: string; cls: string }> = {
+  add: { mark: '+', cls: 'text-green-700' },
+  remove: { mark: '−', cls: 'text-red-700' },
+  patch: { mark: '~', cls: 'text-gray-700' },
+  join: { mark: '↺', cls: 'text-amber-700' },
+  warn: { mark: '!', cls: 'text-gray-500' },
+};
+
+function ChangesPreview({ config, ops }: { config: AppConfig; ops: unknown }) {
+  const plan = planChanges(config, ops);
+  if (!plan.ok) {
+    return <p className="text-amber-700">⚠ This plan can&apos;t be applied: {describeProblems(plan.problems)}</p>;
+  }
+  const sections = summaryLines(plan.summary, config, plan.next);
+  if (sections.length === 0) return <p>No changes — every value is already as asked.</p>;
+  return <SummaryList sections={sections} />;
+}
+
+// The generate_show card, through the same planner and formatter as an edit,
+// so every created row lists every field it sets (the hand-written preview
+// left out each slot's mix and each input's notes — the class Codex R2 found
+// on #196). Removals are summarized by the card's row-count warning instead.
+function GeneratePreview({ config, input }: { config: AppConfig; input: Record<string, unknown> }) {
+  const plan = planGenerateShow(config, input);
+  if (!plan.ok) {
+    return <p className="text-amber-700">⚠ This plan can&apos;t be applied: {describeProblems(plan.problems)}</p>;
+  }
+  const sections = summaryLines(plan.summary, config, plan.next)
+    .map((sec) => ({ ...sec, lines: sec.lines.filter((l) => l.kind !== 'remove') }))
+    .filter((sec) => sec.lines.length > 0);
+  return <SummaryList sections={sections} />;
+}
+
+function SummaryList({ sections }: { sections: SummarySection[] }) {
+  return (
+    <div className="space-y-1.5">
+      {sections.map((sec) => (
+        <div key={sec.title}>
+          <p className="font-bold text-gray-500">{sec.title}</p>
+          <ul className="space-y-0.5">
+            {sec.lines.map((line, i) => (
+              <li key={i} className={SUMMARY_MARK[line.kind].cls}>
+                <span className="inline-block w-3 font-bold">{SUMMARY_MARK[line.kind].mark}</span>
+                {line.text}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
     </div>
   );
 }
