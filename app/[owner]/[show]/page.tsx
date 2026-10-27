@@ -59,7 +59,7 @@ import { buildApiMessages, hasPendingTools as transcriptHasPendingTools } from '
 // on the recovery path. Everything else about storage is `ByoaKeySettings`'s job now
 // (chunk 4) — the overlay is the sole writer, so `initialRemember`/the persist effect
 // that used to live here are gone.
-import { readKey, persistKey } from '@/lib/byoa-key-storage';
+import { readKey, persistKey, keyForSend } from '@/lib/byoa-key-storage';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -439,6 +439,12 @@ function ShowWorkspace() {
   const [isOwner, setIsOwner] = useState(false);
   // The signed-in account, if any. The AI tab scopes the device key to it (#134).
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  // Read by the auth listener, which subscribes once (deps: []) and so cannot
+  // close over these. Same pattern as isReadOnlyRef below.
+  const showOwnerIdRef = useRef<string | null>(null);
+  const currentUserIdRef = useRef<string | null>(null);
+  useEffect(() => { showOwnerIdRef.current = showOwnerId; }, [showOwnerId]);
+  useEffect(() => { currentUserIdRef.current = currentUserId; }, [currentUserId]);
   // Read by updateConfig, which is deliberately ref-stable (deps: []) so that no
   // mutation callback on the page changes identity. A ref keeps the read-only
   // gate current without spending that stability. Defaults to refusing: until
@@ -468,9 +474,21 @@ function ShowWorkspace() {
       setAuthChecked(true);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: string, session: { user: unknown } | null) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: string, session: { user: { id: string } } | null) => {
       setIsAuthenticated(!!session?.user);
       setAuthChecked(true);
+      // ★ Codex R1 on #197: ownership used to be decided once, at load. A
+      // sign-in or sign-out in ANOTHER tab reaches here (supabase broadcasts it)
+      // but left isOwner and the AI tab's account untouched, so an open AI tab
+      // kept sending the previous account's device key. Re-derive both whenever
+      // the account actually changes; AgentChat is keyed by the account, so it
+      // remounts (or, not owner, unmounts) and drops the key it held. The
+      // broadcast is best-effort, so AgentChat ALSO re-checks at send time.
+      const id = session?.user?.id ?? null;
+      if (id === currentUserIdRef.current) return;
+      currentUserIdRef.current = id;
+      setCurrentUserId(id);
+      setIsOwner(!!id && id === showOwnerIdRef.current);
     });
 
     return () => { subscription.unsubscribe(); };
@@ -594,8 +612,10 @@ function ShowWorkspace() {
             // gone — membership grants placement on the dashboard, not access.
             setIsOwner(data.owner_id === user.id);
             setCurrentUserId(user.id);
+            currentUserIdRef.current = user.id;
             setShowId(data.show_id);
             setShowOwnerId(data.owner_id ?? null);
+            showOwnerIdRef.current = data.owner_id ?? null;
             setSetlistMigrated(!!data.setlist_migrated);
           }
         } catch {
@@ -957,7 +977,7 @@ function ShowWorkspace() {
       {shownTab === 'ai' && (
         <div className="p-4 md:p-8">
           <div className="max-w-4xl mx-auto">
-            <AgentChat config={config} updateConfig={updateConfig} owner={owner} slug={slug} userId={currentUserId ?? ''} />
+            <AgentChat key={currentUserId ?? ''} config={config} updateConfig={updateConfig} owner={owner} slug={slug} userId={currentUserId ?? ''} />
           </div>
         </div>
       )}
@@ -5343,6 +5363,9 @@ function AgentChat({
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
+  // Held across the send-time identity check below, which awaits BEFORE
+  // `streaming` flips — without it a double-tap passes the `streaming` guard twice.
+  const checkingSendRef = useRef(false);
   const [error, setError] = useState('');
   const [tryitRemaining, setTryitRemaining] = useState<number | null>(null);
   const [tryitExhausted, setTryitExhausted] = useState(false);
@@ -5402,7 +5425,28 @@ function AgentChat({
 
   async function sendMessage(text?: string) {
     const userText = text ?? input.trim();
-    if (!userText || streaming) return;
+    if (!userText || streaming || checkingSendRef.current) return;
+
+    // #134 / Codex R1 on #197: the key in memory was read for the account this
+    // tab mounted with. Re-check against who is signed in NOW before anything
+    // is spent — the composer is untouched on refusal, so no text is lost.
+    checkingSendRef.current = true;
+    let liveUserId = '';
+    try {
+      const { data: { session: liveSession } } = await getSupabaseBrowser().auth.getSession();
+      liveUserId = liveSession?.user?.id ?? '';
+    } catch {
+      // Unreadable session ⇒ '' ⇒ refused below. Never send on an unknown identity.
+    }
+    const send = keyForSend(localStorage, sessionStorage, userId, liveUserId);
+    if (!send.ok) {
+      checkingSendRef.current = false;
+      setApiKey('');
+      setError('Your sign-in changed (in another tab, or it expired). Reload this page to continue.');
+      return;
+    }
+    // A sign-out elsewhere may have removed the stored key this tab still held.
+    if (send.key !== apiKey) setApiKey(send.key);
 
     // §5.2a.3: the cache write and the clear are ONE action — the composer must
     // never be emptied without the text landing somewhere first. `rememberPrompt`
@@ -5426,12 +5470,14 @@ function AgentChat({
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
     setStreaming(true);
+    // `streaming` now guards re-entry; the check window is closed.
+    checkingSendRef.current = false;
 
     try {
       const apiMessages = [...buildApiMessages(messages), { role: 'user', content: userText }];
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+      if (send.key) headers['Authorization'] = `Bearer ${send.key}`;
 
       const res = await fetch('/api/agent/chat', {
         method: 'POST',

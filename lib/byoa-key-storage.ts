@@ -17,9 +17,16 @@
 // other misses:
 //   1. The entry is named per account (`byoaKeyName`), so a different user never
 //      reads it — including when nobody signed out first.
-//   2. An explicit sign-out removes the leaving user's entry
-//      (`forgetKeyOnSignOut`), so it is not left on disk for the next person to
+//   2. An explicit sign-out removes EVERY account's device key on this browser
+//      (`forgetKeyOnSignOut`), so none is left on disk for the next person to
 //      lift out of devtools. Namespacing alone hides a key; it does not remove it.
+//      Every account, not just the leaving one: the leaving account's id is
+//      unknowable once its session has expired, and a dashboard left open past
+//      expiry then clicked Sign Out is exactly the shared-browser case (Codex
+//      R1 on #197). Sign-out means "I am leaving this browser".
+//   3. A key read into memory is re-checked at SEND time against who is signed
+//      in now (`keyForSend`). An open tab outlives a sign-in or sign-out in
+//      another tab, and the cross-tab auth broadcast is best-effort (Codex R1).
 // The old un-namespaced entry cannot be attributed to anyone, so it is DELETED on
 // first read rather than adopted by whoever signs in first — adopting it is the
 // exact inheritance this fixes. Cost: one re-entry per existing device key.
@@ -33,7 +40,7 @@ export function byoaKeyName(userId: string): string {
 }
 
 /** The slice of the DOM Storage API these rules need — so tests can fake it. */
-export type KeyStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+export type KeyStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'>;
 
 function dropLegacy(local: KeyStore, session: KeyStore): void {
   local.removeItem(LEGACY_BYOA_KEY);
@@ -111,16 +118,46 @@ export function persistKey(
 }
 
 /**
- * An explicit sign-out: the leaving account's device key goes with it (rule 2 above).
+ * An explicit sign-out: every account's device key on this browser goes (rule 2).
  *
  * Only an explicit sign-out — NOT a token expiry or a SIGNED_OUT auth event,
  * which can fire without the person leaving the browser. "Save to my account" is
  * the option that follows you between sign-ins.
  */
-export function forgetKeyOnSignOut(local: KeyStore, session: KeyStore, userId: string): void {
-  dropLegacy(local, session);
-  if (!userId) return;
-  const name = byoaKeyName(userId);
-  local.removeItem(name);
-  session.removeItem(name);
+export function forgetKeyOnSignOut(local: KeyStore, session: KeyStore): void {
+  for (const store of [local, session]) {
+    // Collect first: removing while indexing shifts the indices under the loop.
+    const names: string[] = [];
+    for (let i = 0; i < store.length; i++) {
+      const name = store.key(i);
+      if (name === LEGACY_BYOA_KEY || name?.startsWith(`${LEGACY_BYOA_KEY}:`)) names.push(name);
+    }
+    for (const name of names) store.removeItem(name);
+  }
+}
+
+/** What a send may carry, decided at the moment of sending (rule 3). */
+export type SendKey =
+  /** Identity unchanged: send with this key ('' ⇒ no device key; server resolves the rest). */
+  | { ok: true; key: string }
+  /** Someone else is signed in now, or nobody is: this tab is stale. Send nothing. */
+  | { ok: false };
+
+/**
+ * Re-check a send against the account signed in NOW, not the one the tab mounted with.
+ *
+ * `liveUserId` is the session's user id read at send time ('' if none). A mismatch
+ * refuses outright rather than sending without the key: the whole tab — owner
+ * gate, config, transcript — belongs to the mounted account. On a match the key
+ * is re-read from storage, so a sign-out elsewhere that removed it is honoured
+ * even though this tab still holds a copy in memory.
+ */
+export function keyForSend(
+  local: KeyStore,
+  session: KeyStore,
+  mountedUserId: string,
+  liveUserId: string,
+): SendKey {
+  if (!mountedUserId || liveUserId !== mountedUserId) return { ok: false };
+  return { ok: true, key: readKey(local, session, mountedUserId) };
 }

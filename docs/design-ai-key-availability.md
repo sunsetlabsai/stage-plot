@@ -1680,10 +1680,19 @@ Graham's ruling, the "both" option from #134:
 1. **Named per account** — `showrunr-claude-key:<auth user id>` (`byoaKeyName`,
    `lib/byoa-key-storage.ts`). A different account never reads it, including when
    nobody signed out first.
-2. **Removed on an explicit sign-out** (`forgetKeyOnSignOut`, called from the
-   dashboard's Sign Out before `auth.signOut()`). Rule 1 alone hides the key from
-   the app but leaves it on disk, readable in devtools by the next person. NOT on a
+2. **Removed on an explicit sign-out — every account's device key on the browser**
+   (`forgetKeyOnSignOut`, called from the dashboard's Sign Out before
+   `auth.signOut()`). Rule 1 alone hides the key from the app but leaves it on disk,
+   readable in devtools by the next person. *Every* account's, not only the leaving
+   one's: once a session has expired its id is unknowable, so a dashboard left open
+   past expiry and then signed out left the key behind (Codex R1 on #197). NOT on a
    token expiry or a `SIGNED_OUT` auth event — those can fire without anyone leaving.
+2a. **Re-checked at send time** (`keyForSend`). An open AI tab held the key it read
+   at mount and kept sending it after another tab signed someone else in (Codex R1).
+   The show page now re-derives ownership and the account on every auth change and
+   remounts `AgentChat` per account; because the cross-tab broadcast is
+   best-effort, every send also re-reads the live session and refuses on a
+   mismatch, and re-reads the stored key on a match.
 3. **The old un-namespaced entry is deleted on first read, never adopted.** It
    cannot be attributed to anyone; adopting it is the inheritance being fixed.
    Cost: one re-entry per existing device key.

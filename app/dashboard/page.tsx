@@ -144,11 +144,10 @@ export default function DashboardPage() {
 
   async function handleSignOut() {
     const supabase = getSupabaseBrowser();
-    // #134: the leaving account's device key goes before the session does — the
-    // id is only knowable while signed in, and the intent ("I'm leaving this
-    // browser") holds even if the sign-out request itself fails.
-    const { data: { session } } = await supabase.auth.getSession();
-    forgetKeyOnSignOut(localStorage, sessionStorage, session?.user?.id ?? '');
+    // #134: device keys go before the session does, and ALL of them — the
+    // leaving account's id may already be gone with an expired session, and the
+    // intent ("I'm leaving this browser") holds even if signOut itself fails.
+    forgetKeyOnSignOut(localStorage, sessionStorage);
     await supabase.auth.signOut();
     router.push('/sign-in');
   }

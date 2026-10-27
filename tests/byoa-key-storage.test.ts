@@ -6,6 +6,7 @@ import {
   initialRemember,
   persistKey,
   forgetKeyOnSignOut,
+  keyForSend,
   type KeyStore,
 } from '../lib/byoa-key-storage';
 
@@ -19,6 +20,10 @@ const store = (initial: Record<string, string> = {}): KeyStore & { map: Map<stri
     getItem: (k: string) => (map.has(k) ? map.get(k)! : null),
     setItem: (k: string, v: string) => void map.set(k, v),
     removeItem: (k: string) => void map.delete(k),
+    key: (i: number) => Array.from(map.keys())[i] ?? null,
+    get length() {
+      return map.size;
+    },
   };
 };
 
@@ -61,15 +66,22 @@ describe('scoped to the account (#134)', () => {
   it('sign-out REMOVES the leaving account\'s key from both stores, not just hides it', () => {
     const local = store(at(A));
     const session = store(at(A));
-    forgetKeyOnSignOut(local, session, A);
+    forgetKeyOnSignOut(local, session);
     expect(local.map.size).toBe(0);
     expect(session.map.size).toBe(0);
   });
 
-  it('sign-out leaves another account\'s key alone', () => {
-    const local = store({ ...at(A), ...at(B, 'sk-ant-b') });
-    forgetKeyOnSignOut(local, store(), A);
-    expect(readKey(local, store(), B)).toBe('sk-ant-b');
+  // ★ Codex R1 on #197: the dashboard looked the id up at click time and got ''
+  // from an expired session, so A's key stayed on disk for the next person.
+  it('sign-out needs no account id — it removes EVERY device key on the browser', () => {
+    const local = store({ ...at(A), ...at(B, 'sk-ant-b'), 'showrunr-cache-x': '{}' });
+    const session = store({ ...at(A) });
+    forgetKeyOnSignOut(local, session);
+    expect(readKey(local, session, A)).toBe('');
+    expect(readKey(local, session, B)).toBe('');
+    // Only key entries: the show cache and everything else survives.
+    expect(local.map.get('showrunr-cache-x')).toBe('{}');
+    expect(session.map.size).toBe(0);
   });
 
   it('the legacy un-namespaced key is DELETED on read, never adopted', () => {
@@ -87,12 +99,36 @@ describe('scoped to the account (#134)', () => {
     expect(local.map.has(LEGACY_BYOA_KEY)).toBe(false);
 
     const again = store({ [LEGACY_BYOA_KEY]: KEY });
-    forgetKeyOnSignOut(again, store(), '');
+    forgetKeyOnSignOut(again, store());
     expect(again.map.has(LEGACY_BYOA_KEY)).toBe(false);
   });
 
   it('a write with no account throws rather than saving a key nobody can read', () => {
     expect(() => persistKey(store(), store(), '', KEY, true)).toThrow(/signed-in account/);
+  });
+});
+
+// ★ Codex R1 on #197: an open AI tab kept the key it read at mount and sent it
+// after another tab changed who was signed in.
+describe('keyForSend — re-checked against who is signed in NOW', () => {
+  it('another account signed in since mount: refuses, never sends A\'s key', () => {
+    expect(keyForSend(store(at(A)), store(), A, B)).toEqual({ ok: false });
+  });
+
+  it('signed out since mount (or session expired): refuses', () => {
+    expect(keyForSend(store(at(A)), store(), A, '')).toEqual({ ok: false });
+  });
+
+  it('a tab that mounted with no account never sends', () => {
+    expect(keyForSend(store(), store(), '', '')).toEqual({ ok: false });
+  });
+
+  it('same account: sends the key as stored NOW, not the copy held in memory', () => {
+    const local = store(at(A));
+    expect(keyForSend(local, store(), A, A)).toEqual({ ok: true, key: KEY });
+    // Removed elsewhere (sign-out in another tab, then signed back in): nothing to send.
+    forgetKeyOnSignOut(local, store());
+    expect(keyForSend(local, store(), A, A)).toEqual({ ok: true, key: '' });
   });
 });
 
