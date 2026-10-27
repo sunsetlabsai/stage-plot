@@ -21,13 +21,7 @@
 // PDF points (PDF y is bottom-up, so y_pt = PAGE_H * (1 - y_norm)).
 
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from 'pdf-lib';
-import { CALIBRATION_SCHEMA_VERSION } from './chart-calibration';
-import type {
-  Bar,
-  ChartCalibration,
-  RoadmapMarker,
-  System,
-} from './types';
+import type { ChartCalibration } from './types';
 import type { BarRef, RoadmapSpec } from './roadmap-spec';
 // The section→systems→bars geometry lives in a pure, pdf-lib-free module shared
 // with the React preview (design §4.1). This file owns ONLY the PDF projection.
@@ -42,6 +36,11 @@ import {
 } from './roadmap-layout';
 import { slashBeats } from './roadmap-rhythm';
 import { renderCell } from './roadmap-view';
+import { barIndex, buildCalibration } from './roadmap-calibration';
+
+// Stage 2 lives in roadmap-calibration (pure, no pdf-lib) so the browser-side
+// builder can walk a chart; re-exported here for existing callers.
+export { buildCalibration };
 
 // The bar band (SYSTEM_BARS_H = 48pt) splits into a chord row on top and a rhythm
 // strip below, in the SAME 20/28 proportion as the preview's h-5 / h-7 rows, so a
@@ -72,136 +71,6 @@ export async function renderRoadmap(spec: RoadmapSpec, opts: RenderOptions = {})
   const calibration = buildCalibration(spec, layout);
   const pdfBytes = await drawRoadmapPdf(spec, layout, opts);
   return { pdfBytes, calibration };
-}
-
-// A (sectionIndex, barInSection) → laid bar lookup. The single source both the
-// calibration projection and the PDF glyph pass use to resolve repeats/navigation
-// to concrete bars, so the two can't disagree on where a marker lands.
-function barIndex(layout: RoadmapLayout): Map<string, LaidBar> {
-  const m = new Map<string, LaidBar>();
-  for (const b of layout.bars) m.set(`${b.sectionIndex}:${b.barInSection}`, b);
-  return m;
-}
-
-// ── Stage 2: calibration projection (layout → ChartCalibration) ───────────────
-// Born `verified`: the geometry is exact by construction. Maps systems/bars/
-// sections straight across, and projects spec repeats + navigation onto the
-// existing RoadmapMarker vocabulary (so resolveRoadmap/Perform/conductor consume
-// builder charts with zero new plumbing).
-export function buildCalibration(spec: RoadmapSpec, layout: RoadmapLayout): ChartCalibration {
-  const systems: System[] = layout.systems.map((s) => ({
-    id: s.id,
-    page: s.page,
-    yTop: s.yTop,
-    yBottom: s.yBottom,
-    xStart: s.xStart,
-    xEnd: s.xEnd,
-  }));
-
-  const bars: Bar[] = layout.bars.map((b) => ({
-    id: b.id,
-    systemId: b.systemId,
-    xStart: b.xStart,
-    xEnd: b.xEnd,
-    absNumber: b.absNumber,
-    sectionId: b.sectionId,
-  }));
-
-  const roadmap = buildMarkers(spec, layout);
-
-  return {
-    schemaVersion: CALIBRATION_SCHEMA_VERSION,
-    status: 'verified',
-    sections: layout.sections,
-    systems,
-    bars,
-    ...(roadmap.length > 0 ? { roadmap } : {}),
-  };
-}
-
-// Project section repeats + global navigation onto RoadmapMarkers.
-function buildMarkers(spec: RoadmapSpec, layout: RoadmapLayout): RoadmapMarker[] {
-  const markers: RoadmapMarker[] = [];
-
-  // Shared (sectionIndex, barInSection) → bar lookup for BarRef resolution and
-  // section-edge anchoring.
-  const barAt = barIndex(layout);
-  const refBarId = (ref: BarRef): string | null => barAt.get(`${ref.section}:${ref.bar}`)?.id ?? null;
-
-  // Section-scoped repeats.
-  spec.sections.forEach((section, sectionIndex) => {
-    const repeat = section.repeat;
-    if (!repeat) return;
-
-    const firstBar = barAt.get(`${sectionIndex}:1`);
-    const lastBar = barAt.get(`${sectionIndex}:${section.bars}`);
-    if (!firstBar || !lastBar) return; // unreachable for a validated spec
-
-    const repeatStartId = `mk-rs-${sectionIndex}`;
-    markers.push({ id: repeatStartId, kind: 'repeatStart', barId: firstBar.id, edge: 'start' });
-
-    if (repeat.kind === 'plain') {
-      markers.push({
-        id: `mk-re-${sectionIndex}`,
-        kind: 'repeatEnd',
-        barId: lastBar.id,
-        edge: 'end',
-        repeatStartId,
-        times: repeat.times,
-      });
-    } else {
-      repeat.endings.forEach((ending, ei) => {
-        const barIds: string[] = [];
-        for (let n = 0; n < ending.bars.count; n += 1) {
-          const bb = barAt.get(`${sectionIndex}:${ending.bars.start + n}`);
-          if (bb) barIds.push(bb.id);
-        }
-        markers.push({
-          id: `mk-end-${sectionIndex}-${ei}`,
-          kind: 'ending',
-          repeatStartId,
-          barIds,
-          numbers: ending.passes,
-        });
-      });
-    }
-  });
-
-  // Global navigation.
-  const nav = spec.navigation;
-  if (nav) {
-    if (nav.segno) {
-      const id = refBarId(nav.segno);
-      if (id) markers.push({ id: 'mk-segno', kind: 'segno', barId: id, edge: 'start' });
-    }
-    if (nav.coda) {
-      const id = refBarId(nav.coda);
-      if (id) markers.push({ id: 'mk-coda', kind: 'coda', barId: id, edge: 'start' });
-    }
-    if (nav.toCoda) {
-      const id = refBarId(nav.toCoda);
-      if (id) markers.push({ id: 'mk-tocoda', kind: 'toCoda', barId: id, edge: 'end' });
-    }
-    if (nav.fine) {
-      const id = refBarId(nav.fine);
-      if (id) markers.push({ id: 'mk-fine', kind: 'fine', barId: id, edge: 'end' });
-    }
-    if (nav.jump) {
-      const id = refBarId(nav.jump.at);
-      if (id) {
-        markers.push({
-          id: 'mk-jump',
-          kind: 'jump',
-          barId: id,
-          edge: 'end',
-          from: nav.jump.from,
-          until: nav.jump.until,
-        });
-      }
-    }
-  }
-
-  return markers;
 }
 
 // ── Stage 3: PDF projection (layout → bytes) ──────────────────────────────────

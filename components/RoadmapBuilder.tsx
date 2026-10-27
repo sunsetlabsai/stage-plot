@@ -25,7 +25,12 @@ import {
   renderCell,
   specToView,
   viewToSpec,
-  fitBars,
+  splitBar,
+  insertBar,
+  deleteBar,
+  setBarCount,
+  removeSection as removeSectionOp,
+  type OpResult,
   type ViewModel,
   type ViewSection,
   type ViewBar,
@@ -363,6 +368,7 @@ function Review({
   // stored (the silent-flip guard); a fresh build starts on numbers.
   const [mode, setMode] = useState<'numbers' | 'letters'>(editChart?.sourceNotation ?? 'numbers');
   const [editing, setEditing] = useState<string | null>(null); // `${sectionId}:${barIndex}`
+  const [notice, setNotice] = useState<OpNotice | null>(null);
 
   const beats = view.timeSig.beats;
   const free = availableRoles(charts);
@@ -384,19 +390,35 @@ function Review({
     });
   }
 
-  function updateSection(id: string, patch: Partial<Pick<ViewSection, 'label' | 'bars'>>) {
-    patchSections((prev) =>
-      prev.map((s) => {
-        if (s.id !== id) return s;
-        const next = { ...s, ...patch };
-        if (patch.bars !== undefined) next.chords = fitBars(next.chords, patch.bars);
-        return next;
-      }),
-    );
+  // Structure edits (bar count, section removal, the bar action row) all run
+  // through the pure ops in lib/roadmap-view, which move every chord / ending /
+  // marker reference with its bar (design-roadmap-structure-editing.md §3). A
+  // refused op says why; an op that takes something with it (a marker on a deleted
+  // bar, an ending emptied, a repeat left at 1 bar) asks first, naming it.
+  // Returns whether the edit was applied, so a field can revert its draft.
+  function runOp(result: OpResult, verb: string, where: OpNotice['where']): boolean {
+    if (!result.ok) {
+      setNotice({ text: result.reason, where });
+      return false;
+    }
+    if (result.removes.length > 0 && !confirm(`${verb}? This also removes ${joinList(result.removes)}.`)) {
+      return false;
+    }
+    setNotice(null);
+    setView(result.view);
+    return true;
   }
 
-  function removeSection(id: string) {
-    patchSections((prev) => prev.filter((s) => s.id !== id));
+  function renameSection(id: string, label: string) {
+    patchSections((prev) => prev.map((s) => (s.id === id ? { ...s, label } : s)));
+  }
+
+  function setSectionBars(s: ViewSection, bars: number): boolean {
+    return runOp(setBarCount(view, s.id, bars), `Change ${s.label} to ${bars} bars`, 'sections');
+  }
+
+  function removeSection(s: ViewSection) {
+    runOp(removeSectionOp(view, s.id), `Remove ${s.label}`, 'sections');
   }
 
   function addSection() {
@@ -409,15 +431,25 @@ function Review({
   // Click-to-edit a bar: parseBarInput has already validated; empty clears the
   // bar (inherit). No run-length chips — numerals are edited on the system.
   function commitBar(sectionId: string, barIndex: number, cells: ViewBar) {
-    patchSections((prev) =>
-      prev.map((s) => {
-        if (s.id !== sectionId) return s;
-        const chords = s.chords.slice();
-        chords[barIndex] = cells;
-        return { ...s, chords };
-      }),
-    );
+    setView((prev) => (prev ? withBar(prev, sectionId, barIndex, cells) : prev));
     setEditing(null);
+  }
+
+  // The bar action row. What is typed in the open bar is committed first, so
+  // Split acts on the chords on screen; `draft` is undefined when the input
+  // doesn't parse, and the committed bar is used as-is.
+  function barAction(sectionId: string, barIndex: number, action: BarAction, draft: ViewBar | undefined) {
+    const base = draft === undefined ? view : withBar(view, sectionId, barIndex, draft);
+    const bar = barIndex + 1;
+    const result =
+      action === 'split'
+        ? splitBar(base, sectionId, bar)
+        : action === 'delete'
+          ? deleteBar(base, sectionId, bar)
+          : insertBar(base, sectionId, bar, action === 'insertBefore' ? 'before' : 'after');
+    const label = view.sections.find((s) => s.id === sectionId)?.label ?? '';
+    const verb = `${action === 'split' ? 'Split' : 'Delete'} ${label} bar ${bar}`;
+    if (runOp(result, verb, 'bar')) setEditing(null);
   }
 
   async function save() {
@@ -527,7 +559,8 @@ function Review({
         <ParseErrors error={error} specErrors={specErrors} />
         <p className="text-[11px] text-zinc-600">
           Tip: click a bar — &ldquo;1&rdquo; or &ldquo;IV&rdquo; for a whole bar, &ldquo;5 4&rdquo; to
-          split evenly, &ldquo;1 - 4 5&rdquo; to tie (2 of 1, then 4, then 5).
+          split evenly, &ldquo;1 - 4 5&rdquo; to tie (2 of 1, then 4, then 5). The buttons under an
+          open bar split it into one bar per chord, insert a bar, or delete it.
         </p>
         {tally.length > 0 && <ReadBack tally={tally} />}
       </aside>
@@ -549,8 +582,13 @@ function Review({
           sections={view.sections}
           explicitBarsPerLine={view.barsPerLine}
           editing={editing}
-          setEditing={setEditing}
+          setEditing={(k) => {
+            setNotice(null);
+            setEditing(k);
+          }}
           onCommitBar={commitBar}
+          onBarAction={barAction}
+          barNotice={notice?.where === 'bar' ? notice.text : ''}
         />
       </main>
 
@@ -576,11 +614,17 @@ function Review({
                       key={s.id}
                       section={s}
                       index={i}
-                      onChange={(patch) => updateSection(s.id, patch)}
-                      onRemove={() => removeSection(s.id)}
+                      onRename={(label) => renameSection(s.id, label)}
+                      onBars={(n) => setSectionBars(s, n)}
+                      onRemove={() => removeSection(s)}
                     />
                   ))}
                 </div>
+                {notice?.where === 'sections' && (
+                  <p role="alert" className="mt-1.5 text-xs text-amber-400">
+                    {notice.text}
+                  </p>
+                )}
               </SortableContext>
             </DndContext>
             <button onClick={addSection} className="text-xs text-zinc-500 hover:text-blue-400 px-1 mt-1.5">
@@ -676,6 +720,34 @@ function Review({
   );
 }
 
+// Where a refused structure edit explains itself: under the open bar, or under the
+// section list (bar count / remove).
+interface OpNotice {
+  text: string;
+  where: 'bar' | 'sections';
+}
+
+type BarAction = 'split' | 'insertBefore' | 'insertAfter' | 'delete';
+
+// "the Fine", "the Fine and the D.C. al Fine", "a, b and c".
+function joinList(items: string[]): string {
+  return items.length <= 1 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+// Replace one bar's chords — a content edit, not a structure edit, so no
+// reference moves.
+function withBar(view: ViewModel, sectionId: string, barIndex: number, cells: ViewBar): ViewModel {
+  return {
+    ...view,
+    sections: view.sections.map((s) => {
+      if (s.id !== sectionId) return s;
+      const chords = s.chords.slice();
+      chords[barIndex] = cells;
+      return { ...s, chords };
+    }),
+  };
+}
+
 // Short human label for a section's repeat badge.
 function repeatLabel(repeat: SectionRepeat | undefined): string | null {
   if (!repeat) return null;
@@ -704,12 +776,14 @@ function navMarkers(nav: ViewNavigation | undefined): string[] {
 function SortableSectionRow({
   section,
   index,
-  onChange,
+  onRename,
+  onBars,
   onRemove,
 }: {
   section: ViewSection;
   index: number;
-  onChange: (patch: Partial<Pick<ViewSection, 'label' | 'bars'>>) => void;
+  onRename: (label: string) => void;
+  onBars: (bars: number) => boolean;
   onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -737,15 +811,11 @@ function SortableSectionRow({
       <span className="text-zinc-600 text-[11px] w-4">{index + 1}</span>
       <input
         value={section.label}
-        onChange={(e) => onChange({ label: e.target.value })}
+        onChange={(e) => onRename(e.target.value)}
         className="bg-transparent text-white text-sm w-20 outline-none focus:text-blue-300"
       />
-      <input
-        value={section.bars}
-        type="number"
-        onChange={(e) => onChange({ bars: Math.max(1, Number(e.target.value) || 1) })}
-        className="w-11 bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-center text-xs text-white outline-none focus:border-blue-500"
-      />
+      {/* Keyed by the bar count so an applied edit re-seeds the draft. */}
+      <BarCountField key={section.bars} bars={section.bars} onCommit={onBars} />
       {repeat && (
         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30 whitespace-nowrap">
           {repeat}
@@ -754,11 +824,40 @@ function SortableSectionRow({
       <button
         onClick={onRemove}
         title="Remove section"
+        aria-label={`Remove ${section.label}`}
         className="ml-auto text-[11px] text-zinc-600 hover:text-red-400"
       >
         ✕
       </button>
     </div>
+  );
+}
+
+// The section's bar count. Committed on blur / Enter, not per keystroke: each
+// change is a structure edit (bars added or deleted at the end, through
+// setBarCount), and typing "12" must not pass through a 1-bar section on the way.
+// A refused or declined change puts the old count back; Escape abandons the draft.
+function BarCountField({ bars, onCommit }: { bars: number; onCommit: (bars: number) => boolean }) {
+  const [draft, setDraft] = useState(String(bars));
+  const abandon = useRef(false);
+  function commit() {
+    const n = Number(draft);
+    if (abandon.current || (n !== bars && !onCommit(n))) setDraft(String(bars));
+    abandon.current = false;
+  }
+  return (
+    <input
+      value={draft}
+      type="number"
+      aria-label="Bars"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') abandon.current = true;
+        if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur();
+      }}
+      className="w-11 bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-center text-xs text-white outline-none focus:border-blue-500"
+    />
   );
 }
 
@@ -870,6 +969,8 @@ function ChartSheet({
   editing,
   setEditing,
   onCommitBar,
+  onBarAction,
+  barNotice,
 }: {
   title: string;
   renderKey: string;
@@ -880,6 +981,8 @@ function ChartSheet({
   editing: string | null;
   setEditing: (k: string | null) => void;
   onCommitBar: (sectionId: string, barIndex: number, cells: ViewBar) => void;
+  onBarAction: (sectionId: string, barIndex: number, action: BarAction, draft: ViewBar | undefined) => void;
+  barNotice: string;
 }) {
   const beats = timeSig.beats;
   // Fit-to-width: an explicit spec.barsPerLine wins (Q1, mirrors the PDF resolver);
@@ -963,6 +1066,8 @@ function ChartSheet({
                           isEditing={editing === `${s.id}:${bi}`}
                           onEdit={() => setEditing(`${s.id}:${bi}`)}
                           onCommit={(cells) => onCommitBar(s.id, bi, cells)}
+                          onAction={(action, draft) => onBarAction(s.id, bi, action, draft)}
+                          notice={barNotice}
                           onCancel={() => setEditing(null)}
                         />
                       ))}
@@ -989,6 +1094,8 @@ function Measure({
   isEditing,
   onEdit,
   onCommit,
+  onAction,
+  notice,
   onCancel,
 }: {
   bar: ViewBar;
@@ -999,6 +1106,8 @@ function Measure({
   isEditing: boolean;
   onEdit: () => void;
   onCommit: (cells: ViewBar) => void;
+  onAction: (action: BarAction, draft: ViewBar | undefined) => void;
+  notice: string;
   onCancel: () => void;
 }) {
   const cells = bar ?? [];
@@ -1046,7 +1155,10 @@ function Measure({
           beats={beats}
           mode={mode}
           renderKey={renderKey}
+          committedChords={cells.length}
           onCommit={onCommit}
+          onAction={onAction}
+          notice={notice}
           onCancel={onCancel}
         />
       )}
@@ -1063,18 +1175,27 @@ function BarEditor({
   beats,
   mode,
   renderKey,
+  committedChords,
   onCommit,
+  onAction,
+  notice,
   onCancel,
 }: {
   initialRaw: string;
   beats: number;
   mode: 'numbers' | 'letters';
   renderKey: string;
+  committedChords: number;
   onCommit: (cells: ViewBar) => void;
+  onAction: (action: BarAction, draft: ViewBar | undefined) => void;
+  notice: string;
   onCancel: () => void;
 }) {
   const [draft, setDraft] = useState(initialRaw);
   const parse = parseBarInput(draft, beats, renderKey);
+  const draftCells: ViewBar | undefined = parse.ok ? (parse.cells.length > 0 ? parse.cells : null) : undefined;
+  // Split acts on what is on screen: the typed chords when they parse, else the bar as committed.
+  const chordCount = parse.ok ? parse.cells.length : committedChords;
 
   function commit() {
     if (!parse.ok) return;
@@ -1087,7 +1208,12 @@ function BarEditor({
         autoFocus
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => (parse.ok ? commit() : onCancel())}
+        onBlur={(e) => {
+          // Focus moving to the action row is not leaving the bar.
+          if (e.currentTarget.parentElement?.contains(e.relatedTarget as Node | null)) return;
+          if (parse.ok) commit();
+          else onCancel();
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') commit();
           if (e.key === 'Escape') onCancel();
@@ -1098,6 +1224,47 @@ function BarEditor({
         }`}
       />
       <SplitPreview parse={parse} mode={mode} renderKey={renderKey} />
+      <BarActions chordCount={chordCount} onAction={(a) => onAction(a, draftCells)} />
+      {notice && (
+        <p role="alert" className="mt-1 rounded border border-amber-500/60 bg-zinc-900 p-1 text-center text-[9px] text-amber-400 shadow-lg">
+          {notice}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Bar structure actions under the open bar (design-roadmap-structure-editing.md
+// §5.3). Plain buttons, no hover-reveal, so they work on touch. Pressing one must
+// not blur the chord input first (that would commit/close the bar before the
+// click lands), hence preventDefault on press.
+const BAR_ACTIONS: Array<{ action: BarAction; label: string; title: string }> = [
+  { action: 'split', label: 'Split', title: 'Split into bars' },
+  { action: 'insertBefore', label: '+ Before', title: 'Insert a bar before' },
+  { action: 'insertAfter', label: '+ After', title: 'Insert a bar after' },
+  { action: 'delete', label: 'Delete', title: 'Delete this bar' },
+];
+
+function BarActions({ chordCount, onAction }: { chordCount: number; onAction: (action: BarAction) => void }) {
+  return (
+    <div className="mt-1 grid grid-cols-2 gap-px overflow-hidden rounded border border-zinc-700 bg-zinc-700 shadow-lg">
+      {BAR_ACTIONS.map(({ action, label, title }) => (
+        <button
+          key={action}
+          type="button"
+          title={title}
+          aria-label={title}
+          disabled={action === 'split' && chordCount < 2}
+          onPointerDown={(e) => e.preventDefault()}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onAction(action)}
+          className={`bg-zinc-900 px-1 py-2 text-[11px] font-medium leading-none disabled:text-zinc-600 ${
+            action === 'delete' ? 'text-red-300 hover:bg-red-950' : 'text-zinc-200 hover:bg-zinc-800'
+          }`}
+        >
+          {label}
+        </button>
+      ))}
     </div>
   );
 }

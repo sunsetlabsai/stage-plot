@@ -406,3 +406,126 @@ describe('RoadmapBuilder — the read-back collapses on Review', () => {
     expect(readBack().open).toBe(true);
   });
 });
+
+// Structure editing PR B (design-roadmap-structure-editing.md §5.3): the bar action
+// row and the bar-count field both go through the op layer. Asserted at the save
+// body — the spec that actually reaches the render route.
+describe('RoadmapBuilder — bar structure edits', () => {
+  const STRUCT: RoadmapSpec = {
+    version: 1,
+    timeSig: { beats: 4, unit: 4 },
+    renderKey: 'C',
+    sections: [
+      { id: 'tag', label: 'Tag', bars: 1 },
+      { id: 'verse', label: 'Verse', bars: 2, changes: [{ bar: 1, chords: [{ degree: 4 }, { degree: 5 }] }] },
+      { id: 'chorus', label: 'Chorus', bars: 3 },
+    ],
+    navigation: { fine: { section: 2, bar: 3 } },
+  };
+
+  function renderEdit() {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ chart_id: 'c1', role: 'guitar', url: 'u', song_key: 'k' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <RoadmapBuilder
+        songTitle="X"
+        charts={[]}
+        editChart={{ chartId: 'c1', role: 'guitar', spec: STRUCT, updatedAt: '2026-10-26T00:00:00Z' }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+    return fetchMock;
+  }
+
+  async function savedSpec(fetchMock: ReturnType<typeof vi.fn>): Promise<RoadmapSpec> {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    return JSON.parse(fetchMock.mock.calls[0][1].body as string).spec;
+  }
+
+  const barsField = (i: number) => screen.getAllByRole('spinbutton', { name: 'Bars' })[i] as HTMLInputElement;
+
+  it('a tap on a bar reaches the action row, and Split turns `4 5` into two bars', async () => {
+    const fetchMock = renderEdit();
+    fireEvent.click(screen.getAllByTitle('2 beats')[0]); // the `4` of the Verse's `4 5`
+    fireEvent.click(screen.getByRole('button', { name: 'Split into bars' }));
+    expect(barsField(1).value).toBe('3');
+    const spec = await savedSpec(fetchMock);
+    expect(spec.sections[1]).toEqual({
+      id: 'verse',
+      label: 'Verse',
+      bars: 3,
+      changes: [
+        { bar: 1, chords: [{ degree: 4 }] },
+        { bar: 2, chords: [{ degree: 5 }] },
+      ],
+    });
+  });
+
+  it('Split is disabled on a blank bar, and acts on what is typed', async () => {
+    renderEdit();
+    fireEvent.click(screen.getAllByText('＋')[0]); // the Tag's only bar
+    const split = screen.getByRole('button', { name: 'Split into bars' });
+    expect(split).toBeDisabled();
+    const input = screen.getAllByRole('textbox').find((el) => el.tagName === 'INPUT')!;
+    fireEvent.change(input, { target: { value: '1 5' } });
+    expect(split).toBeEnabled();
+    fireEvent.click(split);
+    expect(barsField(0).value).toBe('2');
+  });
+
+  it('Delete on a section’s only bar is refused, with the reason under the bar', async () => {
+    renderEdit();
+    fireEvent.click(screen.getAllByText('＋')[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete this bar' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/at least one bar/);
+    expect(barsField(0).value).toBe('1');
+  });
+
+  it('the bar count commits on blur, not per keystroke', () => {
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmMock);
+    renderEdit();
+    fireEvent.change(barsField(2), { target: { value: '1' } });
+    expect(confirmMock).not.toHaveBeenCalled(); // mid-typing: nothing applied yet
+    fireEvent.change(barsField(2), { target: { value: '5' } });
+    fireEvent.blur(barsField(2));
+    expect(confirmMock).not.toHaveBeenCalled(); // growing removes nothing
+    expect(barsField(2).value).toBe('5');
+  });
+
+  it('shrinking past a marker confirms, naming it; declining keeps the bars and the marker', async () => {
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmMock);
+    const fetchMock = renderEdit();
+    fireEvent.change(barsField(2), { target: { value: '2' } });
+    fireEvent.blur(barsField(2));
+    expect(confirmMock).toHaveBeenCalledWith('Change Chorus to 2 bars? This also removes the Fine.');
+    expect(barsField(2).value).toBe('3');
+    const spec = await savedSpec(fetchMock);
+    expect(spec.sections[2].bars).toBe(3);
+    expect(spec.navigation).toEqual({ fine: { section: 2, bar: 3 } });
+  });
+
+  it('accepting the confirm saves the shorter section without the marker', async () => {
+    vi.stubGlobal('confirm', () => true);
+    const fetchMock = renderEdit();
+    fireEvent.change(barsField(2), { target: { value: '2' } });
+    fireEvent.blur(barsField(2));
+    const spec = await savedSpec(fetchMock);
+    expect(spec.sections[2].bars).toBe(2);
+    expect(spec.navigation).toBeUndefined();
+  });
+
+  it('removing a section that holds a marker confirms, naming it', () => {
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmMock);
+    renderEdit();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Chorus' }));
+    expect(confirmMock).toHaveBeenCalledWith('Remove Chorus? This also removes the Fine.');
+    expect(screen.getAllByRole('spinbutton', { name: 'Bars' })).toHaveLength(3);
+  });
+});

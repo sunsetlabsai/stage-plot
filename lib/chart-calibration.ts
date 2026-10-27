@@ -1,6 +1,6 @@
 import type { Bar, ChartCalibration, ChartVerdict, RoadmapMarker, SectionAnchor, System } from './types';
 import { compileRoadmap, initVM, stepVM } from './roadmap-vm';
-import type { TraversalStep, RoadmapError } from './roadmap-vm';
+import type { TraversalStep, RoadmapError, VMState } from './roadmap-vm';
 
 // The traversal vocabulary now lives with the VM core; re-exported so existing
 // importers (`import { TraversalStep } from './chart-calibration'`) are unbroken.
@@ -972,23 +972,37 @@ export type RoadmapResult =
 // non-terminating roadmap is a structural error) applies only here — live
 // stepping is MD-bounded.
 export function resolveRoadmap(cal: ChartCalibration): RoadmapResult {
+  const walk = walkRoadmap(cal);
+  return walk.ok ? { ok: true, traversal: walk.steps.map((s) => s.step) } : walk;
+}
+
+// The walk behind resolveRoadmap, exposing the VMState AFTER each played bar. One
+// loop and one termination cap for both, by construction, so the builder's
+// liveness check (navLive, design-roadmap-structure-editing.md §3) sees exactly
+// the walk the show plays: it reads the step where a redirect FIRES (fired[jumpId]
+// / flags.toCodaFired flips) and the bar played next.
+export type RoadmapWalk =
+  | { ok: true; steps: Array<{ step: TraversalStep; state: VMState }> }
+  | { ok: false; error: RoadmapError };
+
+export function walkRoadmap(cal: ChartCalibration): RoadmapWalk {
   const compiled = compileRoadmap(barsInOrder(cal), cal.roadmap ?? []);
   if (!compiled.ok) return { ok: false, error: compiled.error };
 
   const program = compiled.compiled;
-  const traversal: TraversalStep[] = [];
+  const steps: Array<{ step: TraversalStep; state: VMState }> = [];
   let state = initVM(program);
   while (!state.done) {
     const { transition, state: next } = stepVM(program, state);
     if (transition) {
-      traversal.push(transition);
-      if (traversal.length > program.cap) {
+      steps.push({ step: transition, state: next });
+      if (steps.length > program.cap) {
         return { ok: false, error: { markerIds: (cal.roadmap ?? []).map((m) => m.id), reason: 'roadmap does not terminate' } };
       }
     }
     state = next;
   }
-  return { ok: true, traversal };
+  return { ok: true, steps };
 }
 
 // Human-readable play order for the Roadmap tool's live-resolve readout, e.g.
