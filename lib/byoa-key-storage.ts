@@ -44,10 +44,19 @@ export type KeyStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
  * gets an independent COPY of it (HTML Standard, document sequences), so "move
  * it once" cannot hold there — each copy would migrate to whichever account
  * reads it in that tab, handing one key to two accounts. localStorage is one
- * store per origin, and two tabs cannot be signed in to different accounts at
- * the same moment (the session is a shared cookie), so a move there happens
- * once. The session-scoped legacy entry is a key the person chose NOT to keep;
- * it is deleted, at the cost of re-entering it once in that tab.
+ * store per origin, so a move there normally happens once. The session-scoped
+ * legacy entry is a key the person chose NOT to keep; it is deleted, at the cost
+ * of re-entering it once in that tab.
+ *
+ * ⚠ KNOWN LIMIT (Codex R3 on #197, documented by Graham's call, 2026-10-26):
+ * the read → write → delete below is NOT atomic across tabs, and the web storage
+ * spec promises no cross-tab locking. If two tabs read the legacy entry in the
+ * same instant, as two different accounts, each writes it under its own account
+ * and the key lands under both. It needs a legacy entry (first read after the
+ * #197 deploy only), one person with two accounts in two tabs, and both reads
+ * within the same few milliseconds. The worst case is that person's own key
+ * under both of their own accounts, which was the pre-#134 behaviour. Deleting
+ * instead of migrating would close it, at the cost of one re-entry per key.
  */
 function migrateLegacy(local: KeyStore, session: KeyStore, userId: string): void {
   session.removeItem(LEGACY_BYOA_KEY);

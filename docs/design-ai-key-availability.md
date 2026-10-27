@@ -1689,9 +1689,20 @@ account's key.
    nobody re-enters a remembered key. A sessionStorage entry is deleted instead.
    A tab opened from another gets an independent copy of sessionStorage, so each
    copy would have migrated to a different account (Codex R2 on #197).
-   localStorage is one store, and the session cookie is shared, so two tabs
-   cannot be signed in to different accounts at once. The move there happens
-   once.
+   localStorage is one store, so the move there normally happens once.
+
+   **⚠ Known limit: the localStorage move is not atomic across tabs** (Codex R3
+   on #197; Graham chose to document it, 2026-10-26). The read, write and delete
+   are separate operations, and the web storage spec promises no cross-tab
+   locking. If two tabs read the legacy entry in the same instant as two
+   different accounts, both write it, and the key lands under both accounts.
+   Conditions: a legacy entry exists (first read after the #197 deploy only),
+   one person has two accounts open in two tabs, and both reads land within
+   milliseconds. Worst case: that person's own key under both of their own
+   accounts, which is the pre-#134 behaviour. Not fixed because the fix is to
+   delete instead of migrate, which costs every existing device key one
+   re-entry. Remedy if seen: remove the key in Settings on the account that
+   should not have it.
 
 **⚠ Not designed for: a browser shared between PEOPLE** (Graham, 2026-10-26). The
 key survives sign-out, which is the convenience #133 bought, and stays on disk,

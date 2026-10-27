@@ -88,7 +88,10 @@ describe('scoped to the account (#134)', () => {
     expect(readKey(local, tab2, B)).toBe('');
   });
 
-  it('a remembered legacy key reaches exactly one account across tabs', () => {
+  // Sequential reads only. Two tabs INTERLEAVING read-write-delete can both
+  // migrate it: a documented limit (byoa-key-storage.ts migrateLegacy, design
+  // §15 rule 3), not asserted here.
+  it('a remembered legacy key, read by one account then another, reaches only the first', () => {
     const local = store({ [LEGACY_BYOA_KEY]: KEY });
     expect(readKey(local, store(), A)).toBe(KEY);
     expect(readKey(local, store(), B)).toBe('');
