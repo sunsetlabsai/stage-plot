@@ -223,6 +223,33 @@ export function validateMonitorReplace(
   return null;
 }
 
+/**
+ * The confirm text for a monitor-list replace that brings back a number
+ * orphaned slots still point at, or null when it adopts nobody. A mix that
+ * comes into existence at N re-attaches every performer already on N, which
+ * is usually right: the AI recreates Mix 7 precisely because Cy is on it. But
+ * it must not be silent (I8; Codex R2 on #193). Same "join" wording as
+ * `renumberMixPrompt`. "+ Add Mix" never needs it, because `nextMixNumber`
+ * skips orphaned numbers.
+ */
+export function monitorReplacePrompt(
+  stagePlot: StageSlot[],
+  current: readonly MonitorMix[],
+  incoming: readonly { mix?: unknown }[],
+): string | null {
+  const revived = [...new Set(incoming.map((m) => m.mix))]
+    .filter((n): n is number => isMixNumber(n) && isOrphanedMix(n, current))
+    .sort((a, b) => a - b);
+  const groups = revived
+    .map((n) => ({ n, names: performersOnMix(stagePlot, n) }))
+    .filter((g) => g.names.length > 0);
+  if (groups.length === 0) return null;
+  return (
+    'Apply these monitor mixes?\n\n' +
+    groups.map((g) => `Still pointing at the removed Mix ${g.n}, so they join the new Mix ${g.n}:\n${bullets(g.names)}`).join('\n\n')
+  );
+}
+
 /** Add a blank mix, numbered by `nextMixNumber`. */
 export function addMonitor<T extends { stagePlot: StageSlot[]; monitors: MonitorMix[] }>(config: T): T {
   return {

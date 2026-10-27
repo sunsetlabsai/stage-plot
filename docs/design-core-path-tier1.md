@@ -547,8 +547,22 @@ choice.
    Codex R1. It uses the same `validateMonitors` rule, so a file cannot install two
    rows numbered Mix 1.
 
+7. **An AI apply that brings back an orphaned number confirms first, naming who
+   joins.** This came from Codex R2. A mix that comes into existence at N
+   re-attaches every slot already on N. That is usually right, because the AI
+   recreates Mix 7 *because* Cy is on it, but it was silent. `monitorReplacePrompt`
+   uses item 2's "join" wording. The question is asked before the Apply updater,
+   and Cancel leaves the card pending. This is the same class as items 1 and 2:
+   **every way a number comes into existence is either skipped (add), or confirmed
+   with names (renumber, AI apply).**
+
 **Every path that installs a whole monitor list,** and how each is covered:
-editor (`renumberMix`, `addMonitor`, `deleteMonitor`), AI apply (5), file import (6).
+editor (`renumberMix`, `addMonitor`, `deleteMonitor`), AI apply (5, 7), file import (6).
+**Not covered here:** the `update_stage_plot` cascade rebuilds the whole monitor list from
+slot numbers, so it revives orphans and wipes needs. That is B2, and
+`design-ai-op-contract.md` deletes the cascade.
+Two initializers install fixed lists and cannot misroute: the `fallbackBand` shown
+before a show loads (`initConfig`), and a new show's empty list (`app/dashboard/page.tsx`).
 **Not guarded, deliberately:** the server load and the local cache carry our own saved
 data. Per §5.2 they get no repair, though the pre-B3 `length + 1` add could have
 saved duplicates, and deleting one row by id untangles them. The legacy `?config=` URL

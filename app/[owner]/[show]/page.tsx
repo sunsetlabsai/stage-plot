@@ -38,7 +38,7 @@ import type {
   Bar,
   RoadmapMarker,
 } from '@/lib/types';
-import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, validateMonitorReplace, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES } from '@/lib/setlist';
+import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, validateMonitorReplace, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, monitorReplacePrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
@@ -5599,6 +5599,14 @@ function AgentChat({
   }
 
   function applyToolCall(msgIdx: number, toolIdx: number) {
+    // Asked HERE, outside the updater: a confirm inside setMessages would run
+    // twice under StrictMode. Cancel leaves the card pending.
+    const pending = messages[msgIdx]?.toolCalls?.[toolIdx];
+    if (pending?.name === 'update_monitors' && Array.isArray(pending.input.monitors)) {
+      const cur = configRef.current;
+      const prompt = monitorReplacePrompt(cur.stagePlot, cur.monitors, pending.input.monitors as { mix?: unknown }[]);
+      if (prompt && !window.confirm(prompt)) return;
+    }
     setMessages((prev) => {
       const updated = [...prev];
       const msg = { ...updated[msgIdx], toolCalls: [...(updated[msgIdx].toolCalls || [])] };
