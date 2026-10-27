@@ -1,6 +1,6 @@
 # Version-checked show save (UAT S5, and S3 rebuilt on it)
 
-**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1–R4 folded, R5 answered by §4.0 (PROPOSED, awaiting Graham's ruling Q5) (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R5. Nothing here is built.
+**Status:** DESIGN — Q1–Q5 ruled by Graham 2026-10-27 (§10); Codex R1–R4 folded, R5 answered by §4.0 (Q5 ruled) (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R5. Nothing here is built.
 **Supersedes:** the client-side reconcile in PR #200 (`lib/offline-sync.ts` `reconcileOnLoad`,
 the set-aside store and its Restore/Discard banner, the page's reconnect effect). #200's S2 (offline owner editing) and S4 (flush on page hide)
 stand; its S3 is rebuilt on §3–§5 once this merges.
@@ -160,7 +160,7 @@ because that is the setlist the owner chose to keep.
 
 ## 4. Client (`lib/use-show.ts`)
 
-### 4.0 One editing tab per show (Codex R5 on #201 — PROPOSED, needs Graham's ruling Q5)
+### 4.0 One editing tab per show (Codex R5 on #201; Q5, ruled)
 
 Everything in §4 reasons about one tab, but the cache entry and marker are per browser:
 every tab of a show shares `showrunr-cache-{id}` while each keeps its own pending copy
@@ -425,6 +425,6 @@ for them, and their screen must not change under them mid-gig.
   are held, Keep mine / Use the saved one. Not a server-wins default with a restore list.
 - **Q4 — apply `018` before the deploy and accept a few minutes of loud save failures**
   in between, rather than keeping the unchecked function for a release.
-- **Q5 — OPEN: one editing tab per show per browser** (§4.0): a second owner tab is
+- **Q5 — one editing tab per show per browser** (§4.0): a second owner tab is
   view-only with *Edit here*; browsers without `navigator.locks` keep today's behaviour as
   a documented limit.
