@@ -474,7 +474,7 @@ describe('summaryLines — the approve card diff (§7)', () => {
     const cfg = band();
     cfg.monitors.push(...[4, 5, 6].map((n) => ({ id: `m-${n}`, mix: n, name: `M${n}`, needs: '', type: 'Wedge' })));
     const ops = cfg.monitors.map((m) => ({ entity: 'monitors', action: 'patch', id: m.id, values: { type: 'IEM' } }));
-    expect(lines(cfg, ops)).toEqual([{ title: 'Monitors', lines: [{ kind: 'patch', text: '6 monitor mixes — type changed' }] }]);
+    expect(lines(cfg, ops)).toEqual([{ title: 'Monitors', lines: [{ kind: 'patch', text: '6 monitor mixes — type → IEM' }] }]);
     // At the limit, every row is still listed.
     expect(lines(band(), ops.slice(0, 3))[0].lines).toHaveLength(3);
   });
@@ -489,6 +489,45 @@ describe('summaryLines — the approve card diff (§7)', () => {
         { kind: 'join', text: 'Mix 3 is back, so performers still on it rejoin: USC — Sam, DSR — Ray' },
       ] },
       { title: 'Ignored', lines: [{ kind: 'warn', text: 'Ignored "colour" — monitor mixes have no such field.' }] },
+    ]);
+  });
+
+  // ── Codex R1 on #196: four ways the card misdescribed an accepted plan ──
+
+  it('★ an added input shows its mic and performer — same channel, different performer, different line', () => {
+    const add = (slotId: string) => lines(band(), [{ entity: 'inputs', action: 'add', values: { ch: 7, inst: 'BGV', mic: 'SM58', stand: '', slotId } }]);
+    expect(add('s-dee')).toEqual([{ title: 'Inputs', lines: [{ kind: 'add', text: 'ch 7 BGV — SM58 → DSC — Dee' }] }]);
+    expect(add('s-ray')[0].lines[0].text).toBe('ch 7 BGV — SM58 → DSR — Ray');
+    // An added slot shows its role and mix; a new performer on a new mix too.
+    expect(lines(band(), [{ entity: 'stagePlot', action: 'add', values: { name: 'Jo', pos: 'MSR', role: 'Keys', mix: 1 } }])).toEqual([
+      { title: 'Stage plot', lines: [{ kind: 'add', text: 'MSR — Jo (Keys), Mix 1' }] },
+    ]);
+    expect(lines(band(), [{ entity: 'stagePlot', action: 'add', values: { name: 'Jo', pos: 'MSR', role: '', mix: 0 } }])[0].lines[0].text).toBe('MSR — Jo (—), no monitor');
+  });
+
+  it('★ bulk lines name the destination value — IEM and Side-fill never read alike', () => {
+    const cfg = band();
+    cfg.monitors.push(...[4, 5, 6].map((n) => ({ id: `m-${n}`, mix: n, name: `M${n}`, needs: '', type: 'Wedge' })));
+    const ops = cfg.monitors.map((m, i) => ({ entity: 'monitors', action: 'patch', id: m.id, values: { type: i < 4 ? 'IEM' : 'Side-fill' } }));
+    expect(lines(cfg, ops)[0].lines).toEqual([
+      { kind: 'patch', text: '4 monitor mixes — type → IEM' },
+      { kind: 'patch', text: '2 monitor mixes — type → Side-fill' },
+    ]);
+    // A group of one is shown in full, not as a count.
+    const odd = cfg.monitors.map((m, i) => ({ entity: 'monitors', action: 'patch', id: m.id, values: { type: i < 5 ? 'IEM' : 'None' } }));
+    expect(lines(cfg, odd)[0].lines[1]).toEqual({ kind: 'patch', text: 'Mix 6 (M6): type Wedge → None' });
+  });
+
+  it('★ a relink names the performer as they WERE — a same-batch rename does not rewrite history', () => {
+    expect(lines(band(), [
+      { entity: 'stagePlot', action: 'patch', id: 's-dee', values: { name: 'Didi' } },
+      { entity: 'inputs', action: 'patch', id: 'in-6', values: { slotId: 's-ray' } },
+    ])[1]).toEqual({ title: 'Inputs', lines: [{ kind: 'patch', text: 'ch 6 Lead Vox: performer DSC — Dee → DSR — Ray' }] });
+  });
+
+  it('★ an explicit review-flag change is shown; only the clear that follows a re-link is hidden', () => {
+    expect(lines(band(), [{ entity: 'inputs', action: 'patch', id: 'in-1', values: { needsReview: true } }])).toEqual([
+      { title: 'Inputs', lines: [{ kind: 'patch', text: 'ch 1 Kick: review flag no → yes' }] },
     ]);
   });
 

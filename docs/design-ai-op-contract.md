@@ -950,17 +950,33 @@ safe on its own — so no deploy in the sequence is a half-wired state.
 3. **The approved diff is stored on the tool call at Apply** (`sections`).
    Re-planning after Apply would run against the changed config and describe
    nothing, so an applied card would lose its record of what it did.
-4. **Card text is pure `lib/`** (`summaryLines`). `needsReview` is hidden as
-   bookkeeping; `slotId`/`pos`/`inst` read as performer/position/source, and a
-   re-link names performers (`DSR — Ray`), never ids. Past
-   `SUMMARY_ROW_LIMIT` (5) patched rows in one list, the card counts by field
-   set (*"6 monitor mixes — type changed"*), per §7.
+4. **Card text is pure `lib/`** (`summaryLines`), and **every line says what
+   Apply will write** — Codex R1 on #196 found four places it did not:
+   - an ADDED row shows its routing (`+ ch 7 BGV — SM58 → DSC — Dee`;
+     `+ MSR — Jo (Keys), Mix 1`), not just its name;
+   - past `SUMMARY_ROW_LIMIT` (5) patched rows the card counts, grouped by
+     fields **and destination values** (*"4 monitor mixes — type → IEM"*,
+     *"2 … — type → Side-fill"*); a group of one is shown in full;
+   - a `from` names the performer as they were BEFORE Apply, a `to` as after
+     (two lookups — a same-batch rename no longer rewrites the old name);
+   - only the review-flag clear that follows a re-link is hidden; any other
+     flag change, including one an op sets, is shown.
+   `slotId`/`pos`/`inst`/`needsReview` read as performer/position/source/review
+   flag, and performers are named (`DSR — Ray`), never ids.
 5. **The prompt reuses the spike's tested rules verbatim where it can** (§10.1),
    plus three the spike's harness did not need: `null` clears an optional field
    (step 2 item 6), a monitor's mix number is never changed (step 2 item 1), and
    `generate_show` only on an empty show or "start over".
-6. **⚠ The spike measured its own prompt, not this one.** The shipped prompt
-   embeds the same rules inside the larger codesigner prompt, with four tools
-   instead of one. That is a different input to the model, so the 6/7 result is
-   evidence, not proof, for what ships. Re-running `~/op-spike.mjs` against
-   `lib/agent.ts`'s `SYSTEM_PROMPT` and `TOOLS` would measure it.
+6. **The shipped prompt was measured, not inferred: 7/7 on `claude-sonnet-4-6`
+   (2026-10-26).** The spike had measured its own prompt; what ships embeds the
+   rules in the larger codesigner prompt, with four tools and no `thinking`.
+   `~/op-spike-shipped.mts` sends exactly `SYSTEM_PROMPT` + `TOOLS` as the route
+   does, and judges every plan with the real `planChanges` as well as the
+   spike's verdicts. Two passes worth knowing:
+   - **C3 asked, but the wrong question** — names and positions, not "new
+     singers or existing players?" (§4). The rule held (no confident call); the
+     reading it asked about did not. UAT SH-28(c) checks it by hand.
+   - **E renumbered a mix by remove + add** (Junior: Mix 4 removed, Mix 6
+     added, slot patched 4 → 6). Consistent, and fully visible on the card as
+     three lines, so not refused — but it is a renumber the patch rule (step 2
+     item 1) does not see. Recorded, not fixed.

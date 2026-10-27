@@ -452,10 +452,8 @@ export interface SummarySection {
   lines: SummaryLine[];
 }
 
-/** Bookkeeping, not something a performer changed — never shown as a change. */
-const HIDDEN_FIELDS = new Set(['needsReview']);
 /** Field names as the tables label them, where the type's name would mean nothing to a performer. */
-const FIELD_LABEL: Record<string, string> = { slotId: 'performer', pos: 'position', inst: 'source' };
+const FIELD_LABEL: Record<string, string> = { slotId: 'performer', pos: 'position', inst: 'source', needsReview: 'review flag' };
 const fieldLabel = (f: string) => FIELD_LABEL[f] ?? f;
 
 /** Past this many patched rows in one list, the card counts instead of listing (§7). */
@@ -471,17 +469,32 @@ const TITLE: Record<OpEntity, string> = { stagePlot: 'Stage plot', inputs: 'Inpu
  * "→ DSR — Ray", never a UUID.
  */
 export function summaryLines(summary: ChangeSummary, prev: ShowLists, next: ShowLists): SummarySection[] {
-  const slotNames = new Map<string, string>();
-  for (const list of [prev.stagePlot, next.stagePlot]) {
-    list.forEach((s, idx) => {
-      if (s.id) slotNames.set(s.id, `${s.pos} — ${slotLabel(s, blockIndexOf(list, idx))}`);
-    });
-  }
-  const show = (field: string, v: unknown): string => {
-    if (v === undefined || v === '') return '—';
-    if (field === 'slotId') return slotNames.get(String(v)) ?? 'a removed performer';
+  // Two lookups, not one: a `from` names the performer as they were BEFORE
+  // Apply, a `to` as they will be after. One shared map let a same-batch
+  // rename overwrite the old name (Codex R1 on #196).
+  const names = (list: StageSlot[]) =>
+    new Map(list.map((s, idx) => [s.id, `${s.pos} — ${slotLabel(s, blockIndexOf(list, idx))}`] as const));
+  const before = names(prev.stagePlot);
+  const after = names(next.stagePlot);
+  const show = (field: string, v: unknown, side: 'from' | 'to'): string => {
+    if (v === undefined && field === 'needsReview') return 'no'; // absent flag = off
+    if (v === undefined || v === '') return field === 'slotId' ? 'no performer' : '—';
+    if (field === 'slotId') return (side === 'from' ? before : after).get(String(v)) ?? 'a removed performer';
     if (typeof v === 'boolean') return v ? 'yes' : 'no';
     return String(v);
+  };
+  const changeText = (c: FieldChange) => `${fieldLabel(c.field)} ${show(c.field, c.from, 'from')} → ${show(c.field, c.to, 'to')}`;
+
+  // An ADDED row shows what it routes to, not just its name: two inputs on
+  // the same channel for different performers must not read alike (Codex R1).
+  const prevIds = new Set([...prev.stagePlot, ...prev.inputs, ...prev.monitors].map((r) => r.id));
+  const addedText: Record<OpEntity, () => string[]> = {
+    stagePlot: () =>
+      next.stagePlot.flatMap((s) => (prevIds.has(s.id) ? [] : [`${after.get(s.id)} (${s.role || '—'}), ${s.mix > 0 ? `Mix ${s.mix}` : 'no monitor'}`])),
+    inputs: () =>
+      next.inputs.flatMap((i) => (prevIds.has(i.id) ? [] : [`ch ${i.ch} ${i.inst} — ${i.mic || 'no mic'} → ${show('slotId', i.slotId, 'to')}`])),
+    monitors: () =>
+      next.monitors.flatMap((m) => (prevIds.has(m.id) ? [] : [`Mix ${m.mix}${m.name ? ` (${m.name})` : ''}${m.type ? `, ${m.type}` : ''}`])),
   };
 
   const sections: SummarySection[] = [];
@@ -489,24 +502,27 @@ export function summaryLines(summary: ChangeSummary, prev: ShowLists, next: Show
     const changes = summary[entity];
     const lines: SummaryLine[] = [];
     for (const label of changes.removed) lines.push({ kind: 'remove', text: label });
-    for (const label of changes.added) lines.push({ kind: 'add', text: label });
+    for (const text of addedText[entity]()) lines.push({ kind: 'add', text });
 
     const patched = changes.patched
-      .map((p) => ({ label: p.label, changes: p.changes.filter((c) => !HIDDEN_FIELDS.has(c.field)) }))
+      .map((p) => ({ label: p.label, changes: p.changes.filter((c) => !isAutoCleared(c, p.changes)) }))
       .filter((p) => p.changes.length > 0);
     if (patched.length > SUMMARY_ROW_LIMIT) {
-      const byFields = new Map<string, number>();
+      // Grouped by fields AND destination values, so "type → IEM" and
+      // "type → Side-fill" never collapse into one line (Codex R1 on #196).
+      const groups = new Map<string, typeof patched>();
       for (const p of patched) {
-        const fields = p.changes.map((c) => fieldLabel(c.field)).join(', ');
-        byFields.set(fields, (byFields.get(fields) ?? 0) + 1);
+        const key = p.changes.map((c) => `${fieldLabel(c.field)} → ${show(c.field, c.to, 'to')}`).join('; ');
+        groups.set(key, [...(groups.get(key) ?? []), p]);
       }
-      for (const [fields, count] of byFields) {
-        lines.push({ kind: 'patch', text: `${count} ${count === 1 ? PLURAL[entity].replace(/es$|s$/, '') : PLURAL[entity]} — ${fields} changed` });
+      for (const [key, rows] of groups) {
+        lines.push({
+          kind: 'patch',
+          text: rows.length === 1 ? `${rows[0].label}: ${rows[0].changes.map(changeText).join('; ')}` : `${rows.length} ${PLURAL[entity]} — ${key}`,
+        });
       }
     } else {
-      for (const p of patched) {
-        lines.push({ kind: 'patch', text: `${p.label}: ${p.changes.map((c) => `${fieldLabel(c.field)} ${show(c.field, c.from)} → ${show(c.field, c.to)}`).join('; ')}` });
-      }
+      for (const p of patched) lines.push({ kind: 'patch', text: `${p.label}: ${p.changes.map(changeText).join('; ')}` });
     }
     if (entity === 'monitors') {
       for (const j of summary.joins) lines.push({ kind: 'join', text: `Mix ${j.mix} is back, so performers still on it rejoin: ${j.names.join(', ')}` });
@@ -515,6 +531,16 @@ export function summaryLines(summary: ChangeSummary, prev: ShowLists, next: Show
   }
   if (summary.warnings.length > 0) sections.push({ title: 'Ignored', lines: summary.warnings.map((w) => ({ kind: 'warn' as const, text: w })) });
   return sections;
+}
+
+/**
+ * The one change the card leaves out: a review flag cleared BECAUSE the same
+ * row was re-linked (step 2 item 7) — bookkeeping that follows the link line
+ * already shown. Any other flag change, including one an op set explicitly,
+ * is shown (Codex R1 on #196).
+ */
+function isAutoCleared(c: FieldChange, rowChanges: readonly FieldChange[]): boolean {
+  return c.field === 'needsReview' && c.from === true && c.to === false && rowChanges.some((o) => o.field === 'slotId');
 }
 
 /** One sentence for the refused card and for the model's `tool_result` (§5.4, §5.5). */
