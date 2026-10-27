@@ -38,7 +38,7 @@ import type {
   Bar,
   RoadmapMarker,
 } from '@/lib/types';
-import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, validateMonitorReplace, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, monitorReplacePrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES } from '@/lib/setlist';
+import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, validateMonitorReplace, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, monitorReplacePrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES, POSITIONS } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
@@ -214,8 +214,6 @@ function configToBand(c: AppConfig): BandConfig {
     setlist: c.setlist,
   };
 }
-
-const POSITIONS: StagePosition[] = ['USR', 'USC', 'USL', 'MSR', 'MSC', 'MSL', 'DSR', 'DSC', 'DSL'];
 
 // ─── Singer Colors (shared between tabs) ───────────────────────────────────
 const SINGER_COLORS = [

@@ -1,22 +1,14 @@
 # Design: AI Op Contract — editing without replacing
 
-**Status:** v1 — **Proposed. NOT approved, NOT built.**
-
 **Date:** 2026-08-20
 **Supersedes:** `docs/design-core-path-tier1.md` **§2 (chunk 2, "AI apply
 integrity")** — see §9. §1 of that document has shipped (PR #144); §3 (mix
-identity) is untouched and unaffected.
+identity) shipped as B3 (PR #193) and its §3.6 rules bind this design (§14).
 
-> ### ★ THE GATING ASSUMPTION — read before anything else
->
-> **This entire document rests on one unverified claim: that the model can
-> reliably emit correct, minimal ops.** We have not measured it. A spike exists
-> (§10.1) and is blocked on API access.
->
-> **If the spike fails, this design is shelved and "create-first" (§9.3) wins.**
-> Nothing here should be built until the spike runs. Stating this up front
-> because the last spec in this project produced a regression from a claim that
-> was never checked — see `design-core-path-tier1.md` §1.2 part 3.
+> **The gating assumption — that a model can reliably emit correct, minimal
+> ops — was measured, not assumed.** The §10.1 spike ran 2026-08-21/22 against
+> this contract on three models; `tempId` (case C1) passed on the shipping model.
+> Two prompt findings from it are folded into §3.3 and §4.
 
 ---
 
@@ -189,6 +181,14 @@ Rules:
 - A reference to a `new:` string with no matching `tempId` is refused (O3).
 - `tempId` never reaches storage.
 
+> **★ Spike finding, folded: the slot↔input coupling must be stated in BOTH
+> directions.** C1's first run created both singers' slots and **zero inputs** —
+> two BGVs with no microphones. The prompt inherited only the removal half from
+> `lib/agent.ts` (*"Removing a performer usually means removing their stage slot
+> AND their input channels"*). Made symmetric — *"a performer's stage slot and
+> their input channels travel together"* — it passed immediately. State a rule
+> for every direction it applies to, not the one you happened to write.
+
 > **Rejected alternative: nested creates** (a slot op carrying its inputs
 > inline). It makes the op list non-uniform — some rows appear as ops, others
 > hide inside other ops — so both validation and the approve-card diff need two
@@ -300,6 +300,14 @@ prompt gains an explicit rule:
 > If the request is ambiguous about **which existing rows** it affects, or about
 > whether a person is new or already on the stage plot, ask before emitting ops.
 > A wrong guess costs the user more than a question does.
+
+**★ Spike finding, folded: this rule and the required-field set collide on
+almost every add-a-person request.** `pos` and `mix` are required on `StageSlot`
+and neither is inferable from "add two background singers", so under the
+under-specified ask all three models ASKED rather than guessed. That is §4
+working, not a failure — but it means "add a person" is a two-turn exchange
+unless the user names a position. C3 is the case that tests ambiguity; C1 tests
+`tempId`.
 
 `tool_choice` stays `auto` — forcing a tool call would make O5 unenforceable by
 construction.
@@ -737,10 +745,14 @@ Run against **the shipping model first** (§8), then a tier up as a diagnostic.
 at build step 1 (§13).** Until it lands, run B as a `stand` bulk change — the
 same op shape against a field that exists today.
 
-> **★ The current spike script tests a straw-man contract and case C1 is
-> unanswerable under it** — it has no `tempId`, so a new input cannot reference a
-> new slot, and the model is asked to do something the schema forbids. **Re-point
-> the spike at §3 before drawing any conclusion from it.**
+**Result (2026-08-21/22, script `~/op-spike.mjs`, self-test 14/14 before any
+tokens were spent):** 6/7 on `claude-sonnet-4-6`, `claude-sonnet-5` and
+`claude-opus-4-8` under the original prompt, with C1 the miss on all three; C1
+then passed on the shipping model once the prompt stated the slot↔input coupling
+symmetrically (§3.3). Case A was re-scored a pass by Graham: the model also
+patched the departed guitarist's name out of a shared mix, which is
+non-destructive and correct. **Not a clean single-prompt 7/7** — the other six
+ran under the earlier prompt.
 
 ### 10.2 `planChanges` — pure, so fully testable
 
@@ -818,9 +830,12 @@ setlist/charts/show-info are excluded from the replace.
 
 ---
 
-## §13 Build order, once the spike clears
+## §13 Build order
 
-Nothing below starts without Graham's go ([[wait-for-approval]] applies).
+Steps 0–1 shipped (#147, #148, #149). Steps 2, 3 and 4 ship as **three PRs, in
+order** (Graham, 2026-10-26: "B2 in full", UAT plan §2.1). Between step 3 and
+step 4 the AI is create-and-replace only — §9.3's create-first product, which is
+safe on its own — so no deploy in the sequence is a half-wired state.
 
 | # | Scope | Why this order |
 |---|---|---|
@@ -829,3 +844,45 @@ Nothing below starts without Graham's go ([[wait-for-approval]] applies).
 | 2 | **`planChanges` + validation** (§5) — pure `lib/`, no UI | The whole decidable core, fully testable before anything renders |
 | 3 | **`generate_show`, cascade deleted, prompt rewritten** (§9.2) | Removes the third writer; first-run flow must be re-verified here |
 | 4 | **`apply_changes` wiring + diff card + `'refused'` history fix** (§5.5, §7) | The `page.tsx` surface, i.e. the untested seam — last, on top of a proven core |
+
+---
+
+## §14 Decided while building (not stated above)
+
+### Step 2 — `planChanges` (`lib/ai-ops.ts`)
+
+1. **A `patch` that changes `monitors.mix` is refused as a renumber**, with the
+   recovery named (the Monitor Mixes table). §5.3 said the post-batch rule
+   "catches its blast radius". **It does not, for a swap:** patch Mix 1 → 2 and
+   Mix 2 → 1, and every `stagePlot.mix` still resolves, so the plan is accepted
+   and each performer silently lands on the other's wedge. That is exactly the
+   hole Codex R1 found on #193, and `design-core-path-tier1.md` §3.6 item 5
+   already rules the AI path refuses renumbers. A patch re-sending the *same*
+   number is not a renumber.
+2. **A mix added at an orphaned number lists who rejoins it** in
+   `ChangeSummary.joins`. Tier-1 §3.6 item 7 requires it be confirmed with names;
+   the §7 diff card is shown before Apply, so the card is that confirmation.
+3. **Reference and uniqueness rules fire only on what the plan INTRODUCES.** A
+   slot already on a deleted mix, an input whose link already dangled (flagged
+   `needsReview`), or a pre-B3 duplicate mix number is the user's existing data.
+   Refusing over it would let an unrelated problem block the AI — the same
+   reasoning as §5.3 (d). Concretely: a post-batch dangling reference is exempt
+   when the same row carried the same reference before the plan and it already
+   dangled; a collision is checked only for numbers the plan sets (added
+   monitors; added inputs or a patched `ch`).
+4. **`tempId`s are minted before any op runs**, so a `values.slotId` resolves
+   regardless of op order (§3.3's case against positional references, applied
+   to op order too). A `patch`/`remove` may target a `new:` id added earlier in
+   the batch.
+5. **Omitted `ch`/`mix` are assigned after every op has run**, so an auto number
+   never takes one a later explicit op claims. An omitted `mix` uses
+   `nextMixNumber`, which skips orphaned slot mixes like "+ Add Mix".
+6. **`null` in a patch clears an optional field** (the model's only way to
+   unlink an input). On a required field it stays and fails the shape check.
+7. **Setting an input's `slotId` clears `needsReview`**, as the manual relink in
+   the Position dropdown does, unless the op sets the flag itself.
+8. **`ChangeSummary` is a diff of config → next by id**, not a reading-back of
+   the ops — so §10.2 test 10 holds by construction, and a patch re-sending
+   current values shows as no change.
+9. **A config containing an id-less row is refused**, keeping the function total.
+   The page guarantees ids (§9.4), so this is a guard, not a path.
