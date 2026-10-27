@@ -250,7 +250,10 @@ describe('design-version-checked-save §3.4 — the version contract', () => {
     }));
 
     expect(res.status).toBe(428);
-    expect((await res.json()).error).toMatch(/NOT saved/);
+    // Q6: the reload recovers the edit, so the copy must NOT tell them to redo it.
+    const { error } = await res.json();
+    expect(error).toMatch(/Reload/);
+    expect(error).not.toMatch(/make it again/i);
     expect(db.rpcCalled).toBe(false);
     expect(db.userScopedWrite).toBe(false);
   });

@@ -18,7 +18,9 @@ interface EntryInput {
 // The version-check contract (docs/design-version-checked-save.md §3.4).
 const CONFLICT = { error: 'This show was changed somewhere else.', conflict: true } as const;
 const NO_BASE = {
-  error: 'This page is out of date and your last change was NOT saved. Reload, then make it again.',
+  // Q6 (Graham, 2026-10-27): the reload recovers the old tab's edit from its cache
+  // (lib/use-show onWritable), so the copy must not tell them to redo it.
+  error: 'This page is out of date. Reload — your last change will be checked and kept if it can be.',
 } as const;
 
 // PUT /api/shows/update — save show config (authenticated)
