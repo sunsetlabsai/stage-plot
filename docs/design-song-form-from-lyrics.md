@@ -334,14 +334,10 @@ Reuse the existing discipline; do not build a second one.
    spec earns no exemption from it.
 4. **Read back a tally computed from the FOLDED SPEC, not the draft.** A read-back echo
    is mandatory here — a dropped section is the failure mode most likely to look
-   plausible. But `tallyDraft` is **op-blind**: it sums `sec.spans` and ignores ops
-   (`lib/roadmap-authoring.ts:407-416`), a fidelity hole already recorded as verified in
-   `docs/backlog-charting.md` ("an intro `3x` repeat is not reflected"). This grammar
-   emits repeats as a matter of course (`Chorus x2`), so `tallyDraft` would silently
-   under-report exactly the construct we most need echoed. **The tally for this path
-   must be derived from the validated spec** (sections × bars, with repeats expanded),
-   or `tallyDraft` must first be made op-aware. Until one of those exists, the repeat
-   grammar is not pinned.
+   plausible. `tallyDraft` is **op-blind**: it sums `sec.spans` and ignores ops, and
+   this grammar emits repeats as a matter of course (`Chorus x2`). **The tally for this
+   path must be derived from the validated spec** — `tallySpec` (`lib/roadmap-authoring.ts`,
+   built for `design-roadmap-structure-editing.md` §4) does that, showing repeats as `×N`.
 
 **Determinism first.** The grammar in §2 is regular. An AI parse is a *fallback* for
 sheets that deviate, subject to the same transcribe-then-fold split already used in

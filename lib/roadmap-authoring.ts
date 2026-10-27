@@ -418,8 +418,11 @@ export function tallyDraft(draft: AuthoringDraft): string[] {
 // Per-section echo rendered FROM THE FINAL SPEC (post-fold, post-merge), so the
 // read-back matches the chart: one line per section, its repeat appended to the
 // label ("Chorus ×2: 8 bars — D×4, A×4"; "Verse, 2 endings: …"). A change sustains
-// until the next one (the fold's inheritance-diff); bars before a section's first
-// change are written blank and shown as "–", never filled in (ruling §8.5).
+// until the next one. That is a read of the FOLD's inheritance-diff, not an
+// interpretation of an authored blank: foldDraft rejects an empty bar pattern, so
+// every blank in a parsed spec is a bar the author wrote as "same chord again".
+// Parse-output only — a hand-edited spec can carry true blanks (ruling §8.5), so
+// do not reuse this on one. Bars before a section's first change show as "–".
 // docs/design-roadmap-structure-editing.md §4 Read-back. tallyDraft stays the
 // diagnosis when the fold or validator rejects the draft.
 export function tallySpec(spec: RoadmapSpec): string[] {

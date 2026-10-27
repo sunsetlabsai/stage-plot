@@ -121,11 +121,10 @@ remapped through an old-index → new-index map built after all merges (a run of
 removes N − 1 sections, and several runs accumulate). A run that fails any test stays
 longhand — the step never guesses.
 
-**Read-back.** Today the tally is built from the pre-fold SpanList, so it is already
-blind to repeat ops (`backlog-charting.md` §tallyDraft is op-blind). After this change
-it would also disagree with the chart (two Chorus lines vs one `×2`). Fix in the same
-PR: build the tally from the **final spec**, one line per section with `×N` /
-`N endings` appended. Closes that backlog item.
+**Read-back.** The tally was built from the pre-fold SpanList, so it was blind to
+repeat ops, and after this change it would also disagree with the chart (two Chorus
+lines vs one `×2`). Fix in the same PR: build the tally from the **final spec**, one
+line per section with `×N` / `N endings` appended (`tallySpec`).
 
 ## 5. Editor operations
 

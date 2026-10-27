@@ -193,9 +193,8 @@ phone tier in; the spike confirms its breakpoint rather than deciding whether to
 - No change to parse/fold or the spec schema.
 - **Separate issues from diagnosis (backlog, not this spec):**
   - `A7sus2` → `Asus2`: quality enum (`roadmap-parse.ts:58`) has `sus2`, no `7sus2`.
-  - The intro "3x" repeat wasn't captured, and `tallyDraft` is op-blind
-    (`roadmap-authoring.ts:340`) so the read-back can disagree with the folded spec —
-    a latent fidelity hole.
+  - The intro "3x" repeat wasn't captured. (The read-back now comes from the final
+    spec — `tallySpec`, `design-roadmap-structure-editing.md` §4.)
 
 ## 8. Test plan
 
