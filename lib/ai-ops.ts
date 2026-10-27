@@ -422,8 +422,17 @@ export function validateNotes(incoming: unknown): string | null {
 }
 
 export function notesReplacePrompt(current: readonly GeneralNote[], incoming: readonly GeneralNote[]): string | null {
-  const kept = new Set(incoming.map((n) => JSON.stringify([n.label, n.text])));
-  const lost = current.filter((n) => !kept.has(JSON.stringify([n.label, n.text])));
+  // Matched as a MULTISET: the notes editor allows identical rows, so two
+  // copies kept as one is a loss a Set would not see (Codex R2 on #195).
+  const key = (n: GeneralNote) => JSON.stringify([n.label, n.text]);
+  const available = new Map<string, number>();
+  for (const n of incoming) available.set(key(n), (available.get(key(n)) ?? 0) + 1);
+  const lost = current.filter((n) => {
+    const left = available.get(key(n)) ?? 0;
+    if (left === 0) return true;
+    available.set(key(n), left - 1);
+    return false;
+  });
   if (lost.length === 0) return null;
   return (
     `Replace the general notes?\n\nThis removes or rewrites ${lost.length === 1 ? '1 existing note' : `${lost.length} existing notes`}:\n` +

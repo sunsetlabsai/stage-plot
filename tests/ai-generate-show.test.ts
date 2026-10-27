@@ -234,6 +234,14 @@ describe('update_notes never silently drops notes (Codex R1 on #195)', () => {
     expect(notesReplacePrompt([], [{ label: 'Load-in', text: '5pm' }])).toBeNull();
   });
 
+  it('★ duplicates count: two identical notes kept as one is a loss (Codex R2 on #195)', () => {
+    const power = { label: 'Power', text: 'Two drops' };
+    expect(notesReplacePrompt([power, power], [power])).toMatch(/1 existing note:\n  • Power$/);
+    expect(notesReplacePrompt([power, power], [power, { ...power }])).toBeNull();
+    // One copy kept twice does not cover a different note that was dropped.
+    expect(notesReplacePrompt([power, current[1]], [power, power])).toMatch(/1 existing note:\n  • Stands$/);
+  });
+
   it('malformed notes are refused before they reach the config', () => {
     expect(validateNotes('Power: two drops')).toBe('notes must be a list');
     expect(validateNotes([{ label: 'Power' }])).toBe('note 1 needs a text label and text');
