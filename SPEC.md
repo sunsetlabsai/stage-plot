@@ -164,8 +164,10 @@ Config tab (owner)
     Patch (.csv)** (BOM, RFC-4180, header `Channel,Name,Mic,Stand,Notes`, sorted by ch) and
     **Export Patch (.xml)** (`<showrunr-patch version="1">`, blank attrs omitted). Filenames use
     slugified show-or-band name (`page.tsx:6939-6985`, `lib/console-export.ts`, `lib/show-file.ts:35-60`).
-30. **Import Show** in Config replaces the whole current config from a file, with no confirm
-    (`page.tsx:6987-7003`).
+30. **Import Show** in Config replaces the whole current config from a file. If the show has
+    anything to lose (any list row, or a venue or date), it first confirms with counts of what is
+    discarded. Then it arms the same one-level **Undo import** as item 28, restoring the whole show
+    (`lib/import-undo.ts`; `page.tsx` `applyShowImport`).
 
 Sharing
 31. Share buttons use a 3-tier fallback: share the PDF file (chart only) → share the link →

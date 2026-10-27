@@ -8,6 +8,7 @@ type ShowShape = {
   monitors: MonitorMix[];
   notes: GeneralNote[];
   setlist: SetlistSong[];
+  showInfo: { eventDate: string; venue: string };
 };
 
 /**
@@ -31,12 +32,17 @@ export function restoreImportUndo<C extends ShowShape>(prev: C, undo: ImportUndo
  * nothing to lose. Same confirm-with-counts rule as `replaceShowPrompt` (lib/ai-ops): it
  * states what is discarded, and how long undo lasts, because the replace
  * autosaves within seconds.
+ *
+ * Venue and date count as content (Codex R1 on #198): the replace discards them
+ * too. Band and show name do not — New Show fills both from the name typed in
+ * the create dialog, so counting them would prompt on every fresh show.
  */
 export function importShowPrompt(current: ShowShape, fileName: string): string | null {
   const songs = current.setlist.length;
   const notes = current.notes.length;
   const listsEmpty = current.stagePlot.length === 0 && current.inputs.length === 0 && current.monitors.length === 0;
-  if (listsEmpty && songs === 0 && notes === 0) return null;
+  const infoEmpty = !current.showInfo.eventDate && !current.showInfo.venue;
+  if (listsEmpty && songs === 0 && notes === 0 && infoEmpty) return null;
   const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
   return (
     `Replace this whole show with “${fileName}”?\n\n` +

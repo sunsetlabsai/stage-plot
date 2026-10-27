@@ -202,7 +202,7 @@ noted) · **Laptop** (Chrome).
 - [SH-31] Print a long set — 30-song setlist · Print run order only · Songs flow across columns/pages in order, nothing cut off · Any · Laptop
 - [SH-32] Name validation — New Show with "!!!" then a 150-char name · Create disabled for "!!!"; the name field stops accepting text at 100 characters · Owner · Laptop
 - [SH-33] Library on a phone — /library with 10 songs · Scroll rows · Check whether the 6-column grid forces sideways scrolling (suspected; fixed column widths ~580 px) · Owner · Phone
-- [SH-34] Import Show replaces everything — Config → Import Show with a different .yaml · Whole show replaced immediately with no confirm — confirm this is acceptable · Owner · Laptop
+- [SH-34] Import Show replaces everything — Config → Import Show with a different .yaml on a show with content · A confirm names the file and counts what is discarded; Cancel changes nothing; OK replaces the show and offers Undo import, which restores it until the next edit or tab change (re-clicking Config keeps it) · Owner · Laptop
 - [SH-35] Try-it quota — No API key, signed in · Send messages until exhausted · "Free messages used up. Enter your own Claude API key…" · Owner · Laptop
 - [SH-36] Tab-bar copy-link icon — Owner · Click upload icon in tab bar · Link copied; icon briefly shows a tick · Owner · Laptop
 

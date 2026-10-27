@@ -453,7 +453,7 @@ function ShowWorkspace() {
   // the show loads, ownership is unknown, and no edit affordance renders in that
   // window anyway (every one of them is behind !isReadOnly).
   const isReadOnlyRef = useRef(true);
-  // Synced in an effect, not written during render — same idiom as bpmConfigRef
+  // Synced in an effect, not written during render — same idiom as configRef
   // below. The one-commit lag is in the SAFE direction: the ref starts refusing
   // and only relaxes once ownership is known.
   useEffect(() => { isReadOnlyRef.current = !isOwner; }, [isOwner]);
@@ -662,6 +662,12 @@ function ShowWorkspace() {
     };
   }, []);
 
+  // The live config for handlers that run after an await or a FileReader load,
+  // where a render-time `config` would be stale: the BPM writer's confirmed seed
+  // and Import Show's undo snapshot (Codex R1 on #198).
+  const configRef = useRef(config);
+  useEffect(() => { configRef.current = config; }, [config]);
+
   // One-level, in-memory undo for a setlist import (design §7) or an Import Show
   // (UAT S7) — see lib/import-undo. Null ⇒ no affordance. Not persisted: a
   // reload drops it, which is the specified scope.
@@ -723,8 +729,15 @@ function ShowWorkspace() {
   // whole show. Same lifetime and same bypass of updateConfig as the setlist
   // import above, so it cannot clear the snapshot it just armed. The read-only
   // refusal updateConfig would have made is repeated here for that reason.
-  const applyShowImport = useCallback((imported: AppConfig, before: AppConfig) => {
+  //
+  // The confirm and the snapshot both read configRef HERE, when the file has
+  // finished reading — not the config at file-pick, which an edit made while the
+  // FileReader ran would have outdated, and undo would then drop (Codex R1 on #198).
+  const applyShowImport = useCallback((imported: AppConfig, fileName: string) => {
     if (isReadOnlyRef.current) return;
+    const before = configRef.current;
+    const ask = importShowPrompt(before, fileName);
+    if (ask && !window.confirm(ask)) return;
     setConfig(withStableIds(imported));
     setImportUndo({ kind: 'show', config: before });
   }, []);
@@ -746,19 +759,21 @@ function ShowWorkspace() {
   // and restores the previous tab behind the user's back, and an effect would let
   // that invisible round-trip silently eat the affordance. Only user-initiated
   // navigation goes through here. (It also satisfies react-hooks/set-state-in-effect.)
+  //
+  // Only a real change: re-clicking the current tab is not navigation, and used
+  // to drop the undo the user was about to press (Codex R1 on #198).
   const goToTab = useCallback((next: typeof tab) => {
+    if (next === tab) return;
     setImportUndo(null);
     setTab(next);
-  }, []);
+  }, [tab]);
 
   // Canonical-BPM writer (lib/bpm-writer): optimistic patch, per-song serialized
   // PUTs (server receives writes in order), revert-to-confirmed on failure. Lives
   // HERE — not in ConfigTab, which remounts on every tab switch (Codex R2 HIGH-2) —
   // so ONE writer's in-flight chain + confirmed map span the whole show session.
   // Built lazily inside the handler (react-hooks/refs: no ref access in render);
-  // reads the live setlist via bpmConfigRef so the confirmed seed is never stale.
-  const bpmConfigRef = useRef(config);
-  useEffect(() => { bpmConfigRef.current = config; }, [config]);
+  // reads the live setlist via configRef so the confirmed seed is never stale.
   const bpmWriterRef = useRef<BpmWriter | null>(null);
   const handleBpmChange = useCallback((songId: string, bpm: number | null) => {
     if (bpmWriterRef.current == null) {
@@ -772,7 +787,7 @@ function ShowWorkspace() {
           return res.ok;
         },
         getCurrent: (id) =>
-          bpmConfigRef.current.setlist.find((s) => s.songId === id)?.bpm ?? null,
+          configRef.current.setlist.find((s) => s.songId === id)?.bpm ?? null,
         patch: (id, value) =>
           updateConfig((p) => ({
             ...p,
@@ -6205,9 +6220,10 @@ function ConfigTab({
   // Commits an import merge AND arms one-level undo, in Page so the affordance
   // survives this tab's remount (design §7). Deliberately not updateConfig.
   onImportApply: (merged: SetlistSong[], before: SetlistSong[]) => void;
-  // Config → Import Show: replaces the whole show AND arms undo (UAT S7). Same
-  // reason as onImportApply for living in Page.
-  onShowImport: (imported: AppConfig, before: AppConfig) => void;
+  // Config → Import Show: confirms, replaces the whole show AND arms undo (UAT S7).
+  // Same reason as onImportApply for living in Page, plus Page holds the live
+  // config the confirm and snapshot must read.
+  onShowImport: (imported: AppConfig, fileName: string) => void;
   googleToken: GoogleToken | null;
   googleError?: string;
   onDisconnectGoogle: () => void;
@@ -7127,12 +7143,8 @@ function ConfigTab({
                   reader.onload = () => {
                     try {
                       const imported = deserializeShow(reader.result as string, file.name);
-                      // Confirm with counts before the replace, which autosaves
-                      // within seconds; undo is the second line (UAT S7). Read
-                      // `config` here, at load, as the snapshot to restore.
-                      const ask = importShowPrompt(config, file.name);
-                      if (ask && !window.confirm(ask)) return;
-                      onShowImport(imported, config);
+                      // Page confirms with counts and arms undo (UAT S7).
+                      onShowImport(imported, file.name);
                     } catch (err) {
                       alert(err instanceof Error ? err.message : 'Could not read file.');
                     }
