@@ -205,8 +205,16 @@ by each successful save's response. It is stored verbatim with the cache
 **As built:** base, copy AND the unsynced marker are one entry, `showrunr-show-{id}`
 (`lib/show-store.ts`, `{v: 2, config, base, unsynced}`) — a NEW key, so an old bundle the
 service worker still serves offline never reads the new format as a show. The old
-`showrunr-cache-{id}` (bare config) is read as a fallback — clean, no known base — and
-removed on the first write; neither it nor `showrunr-last-saved-{id}` is written any more.
+`showrunr-cache-{id}` (bare config) is read as a fallback and removed on the first write;
+neither it nor `showrunr-last-saved-{id}` is written any more. **Upgrade (Codex R1 on #202):**
+that old bundle cached each edit before its 2 s debounce, so its copy may hold an edit that
+never reached the server (a reload inside the debounce cancels the unload save). The owner
+tab classifies it against the fresh load: same content → clean; different → unsynced, with
+the old bundle's last-saved version as its base — so it saves if the server is still there,
+else 409/§4.3 asks. This also changes §3.4: a 428'd old tab's edit is in that old cache,
+so the reload its message asks for now recovers it (saved, or the owner is asked) — while
+the 428 copy (Q1) still says to make the change again. Open question for Graham (Q6). Also as built: an owner tab is
+read-only until its lock is granted (§4.0; the grant is asynchronous).
 
 ### 4.2 One save in flight
 

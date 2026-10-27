@@ -121,7 +121,10 @@ export function useShow(
 
   // Only an owner's tab asks for the lock; a stale state from a previous show is ignored.
   const effectiveLock = showId && isOwner ? lockState : null;
-  const isReadOnly = !isOwner || effectiveLock === 'elsewhere';
+  // Read-only until this tab may actually write (Codex R1 on #202): a lock grant is
+  // asynchronous, and an edit shown on screen but refused by saveConfig while the
+  // grant was pending would be dropped on the next reload with no warning.
+  const isReadOnly = !isOwner || !(effectiveLock === 'held' || effectiveLock === 'unsupported');
 
   /** Write the entry; on failure show the warning and report it (§4.2a step 2). */
   const persist = useCallback((config: Config, unsynced: boolean): boolean => {
@@ -336,17 +339,29 @@ export function useShow(
   const onWritable = useCallback(() => {
     if (!showId) return;
     const s = store();
-    const entry = s ? readEntry(s, showId) : null;
+    let entry = s ? readEntry(s, showId) : null;
     const loaded = opts.current.loaded;
     const first = !tookLock.current;
     tookLock.current = true;
 
-    if (entry?.unsynced) {
+    // A pre-v2 bundle's cache (Codex R1 on #202): it cached each edit before its
+    // 2 s debounce, so it may hold an edit that never reached the server.
+    //  - same content as the fresh load → nothing unsent: treat as clean;
+    //  - different → treat as unsynced. Its base is the version that bundle last
+    //    saved at: if that is still the server's, the edit goes through (200);
+    //    otherwise it 409s — or, with no base, goes straight to §4.3 — and the
+    //    owner is asked. Never dropped, never silently overwritten.
+    const legacyUnsent = !!entry?.legacy && !(loaded && showContent(entry.config) === showContent(loaded.config));
+    if (entry?.unsynced || legacyUnsent) {
+      entry = { ...entry!, unsynced: true };
       // This browser holds edits the server never confirmed: show them and send
       // them with their base. A 409 asks (§4.3) — never dropped.
       base.current = entry.base;
       latest.current = showContent(entry.config);
       pending.current = entry.config;
+      // Re-home a legacy copy as a marked v2 entry now, so it stays recoverable
+      // even if this send never lands.
+      if (legacyUnsent) persist(entry.config, true);
       opts.current.applyConfig(entry.config);
       sendRef.current();
       return;

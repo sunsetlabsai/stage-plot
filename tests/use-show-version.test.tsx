@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, cleanup } from '@testing-library/react';
 import { useShow, type ServerShow } from '../lib/use-show';
-import { readEntry, writeEntry, entryKey } from '../lib/show-store';
+import { readEntry, writeEntry, entryKey, legacyKey } from '../lib/show-store';
 import { fakeLocks } from './fake-locks';
 
 // docs/design-version-checked-save.md §8 "Hook", "Reload while held", "Tabs",
@@ -250,6 +250,57 @@ describe('§4.5 offline, reconnect, reload', () => {
     expect(applyConfig).toHaveBeenCalledWith({ n: 5 });
     expect(calls).toHaveLength(1);
     expect(calls[0].body.base_updated_at).toBe(V0);
+  });
+});
+
+describe('Codex R1 on #202 — nothing is editable before the lock, nothing lost on upgrade', () => {
+  it('an owner tab is read-only while the lock grant is pending', async () => {
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: fakeLocks() });
+    controlledFetch();
+    const { hook } = setup();
+    // Before the (asynchronous) grant: no edit surface, so no edit to drop.
+    expect(hook.result.current.context.isReadOnly).toBe(true);
+    await flush();
+    expect(hook.result.current.context.lockState).toBe('held');
+    expect(hook.result.current.context.isReadOnly).toBe(false);
+  });
+
+  function legacy(store: ReturnType<typeof memStore>, config: unknown, lastSaved?: string) {
+    store.m.set(legacyKey('show-1'), JSON.stringify(config));
+    if (lastSaved) store.m.set('showrunr-last-saved-show-1', lastSaved);
+  }
+
+  it('old-bundle cache with an unsent edit on top of the CURRENT version → shown, re-homed, sent at that version', async () => {
+    const calls = controlledFetch();
+    const store = memStore();
+    legacy(store, { n: 5 }, V0);
+    const { applyConfig } = setup({ store, loaded: { config: { n: 0 }, updatedAt: V0 } });
+    await flush();
+    expect(applyConfig).toHaveBeenCalledWith({ n: 5 });
+    expect(entry(store)).toMatchObject({ config: { n: 5 }, base: V0, unsynced: true });
+    expect(store.m.has(legacyKey('show-1'))).toBe(false);
+    expect(calls[0].body).toMatchObject({ config: { n: 5 }, base_updated_at: V0 });
+  });
+
+  it('old-bundle cache that differs with no usable version → the owner is asked, never dropped', async () => {
+    controlledFetch();
+    const store = memStore();
+    legacy(store, { n: 5 }); // no last-saved
+    const server = { config: { n: 0 }, updatedAt: V2 };
+    const { hook } = setup({ store, loaded: server, fetchServer: async () => server });
+    await flush();
+    expect(hook.result.current.context.conflict?.server).toEqual(server);
+    expect(entry(store)).toMatchObject({ config: { n: 5 }, unsynced: true });
+  });
+
+  it('old-bundle cache equal to the server → clean, nothing sent, re-homed', async () => {
+    const calls = controlledFetch();
+    const store = memStore();
+    legacy(store, { n: 0 }, V0);
+    setup({ store, loaded: { config: { n: 0 }, updatedAt: V2 } });
+    await flush();
+    expect(calls).toHaveLength(0);
+    expect(entry(store)).toEqual({ config: { n: 0 }, base: V2, unsynced: false });
   });
 });
 

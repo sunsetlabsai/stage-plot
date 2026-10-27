@@ -24,10 +24,10 @@ describe('show-store — one entry holds copy, base and the unsynced flag', () =
     expect(readEntry(s, 'a')).toEqual({ config: { x: 1 }, base: 'v1', unsynced: true });
   });
 
-  it('reads a pre-v2 bare config (an older bundle) as clean, with no known base', () => {
+  it('reads a pre-v2 bare config (an older bundle), flagged legacy for the owner tab to classify', () => {
     const s = memStore();
     s.setItem(legacyKey('a'), JSON.stringify({ stagePlot: [] }));
-    expect(readEntry(s, 'a')).toEqual({ config: { stagePlot: [] }, base: null, unsynced: false });
+    expect(readEntry(s, 'a')).toEqual({ config: { stagePlot: [] }, base: null, unsynced: false, legacy: true });
   });
 
   it('never writes the legacy key (an old bundle offline must not read the new format) and retires it', () => {

@@ -15,6 +15,7 @@ export const entryKey = (showId: string) => `showrunr-show-${showId}`;
 // never written — a NEW key, so an old bundle still served offline by the service
 // worker can never read this format as a show (it would render garbage).
 export const legacyKey = (showId: string) => `showrunr-cache-${showId}`;
+const legacyLastSavedKey = (showId: string) => `showrunr-last-saved-${showId}`;
 
 export interface ShowEntry {
   config: Record<string, unknown>;
@@ -22,6 +23,12 @@ export interface ShowEntry {
   base: string | null;
   /** True while the copy holds edits the server has not confirmed. */
   unsynced: boolean;
+  /**
+   * Read from a pre-v2 bundle's bare cache. Whether it holds an unsent edit is NOT
+   * known (that bundle cached before its 2 s debounce), so the owner's tab decides
+   * against the server (lib/use-show `onWritable`, Codex R1 on #202).
+   */
+  legacy?: boolean;
 }
 
 interface StoredEntry extends ShowEntry {
@@ -29,9 +36,9 @@ interface StoredEntry extends ShowEntry {
 }
 
 /**
- * The entry, or null. A pre-v2 value is a bare config written by an older bundle:
- * read it as a clean copy with no known base. Its edits, if any, are the old tab's
- * — which §3.4 already told the user were not saved.
+ * The entry, or null. A pre-v2 value is a bare config written by an older bundle,
+ * returned with `legacy: true` and, as its base, the version that bundle recorded
+ * after its last successful save (`showrunr-last-saved-{id}`), if any.
  */
 export function readEntry(store: ShowStore, showId: string): ShowEntry | null {
   let raw: string | null;
@@ -53,7 +60,9 @@ export function readEntry(store: ShowStore, showId: string): ShowEntry | null {
         unsynced: p.unsynced === true,
       };
     }
-    return { config: parsed as Record<string, unknown>, base: null, unsynced: false };
+    let lastSaved: string | null = null;
+    try { lastSaved = store.getItem(legacyLastSavedKey(showId)); } catch { /* unknown */ }
+    return { config: parsed as Record<string, unknown>, base: lastSaved || null, unsynced: false, legacy: true };
   } catch {
     return null;
   }
