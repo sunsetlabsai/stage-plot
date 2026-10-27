@@ -403,7 +403,7 @@ interface PlannedBar {
   group: BarGroup;
 }
 
-type MarkerKey = 'segno' | 'coda' | 'toCoda' | 'fine' | 'jump';
+export type MarkerKey = 'segno' | 'coda' | 'toCoda' | 'fine' | 'jump';
 const MARKER_KEYS: MarkerKey[] = ['segno', 'coda', 'toCoda', 'fine', 'jump'];
 
 // Which barline the renderer draws each marker on (roadmap-render.ts: segno/coda
@@ -721,6 +721,161 @@ export function unrollRepeat(view: ViewModel, sectionId: string): OpResult {
   return gate(view, { ok: true, view: next, removes: [] });
 }
 
+// ── 1st / 2nd endings (§5.2) ─────────────────────────────────────────────────
+
+// "Make the last N bars the 1st ending": appends N new bars as the 2nd ending,
+// their chords copied from ending 1 as written (blanks stay blank, §8.5), then
+// editable. Requires 1 <= lastN < bars, so ending 1 starts at bar ≥ 2 and neither
+// ending is empty. Replaces a plain repeat (named when it played more than twice,
+// since endings [1],[2] play twice); a section that already has endings is
+// refused — remove them first. No existing bar moves, so no reference moves.
+// Three-plus endings and other pass lists stay prompt-only.
+export function addEndings(view: ViewModel, sectionId: string, lastN: number): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  if (sec.repeat?.kind === 'volta') return { ok: false, reason: `${sec.label} already has endings — remove them first` };
+  if (!Number.isInteger(lastN) || lastN < 1 || lastN >= sec.bars) {
+    return { ok: false, reason: 'the 1st ending needs at least one bar before it and one bar in it' };
+  }
+  const removes = sec.repeat?.kind === 'plain' && sec.repeat.times > 2 ? [repeatName(sec.repeat)] : [];
+  const copied = sec.chords.slice(sec.bars - lastN).map((b) => (b ? b.map((c) => ({ ...c })) : null));
+  const nextSec: ViewSection = {
+    id: sec.id,
+    label: sec.label,
+    bars: sec.bars + lastN,
+    chords: [...sec.chords, ...copied],
+    repeat: {
+      kind: 'volta',
+      endings: [
+        { bars: { start: sec.bars - lastN + 1, count: lastN }, passes: [1] },
+        { bars: { start: sec.bars + 1, count: lastN }, passes: [2] },
+      ],
+    },
+  };
+  const next: ViewModel = { ...view, sections: view.sections.map((s) => (s.id === sectionId ? nextSec : s)) };
+  const src = [...sec.chords.map((_, i) => i), ...copied.map(() => null)];
+  return gate(view, { ok: true, view: next, removes, edit: { sectionId, src } });
+}
+
+// Remove the endings: delete every ending's bars EXCEPT the one played on pass 1
+// (which become ordinary bars), and drop the repeat. The deleted bars are named in
+// `removes` — this op deletes bars, unlike choosing a count, which keeps them —
+// with any marker on them (and its dependents).
+export function removeEndings(view: ViewModel, sectionId: string): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  const r = sec.repeat;
+  if (r?.kind !== 'volta') return { ok: false, reason: `${sec.label} has no endings` };
+  const first = r.endings.findIndex((e) => e.passes.includes(1));
+  const groups = barGroups(sec);
+  const plan = identityPlan(sec).filter((_, i) => typeof groups[i] !== 'number' || groups[i] === first);
+  const gone = groups.flatMap((g, i) => (typeof g === 'number' && g !== first ? [i + 1] : []));
+  const res = applyPlan({ ...view, sections: view.sections.map((s) => (s.id === sectionId ? { ...s, repeat: undefined } : s)) }, sectionId, plan);
+  if (!res.ok) return res;
+  return gate(view, {
+    ...res,
+    removes: [`the later ending${r.endings.length > 2 ? 's' : ''} (${barList(gone)})`, ...res.removes],
+  });
+}
+
+// "bar 5", "bars 4–5", "bars 2 and 5", "bars 2–3 and 5" — the deleted bars as
+// runs, so a confirm never names a bar it keeps (Codex PR D: with 3+ endings the
+// deleted bars need not be contiguous).
+function barList(bars: number[]): string {
+  const runs: string[] = [];
+  for (let i = 0; i < bars.length; ) {
+    let j = i;
+    while (j + 1 < bars.length && bars[j + 1] === bars[j] + 1) j += 1;
+    runs.push(i === j ? `${bars[i]}` : `${bars[i]}–${bars[j]}`);
+    i = j + 1;
+  }
+  const list = runs.length === 1 ? runs[0] : `${runs.slice(0, -1).join(', ')} and ${runs[runs.length - 1]}`;
+  return `${bars.length === 1 ? 'bar' : 'bars'} ${list}`;
+}
+
+// ── Navigation markers (§5.4) ────────────────────────────────────────────────
+
+export type PlaceableMarker = 'segno' | 'coda' | 'toCoda' | 'fine';
+export type JumpChoice = { from: 'capo' | 'segno'; until: 'end' | 'fine' | 'coda' };
+
+// What the Marker menu may offer, from validateNavigation's preconditions: To Coda
+// needs a Coda; D.S. needs a Segno; al Fine needs a Fine; al Coda needs a Coda
+// and a To Coda. (Liveness is checked when one is placed.)
+export function markerOptions(view: ViewModel): { markers: PlaceableMarker[]; jumps: JumpChoice[] } {
+  const nav = view.navigation ?? {};
+  const markers: PlaceableMarker[] = ['segno', 'coda', 'fine'];
+  if (nav.coda) markers.splice(2, 0, 'toCoda');
+  const jumps: JumpChoice[] = [];
+  for (const from of ['capo', 'segno'] as const) {
+    if (from === 'segno' && !nav.segno) continue;
+    jumps.push({ from, until: 'end' });
+    if (nav.fine) jumps.push({ from, until: 'fine' });
+    if (nav.coda && nav.toCoda) jumps.push({ from, until: 'coda' });
+  }
+  return { markers, jumps };
+}
+
+// The markers on one bar, for the menu's "remove" entries and the preview tags.
+export function markersAt(view: ViewModel, sectionId: string, bar: number): MarkerKey[] {
+  const nav = view.navigation;
+  if (!nav) return [];
+  return MARKER_KEYS.filter((k) => {
+    const ref = markerRef(nav, k);
+    return ref?.sectionId === sectionId && ref.bar === bar;
+  });
+}
+
+// The printed label of a marker kind or jump choice.
+export function markerLabel(key: PlaceableMarker | JumpChoice): string {
+  if (typeof key === 'object') return markerName({ jump: { at: { sectionId: '', bar: 1 }, ...key } }, 'jump');
+  return markerName({}, key);
+}
+
+function placeRef(view: ViewModel, sectionId: string, bar: number): ViewBarRef | { reason: string } {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { reason: 'that section no longer exists' };
+  if (badBar(sec, bar)) return { reason: `bar ${bar} is not in ${sec.label}` };
+  return { sectionId, bar };
+}
+
+// Put a Segno / Coda / To Coda / Fine on a bar. Each exists once: placing it again
+// moves it. Refused where the validator would refuse (To Coda without a Coda) or
+// where it would not take effect (navLive).
+export function setMarker(view: ViewModel, sectionId: string, bar: number, kind: PlaceableMarker): OpResult {
+  const at = placeRef(view, sectionId, bar);
+  if ('reason' in at) return { ok: false, reason: at.reason };
+  if (kind === 'toCoda' && !view.navigation?.coda) return { ok: false, reason: 'place the Coda first' };
+  const next: ViewModel = { ...view, navigation: { ...view.navigation, [kind]: at } };
+  return gate(view, { ok: true, view: next, removes: [] }, true);
+}
+
+// Put the D.S. / D.C. on a bar (al Fine / al Coda / to the end). There is one: a
+// new choice moves and replaces it.
+export function setJump(view: ViewModel, sectionId: string, bar: number, choice: JumpChoice): OpResult {
+  const at = placeRef(view, sectionId, bar);
+  if ('reason' in at) return { ok: false, reason: at.reason };
+  const nav = view.navigation ?? {};
+  if (choice.from === 'segno' && !nav.segno) return { ok: false, reason: 'place the Segno first' };
+  if (choice.until === 'fine' && !nav.fine) return { ok: false, reason: 'place the Fine first' };
+  if (choice.until === 'coda' && !(nav.coda && nav.toCoda)) return { ok: false, reason: 'place the Coda and the To Coda first' };
+  const next: ViewModel = { ...view, navigation: { ...nav, jump: { at, from: choice.from, until: choice.until } } };
+  return gate(view, { ok: true, view: next, removes: [] }, true);
+}
+
+// Remove one marker; what can't stand without it goes too, and is named in
+// `removes` (the marker itself is what was asked for, so it isn't listed).
+export function removeMarker(view: ViewModel, key: MarkerKey): OpResult {
+  const nav = view.navigation;
+  if (!nav || !markerRef(nav, key)) return { ok: false, reason: 'that marker is not on the chart' };
+  const all = withDependents(nav, new Set([key]));
+  const removes = MARKER_KEYS.filter((k) => k !== key && all.has(k)).map((k) => `the ${markerName(nav, k)}`);
+  const next: ViewModel = { ...view };
+  const left = dropMarkers(nav, all);
+  if (left) next.navigation = left;
+  else delete next.navigation;
+  return gate(view, { ok: true, view: next, removes });
+}
+
 // Second rule (§3): no edit may silently disable a marker. Moving every reference
 // with its bar keeps a marker on the right bar, but not necessarily in effect — a
 // repeat or ending re-shaped around it changes how the VM reaches it (Codex, PR B:
@@ -730,20 +885,31 @@ export function unrollRepeat(view: ViewModel, sectionId: string): OpResult {
 // refused, naming the redirect. A chart already not-live doesn't block edits, so
 // the author can fix it. A marker REMOVED under confirm is not a liveness loss —
 // the redirect is gone, not dead.
-function gate(before: ViewModel, r: OpResult): OpResult {
+//
+// `placing` = the op puts a marker down (§5.4): the refusal then says the marker
+// would not work where it is being put, rather than "move it first".
+function gate(before: ViewModel, r: OpResult, placing = false): OpResult {
   if (!r.ok) return r;
   if (!navLive(viewToSpec(before)).live) return r;
   const now = navLive(viewToSpec(r.view));
   if (now.live) return r;
-  const nav = before.navigation ?? {};
+  if (now.dead === 'walk') return { ok: false, reason: 'this would leave the chart with no end' };
+  const nav = (placing ? r.view.navigation : before.navigation) ?? {};
+  if (placing) {
+    const what =
+      now.dead === 'jump'
+        ? `the ${markerName(nav, 'jump')} would never be played`
+        : now.dead === 'toCoda'
+          ? 'the To Coda would never be taken'
+          : 'the chart would not end at the Fine';
+    return { ok: false, reason: `${what} with the markers placed like this` };
+  }
   const reason =
     now.dead === 'jump'
       ? `this would stop the ${markerName(nav, 'jump')} from being played — move it first`
       : now.dead === 'toCoda'
         ? 'this would stop the To Coda from being taken — move it first'
-        : now.dead === 'fine'
-          ? 'this would stop the chart ending at the Fine — move it first'
-          : 'this would leave the chart with no end';
+        : 'this would stop the chart ending at the Fine — move it first';
   return { ok: false, reason };
 }
 

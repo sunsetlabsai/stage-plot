@@ -9,6 +9,12 @@ import {
   removeSection,
   setPlainRepeat,
   unrollRepeat,
+  addEndings,
+  removeEndings,
+  setMarker,
+  setJump,
+  removeMarker,
+  markerOptions,
   type ViewModel,
   type ViewNavigation,
   type ViewBar,
@@ -650,6 +656,193 @@ describe('unrollRepeat (§5.1)', () => {
   });
 });
 
+describe('addEndings (§5.2)', () => {
+  it('makes the last N bars the 1st ending and appends a copied 2nd ending', () => {
+    const r = applied(addEndings(view(PLAIN_BARS), 'chorus', 2));
+    expect(sec(r.view, 'chorus')).toMatchObject({
+      bars: 5,
+      repeat: {
+        kind: 'volta',
+        endings: [
+          { bars: { start: 2, count: 2 }, passes: [1] },
+          { bars: { start: 4, count: 2 }, passes: [2] },
+        ],
+      },
+    });
+    // Bars 4–5 copy bars 2–3 as written: bar 3 was blank, so bar 5 is blank (§8.5).
+    expect(degrees(r.view, 'chorus')).toEqual([[4, 5], [1, 5], null, [1, 5], null]);
+    expect(r.removes).toEqual([]);
+    expectValid(r.view);
+  });
+
+  it('needs a bar before the 1st ending and at least one in it; refuses a section that has endings', () => {
+    const v = view(PLAIN_BARS);
+    expect(addEndings(v, 'chorus', 0).ok).toBe(false);
+    expect(addEndings(v, 'chorus', 3).ok).toBe(false);
+    expect(addEndings(view(VOLTA), 'verse', 1)).toEqual({ ok: false, reason: 'Verse already has endings — remove them first' });
+  });
+
+  it('replacing a ×2 repeat loses nothing; a ×3 repeat is named (endings play twice)', () => {
+    expect(applied(addEndings(view(PLAIN), 'verse', 1)).removes).toEqual([]);
+    const x3 = applied(setPlainRepeat(view(PLAIN), 'verse', 3)).view;
+    expect(applied(addEndings(x3, 'verse', 1)).removes).toEqual(['the ×3 repeat']);
+  });
+});
+
+// §6 liveness fixtures, verbatim from the design.
+describe('addEndings — the liveness gate (§6, Codex R4 / R5)', () => {
+  const R4: RoadmapSpec = {
+    version: 1,
+    timeSig: { beats: 4, unit: 4 },
+    renderKey: 'C',
+    sections: [
+      { id: 'verse', label: 'Verse', bars: 2, repeat: { kind: 'plain', times: 2 }, changes: [{ bar: 1, chords: [h(1)] }] },
+      { id: 'outro', label: 'Outro', bars: 2 },
+    ],
+    navigation: { jump: { at: { section: 0, bar: 2 }, from: 'capo', until: 'end' } },
+  };
+
+  it('R4: Verse ×2 with D.C. on bar 2 — addEndings(1) is refused', () => {
+    expect(navLive(R4)).toEqual({ live: true });
+    expect(addEndings(view(R4), 'verse', 1)).toEqual({
+      ok: false,
+      reason: 'this would stop the D.C. from being played — move it first',
+    });
+  });
+
+  it('R4 mirror: the same op with the D.C. outside the section is allowed', () => {
+    const v = view({ ...R4, navigation: { jump: { at: { section: 1, bar: 2 }, from: 'capo', until: 'end' } } });
+    expect(addEndings(v, 'verse', 1).ok).toBe(true);
+  });
+
+  it('R5: To Coda in Intro, Coda on Verse ×2 bar 2, D.C. al Coda in Outro — addEndings(Verse, 1) is refused', () => {
+    const R5: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'C',
+      sections: [
+        { id: 'intro', label: 'Intro', bars: 2 },
+        { id: 'verse', label: 'Verse', bars: 2, repeat: { kind: 'plain', times: 2 } },
+        { id: 'outro', label: 'Outro', bars: 2 },
+      ],
+      navigation: {
+        toCoda: { section: 0, bar: 2 },
+        coda: { section: 1, bar: 2 },
+        jump: { at: { section: 2, bar: 2 }, from: 'capo', until: 'coda' },
+      },
+    };
+    expect(navLive(R5)).toEqual({ live: true });
+    expect(addEndings(view(R5), 'verse', 1)).toEqual({
+      ok: false,
+      reason: 'this would stop the To Coda from being taken — move it first',
+    });
+  });
+});
+
+describe('removeEndings (§5.2)', () => {
+  it('deletes the later ending’s bars, keeps the 1st ending as ordinary bars, drops the repeat', () => {
+    // VOLTA lists the 2nd ending FIRST in endings[] — position order must not matter.
+    const r = applied(removeEndings(view(VOLTA), 'verse'));
+    expect(r.removes).toEqual(['the later ending (bar 5)']);
+    expect(sec(r.view, 'verse').repeat).toBeUndefined();
+    expect(degrees(r.view, 'verse')).toEqual([[1, 4], [6], [2, 5], null]);
+    expect(r.view.navigation?.toCoda).toEqual({ sectionId: 'verse', bar: 2 });
+    expectValid(r.view);
+  });
+
+  it('names a marker on a deleted bar, with its dependents', () => {
+    const v = view(VOLTA);
+    const withFine = applied(setMarker(v, 'verse', 5, 'fine')).view;
+    const r = applied(removeEndings(withFine, 'verse'));
+    expect(r.removes).toEqual(['the later ending (bar 5)', 'the Fine']);
+  });
+
+  it('names only the bars it deletes when they are not contiguous (3+ endings, Codex PR D)', () => {
+    // Prompt-only shape: the pass-1 ending sits BETWEEN the others.
+    const three = (endings: Array<[number, number, number]>) =>
+      view({
+        ...PLAIN_BARS,
+        sections: [
+          {
+            id: 'v',
+            label: 'Verse',
+            bars: 6,
+            repeat: { kind: 'volta', endings: endings.map(([start, count, pass]) => ({ bars: { start, count }, passes: [pass] })) },
+          },
+        ],
+      });
+    const a = applied(removeEndings(three([[2, 1, 2], [3, 2, 1], [5, 1, 3]]), 'v'));
+    expect(a.removes).toEqual(['the later endings (bars 2 and 5)']);
+    expect(sec(a.view, 'v').bars).toBe(4);
+    const b = applied(removeEndings(three([[2, 2, 2], [4, 1, 1], [5, 1, 3]]), 'v'));
+    expect(b.removes).toEqual(['the later endings (bars 2–3 and 5)']);
+    const c = applied(removeEndings(three([[2, 1, 1], [3, 2, 2], [5, 1, 3]]), 'v'));
+    expect(c.removes).toEqual(['the later endings (bars 3–5)']);
+    expectValid(a.view);
+  });
+
+  it('is refused without endings', () => {
+    expect(removeEndings(view(PLAIN), 'verse')).toEqual({ ok: false, reason: 'Verse has no endings' });
+  });
+});
+
+describe('markers (§5.4)', () => {
+  it('the menu offers only what the validator accepts', () => {
+    expect(markerOptions(view(PLAIN_BARS))).toEqual({ markers: ['segno', 'coda', 'fine'], jumps: [{ from: 'capo', until: 'end' }] });
+    // VOLTA has Segno, Coda and To Coda (no Fine).
+    expect(markerOptions(view(VOLTA))).toEqual({
+      markers: ['segno', 'coda', 'toCoda', 'fine'],
+      jumps: [
+        { from: 'capo', until: 'end' },
+        { from: 'capo', until: 'coda' },
+        { from: 'segno', until: 'end' },
+        { from: 'segno', until: 'coda' },
+      ],
+    });
+  });
+
+  it('places a marker, and placing it again moves it', () => {
+    const one = applied(setMarker(view(PLAIN_BARS), 'verse', 2, 'segno'));
+    expect(one.view.navigation).toEqual({ segno: { sectionId: 'verse', bar: 2 } });
+    const moved = applied(setMarker(one.view, 'chorus', 1, 'segno'));
+    expect(moved.view.navigation).toEqual({ segno: { sectionId: 'chorus', bar: 1 } });
+    expectValid(moved.view);
+  });
+
+  it('refuses what the validator would refuse', () => {
+    const v = view(PLAIN_BARS);
+    expect(setMarker(v, 'verse', 1, 'toCoda')).toEqual({ ok: false, reason: 'place the Coda first' });
+    expect(setJump(v, 'verse', 1, { from: 'segno', until: 'end' })).toEqual({ ok: false, reason: 'place the Segno first' });
+    expect(setJump(v, 'verse', 1, { from: 'capo', until: 'fine' })).toEqual({ ok: false, reason: 'place the Fine first' });
+    expect(setJump(v, 'verse', 1, { from: 'capo', until: 'coda' }).ok).toBe(false);
+  });
+
+  it('a new D.S./D.C. replaces the old one', () => {
+    const r = applied(setJump(view(PLAIN), 'chorus', 2, { from: 'capo', until: 'end' }));
+    expect(r.view.navigation?.jump).toEqual({ at: { sectionId: 'chorus', bar: 2 }, from: 'capo', until: 'end' });
+    expectValid(r.view);
+  });
+
+  it('refuses a placement where the redirect would never fire', () => {
+    // The last bar of the 1st ending: the volta exit pre-empts a D.C. there.
+    const v = view({ ...VOLTA, navigation: undefined });
+    expect(setJump(v, 'verse', 4, { from: 'capo', until: 'end' })).toEqual({
+      ok: false,
+      reason: 'the D.C. would never be played with the markers placed like this',
+    });
+    expect(setJump(v, 'bridge', 2, { from: 'capo', until: 'end' }).ok).toBe(true);
+  });
+
+  it('removing a marker takes what depends on it, and names only those', () => {
+    const r = applied(removeMarker(view(VOLTA), 'coda'));
+    expect(r.removes).toEqual(['the To Coda', 'the D.S. al Coda']);
+    expect(r.view.navigation).toEqual({ segno: { sectionId: 'intro', bar: 2 } });
+    const plain = applied(removeMarker(view(VOLTA), 'jump'));
+    expect(plain.removes).toEqual([]);
+    expectValid(r.view);
+  });
+});
+
 // ── §6 property test ─────────────────────────────────────────────────────────
 // Random op sequences over the fixtures. Each bar carries a SYNTHETIC stable id
 // carried through the op's own bar map (rendered bar ids are positional, so they
@@ -711,7 +904,18 @@ describe('structure ops — property test (§6)', () => {
       for (let step = 0; step < 20; step += 1) {
         const s = pick(v.sections);
         const bar = 1 + Math.floor(rand() * s.bars);
-        const op = pick(['split', 'before', 'after', 'delete', 'delete', 'count', 'remove', 'repeat', 'unroll'] as const);
+        const op = pick([
+          'split', 'before', 'after', 'delete', 'delete', 'count', 'remove', 'repeat', 'unroll',
+          'endings', 'unendings', 'marker', 'jump', 'unmark',
+        ] as const);
+        // Marker ops pick only what the menu would offer (markerOptions).
+        const opts = markerOptions(v);
+        const kind = pick(opts.markers);
+        const choice = pick(opts.jumps);
+        const present = KEYS.filter((k) => refOf(v.navigation, k));
+        const unmark = present.length > 0 ? pick(present) : null;
+        const lastN = 1 + Math.floor(rand() * s.bars);
+        if (op === 'unmark' && !unmark) continue;
         const r =
           op === 'split'
             ? splitBar(v, s.id, bar)
@@ -725,7 +929,19 @@ describe('structure ops — property test (§6)', () => {
                     ? setPlainRepeat(v, s.id, pick([null, 2, 3, 4]))
                     : op === 'unroll'
                       ? unrollRepeat(v, s.id)
-                      : removeSection(v, s.id);
+                      : op === 'endings'
+                        ? addEndings(v, s.id, lastN)
+                        : op === 'unendings'
+                          ? removeEndings(v, s.id)
+                          : op === 'marker'
+                            ? setMarker(v, s.id, bar, kind)
+                            : op === 'jump'
+                              ? setJump(v, s.id, bar, choice)
+                              : op === 'unmark'
+                                ? removeMarker(v, unmark!)
+                                : removeSection(v, s.id);
+        // The key a marker op places or removes — exempt from "markers stay put".
+        const touched: Key | null = op === 'marker' ? kind : op === 'jump' ? 'jump' : op === 'unmark' ? unmark : null;
         // The only section can never be removed (Codex PR B R1).
         if (op === 'remove' && v.sections.length === 1) {
           expect(r.ok).toBe(false);
@@ -734,7 +950,7 @@ describe('structure ops — property test (§6)', () => {
         const wasLive = navLive(viewToSpec(v)).live;
         if (!r.ok) {
           stats.refused += 1;
-          if (/from being played|from being taken|at the Fine|no end/.test(r.reason)) {
+          if (/from being played|from being taken|at the Fine|no end|would never be|would not end/.test(r.reason)) {
             // A liveness refusal only ever protects a chart that was live.
             expect(wasLive).toBe(true);
             stats.deadRefused += 1;
@@ -747,9 +963,15 @@ describe('structure ops — property test (§6)', () => {
           const ns = r.view.sections.find((x) => x.id === ps.id);
           if (!ns || !ps.repeat) continue;
           if (ps.repeat.kind === 'volta' && ns.repeat?.kind !== 'volta') {
-            expect(r.removes).toContain(`the ${ps.repeat.endings.length} endings`);
+            // Remove endings names the bars it deletes; anything else names the endings.
+            if (op === 'unendings') expect(r.removes[0]).toMatch(/^the later endings? \(bars? /);
+            else expect(r.removes).toContain(`the ${ps.repeat.endings.length} endings`);
           }
           if (ps.repeat.kind === 'plain' && !ns.repeat && op !== 'repeat' && op !== 'unroll') {
+            expect(r.removes).toContain(`the ×${ps.repeat.times} repeat`);
+          }
+          // Endings replacing a ×3+ repeat change how often it plays: named.
+          if (ps.repeat.kind === 'plain' && ps.repeat.times > 2 && ns.repeat?.kind === 'volta') {
             expect(r.removes).toContain(`the ×${ps.repeat.times} repeat`);
           }
         }
@@ -802,6 +1024,15 @@ describe('structure ops — property test (§6)', () => {
         for (const k of KEYS) {
           const was = refOf(prev.navigation, k);
           const now = refOf(next.navigation, k);
+          if (k === touched && op !== 'unmark') {
+            // Placed or moved: exactly where it was put.
+            expect(now).toEqual({ sectionId: s.id, bar });
+            continue;
+          }
+          if (k === touched) {
+            expect(now).toBeUndefined();
+            continue;
+          }
           if (!was) {
             expect(now).toBeUndefined(); // no op adds a marker
             continue;
@@ -821,6 +1052,14 @@ describe('structure ops — property test (§6)', () => {
             return r.edit?.sectionId === was.sectionId && !counts.has(was.bar - 1);
           };
           for (const k of gone) {
+            if (op === 'unmark') {
+              // Only the marker asked for and what depends on it.
+              const dependent =
+                (k === 'toCoda' && (unmark === 'coda')) ||
+                (k === 'jump' && unmark !== 'jump');
+              expect(dependent).toBe(true);
+              continue;
+            }
             const dependent =
               (k === 'toCoda' && gone.includes('coda')) ||
               (k === 'jump' && gone.some((g) => g !== 'jump'));
@@ -836,7 +1075,12 @@ describe('structure ops — property test (§6)', () => {
           const newSec = sec(next, id);
           r.edit.src.forEach((src, i) => {
             const nb = newSec.chords[i];
-            if (src == null) return expect(nb).toBeNull();
+            if (src == null) {
+              // A 2nd ending's bar is a copy of its 1st-ending bar; every other new bar is blank.
+              if (op !== 'endings') return expect(nb).toBeNull();
+              const ob = oldSec.chords[oldSec.bars - lastN + (i - oldSec.bars)];
+              return expect(sameBar(nb, ob)).toBe(true);
+            }
             const ob = oldSec.chords[src];
             if (ob == null) return expect(nb).toBeNull();
             if ((counts.get(src) ?? 0) === 1) return expect(sameBar(nb, ob)).toBe(true);
@@ -862,7 +1106,9 @@ describe('structure ops — property test (§6)', () => {
     }
 
     // A property test that never exercised the hard paths would pass vacuously.
-    expect([...stats.applied].sort()).toEqual(['after', 'before', 'count', 'delete', 'remove', 'repeat', 'split', 'unroll']);
+    expect([...stats.applied].sort()).toEqual([
+      'after', 'before', 'count', 'delete', 'endings', 'jump', 'marker', 'remove', 'repeat', 'split', 'unendings', 'unmark', 'unroll',
+    ]);
     expect(stats.refused).toBeGreaterThan(0);
     expect(stats.removed).toBeGreaterThan(0);
     expect(stats.deadRefused).toBeGreaterThan(0);
