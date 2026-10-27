@@ -452,7 +452,8 @@ The saved chart can be re-opened and edited later.
 7. Key resolution (L0), in order: Review-toolbar key (override) → key stated in the prose ("in Bb", "key of F sharp", "D minor") → Compose "Key" selector → `C`. `lib/roadmap-authoring.ts:378-389`
 8. L1 deterministic grammar is tried first: optional `Label:` headers, clauses split on `, ; . newline then`, each clause `N bars [of] CHORD` / `CHORD for N bars` / bare `CHORD` (= 1 bar). Any unparseable clause → whole description falls to the model. Multi-chord bars are accepted only with an explicit `-` tie. L1 always assumes 4/4. `lib/roadmap-authoring.ts:465-581`, `lib/roadmap-parse.ts:226-231`
 9. L2 model **transcribes** into a per-span draft (one span per contiguous region, no invented repeats); our code folds it into the sparse spec; the validator disposes. Model is `AGENT_MODEL_ROADMAP` via the admin `claude_tryit_key`. `lib/roadmap-parse.ts:35-85,148-189`, `parse/route.ts:49`
-10. Every parse returns a per-section read-back tally ("Verse: 16 bars — D×2, G7×2 …") shown on Compose and Review, even when the spec is invalid. The tally counts spans only and ignores repeat/splice ops. `lib/roadmap-authoring.ts:407-416`, `components/RoadmapBuilder.tsx:754-770`
+10. After the fold, a run of 2+ adjacent sections with the same base label (`Verse 1` = `Verse 2`), identical bars and changes, no existing repeat, ≥ 2 bars, and no nav ref into any but the first merges into the first as a plain `×N` repeat — only when the merged chart plays the same written content step for step (two identical Verses before a D.C. stay longhand). `lib/roadmap-merge.ts`, `lib/roadmap-parse.ts` `foldAndValidateDraft`
+10a. Every parse that reaches a draft returns a per-section read-back tally shown on Compose and Review (empty or non-JSON model output returns errors only). On success it is rendered from the final spec, repeat appended to the label ("Chorus ×2: 8 bars — G×4, A×4"; "Verse, 2 endings: …"); when the spec is invalid it is rendered from the draft's spans (pre-op) as the diagnosis. `lib/roadmap-authoring.ts` `tallySpec` / `tallyDraft`, `components/RoadmapBuilder.tsx:754-770`
 11. Invalid result = HTTP 200 `{ok:false, errors}`; the UI lists up to 6 errors and keeps the user's text. `components/RoadmapBuilder.tsx:92-115`
 
 **Builder UI** — `components/RoadmapBuilder.tsx`, full-screen overlay
@@ -486,7 +487,7 @@ The saved chart can be re-opened and edited later.
 
 - `chart_library.source_spec jsonb` (009), `source_prompt text` (016), `source_notation text check in ('numbers','letters')` (017); `is_builder` = `source_spec IS NOT NULL`. RPC `save_builder_chart` (17 args, `FOR UPDATE` slot lock, PT409, service_role only).
 - `chart_calibration (chart_id, source_hash)` row written `verified` by the RPC.
-- Pure libs: `roadmap-spec.ts` (model+validator) · `roadmap-authoring.ts` (key L0, grammar L1, fold L3, tally L4) · `roadmap-parse.ts` (model transport) · `roadmap-view.ts` (editor bridge, chord grammar, letters) · `roadmap-layout.ts` (shared layout, pdf-lib-free) · `roadmap-render.ts` (PDF+calibration) · `roadmap-rhythm.ts` (slash rule) · `roadmap-save.ts` (parity).
+- Pure libs: `roadmap-spec.ts` (model+validator) · `roadmap-authoring.ts` (key L0, grammar L1, fold L3, tally L4) · `roadmap-parse.ts` (model transport) · `roadmap-merge.ts` (repeated-section merge, server-only) · `roadmap-view.ts` (editor bridge, chord grammar, letters) · `roadmap-layout.ts` (shared layout, pdf-lib-free) · `roadmap-render.ts` (PDF+calibration) · `roadmap-rhythm.ts` (slash rule) · `roadmap-save.ts` (parity).
 - Routes: `/api/charts/roadmap/parse` · `/save` · `/[chartId]` (GET). UI: `components/RoadmapBuilder.tsx`, `components/ManageChartsModal.tsx`, `app/library/page.tsx`. Stub prototype: `app/mockup/roadmap-builder/page.tsx`.
 
 ### 5.3 Settled rulings
@@ -511,7 +512,6 @@ The saved chart can be re-opened and edited later.
 - Manual editing of repeats, voltas, nav markers, time signature, or artist; markers are read-only. — builder §UI
 - Duplicate-a-builder-chart cloning the spec (key variant). — builder §UX
 - Held (diamond) in the preview, and held via the bar grammar (retyping a held bar drops it). — edit-loop §6, prompt-persistence §11
-- Op-aware read-back tally (repeats not reflected). — fit-to-width §7, song-form §6.4
 - Orphaned-PDF garbage collection (no GC job exists; failed/replaced objects linger). — builder §Save
 - Bundled embedded font (renderer uses StandardFonts Helvetica instead). — builder Open Q1
 - Pickup/anacrusis measure numbering. — line-measure §1

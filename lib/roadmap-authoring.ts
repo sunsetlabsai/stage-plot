@@ -415,6 +415,33 @@ export function tallyDraft(draft: AuthoringDraft): string[] {
   });
 }
 
+// Per-section echo rendered FROM THE FINAL SPEC (post-fold, post-merge), so the
+// read-back matches the chart: one line per section, its repeat appended to the
+// label ("Chorus ×2: 8 bars — D×4, A×4"; "Verse, 2 endings: …"). A change sustains
+// until the next one. That is a read of the FOLD's inheritance-diff, not an
+// interpretation of an authored blank: foldDraft rejects an empty bar pattern, so
+// every blank in a parsed spec is a bar the author wrote as "same chord again".
+// Parse-output only — a hand-edited spec can carry true blanks (ruling §8.5), so
+// do not reuse this on one. Bars before a section's first change show as "–".
+// docs/design-roadmap-structure-editing.md §4 Read-back. tallyDraft stays the
+// diagnosis when the fold or validator rejects the draft.
+export function tallySpec(spec: RoadmapSpec): string[] {
+  return spec.sections.map((sec) => {
+    const changes = [...(sec.changes ?? [])].sort((a, b) => a.bar - b.bar);
+    const runs: { txt: string; bars: number }[] = [];
+    const firstBar = changes.length > 0 ? changes[0].bar : sec.bars + 1;
+    if (firstBar > 1) runs.push({ txt: '–', bars: firstBar - 1 });
+    changes.forEach((c, i) => {
+      const end = i + 1 < changes.length ? changes[i + 1].bar : sec.bars + 1;
+      runs.push({ txt: barPatternText(c.chords, spec.renderKey), bars: end - c.bar });
+    });
+    const parts = runs.map((r) => (r.bars > 1 ? `${r.txt}×${r.bars}` : r.txt));
+    const rep = sec.repeat;
+    const suffix = !rep ? '' : rep.kind === 'plain' ? ` ×${rep.times}` : `, ${rep.endings.length} endings`;
+    return `${sec.label}${suffix}: ${sec.bars} bars — ${parts.join(', ')}`;
+  });
+}
+
 // ── L1 — the deterministic span-grammar parser (§7) ──────────────────────────
 //
 // The fast, faithful, ZERO-LLM front-end for the countable phrasing authors

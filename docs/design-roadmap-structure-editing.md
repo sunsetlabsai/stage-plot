@@ -1,6 +1,6 @@
 # ShowRunr — Roadmap Builder: Repeats, Markers and Bar Editing DESIGN
 
-**Status: PROPOSED (2026-10-26), §8 ruled by Graham.** Not built. Companion to `design-roadmap-builder.md`
+**§8 ruled by Graham 2026-10-26.** Build state lives in `docs/INDEX.md`. Companion to `design-roadmap-builder.md`
 (the spec model) and `design-roadmap-edit-loop.md` (the editor this extends).
 
 ## 1. What UAT found (2026-10-26, Graham)
@@ -121,11 +121,10 @@ remapped through an old-index → new-index map built after all merges (a run of
 removes N − 1 sections, and several runs accumulate). A run that fails any test stays
 longhand — the step never guesses.
 
-**Read-back.** Today the tally is built from the pre-fold SpanList, so it is already
-blind to repeat ops (`backlog-charting.md` §tallyDraft is op-blind). After this change
-it would also disagree with the chart (two Chorus lines vs one `×2`). Fix in the same
-PR: build the tally from the **final spec**, one line per section with `×N` /
-`N endings` appended. Closes that backlog item.
+**Read-back.** The tally was built from the pre-fold SpanList, so it was blind to
+repeat ops, and after this change it would also disagree with the chart (two Chorus
+lines vs one `×2`). Fix in the same PR: build the tally from the **final spec**, one
+line per section with `×N` / `N endings` appended (`tallySpec`).
 
 ## 5. Editor operations
 
