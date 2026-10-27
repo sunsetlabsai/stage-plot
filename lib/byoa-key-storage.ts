@@ -22,8 +22,9 @@
 // ⚠ A browser SHARED BETWEEN PEOPLE is not designed for (Graham, 2026-10-26).
 // The key survives sign-out — that is the convenience #133 bought — and stays on
 // disk, readable in devtools, until it is removed in Settings.
-// The old un-namespaced entry is MIGRATED to the first account that reads it: on
-// a one-person browser that account is its owner, and nobody re-enters a key.
+// The old un-namespaced localStorage entry is MIGRATED to the first account that
+// reads it: on a one-person browser that account is its owner, and nobody
+// re-enters a remembered key. A session-scoped one is deleted (see migrateLegacy).
 
 /** The pre-#134 single entry, shared by every account on the browser. Read only to migrate it. */
 export const LEGACY_BYOA_KEY = 'showrunr-claude-key';
@@ -36,15 +37,25 @@ export function byoaKeyName(userId: string): string {
 /** The slice of the DOM Storage API these rules need — so tests can fake it. */
 export type KeyStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
-/** Move a pre-#134 entry, in whichever store it is, under this account's name. */
+/**
+ * Claim the pre-#134 entry for this account — from localStorage ONLY.
+ *
+ * ★ Codex R2 on #197: sessionStorage is not one store. A tab opened from another
+ * gets an independent COPY of it (HTML Standard, document sequences), so "move
+ * it once" cannot hold there — each copy would migrate to whichever account
+ * reads it in that tab, handing one key to two accounts. localStorage is one
+ * store per origin, and two tabs cannot be signed in to different accounts at
+ * the same moment (the session is a shared cookie), so a move there happens
+ * once. The session-scoped legacy entry is a key the person chose NOT to keep;
+ * it is deleted, at the cost of re-entering it once in that tab.
+ */
 function migrateLegacy(local: KeyStore, session: KeyStore, userId: string): void {
+  session.removeItem(LEGACY_BYOA_KEY);
+  const legacy = local.getItem(LEGACY_BYOA_KEY);
+  if (legacy === null) return;
   const name = byoaKeyName(userId);
-  for (const store of [local, session]) {
-    const legacy = store.getItem(LEGACY_BYOA_KEY);
-    if (legacy === null) continue;
-    if (!local.getItem(name) && !session.getItem(name)) store.setItem(name, legacy);
-    store.removeItem(LEGACY_BYOA_KEY);
-  }
+  if (!local.getItem(name) && !session.getItem(name)) local.setItem(name, legacy);
+  local.removeItem(LEGACY_BYOA_KEY);
 }
 
 function requireUser(userId: string): void {

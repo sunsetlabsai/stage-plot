@@ -69,12 +69,29 @@ describe('scoped to the account (#134)', () => {
     expect(readKey(local, session, B)).toBe('');
   });
 
-  it('a session-scoped legacy key migrates within sessionStorage', () => {
+  it('a session-scoped legacy key is DELETED, not migrated', () => {
     const local = store();
     const session = store({ [LEGACY_BYOA_KEY]: KEY });
-    expect(readKey(local, session, A)).toBe(KEY);
-    expect(session.getItem(byoaKeyName(A))).toBe(KEY);
+    expect(readKey(local, session, A)).toBe('');
+    expect(session.map.size).toBe(0);
     expect(local.map.size).toBe(0);
+  });
+
+  // ★ Codex R2 on #197: a tab opened from another gets an independent COPY of
+  // sessionStorage, so two tabs each held the legacy key. Migrating each copy
+  // gave one key to two accounts. Shared localStorage + one store per tab:
+  it('cloned per-tab sessionStorage cannot hand one legacy key to two accounts', () => {
+    const local = store();
+    const tab1 = store({ [LEGACY_BYOA_KEY]: KEY });
+    const tab2 = store({ [LEGACY_BYOA_KEY]: KEY });
+    expect(readKey(local, tab1, A)).toBe('');
+    expect(readKey(local, tab2, B)).toBe('');
+  });
+
+  it('a remembered legacy key reaches exactly one account across tabs', () => {
+    const local = store({ [LEGACY_BYOA_KEY]: KEY });
+    expect(readKey(local, store(), A)).toBe(KEY);
+    expect(readKey(local, store(), B)).toBe('');
   });
 
   it('migration never overwrites a key the account already has', () => {

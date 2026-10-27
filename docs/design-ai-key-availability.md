@@ -1684,8 +1684,14 @@ account's key.
    auth change and remounts `AgentChat` per account. The cross-tab broadcast is
    best-effort, so every send also re-reads the live session, refuses on a
    mismatch, and re-reads the stored key on a match.
-3. **The old un-namespaced entry migrates** to the first account that reads it. On
-   a one-person browser that account is its owner, so nobody re-enters a key.
+3. **The old un-namespaced entry migrates from localStorage only** to the first
+   account that reads it. On a one-person browser that account is its owner, so
+   nobody re-enters a remembered key. A sessionStorage entry is deleted instead.
+   A tab opened from another gets an independent copy of sessionStorage, so each
+   copy would have migrated to a different account (Codex R2 on #197).
+   localStorage is one store, and the session cookie is shared, so two tabs
+   cannot be signed in to different accounts at once. The move there happens
+   once.
 
 **⚠ Not designed for: a browser shared between PEOPLE** (Graham, 2026-10-26). The
 key survives sign-out, which is the convenience #133 bought, and stays on disk,

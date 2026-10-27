@@ -5438,7 +5438,16 @@ function AgentChat({
     } catch {
       // Unreadable session ⇒ '' ⇒ refused below. Never send on an unknown identity.
     }
-    const send = keyForSend(localStorage, sessionStorage, userId, liveUserId);
+    let send: ReturnType<typeof keyForSend>;
+    try {
+      send = keyForSend(localStorage, sessionStorage, userId, liveUserId);
+    } catch {
+      // Codex R2 NIT: storage can throw (blocked mid-session). Release the guard
+      // on EVERY exit, or each later Send returns at the top of this function.
+      checkingSendRef.current = false;
+      setError("Couldn't read this browser's storage. Reload this page to continue.");
+      return;
+    }
     if (!send.ok) {
       checkingSendRef.current = false;
       setApiKey('');
