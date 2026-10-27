@@ -215,7 +215,10 @@ NO base, so §4.3 re-reads the server and the owner chooses — never sent blind
 `showrunr-last-saved-{id}` is NOT used as its base (Codex R2 on #202): that bundle wrote it
 separately from the copy and swallowed failed copy writes, so a stale copy could sit beside
 a current version and overwrite a newer save. Cost: a one-time prompt on upgrade for any
-show whose old copy differs from the server, edit or not. This also changes §3.4: a 428'd old tab's edit is in that old cache,
+show whose old copy differs from the server, edit or not. Until an owner tab has classified it, a VIEWER load
+(e.g. the owner's lapsed session) never overwrites an old copy in a browser where an owner
+saved — `showrunr-last-saved-{id}` present, only its presence is used (Codex R3 on #202,
+`viewerMayOverwrite`); a performer's phone never has that key and keeps refreshing. This also changes §3.4: a 428'd old tab's edit is in that old cache,
 so the reload its message asks for now recovers it (shown, and the owner is asked) — while
 Graham ruled the 428 copy accordingly (Q6). Also as built: an owner tab is
 read-only until its lock is granted (§4.0; the grant is asynchronous).

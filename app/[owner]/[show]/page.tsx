@@ -137,7 +137,7 @@ import {
   saveDeviceLabel,
 } from '@/lib/relay-join';
 import { useShow, PERSIST_WARNING, type ServerShow } from '@/lib/use-show';
-import { readEntry, writeEntry, readOwnership, rememberOwnership } from '@/lib/show-store';
+import { readEntry, writeEntry, readOwnership, rememberOwnership, viewerMayOverwrite } from '@/lib/show-store';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { normalizeSongKeySafe, displayRole } from '@/lib/normalize';
 import type { ChartRole } from '@/lib/normalize';
@@ -669,7 +669,7 @@ function ShowWorkspace() {
         // writes over a copy holding an owner's unsaved edits (§4.0 item 5).
         const cacheForViewer = () => {
           try {
-            if (data.show_id && !readEntry(localStorage, data.show_id)?.unsynced) {
+            if (data.show_id && viewerMayOverwrite(localStorage, data.show_id)) {
               writeEntry(localStorage, data.show_id, {
                 config: cfg as unknown as Record<string, unknown>,
                 base: typeof data.updated_at === 'string' ? data.updated_at : null,

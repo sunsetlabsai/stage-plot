@@ -68,6 +68,25 @@ export function readEntry(store: ShowStore, showId: string): ShowEntry | null {
   }
 }
 
+/**
+ * May a VIEWER's load replace this show's entry with the server copy? Never over an
+ * owner's unsynced edits (§4.0 item 5), and never over an old bundle's copy in a
+ * browser where an owner has saved (Codex R3 on #202): that copy may hold an unsent
+ * edit, and only the owner's tab can classify it — a lapsed session must not erase
+ * it. The old bundle wrote `showrunr-last-saved-{id}` only on an owner's save, so a
+ * performer's phone has none and keeps refreshing. Only the key's presence is used,
+ * never its value (R2).
+ */
+export function viewerMayOverwrite(store: ShowStore, showId: string): boolean {
+  const e = readEntry(store, showId);
+  if (!e) return true;
+  if (e.unsynced) return false;
+  if (e.legacy) {
+    try { return store.getItem(`showrunr-last-saved-${showId}`) === null; } catch { return false; }
+  }
+  return true;
+}
+
 /** Write the whole entry. THROWS if storage refuses — callers decide what that means. */
 export function writeEntry(store: ShowStore, showId: string, entry: ShowEntry): void {
   const stored: StoredEntry = { v: 2, config: entry.config, base: entry.base, unsynced: entry.unsynced };

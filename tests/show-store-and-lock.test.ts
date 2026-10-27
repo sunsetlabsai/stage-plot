@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readEntry, writeEntry, deleteEntry, showContent, sameShow, entryKey, legacyKey } from '../lib/show-store';
+import { readEntry, writeEntry, deleteEntry, showContent, sameShow, entryKey, legacyKey, viewerMayOverwrite } from '../lib/show-store';
 import { acquireEditLock, lockName, type LockState } from '../lib/edit-lock';
 import { fakeLocks } from './fake-locks';
 
@@ -46,6 +46,34 @@ describe('show-store — one entry holds copy, base and the unsynced flag', () =
     const failing = { ...s, setItem: () => { throw new DOMException('quota'); } };
     expect(() => writeEntry(failing, 'a', { config: { x: 2 }, base: 'v2', unsynced: false })).toThrow();
     expect(readEntry(s, 'a')).toEqual({ config: { x: 1 }, base: 'v1', unsynced: true });
+  });
+});
+
+describe('viewerMayOverwrite — a viewer load never erases an owner\'s possible edit', () => {
+  it('no entry, or a clean v2 entry → may overwrite', () => {
+    const s = memStore();
+    expect(viewerMayOverwrite(s, 'a')).toBe(true);
+    writeEntry(s, 'a', { config: {}, base: 'v1', unsynced: false });
+    expect(viewerMayOverwrite(s, 'a')).toBe(true);
+  });
+
+  it('an unsynced entry → never (§4.0 item 5)', () => {
+    const s = memStore();
+    writeEntry(s, 'a', { config: {}, base: 'v1', unsynced: true });
+    expect(viewerMayOverwrite(s, 'a')).toBe(false);
+  });
+
+  it('an old-bundle copy where an OWNER saved (last-saved key present) → never (Codex R3: lapsed session)', () => {
+    const s = memStore();
+    s.setItem(legacyKey('a'), JSON.stringify({ n: 5 }));
+    s.setItem('showrunr-last-saved-a', 'anything');
+    expect(viewerMayOverwrite(s, 'a')).toBe(false);
+  });
+
+  it('an old-bundle copy on a performer\'s phone (never saved) → may overwrite, so it keeps refreshing', () => {
+    const s = memStore();
+    s.setItem(legacyKey('a'), JSON.stringify({ n: 5 }));
+    expect(viewerMayOverwrite(s, 'a')).toBe(true);
   });
 });
 
