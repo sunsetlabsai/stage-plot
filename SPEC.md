@@ -188,12 +188,16 @@ AI co-designer
 36. AI tab (owner only): chat proxied through `POST /api/agent/chat`; device key → account key →
     free "try-it" key (50 messages per IP per 30 days), model from env (default
     `claude-sonnet-4-6`) (`app/api/agent/chat/route.ts:46-103`, `lib/agent-key.ts:14-29`).
-37. Six full-replace tools: `update_stage_plot/inputs/monitors/setlist/notes/show_info`; only the
-    nine on-grid positions are allowed (`lib/agent.ts:49-198`). Each tool call is a card with
-    **Apply / Reject**; nothing changes until Apply (`page.tsx:5588-5664`, `:5840-5866`).
-38. Applying `update_stage_plot` **regenerates the whole input list and monitor list** from performer
-    roles (keyword expansion) — prior inputs/monitors are discarded, with no confirm
-    (`page.tsx:5608-5640`, `:5486-5559`). The card previews the generated lists (`page.tsx:5954-6018`).
+37. Three tools (`lib/agent.ts`): `generate_show` builds or replaces the stage plot, inputs and
+    monitors in one call (slots carry a `new:` tempId, every input a `slotId` or null), validated by
+    `planGenerateShow` → `planChanges` (`lib/ai-ops.ts`); `update_notes` (whole list) and
+    `update_show_info` (merge). Only the nine on-grid positions are allowed. The AI cannot touch the
+    setlist or charts. Each tool call is a card with **Apply / Reject**; nothing changes until Apply.
+38. A `generate_show` on a show with content, or an `update_notes` that drops existing notes, warns
+    on the card with what is lost, labels its button "Replace everything" / "Replace notes", and
+    confirms. An invalid call is **refused**: config untouched, reason on the card, and Claude is told
+    it was the app, not the user (`lib/agent-history.ts`). No cascade: the AI's lists are the only
+    writer. Targeted AI edits (`apply_changes`) are not built yet (`design-ai-op-contract.md` §13 step 4).
 
 ### 2.2 Data & key files
 
@@ -705,14 +709,6 @@ Code wins. Each item is a doc to fix the next time someone touches that area. No
 
 ### A2. Show
 
-- **INDEX says input-plot-linkage steps 1–5 shipped.** Step 5's monitor rules (immutable mix#,
-  `max+1` add, no renumber on reorder, `validateMonitors`) are not on main: reorder and delete renumber
-  mixes and leave `slot.mix` pointing at the old numbers (`lib/setlist.ts:172-180`,
-  `page.tsx:6646`,`:6650`). Deleting Mix 2 of 4 silently re-routes performers on 3 and 4.
-- **design-agent-codesigner** shows a +/~/− diff and an approve per change; code previews proposed rows
-  only, and `update_stage_plot` wipes inputs/monitors (`page.tsx:5608-5640`). AI tools carry no ids or
-  `slotId`, so applying any AI plot/input change drops input↔performer links, and `update_setlist`
-  drops `songId`/charts/bpm until the next save+reload (`lib/agent.ts:78-150`, `page.tsx:5642-5647`).
 - **design-agent-codesigner**: try-it quota 10 turns via Redis; code is 50 per IP per 30 days in
   Supabase (`lib/agent-key.ts:14`, `:158-220`).
 - **design-perform-tab**: rows show lead singer and notes; code shows number, title, key, chart only

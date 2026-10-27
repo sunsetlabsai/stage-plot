@@ -41,7 +41,7 @@ import type {
 import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES, POSITIONS } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
-import { planGenerateShow, replaceShowPrompt, replaceCounts, isShowEmpty, describeProblems } from '@/lib/ai-ops';
+import { planGenerateShow, replaceShowPrompt, replaceCounts, isShowEmpty, describeProblems, validateNotes, notesReplacePrompt } from '@/lib/ai-ops';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
 import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
 import { ByoaKeySettings } from '@/components/ByoaKeySettings';
@@ -5497,8 +5497,7 @@ function AgentChat({
   function validateToolInput(name: string, input: Record<string, unknown>): string | null {
     switch (name) {
       case 'update_notes':
-        if (!Array.isArray(input.notes)) return 'notes must be a list';
-        break;
+        return validateNotes(input.notes);
       case 'update_show_info':
         if (input.showInfo && typeof input.showInfo !== 'object') return 'showInfo must be an object';
         break;
@@ -5549,6 +5548,11 @@ function AgentChat({
     if (invalid) {
       setToolStatus(msgIdx, toolIdx, 'refused', `This change was refused because ${invalid}.`);
       return;
+    }
+    // A whole-list notes write that drops existing notes names them first.
+    if (tc.name === 'update_notes') {
+      const ask = notesReplacePrompt(configRef.current.notes, tc.input.notes as GeneralNote[]);
+      if (ask && !window.confirm(ask)) return;
     }
     setToolStatus(msgIdx, toolIdx, 'applied');
     const toolInput = tc.input;
@@ -5679,6 +5683,11 @@ function AgentChat({
 
   const replacesContent = (tc: { name: string; status: string }) =>
     tc.name === 'generate_show' && tc.status === 'pending' && !isShowEmpty(config);
+  // Notes that a pending update_notes would remove or rewrite (Codex R1 on #195).
+  const notesLost = (tc: { name: string; status: string; input: Record<string, unknown> }) =>
+    tc.name === 'update_notes' && tc.status === 'pending' && validateNotes(tc.input.notes) === null
+      ? notesReplacePrompt(config.notes, tc.input.notes as GeneralNote[])
+      : null;
 
   const toolNameLabels: Record<string, string> = {
     generate_show: 'Stage Plot, Inputs & Monitors',
@@ -5758,13 +5767,18 @@ function AgentChat({
                         ⚠ Replaces the whole show: discards {replaceCounts(config)}. Setlist, charts, notes and show info are kept.
                       </p>
                     )}
+                    {notesLost(tc) && (
+                      <p className="text-xs font-bold text-red-700 mb-2 whitespace-pre-line">
+                        ⚠ {notesLost(tc)!.split('\n\n')[1]}
+                      </p>
+                    )}
                     {tc.status === 'pending' ? (
                       <div className="flex gap-2">
                         <button
                           onClick={() => applyToolCall(msgIdx, tcIdx)}
-                          className={`px-3 py-1 text-xs font-bold text-white rounded transition-colors ${replacesContent(tc) ? 'bg-red-700 hover:bg-red-800' : 'bg-black hover:bg-gray-800'}`}
+                          className={`px-3 py-1 text-xs font-bold text-white rounded transition-colors ${replacesContent(tc) || notesLost(tc) ? 'bg-red-700 hover:bg-red-800' : 'bg-black hover:bg-gray-800'}`}
                         >
-                          {replacesContent(tc) ? 'Replace everything' : 'Apply'}
+                          {replacesContent(tc) ? 'Replace everything' : notesLost(tc) ? 'Replace notes' : 'Apply'}
                         </button>
                         <button
                           onClick={() => rejectToolCall(msgIdx, tcIdx)}
@@ -5880,6 +5894,8 @@ function ToolCallPreview({ name, input }: { name: string; input: Record<string, 
       // Exactly what the model sent — there is no cascade any more, so the
       // preview is the plan, not a guess at what apply will invent.
       const owner = new Map(slots.map((s: Record<string, unknown>) => [s.tempId, String(s.name)]));
+      // A missing link must be VISIBLE before Apply, in both directions.
+      const owned = new Set(inputs.map((inp: Record<string, unknown>) => inp.slotId));
       return (
         <div className="space-y-2">
           <div>
@@ -5889,6 +5905,7 @@ function ToolCallPreview({ name, input }: { name: string; input: Record<string, 
                 <li key={i}>
                   <span className="font-bold">{String(s.name)}</span> — {String(s.role)}, {String(s.pos)}
                   {s.featured ? ' (featured)' : ''}{s.power ? ' [POWER]' : ''}
+                  {!owned.has(s.tempId) && <span className="text-amber-700"> (no inputs)</span>}
                 </li>
               ))}
             </ul>
@@ -5899,7 +5916,7 @@ function ToolCallPreview({ name, input }: { name: string; input: Record<string, 
               {inputs.map((inp: Record<string, unknown>, i: number) => (
                 <li key={i}>
                   Ch {String(inp.ch)}: {String(inp.inst)} — {String(inp.mic)}{inp.stand ? `, ${String(inp.stand)}` : ''}
-                  {owner.has(inp.slotId) ? ` → ${owner.get(inp.slotId)}` : ''}
+                  {owner.has(inp.slotId) ? ` → ${owner.get(inp.slotId)}` : <span className="text-amber-700"> → no performer</span>}
                 </li>
               ))}
             </ul>

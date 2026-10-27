@@ -14,7 +14,7 @@
 // O1 (a row the model does not name is not modified) is structural: rows are
 // only ever touched by an op that names their id.
 
-import type { InputChannel, MonitorMix, StageSlot } from './types';
+import type { GeneralNote, InputChannel, MonitorMix, StageSlot } from './types';
 import { POSITIONS, blockIndexOf, isOrphanedMix, nextMixNumber, slotLabel } from './setlist';
 
 export const OP_ENTITIES = ['stagePlot', 'inputs', 'monitors'] as const;
@@ -357,6 +357,21 @@ export function planGenerateShow<C extends ShowLists>(
       ops.push({ entity: 'stagePlot', action: 'add', values: row });
     }
   }
+  // Every generated input must DECLARE its owner: a performer's tempId, or
+  // null for a source no performer owns (playback, click, talkback). An
+  // omitted slotId is indistinguishable from a forgotten one, and a forgotten
+  // one is exactly the unlinked-input defect this tool exists to end (Codex R1
+  // on #195). `null` is stripped on add, so it stores as "no link".
+  const undeclared = rows('inputs').filter(
+    (row) => row !== null && typeof row === 'object' && !Array.isArray(row) && !Object.prototype.hasOwnProperty.call(row, 'slotId'),
+  ) as Record<string, unknown>[];
+  if (undeclared.length > 0) {
+    const names = undeclared.map((r) => `ch ${String(r.ch ?? '?')} ${typeof r.inst === 'string' ? r.inst : ''}`.trim());
+    return {
+      ok: false,
+      problems: [{ message: `${names.length === 1 ? 'an input has' : `${names.length} inputs have`} no slotId (${names.join(', ')}) — give each its performer's tempId, or null if no performer owns it` }],
+    };
+  }
   for (const entity of ['inputs', 'monitors'] as const) {
     for (const row of rows(entity)) ops.push({ entity, action: 'add', values: row });
   }
@@ -389,6 +404,31 @@ export function replaceShowPrompt(config: ShowLists): string | null {
 export function replaceCounts(config: ShowLists): string {
   const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
   return `${n(config.stagePlot.length, 'performer', 'performers')}, ${n(config.inputs.length, 'input', 'inputs')} and ${n(config.monitors.length, 'monitor mix', 'monitor mixes')}`;
+}
+
+// ── update_notes ─────────────────────────────────────────────────────────────
+
+/**
+ * `update_notes` replaces the whole notes list, and notes carry no identity, so
+ * a model that sends only the note it was asked to add deletes the rest (Codex
+ * R1 on #195). Shape-checked here, and every existing note the new list does
+ * not keep VERBATIM is named before Apply — the same confirm-with-names rule as
+ * `replaceShowPrompt`. An edited note counts: its old text is what is lost.
+ */
+export function validateNotes(incoming: unknown): string | null {
+  if (!Array.isArray(incoming)) return 'notes must be a list';
+  const bad = incoming.findIndex((n) => !n || typeof n !== 'object' || typeof n.label !== 'string' || typeof n.text !== 'string');
+  return bad === -1 ? null : `note ${bad + 1} needs a text label and text`;
+}
+
+export function notesReplacePrompt(current: readonly GeneralNote[], incoming: readonly GeneralNote[]): string | null {
+  const kept = new Set(incoming.map((n) => JSON.stringify([n.label, n.text])));
+  const lost = current.filter((n) => !kept.has(JSON.stringify([n.label, n.text])));
+  if (lost.length === 0) return null;
+  return (
+    `Replace the general notes?\n\nThis removes or rewrites ${lost.length === 1 ? '1 existing note' : `${lost.length} existing notes`}:\n` +
+    lost.map((n) => `  • ${n.label || '(no label)'}`).join('\n')
+  );
 }
 
 /** One sentence for the refused card and for the model's `tool_result` (§5.4, §5.5). */

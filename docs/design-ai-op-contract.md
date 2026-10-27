@@ -902,8 +902,11 @@ safe on its own — so no deploy in the sequence is a half-wired state.
 2. **Slots carry a `tempId`; inputs carry `slotId`.** §9.2 did not say how a
    whole-show create links inputs to performers, and without it the flagship
    first run produces unlinked inputs — half of the B2 defect. `tempId` is
-   required on slots; `slotId` is optional on inputs, because playback, click and
-   talkback belong to no performer and a required field would force a fake link.
+   required on slots, and **`slotId` is required on every input, with `null`
+   meaning "no performer"** (playback, click, talkback). An omitted link would be
+   indistinguishable from a forgotten one, so omission is refused (Codex R1 on
+   #195); the card also marks inputs with no performer and performers with no
+   inputs, so a deliberate gap is visible before Apply.
 3. **An `id` echoed from `<current_config>` into a generated row is refused**, not
    silently dropped or trusted. Every old row is being removed, so an echoed id
    names nothing.
@@ -926,3 +929,9 @@ safe on its own — so no deploy in the sequence is a half-wired state.
 8. **`validateMonitorReplace` and `monitorReplacePrompt` (B3) are deleted** with
    `update_monitors`, their only caller. Their rules live on in `planChanges`
    (tier-1 §3.6 items 5 and 7 updated to point there).
+9. **`update_notes` is still a whole-list write, and notes have no identity** — so
+   a model asked to "add a Power note" that sends only that note would delete the
+   rest (Codex R1 on #195; §9.2 had called it "no identity to lose", which is the
+   problem, not the defence). Shapes are validated, and any existing note the new
+   list does not keep verbatim is named on the card ("Replace notes") and
+   confirmed. The prompt and tool description say the list is whole.

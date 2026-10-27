@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { planChanges, planGenerateShow, replaceShowPrompt, describeProblems } from '@/lib/ai-ops';
+import { planChanges, planGenerateShow, replaceShowPrompt, describeProblems, notesReplacePrompt, validateNotes } from '@/lib/ai-ops';
 import { SYSTEM_PROMPT, TOOLS } from '@/lib/agent';
 import type { InputChannel, MonitorMix, StageSlot } from '@/lib/types';
 
@@ -45,7 +45,7 @@ const show = {
   inputs: [
     { ch: 1, inst: 'Kick', mic: 'D6', stand: 'Short boom', slotId: 'new:bo' },
     { ch: 2, inst: 'Lead Vox', mic: 'SM58', stand: 'Straight', slotId: 'new:ana' },
-    { ch: 3, inst: 'Playback', mic: 'DI', stand: '' },
+    { ch: 3, inst: 'Playback', mic: 'DI', stand: '', slotId: null },
   ],
   monitors: [
     { mix: 1, name: 'Ana', needs: 'Vox, keys', type: 'IEM' },
@@ -76,6 +76,8 @@ describe('generate_show on an empty show (§10.4 14, 15)', () => {
     const bo = next.stagePlot.find((s) => s.name === 'Bo')!;
     const ana = next.stagePlot.find((s) => s.name === 'Ana')!;
     expect(next.inputs.map((i) => [i.inst, i.slotId])).toEqual([['Kick', bo.id], ['Lead Vox', ana.id], ['Playback', undefined]]);
+    // null declares "no performer" and stores as no link — not a literal null.
+    expect(next.inputs[2]).not.toHaveProperty('slotId');
     expect(JSON.stringify(next)).not.toContain('new:');
   });
 
@@ -102,6 +104,23 @@ describe('generate_show on an empty show (§10.4 14, 15)', () => {
     expect(why(planGenerateShow(empty(), { stagePlot: [] }))).toMatch(/needs inputs, monitors as lists/);
     const dupCh = { ...show, inputs: [show.inputs[0], { ...show.inputs[1], ch: 1 }] };
     expect(why(planGenerateShow(empty(), dupCh))).toMatch(/channel 1 is already in use/);
+  });
+
+  it('★ an input that OMITS slotId is refused — a forgotten link must not pass as "no performer" (Codex R1 on #195)', () => {
+    // Codex's probe: Ana's slot exists, her vocal input simply leaves the link out.
+    const forgot = { ...show, inputs: [show.inputs[0], { ch: 2, inst: 'Ana Vox', mic: 'SM58', stand: 'Straight' }, show.inputs[2]] };
+    expect(why(planGenerateShow(empty(), forgot))).toBe(
+      "This plan was refused because an input has no slotId (ch 2 Ana Vox) — give each its performer's tempId, or null if no performer owns it.",
+    );
+    // An explicit null is the declared opt-out, and is accepted.
+    ok(planGenerateShow(empty(), show));
+  });
+
+  it('the preview makes a missing link visible in both directions', () => {
+    const src = readFileSync('app/[owner]/[show]/page.tsx', 'utf8');
+    const preview = src.slice(src.indexOf("case 'generate_show': {", src.indexOf('function ToolCallPreview(')));
+    expect(preview).toMatch(/→ no performer/);
+    expect(preview).toMatch(/\(no inputs\)/);
   });
 
   it('an id echoed from current_config into a generated row is refused, not trusted', () => {
@@ -155,7 +174,7 @@ describe('generate_show on a populated show — confirm and replace (§9.2a, §1
 
   it('the card button for a replace never reads "Apply"', () => {
     const src = readFileSync('app/[owner]/[show]/page.tsx', 'utf8');
-    expect(src).toMatch(/\{replacesContent\(tc\) \? 'Replace everything' : 'Apply'\}/);
+    expect(src).toMatch(/\{replacesContent\(tc\) \? 'Replace everything' : notesLost\(tc\) \? 'Replace notes' : 'Apply'\}/);
   });
 });
 
@@ -176,11 +195,11 @@ describe('the tool set and prompt (§9.2)', () => {
     expect(SYSTEM_PROMPT).toMatch(/each of those inputs carries its performer's slotId/);
   });
 
-  it('slots must carry a tempId; an input may omit slotId (playback, talkback)', () => {
+  it('slots must carry a tempId; every input must carry slotId, null allowed (playback, talkback)', () => {
     const schema = (TOOLS[0] as unknown as { input_schema: { properties: Record<string, { items: { required: string[]; properties: Record<string, unknown> } }> } }).input_schema.properties;
     expect(schema.stagePlot.items.required).toContain('tempId');
-    expect(schema.inputs.items.properties).toHaveProperty('slotId');
-    expect(schema.inputs.items.required).not.toContain('slotId');
+    expect(schema.inputs.items.required).toContain('slotId');
+    expect((schema.inputs.items.properties.slotId as { type: string[] }).type).toEqual(['string', 'null']);
     expect(schema.monitors.items.required).toEqual(['mix', 'name', 'needs']);
   });
 });
@@ -194,5 +213,46 @@ describe('planChanges never mutates the caller, even on an id collision (Codex R
     const result = planChanges(cfg, [{ entity: 'inputs', action: 'add', values: { inst: 'X', mic: '', stand: '' } }], () => 'in-1');
     expect(why(result)).toMatch(/same id/);
     expect(cfg.inputs[0]).not.toHaveProperty('ch', 2);
+  });
+});
+
+// update_notes is still a whole-list write and notes have no identity, so a
+// model that sends only the note it was asked to add deletes every other one
+// (Codex R1 on #195). Same rule as a show replace: name what is lost, confirm.
+describe('update_notes never silently drops notes (Codex R1 on #195)', () => {
+  const current = [{ label: 'Power', text: 'Two drops' }, { label: 'Stands', text: 'Bring 3 booms' }];
+
+  it('★ "add a note" that sends only the new note names the notes it would remove', () => {
+    expect(notesReplacePrompt(current, [{ label: 'Load-in', text: '5pm' }])).toBe(
+      'Replace the general notes?\n\nThis removes or rewrites 2 existing notes:\n  • Power\n  • Stands',
+    );
+  });
+
+  it('a list that keeps every existing note verbatim needs no confirm; an edited note counts as lost', () => {
+    expect(notesReplacePrompt(current, [...current, { label: 'Load-in', text: '5pm' }])).toBeNull();
+    expect(notesReplacePrompt(current, [{ label: 'Power', text: 'One drop' }, current[1]])).toMatch(/1 existing note:\n  • Power$/);
+    expect(notesReplacePrompt([], [{ label: 'Load-in', text: '5pm' }])).toBeNull();
+  });
+
+  it('malformed notes are refused before they reach the config', () => {
+    expect(validateNotes('Power: two drops')).toBe('notes must be a list');
+    expect(validateNotes([{ label: 'Power' }])).toBe('note 1 needs a text label and text');
+    expect(validateNotes(current)).toBeNull();
+  });
+
+  it('wiring: the confirm is asked after validation, before the status or config write; the card warns first', () => {
+    const src = readFileSync('app/[owner]/[show]/page.tsx', 'utf8');
+    const fn = src.slice(src.indexOf('function applyToolCall('), src.indexOf('function rejectToolCall('));
+    const tail = fn.slice(fn.indexOf('const invalid = validateToolInput'));
+    const confirm = tail.indexOf('notesReplacePrompt(configRef.current.notes');
+    expect(confirm).toBeGreaterThan(tail.indexOf("'refused'"));
+    expect(tail.slice(confirm)).toMatch(/^[^;]*;\s*if \(ask && !window\.confirm\(ask\)\) return;/);
+    expect(confirm).toBeLessThan(tail.indexOf("setToolStatus(msgIdx, toolIdx, 'applied')"));
+    expect(src).toMatch(/notesLost\(tc\) \? 'Replace notes' : 'Apply'/);
+  });
+
+  it('the prompt and tool description say the list is whole', () => {
+    expect(SYSTEM_PROMPT).toMatch(/update_notes REPLACES the whole notes list/);
+    expect(TOOLS.find((t) => t.name === 'update_notes')!.description).toMatch(/include every existing note you are keeping/);
   });
 });

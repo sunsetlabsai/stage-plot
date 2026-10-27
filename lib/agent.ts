@@ -28,7 +28,7 @@ You understand:
 
 When the user describes their band, you should:
 1. Set up stage positions based on their description, using the zone model — name distinct occupants individually (multiple may share a position) or collapse large/interchangeable sections into a single named zone; detail individuals in inputs
-2. Call generate_show ONCE with the whole show — stagePlot, inputs and monitors together. A performer's stage slot and their input channels travel together: every person on the stage plot gets their inputs, and each of those inputs carries its performer's slotId. Give each stage-plot slot a tempId starting with "new:" (e.g. "new:dee") and set each input's slotId to that tempId. Only a source no performer owns (playback, click, talkback) has no slotId. Every stagePlot.mix of 1 or more must be the mix number of one of the monitors you send; 0 means "no monitor". Every person should be on a monitor mix.
+2. Call generate_show ONCE with the whole show — stagePlot, inputs and monitors together. A performer's stage slot and their input channels travel together: every person on the stage plot gets their inputs, and each of those inputs carries its performer's slotId. Give each stage-plot slot a tempId starting with "new:" (e.g. "new:dee") and set each input's slotId to that tempId. Every input must have a slotId: use null only for a source no performer owns (playback, click, talkback). Every stagePlot.mix of 1 or more must be the mix number of one of the monitors you send; 0 means "no monitor". Every person should be on a monitor mix.
 3. Infer reasonable defaults for anything not specified (mic types, stand types, monitor groupings)
 4. Auto-number channels sequentially (drums first, then bass, keys, guitars, horns, vocals — standard FOH convention)
 5. Ask clarifying questions only when genuinely ambiguous
@@ -47,6 +47,7 @@ The current show configuration is provided in each message.
 - If the show has no stage plot, inputs or monitors yet, build it with generate_show.
 - If the show already has content, generate_show REPLACES its stage plot, inputs and monitors (never the setlist, charts, notes or show info), and the user is asked to confirm first. Use it only when the user wants to start over or regenerate.
 - For a targeted change to a show that already has content ("Beta 91 on the kick", "add a BGV mic for the bassist"), do NOT regenerate. Tell the user targeted AI edits are not available yet: they can make the change directly in the tables, or ask you to regenerate the whole show.
+- update_notes REPLACES the whole notes list. To add or change one note, send every existing note you are keeping as well.
 - You cannot change the setlist or charts. Point the user to setlist import or the Setlist tab.
 - If a tool result says a change was refused, it tells you why. Fix the problem and try again, or ask the user.`;
 
@@ -77,9 +78,14 @@ const INPUT_SCHEMA = {
     mic: { type: 'string' as const, description: 'Microphone or DI type' },
     stand: { type: 'string' as const, description: 'Stand type' },
     notes: { type: 'string' as const, description: 'Notes (e.g., player name, position)' },
-    slotId: { type: 'string' as const, description: 'The tempId of the stage-plot slot this input belongs to. Omit only for a source no performer owns (playback, click, talkback).' },
+    slotId: {
+      type: ['string', 'null'] as const,
+      description: 'The tempId of the stage-plot slot this input belongs to, or null ONLY for a source no performer owns (playback, click, talkback). Always present.',
+    },
   },
-  required: ['ch', 'inst', 'mic', 'stand'],
+  // slotId is REQUIRED (null allowed): an omitted link is indistinguishable
+  // from a forgotten one, so every input must declare its owner.
+  required: ['ch', 'inst', 'mic', 'stand', 'slotId'],
 };
 
 const MONITOR_SCHEMA = {
@@ -120,7 +126,7 @@ export const TOOLS = [
   },
   {
     name: 'update_notes',
-    description: 'Replace the general notes section.',
+    description: 'Replace the general notes section. This is the WHOLE list: include every existing note you are keeping.',
     input_schema: {
       type: 'object' as const,
       properties: {
