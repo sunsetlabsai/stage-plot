@@ -1,6 +1,6 @@
 import { resolveRoadmap } from './chart-calibration';
 import { layoutRoadmap } from './roadmap-layout';
-import { buildCalibration } from './roadmap-render';
+import { buildCalibration } from './roadmap-calibration';
 import type { BarRef, RoadmapNavigation, RoadmapSection, RoadmapSpec } from './roadmap-spec';
 
 // ── Roadmap Builder — merge repeated sections on parse ───────────────────────
@@ -12,8 +12,6 @@ import type { BarRef, RoadmapNavigation, RoadmapSection, RoadmapSpec } from './r
 // target display is a phone. A run that fails ANY test stays longhand; the step
 // never guesses. Runs between foldDraft and validateRoadmapSpec, so the L1 grammar
 // path and the L2 model path both get it. Pure — no IO.
-//
-// Server-side only: buildCalibration lives in roadmap-render, which pulls pdf-lib.
 
 // "Verse 1" = "Verse 2" = "verse" (ruling §8.2). A label that is ONLY a number
 // keeps itself, so "1" and "2" never collapse to the same empty base.

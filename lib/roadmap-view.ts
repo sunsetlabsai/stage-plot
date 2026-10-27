@@ -20,6 +20,7 @@ import {
   type RoadmapNavigation,
   type BarRef,
 } from './roadmap-spec';
+import { navLive } from './roadmap-calibration';
 
 // A chord occupying `beats` beats of its measure (the real span — cells in a bar
 // sum to timeSig.beats). degree/quality/bass mirror ChordHit; held is carried
@@ -576,7 +577,7 @@ function applyPlan(view: ViewModel, sectionId: string, plan: PlannedBar[]): OpRe
 }
 
 // A bar of k ≥ 2 chords → k bars, one chord each, whole bar (`D E` → `D | E`).
-export function splitBar(view: ViewModel, sectionId: string, bar: number): OpResult {
+function splitBarRaw(view: ViewModel, sectionId: string, bar: number): OpResult {
   const sec = findSection(view, sectionId);
   if (!sec) return { ok: false, reason: 'that section no longer exists' };
   if (badBar(sec, bar)) return { ok: false, reason: `bar ${bar} is not in ${sec.label}` };
@@ -591,7 +592,7 @@ export function splitBar(view: ViewModel, sectionId: string, bar: number): OpRes
 
 // A new BLANK bar before or after `bar`. It joins that bar's repeat group; the
 // existing bar keeps its markers wherever it moves.
-export function insertBar(view: ViewModel, sectionId: string, bar: number, side: 'before' | 'after'): OpResult {
+function insertBarRaw(view: ViewModel, sectionId: string, bar: number, side: 'before' | 'after'): OpResult {
   const sec = findSection(view, sectionId);
   if (!sec) return { ok: false, reason: 'that section no longer exists' };
   if (badBar(sec, bar)) return { ok: false, reason: `bar ${bar} is not in ${sec.label}` };
@@ -603,7 +604,7 @@ export function insertBar(view: ViewModel, sectionId: string, bar: number, side:
 // Delete one bar. Refused on the only bar, and on the last body bar of a volta
 // section; otherwise anything that can't survive it (a marker on it, an ending it
 // was the only bar of, a plain repeat left at 1 bar) comes back in `removes`.
-export function deleteBar(view: ViewModel, sectionId: string, bar: number): OpResult {
+function deleteBarRaw(view: ViewModel, sectionId: string, bar: number): OpResult {
   const sec = findSection(view, sectionId);
   if (!sec) return { ok: false, reason: 'that section no longer exists' };
   if (badBar(sec, bar)) return { ok: false, reason: `bar ${bar} is not in ${sec.label}` };
@@ -627,7 +628,7 @@ export function setBarCount(view: ViewModel, sectionId: string, bars: number): O
   const removes: string[] = [];
   let n = sec.bars;
   while (n !== bars) {
-    const r = n < bars ? insertBar(cur, sectionId, n, 'after') : deleteBar(cur, sectionId, n);
+    const r = n < bars ? insertBarRaw(cur, sectionId, n, 'after') : deleteBarRaw(cur, sectionId, n);
     if (!r.ok) return r;
     cur = r.view;
     for (const x of r.removes) if (!removes.includes(x)) removes.push(x);
@@ -635,13 +636,14 @@ export function setBarCount(view: ViewModel, sectionId: string, bars: number): O
   }
   // The composite's bar map: the first min(old, new) bars stay; the rest are new.
   const src = Array.from({ length: bars }, (_, i) => (i < sec.bars ? i : null));
-  return { ok: true, view: cur, removes, edit: { sectionId, src } };
+  return gate(view, { ok: true, view: cur, removes, edit: { sectionId, src } });
 }
 
 // Remove a whole section. Markers inside it are removed with their dependents and
 // named — replacing viewToSpec's silent drop of the entire navigation block.
 export function removeSection(view: ViewModel, sectionId: string): OpResult {
   if (!findSection(view, sectionId)) return { ok: false, reason: 'that section no longer exists' };
+  if (view.sections.length === 1) return { ok: false, reason: 'a chart needs at least one section' };
   const removes: string[] = [];
   let navigation = view.navigation;
   if (navigation) {
@@ -656,7 +658,45 @@ export function removeSection(view: ViewModel, sectionId: string): OpResult {
   const next: ViewModel = { ...view, sections: view.sections.filter((s) => s.id !== sectionId) };
   if (navigation) next.navigation = navigation;
   else delete next.navigation;
-  return { ok: true, view: next, removes };
+  return gate(view, { ok: true, view: next, removes });
+}
+
+// Second rule (§3): no edit may silently disable a marker. Moving every reference
+// with its bar keeps a marker on the right bar, but not necessarily in effect — a
+// repeat or ending re-shaped around it changes how the VM reaches it (Codex, PR B:
+// deleting an unmarked bar of a two-bar 1st ending makes the D.C. bar the ending's
+// LAST bar, so the volta exit pre-empts the D.C. on pass 1 and pass 2 skips it).
+// So every applied op is checked: a chart that was live and would not be is
+// refused, naming the redirect. A chart already not-live doesn't block edits, so
+// the author can fix it. A marker REMOVED under confirm is not a liveness loss —
+// the redirect is gone, not dead.
+function gate(before: ViewModel, r: OpResult): OpResult {
+  if (!r.ok) return r;
+  if (!navLive(viewToSpec(before)).live) return r;
+  const now = navLive(viewToSpec(r.view));
+  if (now.live) return r;
+  const nav = before.navigation ?? {};
+  const reason =
+    now.dead === 'jump'
+      ? `this would stop the ${markerName(nav, 'jump')} from being played — move it first`
+      : now.dead === 'toCoda'
+        ? 'this would stop the To Coda from being taken — move it first'
+        : now.dead === 'fine'
+          ? 'this would stop the chart ending at the Fine — move it first'
+          : 'this would leave the chart with no end';
+  return { ok: false, reason };
+}
+
+export function splitBar(view: ViewModel, sectionId: string, bar: number): OpResult {
+  return gate(view, splitBarRaw(view, sectionId, bar));
+}
+
+export function insertBar(view: ViewModel, sectionId: string, bar: number, side: 'before' | 'after'): OpResult {
+  return gate(view, insertBarRaw(view, sectionId, bar, side));
+}
+
+export function deleteBar(view: ViewModel, sectionId: string, bar: number): OpResult {
+  return gate(view, deleteBarRaw(view, sectionId, bar));
 }
 
 // ── Nashville degree → letter, in a key (for the Letters display toggle) ─────

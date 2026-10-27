@@ -13,6 +13,7 @@ import {
   type OpResult,
 } from '../lib/roadmap-view';
 import { validateRoadmapSpec, type RoadmapSpec, type ChordHit } from '../lib/roadmap-spec';
+import { navLive } from '../lib/roadmap-calibration';
 
 // design-roadmap-structure-editing.md §3 / §5.3 / §6 — the structure-edit op layer.
 
@@ -174,6 +175,157 @@ const MARKERS_ON_SPLITS: RoadmapSpec = {
     jump: { at: { section: 1, bar: 3 }, from: 'segno', until: 'coda' },
   },
 };
+
+// Codex PR B R1: D.C. on the FIRST bar of a two-bar 1st ending. Live as written
+// (pass 1 plays bar 2 and the D.C. fires mid-ending). Delete the unmarked bar 3 and
+// bar 2 becomes the ending's last bar: the volta exit pre-empts the D.C. on pass 1,
+// pass 2 skips the ending — the D.C. never fires. Every reference still lands.
+const DC_IN_ENDING: RoadmapSpec = {
+  version: 1,
+  timeSig: { beats: 4, unit: 4 },
+  renderKey: 'A',
+  sections: [
+    {
+      id: 'verse',
+      label: 'Verse',
+      bars: 4,
+      repeat: {
+        kind: 'volta',
+        endings: [
+          { bars: { start: 2, count: 2 }, passes: [1] },
+          { bars: { start: 4, count: 1 }, passes: [2] },
+        ],
+      },
+      changes: [
+        { bar: 1, chords: [h(1)] },
+        { bar: 2, chords: [h(4), h(5)] },
+        { bar: 4, chords: [h(1)] },
+      ],
+    },
+    { id: 'outro', label: 'Outro', bars: 2, changes: [{ bar: 1, chords: [h(5)] }] },
+  ],
+  navigation: { jump: { at: { section: 0, bar: 2 }, from: 'capo', until: 'end' } },
+};
+
+describe('navLive — §3 second rule', () => {
+  it('is live for every fixture as written', () => {
+    for (const f of [PLAIN, VOLTA, PLAIN_BARS, MARKERS_ON_SPLITS, DC_IN_ENDING]) expect(navLive(f)).toEqual({ live: true });
+  });
+
+  it('is dead when the D.C. sits on the last bar of a 1st ending (the exit pre-empts it)', () => {
+    const dead = viewToSpec(
+      (() => {
+        const v = view(DC_IN_ENDING);
+        // Same chart with bar 3 gone, built by hand — no op, so no gate.
+        const s = v.sections[0];
+        return {
+          ...v,
+          sections: [
+            {
+              ...s,
+              bars: 3,
+              chords: [s.chords[0], s.chords[1], s.chords[3]],
+              repeat: {
+                kind: 'volta' as const,
+                endings: [
+                  { bars: { start: 2, count: 1 }, passes: [1] },
+                  { bars: { start: 3, count: 1 }, passes: [2] },
+                ],
+              },
+            },
+            v.sections[1],
+          ],
+        };
+      })(),
+    );
+    expect(validateRoadmapSpec(dead).ok).toBe(true); // valid — only the walk can see it
+    expect(navLive(dead)).toEqual({ live: false, dead: 'jump' });
+  });
+
+  it('is dead when al Coda fires but the Coda sits in an ending the walk now skips (Codex R5 shape)', () => {
+    const spec: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'C',
+      sections: [
+        { id: 'intro', label: 'Intro', bars: 2 },
+        {
+          id: 'verse',
+          label: 'Verse',
+          bars: 3,
+          repeat: {
+            kind: 'volta',
+            endings: [
+              { bars: { start: 2, count: 1 }, passes: [1] },
+              { bars: { start: 3, count: 1 }, passes: [2] },
+            ],
+          },
+        },
+        { id: 'outro', label: 'Outro', bars: 2 },
+      ],
+      navigation: {
+        toCoda: { section: 0, bar: 2 },
+        coda: { section: 1, bar: 2 },
+        jump: { at: { section: 2, bar: 2 }, from: 'capo', until: 'coda' },
+      },
+    };
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+    // toCodaFired flips, but the next bar played is not the Coda bar.
+    expect(navLive(spec)).toEqual({ live: false, dead: 'toCoda' });
+  });
+});
+
+describe('the liveness gate on ops', () => {
+  it('refuses Codex’s repro: deleting the unmarked bar that would silence the D.C.', () => {
+    expect(deleteBar(view(DC_IN_ENDING), 'verse', 3)).toEqual({
+      ok: false,
+      reason: 'this would stop the D.C. from being played — move it first',
+    });
+  });
+
+  it('allows the same delete when the D.C. is outside the section', () => {
+    const v = view({
+      ...DC_IN_ENDING,
+      navigation: { jump: { at: { section: 1, bar: 2 }, from: 'capo', until: 'end' } },
+    });
+    expect(deleteBar(v, 'verse', 3).ok).toBe(true);
+  });
+
+  it('gates the bar-count field on its END state, not each step on the way', () => {
+    // Shrinking the Verse to 2 bars deletes bars 4 then 3: the endings go (confirmed),
+    // and the D.C. on bar 2 plays again — live at the end, so allowed.
+    const r = applied(setBarCount(view(DC_IN_ENDING), 'verse', 2));
+    expect(r.removes).toEqual(['the 2 endings']);
+    expect(navLive(viewToSpec(r.view))).toEqual({ live: true });
+  });
+
+  it('does not block edits on a chart that was already not live', () => {
+    const v = view(DC_IN_ENDING);
+    const dead = applied(setBarCount(v, 'outro', 3)).view; // harmless warm-up
+    // Hand-break it (no gate), then edit elsewhere.
+    const s = dead.sections[0];
+    const broken: ViewModel = {
+      ...dead,
+      sections: [
+        {
+          ...s,
+          bars: 3,
+          chords: [s.chords[0], s.chords[1], s.chords[3]],
+          repeat: {
+            kind: 'volta',
+            endings: [
+              { bars: { start: 2, count: 1 }, passes: [1] },
+              { bars: { start: 3, count: 1 }, passes: [2] },
+            ],
+          },
+        },
+        dead.sections[1],
+      ],
+    };
+    expect(navLive(viewToSpec(broken)).live).toBe(false);
+    expect(insertBar(broken, 'outro', 1, 'after').ok).toBe(true);
+  });
+});
 
 describe('splitBar', () => {
   it('turns `D E` into `D | E`, each chord a whole bar', () => {
@@ -371,6 +523,11 @@ describe('removeSection', () => {
     expectValid(r.view);
   });
 
+  it('refuses the last section (a chart with no sections cannot be saved)', () => {
+    const one = view({ ...PLAIN_BARS, sections: [PLAIN_BARS.sections[0]] });
+    expect(removeSection(one, 'verse')).toEqual({ ok: false, reason: 'a chart needs at least one section' });
+  });
+
   it('removes nothing else when no marker is inside', () => {
     const r = applied(removeSection(view(PLAIN), 'verse'));
     expect(r.removes).toEqual([]);
@@ -391,7 +548,8 @@ describe('removeSection', () => {
 //       and is named in `removes`;
 //   (c) chords.length === bars;
 //   (d) no chord is written into or read out of a blank bar;
-//   (e) every bar keeps its volta group; an inserted bar joins its neighbour's.
+//   (e) every bar keeps its volta group; an inserted bar joins its neighbour's;
+//   (f) no step turns a live chart not-live (§3), and the only section is never removed.
 
 function mulberry32(seed: number) {
   let a = seed;
@@ -426,10 +584,10 @@ const sameBar = (a: ViewBar, b: ViewBar) => JSON.stringify(a) === JSON.stringify
 
 describe('structure ops — property test (§6)', () => {
   it('random op sequences keep every reference on its musical bar', () => {
-    const fixtures = [PLAIN, VOLTA, PLAIN_BARS, MARKERS_ON_SPLITS];
+    const fixtures = [PLAIN, VOLTA, PLAIN_BARS, MARKERS_ON_SPLITS, DC_IN_ENDING];
     const rand = mulberry32(0x5eed);
     const pick = <T,>(xs: T[]) => xs[Math.floor(rand() * xs.length)];
-    const stats = { applied: new Set<string>(), refused: 0, removed: 0 };
+    const stats = { applied: new Set<string>(), refused: 0, removed: 0, deadRefused: 0, lastSectionRefused: 0 };
     let fresh = 0;
 
     for (let run = 0; run < 300; run += 1) {
@@ -441,7 +599,6 @@ describe('structure ops — property test (§6)', () => {
         const s = pick(v.sections);
         const bar = 1 + Math.floor(rand() * s.bars);
         const op = pick(['split', 'before', 'after', 'delete', 'delete', 'count', 'remove'] as const);
-        if (op === 'remove' && v.sections.length < 2) continue;
         const r =
           op === 'split'
             ? splitBar(v, s.id, bar)
@@ -452,12 +609,23 @@ describe('structure ops — property test (§6)', () => {
                 : op === 'count'
                   ? setBarCount(v, s.id, 1 + Math.floor(rand() * (s.bars + 3)))
                   : removeSection(v, s.id);
-        // Inserting a blank bar has no precondition beyond a real bar to insert at.
-        if (op === 'before' || op === 'after') expect(r.ok).toBe(true);
+        // The only section can never be removed (Codex PR B R1).
+        if (op === 'remove' && v.sections.length === 1) {
+          expect(r.ok).toBe(false);
+          stats.lastSectionRefused += 1;
+        }
+        const wasLive = navLive(viewToSpec(v)).live;
         if (!r.ok) {
           stats.refused += 1;
+          if (/from being played|from being taken|at the Fine|no end/.test(r.reason)) {
+            // A liveness refusal only ever protects a chart that was live.
+            expect(wasLive).toBe(true);
+            stats.deadRefused += 1;
+          }
           continue;
         }
+        // §3 second rule: no applied step turns a live chart not-live.
+        if (wasLive) expect(navLive(viewToSpec(r.view))).toEqual({ live: true });
         stats.applied.add(op);
         const prev = v;
         const next = r.view;
@@ -565,5 +733,7 @@ describe('structure ops — property test (§6)', () => {
     expect([...stats.applied].sort()).toEqual(['after', 'before', 'count', 'delete', 'remove', 'split']);
     expect(stats.refused).toBeGreaterThan(0);
     expect(stats.removed).toBeGreaterThan(0);
+    expect(stats.deadRefused).toBeGreaterThan(0);
+    expect(stats.lastSectionRefused).toBeGreaterThan(0);
   });
 });
