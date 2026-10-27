@@ -1,6 +1,6 @@
 # Version-checked show save (UAT S5, and S3 rebuilt on it)
 
-**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); awaiting Codex. Nothing here is built.
+**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1 folded (§3.1, §3.3–§3.6, §4.2, §7); awaiting Codex R2. Nothing here is built.
 **Supersedes:** the client-side reconcile in PR #200 (`lib/offline-sync.ts` `reconcileOnLoad`,
 the set-aside store and its Restore/Discard banner, the page's reconnect effect). #200's S2 (offline owner editing) and S4 (flush on page hide)
 stand; its S3 is rebuilt on §3–§5 once this merges.
@@ -33,17 +33,27 @@ Compare-and-set on `shows.updated_at`, which the `set_shows_updated_at` trigger
 
 ## 3. Server
 
-### 3.1 Every writer of a `shows` row (enumerated, `grep "from('shows')"` + migrations)
+### 3.1 What the version must cover (revised after Codex R1 on #201)
 
-| Writer | Changes `updated_at`? | Under this design |
+A show save writes the `shows` row AND, for a migrated show, rebuilds its
+`setlist_entries` with overrides computed against the song library
+(`app/api/shows/update/route.ts:151`), auto-creating a song by title when one can't be
+resolved (`:95`). So a stale tab can reverse more than the show row: a library key
+change becomes a show override, and a deleted song can be recreated. **The version must
+therefore move whenever anything a show save can echo back changes** — not only when the
+`shows` row is written.
+
+Every writer, enumerated (`grep "from('shows')"`, `from('songs')`, `setlist_entries`, `scripts/`, migrations):
+
+| Writer | Touches | Under this design |
 |---|---|---|
-| `PUT /api/shows/update`, entries path → `rpc_save_show` | yes | **checked** (§3.2) |
-| `PUT /api/shows/update`, legacy path → direct `.update()` | yes | **checked** (§3.3) |
-| `app/api/admin/migrate-setlists` (sets `setlist_migrated`) | yes | unchanged. An open tab then gets one 409, which §4.3 resolves silently because the content is identical. |
-| `POST /api/shows` (create), `/api/shows/delete` | n/a (insert/delete) | unchanged |
-
-Song-library edits (`/api/songs/*`) write `songs`/`setlist_entries`, not `shows`, so they
-neither bump nor need the check.
+| `PUT /api/shows/update` → `rpc_save_show` | `shows`, `setlist_entries` | **checked** (§3.2) |
+| `PUT /api/shows/update`, legacy direct `.update()` | `shows` | **checked** (§3.3) |
+| `/api/songs/update` (title/artist/key/lead/notes/bpm) | `songs` | bumps every show that references the song on title/key/lead/notes (§3.5); not artist or bpm, which a show save never writes |
+| `/api/songs/delete` → `rpc_delete_song` | `setlist_entries`, `songs` | bumps the affected shows via the entries trigger (§3.5) |
+| `app/api/admin/migrate-setlists`, `scripts/migrate-setlists.ts` | `songs`, `setlist_entries`, `shows` | **retired** — deleted in the build PR (§3.6) |
+| `POST /api/shows` (create), `/api/shows/delete` | insert / delete | unchanged; create marks an empty-setlist show migrated (§3.6) |
+| `/api/charts/roadmap/save` | reads `songs` only | n/a |
 
 ### 3.2 `rpc_save_show` — migration `018_show_save_version.sql`
 
@@ -72,13 +82,18 @@ which truncates to milliseconds. (#200's `sameInstant` did exactly that, and is 
 
 ### 3.3 Legacy path
 
+The route checks ownership explicitly FIRST, for both paths, with the admin client —
+as the entries path already does (`route.ts:42-60`): no row → 404, not the owner → 403.
+Only then:
+
 ```ts
 .update(updatePayload).eq('id', id).eq('updated_at', base).select('updated_at, slug')
 ```
 
-Zero rows is ambiguous: wrong version, RLS refusal, or missing show. Disambiguate by
-re-reading `updated_at` for `id` with the user client: a row whose `updated_at` ≠ `base`
-→ **409**; no row → **403** (today's answer).
+With ownership already proven, zero rows means the version moved (or the show was deleted
+in between) → **409** (a deleted show then 404s on the GET that follows). No RLS
+inference: a collaborator, who can READ the row at the matching version but not update it
+(`014_collaborator_view_only.sql:80`), has already been refused 403 by the explicit check.
 
 ### 3.4 The route's contract
 
@@ -86,11 +101,49 @@ re-reading `updated_at` for `id` with the user client: a row whose `updated_at` 
 |---|---|
 | `base_updated_at` matches | 200 `{ updated_at, slug }` (as today) |
 | `base_updated_at` stale | **409** `{ error: 'This show was changed somewhere else.', conflict: true }` |
-| `base_updated_at` missing | **428** `{ error: 'This page is out of date. Reload to keep editing.' }` |
+| `base_updated_at` missing | **428** `{ error: "This page is out of date and your last change was NOT saved. Reload, then make it again." }` |
 
 428, not "accept unchecked": an old bundle (a PWA can keep one for days) would otherwise
 keep doing exactly the blind overwrite this exists to stop. An old client renders `error`
 in its pill as-is, so the message reaches the user with no client change (Q1, ruled).
+
+**The old tab's rejected edit is NOT recovered automatically** (Codex R1 on #201): the old
+bundle caches it without a marker, and the reload overwrites that cache. Recovering it
+would need server-side storage of rejected payloads, or guessing from an unmarked cache —
+which also fires on every stale cache that holds no edit at all. Per Graham's rule (§5),
+the person is told plainly what was lost and redoes it: the loss is bounded to edits made
+in a tab opened before the deploy, and it is never silent.
+
+### 3.5 Library changes move the version — migration `018`
+
+Two trigger functions, `security definer`, `set search_path = public`, execute revoked
+from `public`/`anon`/`authenticated`:
+
+- **`setlist_entries`** — AFTER INSERT / UPDATE / DELETE, statement-level with transition
+  tables: `update shows set updated_at = now() where id in (affected show_ids)`. Covers
+  `rpc_delete_song` and any future entries writer. Inside `rpc_save_show` it touches the
+  row the function already holds `FOR UPDATE`, in the same transaction, to the same
+  `now()` — the returned `updated_at` is unchanged.
+- **`songs`** — AFTER UPDATE OF `title, key, lead, notes`, `when (old.* is distinct from
+  new.*)` on those columns: bump every show with an entry for that song. **Not `bpm`**: a
+  show save never writes bpm (entries carry key/lead/notes only), so a stale tab cannot
+  reverse it, and the show page's own BPM writer must not 409 its own next save.
+
+A stale show tab after a library edit therefore gets a 409, and §5 asks the owner. *Use
+the saved one* shows the new library values; *Keep mine* re-applies the stale ones as
+overrides — knowingly. A deleted song is the same: *Keep mine* recreates it by title,
+because that is the setlist the owner chose to keep.
+
+### 3.6 Retired and tightened
+
+- **`app/api/admin/migrate-setlists` and `scripts/migrate-setlists.ts` are deleted.** They
+  were the one-off song-library rollout. Prod, read 2026-10-27: `select setlist_migrated,
+  count(*) from shows` → `t | 8`, nothing left to migrate. Both did read-then-replace of
+  entries with no version check (Codex R1 on #201, finding 2); deleting them is cheaper
+  than checking them.
+- **`POST /api/shows` (plain create) sets `setlist_migrated = true` when the config's
+  setlist is empty** — an empty setlist has nothing to migrate. So no new legacy shows
+  appear, and §4.4's migration-timing change (Q2) affects no show in practice.
 
 ## 4. Client (`lib/use-show.ts`)
 
@@ -107,6 +160,14 @@ At most one PUT per show at a time. Edits during a save update the pending copy;
 the save returns, the latest pending copy goes next **with the new base**. This is
 Codex finding 3: out-of-order PUTs become impossible, and a tab never conflicts with
 itself.
+
+**The marker rule, explicitly (Codex R1 on #201, finding 3):** every cached edit bumps an
+edit sequence (#200's `editSeq`, kept in the rebuild). A save's success clears the unsynced
+marker **only if it carried the latest sequence and nothing is pending**. Otherwise the
+marker stays and the pending copy goes next. The same rule governs the 409 path: an edit
+made while §4.3's GET is in flight bumps the sequence, so step 3's "equal content → clear"
+compares and clears against the LATEST copy at the moment the GET returns, never the one
+that was sent.
 
 ### 4.3 A 409
 
@@ -189,13 +250,29 @@ for them, and their screen must not change under them mid-gig.
 | 3 | out-of-order PUTs, marker cleared early | §4.2 (one in flight) + §3 (an older base is refused) |
 | 4 | set-aside write failure / overwrite | §4.3 + §5: no set-aside store exists; the owner's copy stays the cache under a marker only a choice clears |
 
+**Codex R1 on #201:**
+
+| # | Finding | Closed by |
+|---|---|---|
+| 1 | a stale show save reverses a library change / recreates a deleted song | §3.1 + §3.5: library changes move the version; the owner arbitrates |
+| 2 | admin migration replaces a successful save; script missing from the inventory | §3.6: both retired; no unmigrated shows exist |
+| 3 | an older save's success clears the marker | §4.2 marker rule (latest sequence only, incl. during the 409 GET) |
+| 4 | old tabs' rejected edit lost on reload | §3.4: not recovered, but never silent — the 428 says it was not saved |
+| — | collaborator at the matching version | §3.3: explicit owner check before either path |
+
 ## 8. Tests (written with the build)
 
 - **SQL** (run against a scratch DB through psql, recorded in the PR): matching base
   saves; stale base raises `PT409`; two concurrent `rpc_save_show` with the same base →
   exactly one succeeds (the `FOR UPDATE`); the old 7-arg signature no longer exists;
   `has_function_privilege` for `anon`/`authenticated` is false, for `service_role` true.
-- **Route:** 200 / 409 / 428 on both paths; the legacy path's 0-row 409-vs-403 split.
+- **Route:** 200 / 409 / 428 on both paths; owner check before either path (collaborator →
+  403 even at the matching version); legacy 0-row → 409.
+- **Triggers (SQL):** an entries insert/delete bumps its show; a song key/title/lead/notes
+  change bumps every show referencing it, a bpm-only change bumps none; `rpc_delete_song`
+  bumps the affected shows; inside `rpc_save_show` the returned `updated_at` equals the
+  row's final value.
+- **Create:** an empty-setlist show is created `setlist_migrated = true`.
 - **Hook:** one save in flight (a second edit waits, then goes with the new base); 409 →
   GET → equal content adopts silently; 409 → different content holds saves, keeps this
   copy on screen and the marker set; edits while held are cached, not sent; *Keep mine*
@@ -207,11 +284,12 @@ for them, and their screen must not change under them mid-gig.
 ## 9. Rollout
 
 1. Merge this design.
-2. Build PR: migration `018` + route + hook, rebased with #200's S2/S4. Codex.
+2. Build PR: migration `018` (RPC check, both triggers, grants) + route + hook + the
+   create-path change + deletion of both migration tools, rebased with #200's S2/S4. Codex.
 3. On Graham's go: apply `018` through psql **before** the deploy (`project_showrunr_reference`:
    migrations run first). Between apply and deploy the OLD route still calls the dropped
    7-arg function and saves fail loudly for those minutes (Q4, accepted).
-4. Deploy. Old open tabs get 428 and the reload message.
+4. Deploy. Old open tabs get 428 and the message that their last change was not saved.
 
 ## 10. Rulings (Graham, 2026-10-27)
 
