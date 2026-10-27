@@ -428,6 +428,12 @@ export function bearerKey(headers: Headers): string | undefined {
 }
 
 /**
+ * The header a chart client sends beside a device key, naming the account the key
+ * was read for. See `resolveChartKey`.
+ */
+export const KEY_ACCOUNT_HEADER = 'x-showrunr-key-account';
+
+/**
  * Key resolution for the two AUTHENTICATED chart routes — roadmap parse and
  * overlay convert (design-ai-key-availability §13.4.1). The same resolver,
  * precedence and try-it quota as the AI tab: device key, then the signed-in
@@ -435,8 +441,16 @@ export function bearerKey(headers: Headers): string | undefined {
  * Unlike chat, the caller is always signed in, so the account key is always
  * consulted when no device key came.
  */
+//
+// ★ The device key is BOUND to the account it was read for (Codex R1 on #199). The
+// client reads the session and the key, then sends; the server authenticates the
+// cookie separately. A sign-in change in another tab between those reads would put
+// account A's key on account B's request. So the client names the account
+// (KEY_ACCOUNT_HEADER) and a key whose account is not the authenticated user — or
+// not named at all — is ignored, failing closed to B's own account key or try-it.
 export function resolveChartKey(request: { headers: Headers }, userId: string): Promise<KeyMode> {
-  const clientKey = bearerKey(request.headers);
+  const claimed = request.headers.get(KEY_ACCOUNT_HEADER);
+  const clientKey = claimed && claimed === userId ? bearerKey(request.headers) : undefined;
   return resolveKeyMode(clientKey, getClientIp(request.headers), { consume: true }, clientKey ? undefined : userId);
 }
 

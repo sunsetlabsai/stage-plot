@@ -456,24 +456,33 @@ export function tallySpec(spec: RoadmapSpec): string[] {
 // the L0-pinned key (e.g. a chromatic root) fails the whole parse to L2 / Gap-1
 // rather than being rounded.
 
-// A time signature, in the only places it cannot be a chord (UAT S14). Number
-// notation makes "4/4" a legal chord (IV over 4), so a bare N/D mid-clause stays a
-// chord. It is a time signature when it opens the description as a clause of its
-// own ("4/4, …", "4/4 in G, …", "3/4\n…"), or is marked as one ("in 3/4", "3/4
-// time"). Bounds match the model path's normalizeTimeSig (beats 1–32, unit
-// 1|2|4|8|16) so L1 and L2 accept the same signatures.
+// A time signature, in the places it cannot be a chord (UAT S14). Number notation
+// makes "4/4" a legal chord (IV over 4). It is a time signature when it opens the
+// description — after any key statement — as a clause of its own ("4/4, …",
+// "4/4 in G, …", "in G, 3/4, …"), or is labelled or marked as one ("Time
+// signature: 3/4", "Meter: 6/8", "in 3/4", "3/4 time"). Anywhere else a BARE N/D
+// clause is ambiguous and defers the whole description to L2 (`isBareTimeSig` in
+// parseSpanClause) — never a guess either way (Codex R1 on #199). Bounds match the
+// model path's normalizeTimeSig (beats 1–32, unit 1|2|4|8|16).
 const TIME_SIG = String.raw`([1-9]|[12]\d|3[0-2])\/(1|2|4|8|16)`;
-const RE_TIME_LEADING = new RegExp(String.raw`^\s*${TIME_SIG}(?:\s+time)?(?=\s*(?:[,;.\n]|$)|\s+(?:in|key)\b)`, 'i');
-const RE_TIME_MARKED = new RegExp(String.raw`\bin\s+${TIME_SIG}\b(?:\s+time\b)?|\b${TIME_SIG}\s+time\b`, 'i');
+const RE_TIME_LEADING = new RegExp(String.raw`^[\s,;.]*${TIME_SIG}(?:\s+time)?(?=\s*(?:[,;.\n]|$)|\s+(?:in|key)\b)`, 'i');
+const RE_TIME_MARKED = new RegExp(
+  String.raw`\b(?:time\s+signature|time\s+sig|time|meter)\s*[:=]?\s*${TIME_SIG}\b|\bin\s+${TIME_SIG}\b(?:\s+time\b)?|\b${TIME_SIG}\s+time\b`,
+  'i',
+);
+const RE_BARE_TIME_SIG = new RegExp(String.raw`^${TIME_SIG}$`);
 
 // The time signature the description states, and the text without it, so the
 // span grammar never reads it as a bar. First match only, like stripKeyPhrase.
+// Run AFTER stripKeyPhrase, so "in G, 3/4, …" is leading too.
 function extractTimeSig(text: string): { text: string; timeSig: { beats: number; unit: number } | null } {
   const m = text.match(RE_TIME_LEADING) ?? text.match(RE_TIME_MARKED);
   if (!m || m.index === undefined) return { text, timeSig: null };
-  const beats = Number(m[1] ?? m[3]);
-  const unit = Number(m[2] ?? m[4]);
-  return { text: `${text.slice(0, m.index)} ${text.slice(m.index + m[0].length)}`, timeSig: { beats, unit } };
+  const g = m.slice(1).filter((x) => x !== undefined);
+  // Separators left at the start by the cut would read as content before the
+  // first section header, which splitSections refuses.
+  const rest = `${text.slice(0, m.index)} ${text.slice(m.index + m[0].length)}`.replace(/^[\s,;.]+/, '');
+  return { text: rest, timeSig: { beats: Number(g[0]), unit: Number(g[1]) } };
 }
 
 // Strip a leading/inline key statement (the L0 grammar already consumed it for the
@@ -574,6 +583,10 @@ function parseSpanClause(clause: string, renderKey: string, beats: number): Chor
   }
   if (!Number.isInteger(bars) || bars < 1) return null;
 
+  // A bare N/D with no bar count could be a 1-bar slash chord or a time signature
+  // extractTimeSig did not recognise ("…, 3/4, …"). Ambiguous → defer (S14).
+  if (!leading && barText === c && RE_BARE_TIME_SIG.test(c)) return null;
+
   // Multi-chord bar pattern without an explicit "-" tie = ambiguous shorthand → defer.
   const tokens = barText.split(/\s+/).filter(Boolean);
   const chordTokens = tokens.filter((t) => t !== '-');
@@ -596,9 +609,9 @@ export function parseDescription(
 ): AuthoringDraft | null {
   // A stated time signature wins over the default, and is removed before the
   // span grammar sees it — else "4/4" reads as a chord and adds a bar (UAT S14).
-  const stated = extractTimeSig(description);
+  const stated = extractTimeSig(stripKeyPhrase(description));
   const timeSig = stated.timeSig ?? defaultTimeSig;
-  const secs = splitSections(stripKeyPhrase(stated.text));
+  const secs = splitSections(stated.text);
   if (!secs) return null;
 
   const beats = timeSig.beats;

@@ -244,8 +244,8 @@ describe('round trips — the behaviour the user actually reported', () => {
 // UAT S15 / design-ai-key-availability §13.4.2: the chart routes get the device key
 // too, read for whoever is signed in at the moment of the request (#134).
 describe('deviceKeyHeaders', () => {
-  it("sends the signed-in account's key as a bearer header", () => {
-    expect(deviceKeyHeaders(store(at(A)), store(), A)).toEqual({ Authorization: `Bearer ${KEY}` });
+  it("sends the signed-in account's key as a bearer header, naming that account", () => {
+    expect(deviceKeyHeaders(store(at(A)), store(), A)).toEqual({ Authorization: `Bearer ${KEY}`, 'x-showrunr-key-account': A });
   });
 
   it("never another account's key on the same browser", () => {

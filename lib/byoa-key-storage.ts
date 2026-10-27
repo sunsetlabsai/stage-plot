@@ -167,13 +167,18 @@ export function keyForSend(
  * The `Authorization` header for a chart AI request — roadmap parse or overlay
  * convert (design-ai-key-availability §13.4.2) — or none.
  *
- * Read for the account signed in NOW, at the moment of the request. Unlike the AI
- * tab, a chart surface holds no key in memory and is not bound to the account it
- * mounted with: the route authenticates the same live session, so the key read
- * here and the user the server resolves are one account (#134). No device key ⇒
- * no header, and the server falls back to the account key, then try-it.
+ * Read for the account signed in NOW, at the moment of the request — a chart
+ * surface holds no key in memory and is not bound to the account it mounted with.
+ * The session can still change between this read and the request, so the key
+ * travels with the account it belongs to, and the server ignores it under any
+ * other (`resolveChartKey`, #134). No device key ⇒ no headers, and the server
+ * falls back to the account key, then try-it.
  */
 export function deviceKeyHeaders(local: KeyStore, session: KeyStore, liveUserId: string): Record<string, string> {
   const key = readKey(local, session, liveUserId);
-  return key ? { Authorization: `Bearer ${key}` } : {};
+  // The account is named beside the key so the server can refuse it under any
+  // other session — the session can change between this read and the request
+  // (Codex R1 on #199; resolveChartKey). Literal, not imported: this module is
+  // client-side and agent-key is server-only.
+  return key ? { Authorization: `Bearer ${key}`, 'x-showrunr-key-account': liveUserId } : {};
 }

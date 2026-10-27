@@ -213,6 +213,26 @@ describe('parseGrammarDraft — L1 deterministic path (skips the model)', () => 
       expect(only('1/4 for 2 bars, 2 bars G').sections[0].changes?.[0]).toEqual({ bar: 1, chords: [{ degree: 1, bass: 4 }] });
     });
 
+    // Codex R1 on #199: ordinary phrasings the first cut missed, each of which
+    // parsed in 4/4 with a bogus slash-chord bar and returned before L2 could fix it.
+    it.each([
+      ['Time signature: 3/4, Verse: 4 bars G', { beats: 3, unit: 4 }],
+      ['Time signature: 3/4. Verse: 4 bars G', { beats: 3, unit: 4 }],
+      ['in G, 3/4, 4 bars G', { beats: 3, unit: 4 }],
+      ['Meter: 6/8. 4 bars G', { beats: 6, unit: 8 }],
+      ['Time: 7/8\nVerse: 4 bars G', { beats: 7, unit: 8 }],
+    ])('labelled or after the key: %j → %j, 4 bars, no extra bar', (text, timeSig) => {
+      const spec = only(text);
+      expect(spec.timeSig).toEqual(timeSig);
+      expect(spec.sections).toHaveLength(1);
+      expect(spec.sections[0].bars).toBe(4);
+    });
+
+    it('a bare N/D anywhere else is ambiguous (chord or time signature) → defers to L2, never a guess', () => {
+      expect(parseGrammarDraft('Verse: 1, 4, 3/4, 5', 'G')).toBeNull();
+      expect(parseGrammarDraft('4 bars G, 3/4, 4 bars C', 'G')).toBeNull();
+    });
+
     it('with no time signature stated, the default 4/4 is unchanged', () => {
       expect(only('in G, 4 bars G').timeSig).toEqual({ beats: 4, unit: 4 });
     });
