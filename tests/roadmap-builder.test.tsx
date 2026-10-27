@@ -529,3 +529,104 @@ describe('RoadmapBuilder — bar structure edits', () => {
     expect(screen.getAllByRole('spinbutton', { name: 'Bars' })).toHaveLength(3);
   });
 });
+
+// Structure editing PR C (design-roadmap-structure-editing.md §5.1): the section's
+// repeat control and Write out, asserted at the save body.
+describe('RoadmapBuilder — section repeat control', () => {
+  const REP: RoadmapSpec = {
+    version: 1,
+    timeSig: { beats: 4, unit: 4 },
+    renderKey: 'C',
+    sections: [
+      { id: 'tag', label: 'Tag', bars: 1 },
+      { id: 'verse', label: 'Verse', bars: 2, repeat: { kind: 'plain', times: 2 }, changes: [{ bar: 1, chords: [{ degree: 1 }] }] },
+      {
+        id: 'chorus',
+        label: 'Chorus',
+        bars: 3,
+        repeat: {
+          kind: 'volta',
+          endings: [
+            { bars: { start: 2, count: 1 }, passes: [1] },
+            { bars: { start: 3, count: 1 }, passes: [2] },
+          ],
+        },
+      },
+    ],
+  };
+
+  function renderEdit(spec: RoadmapSpec = REP) {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ chart_id: 'c1', role: 'guitar', url: 'u', song_key: 'k' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <RoadmapBuilder
+        songTitle="X"
+        charts={[]}
+        editChart={{ chartId: 'c1', role: 'guitar', spec, updatedAt: '2026-10-26T00:00:00Z' }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+    return fetchMock;
+  }
+
+  async function savedSpec(fetchMock: ReturnType<typeof vi.fn>): Promise<RoadmapSpec> {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    return JSON.parse(fetchMock.mock.calls[0][1].body as string).spec;
+  }
+
+  const repeatOf = (label: string) => screen.getByRole('combobox', { name: `Repeat ${label}` }) as HTMLSelectElement;
+
+  it('shows each section’s repeat, and is disabled on a 1-bar section', () => {
+    renderEdit();
+    expect(repeatOf('Tag')).toBeDisabled();
+    expect(repeatOf('Verse').value).toBe('2');
+    expect(repeatOf('Chorus').value).toBe('volta');
+    expect(repeatOf('Chorus').selectedOptions[0].textContent).toBe('2 endings');
+  });
+
+  it('changing the count saves the new plain repeat', async () => {
+    const fetchMock = renderEdit();
+    fireEvent.change(repeatOf('Verse'), { target: { value: '3' } });
+    const spec = await savedSpec(fetchMock);
+    expect(spec.sections[1].repeat).toEqual({ kind: 'plain', times: 3 });
+  });
+
+  it('replacing endings with a count confirms, naming them; declining keeps them', async () => {
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmMock);
+    const fetchMock = renderEdit();
+    fireEvent.change(repeatOf('Chorus'), { target: { value: '2' } });
+    expect(confirmMock).toHaveBeenCalledWith('Repeat Chorus ×2? This also removes the 2 endings.');
+    const spec = await savedSpec(fetchMock);
+    expect(spec.sections[2].repeat?.kind).toBe('volta');
+  });
+
+  it('Write out turns Verse ×2 into two Verse sections', async () => {
+    const fetchMock = renderEdit();
+    fireEvent.click(screen.getByRole('button', { name: 'Write out' }));
+    const spec = await savedSpec(fetchMock);
+    expect(spec.sections.map((s) => [s.id, s.label, s.bars, s.repeat])).toEqual([
+      ['tag', 'Tag', 1, undefined],
+      ['verse', 'Verse', 2, undefined],
+      ['verse-2', 'Verse', 2, undefined],
+      ['chorus', 'Chorus', 3, REP.sections[2].repeat],
+    ]);
+  });
+
+  it('Write out is refused, with the reason, when a D.C. replays the repeat', () => {
+    renderEdit({
+      ...REP,
+      sections: [REP.sections[1], { id: 'outro', label: 'Outro', bars: 1 }],
+      navigation: { jump: { at: { section: 1, bar: 1 }, from: 'capo', until: 'end' } },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Write out' }));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'this repeat is replayed by the D.C.; writing it out would change what is played',
+    );
+    expect(screen.getAllByRole('spinbutton', { name: 'Bars' })).toHaveLength(2);
+  });
+});

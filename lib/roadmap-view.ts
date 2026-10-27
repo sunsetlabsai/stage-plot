@@ -21,6 +21,7 @@ import {
   type BarRef,
 } from './roadmap-spec';
 import { navLive } from './roadmap-calibration';
+import { playsTheSame } from './roadmap-merge';
 
 // A chord occupying `beats` beats of its measure (the real span — cells in a bar
 // sum to timeSig.beats). degree/quality/bass mirror ChordHit; held is carried
@@ -659,6 +660,65 @@ export function removeSection(view: ViewModel, sectionId: string): OpResult {
   if (navigation) next.navigation = navigation;
   else delete next.navigation;
   return gate(view, { ok: true, view: next, removes });
+}
+
+// ── Section repeat (§5.1) ────────────────────────────────────────────────────
+
+// Set a section's plain repeat (×times), or clear it (null). No bar moves, so no
+// reference moves; switching away from a volta repeat drops its endings (named in
+// `removes`; the ending bars stay as ordinary bars — never deleted implicitly).
+export function setPlainRepeat(view: ViewModel, sectionId: string, times: number | null): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  if (times !== null) {
+    if (!Number.isInteger(times) || times < 2) return { ok: false, reason: 'a repeat plays at least twice' };
+    if (sec.bars < 2) return { ok: false, reason: "a 1-bar section can't repeat" };
+  }
+  const removes = sec.repeat?.kind === 'volta' ? [repeatName(sec.repeat)] : [];
+  const nextSec: ViewSection = { id: sec.id, label: sec.label, bars: sec.bars, chords: sec.chords };
+  if (times !== null) nextSec.repeat = { kind: 'plain', times };
+  const next: ViewModel = { ...view, sections: view.sections.map((s) => (s.id === sectionId ? nextSec : s)) };
+  return gate(view, { ok: true, view: next, removes });
+}
+
+// Write a plain ×N repeat out as N adjacent copies (the escape hatch for ruling
+// §8.1's merge-always). Copy 1 keeps the section's id — so every nav ref into it
+// stays put — and copies 2..N get fresh ids. Gated by the §4 playback-equivalence
+// check: a repeat a D.C./D.S. replays is played ONCE more as a repeat (the VM keeps
+// its pass count) but in full when written out, so that unroll is refused rather
+// than silently adding a pass.
+export function unrollRepeat(view: ViewModel, sectionId: string): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  if (sec.repeat?.kind !== 'plain') return { ok: false, reason: 'only a ×N repeat can be written out' };
+  const taken = new Set(view.sections.map((s) => s.id));
+  const freshId = (k: number) => {
+    let id = `${sec.id}-${k}`;
+    for (let n = 2; taken.has(id); n += 1) id = `${sec.id}-${k}-${n}`;
+    taken.add(id);
+    return id;
+  };
+  const copies: ViewSection[] = Array.from({ length: sec.repeat.times }, (_, k) => ({
+    id: k === 0 ? sec.id : freshId(k + 1),
+    label: sec.label,
+    bars: sec.bars,
+    chords: sec.chords.slice(),
+  }));
+  const i = view.sections.findIndex((s) => s.id === sectionId);
+  const next: ViewModel = {
+    ...view,
+    sections: [...view.sections.slice(0, i), ...copies, ...view.sections.slice(i + 1)],
+  };
+  if (!playsTheSame(viewToSpec(view), viewToSpec(next))) {
+    const j = view.navigation?.jump;
+    return {
+      ok: false,
+      reason: j
+        ? `this repeat is replayed by the ${markerName(view.navigation!, 'jump')}; writing it out would change what is played`
+        : 'writing this repeat out would change what is played',
+    };
+  }
+  return gate(view, { ok: true, view: next, removes: [] });
 }
 
 // Second rule (§3): no edit may silently disable a marker. Moving every reference

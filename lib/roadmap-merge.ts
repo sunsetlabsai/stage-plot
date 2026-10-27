@@ -75,6 +75,13 @@ function samePlayback(a: string[] | null, b: string[] | null): boolean {
   return a !== null && b !== null && a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
+// The §4 playback-equivalence check as one call: do two specs play the same
+// written content, step for step? Reused by the editor's Unroll (§5.1), so the
+// merge and its escape hatch agree by construction.
+export function playsTheSame(a: RoadmapSpec, b: RoadmapSpec): boolean {
+  return samePlayback(playedContent(a), playedContent(b));
+}
+
 // Merge sections [i..j] into i (×(j−i+1)); refs past j shift down by j−i. The
 // caller has already proved no ref points into (i, j].
 function mergeRun(spec: RoadmapSpec, i: number, j: number): RoadmapSpec {
