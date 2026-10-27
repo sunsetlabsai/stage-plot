@@ -69,7 +69,7 @@ describe('test 1 — a network failure is surfaced, not swallowed', () => {
     // so this carries the CAUSE only; asserting on content rather than an exact
     // string keeps the copy editable without a false failure.
     expect(result.current.context.saveError).toMatch(/offline/i);
-    expect(result.current.context.saveError).toMatch(/cached/i);
+    expect(result.current.context.saveError).toMatch(/kept in this browser and will save when you're back online/i);
   });
 
   it('★ leaves lastSavedAt untouched, so the pill cannot still read "Saved"', async () => {

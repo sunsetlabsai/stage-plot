@@ -2,6 +2,12 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { shouldSendEntries } from './overrides';
+import { cacheKey, clearUnsynced, markUnsynced, rememberServerVersion } from './offline-sync';
+
+// keepalive requests share a 64 KiB in-flight budget; a larger body is rejected
+// outright. Over it, the flush on page hide sends normally and may be cut off —
+// the unsynced marker then recovers the edit on the next load (lib/offline-sync).
+const KEEPALIVE_MAX_BYTES = 60_000;
 
 interface ShowContext {
   showId: string | null;
@@ -17,6 +23,7 @@ interface ShowContext {
 interface UseShowReturn {
   context: ShowContext;
   saveConfig: (config: Record<string, unknown>) => void;
+  resave: (config: Record<string, unknown>) => void;
 }
 
 // Debounced auto-save to Supabase for authenticated users
@@ -34,11 +41,15 @@ export function useShow(
   // Once entries have been sent successfully, treat show as migrated for the rest of the session.
   // Prevents stale setlistMigrated=false from reverting to legacy path after removing all songs.
   const hasSentEntries = useRef(false);
+  // Bumped per cached edit. A save clears the unsynced marker only if it carried
+  // the LATEST edit and nothing is waiting — else an older save's success would
+  // declare a newer, unsaved edit synced (UAT S3).
+  const editSeq = useRef(0);
 
   // Collaborators are view-only (§3.3c), so ownership is the whole write gate.
   const isReadOnly = !isOwner;
 
-  const doSave = useCallback(async (config: Record<string, unknown>) => {
+  const doSave = useCallback(async (config: Record<string, unknown>, opts: { seq: number; keepalive?: boolean }) => {
     if (!showId || isReadOnly) return;
 
     setSaving(true);
@@ -95,6 +106,8 @@ export function useShow(
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body,
+          // On page hide (S4): lets the request outlive the page, within budget.
+          keepalive: !!opts.keepalive && body.length <= KEEPALIVE_MAX_BYTES,
         });
       } catch {
         // §1.1: the config IS still cached (saveConfig writes localStorage before
@@ -107,7 +120,7 @@ export function useShow(
         // only. No auto-retry: the existing 2s debounce retries on the next edit,
         // and a background loop would be a new mechanism with its own failure modes.
         setSaveError(
-          "you appear to be offline. Your changes are cached in this browser and will save on your next edit once you're back.",
+          "you appear to be offline. Your changes are kept in this browser and will save when you're back online.",
         );
         return; // `finally` still clears `saving`
       }
@@ -116,13 +129,15 @@ export function useShow(
         const { updated_at } = await res.json();
         setLastSavedAt(updated_at);
         setSaveError(null);
-        // Cache server timestamp for offline conflict detection. Best-effort:
-        // the SERVER is the source of truth and the save has already persisted,
-        // so a quota error or Safari private mode must not surface as a failure.
+        // Cache the server version for the next load's reconcile, and clear the
+        // unsynced marker if this save carried the latest edit (lib/offline-sync).
+        // Best-effort: the SERVER is the source of truth and the save has already
+        // persisted, so blocked storage must not surface as a failure.
         try {
-          localStorage.setItem(`showrunr-last-saved-${showId}`, updated_at);
+          rememberServerVersion(localStorage, showId, updated_at);
+          if (opts.seq === editSeq.current && pendingConfig.current === null) clearUnsynced(localStorage, showId);
         } catch {
-          // Conflict detection degrades; the save itself stands.
+          // Reconcile degrades to asking; the save itself stands.
         }
         // Once entries have been sent successfully, lock into entries path
         if (payload.entries !== undefined) {
@@ -149,29 +164,65 @@ export function useShow(
     if (!showId || isReadOnly) return;
 
     pendingConfig.current = config;
+    const seq = ++editSeq.current;
 
-    // Also write to localStorage as offline cache
-    try { localStorage.setItem(`showrunr-cache-${showId}`, JSON.stringify(config)); } catch { /* quota */ }
+    // Write to this browser first, and mark it unsynced until the server confirms
+    // (UAT S3/S4): this copy is what survives an offline session or a killed tab.
+    // Only a CHANGE marks it. The page saves once on every load; a show opened
+    // offline and never touched must not later read as offline edits — or worse,
+    // be pushed over another device's save.
+    try {
+      const json = JSON.stringify(config);
+      const changed = localStorage.getItem(cacheKey(showId)) !== json;
+      localStorage.setItem(cacheKey(showId), json);
+      if (changed) markUnsynced(localStorage, showId, new Date().toISOString());
+    } catch { /* quota */ }
 
     // Debounce: save to Supabase after 2s of no changes
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       if (pendingConfig.current) {
-        doSave(pendingConfig.current);
+        const latest = pendingConfig.current;
         pendingConfig.current = null;
+        doSave(latest, { seq });
       }
     }, 2000);
   }, [showId, isReadOnly, doSave]);
 
-  // Cleanup timer on unmount
+  // Send the waiting edit now instead of after the debounce.
+  const flush = useCallback((keepalive: boolean) => {
+    if (!pendingConfig.current || !showId || isReadOnly) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    const latest = pendingConfig.current;
+    pendingConfig.current = null;
+    doSave(latest, { seq: editSeq.current, keepalive });
+  }, [showId, isReadOnly, doSave]);
+
+  // S4: a phone lock or tab kill fires pagehide / visibilitychange, never React's
+  // unmount, so the last 2 s of edits waited on a timer that would never run.
+  // (Reconnecting is NOT handled here: re-sending blind could overwrite another
+  // device's save. The page re-checks the server version first — S3.)
   useEffect(() => {
+    if (!showId || isReadOnly) return;
+    const onHide = () => flush(true);
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flush(true); };
+    window.addEventListener('pagehide', onHide);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      // Flush pending save on unmount
-      if (pendingConfig.current && showId && !isReadOnly) {
-        doSave(pendingConfig.current);
-      }
+      window.removeEventListener('pagehide', onHide);
+      document.removeEventListener('visibilitychange', onVisibility);
+      // Unmount (or a show change): send what is waiting rather than drop it.
+      flush(false);
     };
+  }, [showId, isReadOnly, flush]);
+
+  // Save the current show now, even though it is already cached — the page's
+  // reconnect path calls this once it has checked the server has not moved.
+  const resave = useCallback((config: Record<string, unknown>) => {
+    if (!showId || isReadOnly) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    pendingConfig.current = null;
+    doSave(config, { seq: editSeq.current });
   }, [showId, isReadOnly, doSave]);
 
   return {
@@ -186,5 +237,6 @@ export function useShow(
       setlistMigrated,
     },
     saveConfig,
+    resave,
   };
 }

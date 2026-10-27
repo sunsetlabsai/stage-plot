@@ -106,7 +106,8 @@ Loading, access and saving
     any signed-in non-owner sees "Viewing as collaborator (read-only)" (`page.tsx:794-798`).
 13. Owner edits autosave 2 s after the last change; config is also written to localStorage first
     (`lib/use-show.ts:148-164`). The tab-bar pill shows Saving… / Saved / red "Couldn't save — …";
-    a network failure says "you appear to be offline…" (`use-show.ts:109-111`, `page.tsx:890-903`).
+    a network failure says "you appear to be offline…" (`lib/use-show.ts`, `page.tsx`). Offline
+    behaviour: Platform items 30–31.
 14. Setlist save: owners send entries; the server resolves each row by `songId`, else by normalized
     title, **auto-creating a missing library song**, then stores per-show key/lead/notes overrides
     (null = library default, '' = blank, value = override) (`update/route.ts:66-163`).
@@ -306,7 +307,8 @@ its setlist and charts keep working on that device with no signal.
 27. Every viewer (owner or not) caches the show config in localStorage on load (`page.tsx:544-555`); a network error or 5xx falls back to it (`:469-487,505,590`); 4xx does not.
 28. Every viewer auto-downloads all Supabase-hosted charts into Cache API `stageplot-charts-v1`, keyed `/api/chart-cache/{chartId}/{updated_at ms}` (`lib/chart-cache.ts:8-14`; `page.tsx:559-566`); Perform shows "Caching n/N" → "N charts cached" or "x of N cached" (`page.tsx:1106-1120`). The chart viewer reads cache first, then network, and writes back on fetch (`lib/pdf-viewer.ts:88-130`). A replaced chart gets a new key; old versions are deleted (`lib/chart-cache.ts:54-60`).
 29. Launching the PWA offline at `/` redirects to the last-viewed show (`app/page.tsx:39-46`, `showrunr-last-show`). Chart viewer shows an "OFFLINE" pill (`page.tsx:3889`).
-30. Owner edits write localStorage immediately and save to the server after a 2 s debounce; a failed fetch shows "you appear to be offline… will save on your next edit" (`lib/use-show.ts:110,153-163`). No auto-retry, no background sync.
+30. Owner edits write localStorage immediately and save to the server after a 2 s debounce; a failed fetch shows "you appear to be offline. Your changes are kept in this browser and will save when you're back online." A changed copy is marked unsynced (with the server version it started from) until a save of the latest edit succeeds. A waiting edit is sent on `pagehide` / tab hidden (`keepalive` under 60 kB). `lib/use-show.ts`, `lib/offline-sync.ts`.
+31. Opened offline (network error or 5xx), a show loads from this browser's copy with a banner; if the session held in the browser is the account that owned the show when cached, the owner can edit (S2). On reconnect, or on the next online load, an unsynced copy is reconciled against the server version — never pushed blind: server unchanged since the edits began → the edits are saved; server changed → the server's copy is shown and the edits are set aside (persisted) with "Restore my offline edits" / "Discard them", each confirmed. A copy identical to the server's is dropped quietly. Another account's load never overwrites an owner's unsynced copy. `page.tsx` (`tryOfflineFallback`, reconnect effect), `lib/offline-sync.ts` (`reconcileOnLoad`). Two devices editing ONLINE at once is still last-write-wins (S5).
 
 ### 3.2 Data & key files
 
@@ -339,9 +341,8 @@ its setlist and charts keep working on that device with no signal.
 - `profiles` privacy (Public read) and admin rate-limit persistence — backlog-admin-identity §2-3.
 - Fix for BYOA key surviving sign-out — issue #134.
 - Handle rename / profile editing, owner public page `/{owner}`, vanity subdomains, QR/social links on profile — design-owner-namespacing Phase 2.
-- Global SW registration, build-time asset manifest, SW cache of `/api/shows/*`, install prompt, "Offline — showing cached data" banner — design-alpha-ready Part 2.
+- Global SW registration, build-time asset manifest, SW cache of `/api/shows/*`, install prompt — design-alpha-ready Part 2. (An offline banner now exists: Platform item 31.)
 - Explicit "Ready for Offline" action, cache eviction after show date, stale-cache prompt — backlog-offline-performer-cache.
-- Offline conflict detection (`showrunr-last-saved-*` written at `lib/use-show.ts:123`, never read).
 - Payments/subscriptions/trial/tier limits (Stripe) — design-payments; commercial half of strategy-pwa-commercial.
 - BYOS / GitHub provider and .md-first charts — design-storage-notation Phases 2–3 (Phase 1 YAML import/export is built).
 - Drive retirement — will not ship (ruled).
