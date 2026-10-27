@@ -1668,3 +1668,47 @@ so main's copy of the design is never silently wrong.
 | item 2 | **An unrecognised event type stays non-fatal**, and has its own test. | The defect being fixed *is* an unhandled event falling through silently, so the tempting overcorrection is to treat anything unknown as a failure. Anthropic's versioning policy says new event types will appear and clients must tolerate them — a stream carrying a new block type must not render as an interrupted turn. |
 | item 2 (R1 fold) | **§5.2a.4's restore rule now keys on what reached the transcript, not on byte timing.** `shouldRestoreComposer(streamStarted)` becomes `shouldRestoreComposer({ text, completedToolCalls })`, fed by a new `arrivedFrom(state)` in `lib/agent-stream.ts`; the `streamStarted` flag is deleted. **This REVERSES a chunk-4 behaviour that a prior round pinned** (old test 13c-ii: "a started stream that produced only unparseable bytes is not restored"). | Chunk 4's byte rule was correct for chunk 4's scope — every failure that could reach it was a non-`ok` response, so "bytes arrived" and "content arrived" could not disagree. Item 2 makes them disagree: a stream can open, emit `message_start`, and die before any text or completed tool call. The byte rule then committed an assistant turn whose entire content was the red "interrupted" line and left the composer empty, stranding the user in exactly this document's recurring class. Codex R1 on item 2 raised it as a product preference and explicitly declined to block; **Graham ruled to fold it.** Codex R4's medium is preserved by counting completed tool calls, which is the distinction the bare boolean could not express: a tool-only turn that completed a call is delivered, a stream that produced nothing is not. An in-flight tool block counts as NOT delivered — it never completes, and `finalizeTurn` discards even completed calls on a failed turn, so nothing from it survives. Applied to BOTH failure paths (the `error` frame and the transport drop) so they cannot diverge; the `error`-frame branch is additionally guarded on `failed`, because a legitimately empty SUCCESSFUL turn satisfies the same predicate and must not refill the composer. |
 | item 2 (R1 fold) | **§5.2a.3's prompt cache ships WRITE-ONLY for the UAT window, and no reasoning may treat it as a live safety net.** `readPrompts` is exported and tested but has zero production callers; `page.tsx` imports only `rememberPrompt`. Its consumer is item 3 (edit-and-resend), deferred past UAT per §5.2a.0. | Recorded because the argument for *not* restoring the composer rested on the cache being able to hand the text back, and it cannot yet. The text is still visible in the transcript, so this was never data loss — but "the cache protects the user" is false until item 3 lands, and a design that quietly depends on an unbuilt consumer is how a stated justification outlives the mechanism behind it. |
+
+## 15. Device key scope: per account, re-checked at send (#134, UAT S11 — ruled 2026-10-26)
+
+**Supersedes the "this browser" scope in §1's table for the BYOA row.** The device
+key was one fixed `localStorage` entry, so signing in as a second account on the
+same browser (every UAT tester with a test account) quietly spent the first
+account's key.
+
+1. **Named per account:** `showrunr-claude-key:<auth user id>` (`byoaKeyName`,
+   `lib/byoa-key-storage.ts`). Another account never reads it.
+2. **Re-checked at send time** (`keyForSend`). An open AI tab held the key it read
+   at mount and kept sending it after another tab signed a different account in
+   (Codex R1 on #197). The show page re-derives ownership and the account on every
+   auth change and remounts `AgentChat` per account. The cross-tab broadcast is
+   best-effort, so every send also re-reads the live session, refuses on a
+   mismatch, and re-reads the stored key on a match.
+3. **The old un-namespaced entry migrates from localStorage only** to the first
+   account that reads it. On a one-person browser that account is its owner, so
+   nobody re-enters a remembered key. A sessionStorage entry is deleted instead.
+   A tab opened from another gets an independent copy of sessionStorage, so each
+   copy would have migrated to a different account (Codex R2 on #197).
+   localStorage is one store, so the move there normally happens once.
+
+   **⚠ Known limit: the localStorage move is not atomic across tabs** (Codex R3
+   on #197; Graham chose to document it, 2026-10-26). The read, write and delete
+   are separate operations, and the web storage spec promises no cross-tab
+   locking. If two tabs read the legacy entry in the same instant as two
+   different accounts, both write it, and the key lands under both accounts.
+   Conditions: a legacy entry exists (first read after the #197 deploy only),
+   one person has two accounts open in two tabs, and both reads land within
+   milliseconds. Worst case: that person's own key under both of their own
+   accounts, which is the pre-#134 behaviour. Not fixed because the fix is to
+   delete instead of migrate, which costs every existing device key one
+   re-entry. Remedy if seen: remove the key in Settings on the account that
+   should not have it.
+
+**⚠ Not designed for: a browser shared between PEOPLE** (Graham, 2026-10-26). The
+key survives sign-out, which is the convenience #133 bought, and stays on disk,
+readable in devtools, until it is removed in Settings. Clearing on sign-out was
+built and then removed in R1 of #197. It protects only that case, and it brings
+back the re-entry complaint #133 fixed.
+
+Write paths require an account and throw without one, rather than saving a key no
+one can read after the UI has said "Saved".

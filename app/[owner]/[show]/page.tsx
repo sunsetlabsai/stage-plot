@@ -59,7 +59,7 @@ import { buildApiMessages, hasPendingTools as transcriptHasPendingTools } from '
 // on the recovery path. Everything else about storage is `ByoaKeySettings`'s job now
 // (chunk 4) — the overlay is the sole writer, so `initialRemember`/the persist effect
 // that used to live here are gone.
-import { readKey, persistKey } from '@/lib/byoa-key-storage';
+import { readKey, persistKey, keyForSend } from '@/lib/byoa-key-storage';
 import { serializeShow, deserializeShow, slugify } from '@/lib/show-file';
 import { exportPatchCsv, exportPatchXml } from '@/lib/console-export';
 import {
@@ -437,6 +437,14 @@ function ShowWorkspace() {
   const [showId, setShowId] = useState<string | null>(null);
   const [showOwnerId, setShowOwnerId] = useState<string | null>(null);
   const [isOwner, setIsOwner] = useState(false);
+  // The signed-in account, if any. The AI tab scopes the device key to it (#134).
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  // Read by the auth listener, which subscribes once (deps: []) and so cannot
+  // close over these. Same pattern as isReadOnlyRef below.
+  const showOwnerIdRef = useRef<string | null>(null);
+  const currentUserIdRef = useRef<string | null>(null);
+  useEffect(() => { showOwnerIdRef.current = showOwnerId; }, [showOwnerId]);
+  useEffect(() => { currentUserIdRef.current = currentUserId; }, [currentUserId]);
   // Read by updateConfig, which is deliberately ref-stable (deps: []) so that no
   // mutation callback on the page changes identity. A ref keeps the read-only
   // gate current without spending that stability. Defaults to refusing: until
@@ -466,9 +474,21 @@ function ShowWorkspace() {
       setAuthChecked(true);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: string, session: { user: unknown } | null) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event: string, session: { user: { id: string } } | null) => {
       setIsAuthenticated(!!session?.user);
       setAuthChecked(true);
+      // ★ Codex R1 on #197: ownership used to be decided once, at load. A
+      // sign-in or sign-out in ANOTHER tab reaches here (supabase broadcasts it)
+      // but left isOwner and the AI tab's account untouched, so an open AI tab
+      // kept sending the previous account's device key. Re-derive both whenever
+      // the account actually changes; AgentChat is keyed by the account, so it
+      // remounts (or, not owner, unmounts) and drops the key it held. The
+      // broadcast is best-effort, so AgentChat ALSO re-checks at send time.
+      const id = session?.user?.id ?? null;
+      if (id === currentUserIdRef.current) return;
+      currentUserIdRef.current = id;
+      setCurrentUserId(id);
+      setIsOwner(!!id && id === showOwnerIdRef.current);
     });
 
     return () => { subscription.unsubscribe(); };
@@ -591,8 +611,11 @@ function ShowWorkspace() {
             // (§3.3c), so the show_collaborators lookup that used to run here is
             // gone — membership grants placement on the dashboard, not access.
             setIsOwner(data.owner_id === user.id);
+            setCurrentUserId(user.id);
+            currentUserIdRef.current = user.id;
             setShowId(data.show_id);
             setShowOwnerId(data.owner_id ?? null);
+            showOwnerIdRef.current = data.owner_id ?? null;
             setSetlistMigrated(!!data.setlist_migrated);
           }
         } catch {
@@ -798,16 +821,29 @@ function ShowWorkspace() {
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans text-gray-900">
-      {/* ── Auth / save status banner ────────────────────────────────── */}
+      {/* ── Auth status line (UAT S9) ─────────────────────────────────
+          The main audience here is a performer opening a link from a text: they
+          have no edit surface (`isReadOnly = !isOwner`), so "changes won't be
+          saved" warned about something they cannot do. Signed out gets a quiet
+          Sign in — for the owner whose session lapsed — and a signed-in
+          non-owner is told whose show it is, not that they are a "collaborator"
+          (014 made every non-owner view-only; nobody is invited). */}
       {authChecked && !isAuthenticated && !loadError && (
-        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-center text-sm text-amber-800">
-          Not signed in — changes won&apos;t be saved.{' '}
-          <Link href="/sign-in" className="underline font-semibold hover:text-amber-900">Sign in</Link>
+        <div className="bg-gray-50 border-b border-gray-200 px-4 py-1.5 text-right text-xs text-gray-500">
+          {/* S10: return to THIS page, query included (?song deep links), not
+              /dashboard. Window is safe: authChecked is only set client-side.
+              /sign-in validates it with lib/safe-redirect. */}
+          <a
+            href={`/sign-in?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`}
+            className="underline hover:text-gray-700"
+          >
+            Sign in
+          </a>
         </div>
       )}
       {isAuthenticated && isReadOnly && showId && (
         <div className="bg-blue-50 border-b border-blue-200 px-4 py-2 text-center text-sm text-blue-800">
-          Viewing as collaborator (read-only).
+          Viewing {owner}&apos;s show (read-only).
         </div>
       )}
       {/* ── Tab Bar ─────────────────────────────────────────────────────── */}
@@ -930,7 +966,7 @@ function ShowWorkspace() {
 
       {/* ── Content ────────────────────────────────────────────────────── */}
       {shownTab === 'perform' && (
-        <PerformTab setlist={config.setlist} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} chartCacheProgress={chartCacheProgress} />
+        <PerformTab setlist={config.setlist} setlistReady={loadedPath === `/${owner}/${slug}`} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} chartCacheProgress={chartCacheProgress} />
       )}
       {shownTab === 'mix' && (
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
@@ -941,7 +977,7 @@ function ShowWorkspace() {
       {shownTab === 'ai' && (
         <div className="p-4 md:p-8">
           <div className="max-w-4xl mx-auto">
-            <AgentChat config={config} updateConfig={updateConfig} owner={owner} slug={slug} />
+            <AgentChat key={currentUserId ?? ''} config={config} updateConfig={updateConfig} owner={owner} slug={slug} userId={currentUserId ?? ''} />
           </div>
         </div>
       )}
@@ -1013,8 +1049,11 @@ function ShowWorkspace() {
 // PERFORM TAB — musician's gig-day view
 // ════════════════════════════════════════════════════════════════════════════
 
-function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, isOwner, chartCacheProgress }: {
+function PerformTab({ setlist, setlistReady, showInfo, isOffline, accessToken, slug, owner, isOwner, chartCacheProgress }: {
   setlist: SetlistSong[];
+  // True once THIS show's setlist has loaded — until then `setlist` can be the
+  // built-in demo band (UAT S1), which a deep link must not be resolved against.
+  setlistReady: boolean;
   showInfo: { bandName: string; eventDate: string; venue: string; showName?: string };
   isOffline: boolean;
   accessToken?: string;
@@ -1071,32 +1110,44 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, is
     };
   }, [setlist]);
 
-  // ── Share deep link (?song=N&chart=ROLE, lib/share buildChartShareUrl) ──
+  // ── Share deep link (?song=N&sid=ID&chart=ROLE, lib/share buildChartShareUrl) ──
   // A shared chart link opens the navigator on that song; the role rides along
   // as a prop and ChartNavigator selects the matching chart. Same read-once /
   // armed-ref / deferred-setState shape as the ?join handler above. Invalid
-  // song ⇒ ignore, land on the setlist as usual.
+  // song ⇒ ignore, land on the setlist as usual. A song that has left the
+  // setlist ⇒ land on the setlist WITH a notice (S6), never on a stranger.
   const [deepLinkRole, setDeepLinkRole] = useState<string | null>(null);
+  const [deepLinkGone, setDeepLinkGone] = useState(false);
   const chartLinkArmedRef = useRef(false);
   useEffect(() => {
-    if (chartLinkArmedRef.current) return;
+    if (chartLinkArmedRef.current || !setlistReady) return;
     const parsed = parseChartDeepLink(window.location.search, setlist);
     if (!parsed) return;
     chartLinkArmedRef.current = true;
     let cancelled = false;
     Promise.resolve().then(() => {
       if (cancelled) return;
+      if (parsed.kind === 'gone') {
+        setDeepLinkGone(true);
+        return;
+      }
       setNavigatorSongIdx(parsed.songIdx);
       setDeepLinkRole(parsed.role);
     });
     return () => {
       cancelled = true;
     };
-  }, [setlist]);
+  }, [setlist, setlistReady]);
 
   return (
     <div className="bg-zinc-950 min-h-screen text-zinc-100">
       <div className="max-w-2xl mx-auto px-4 py-6">
+        {deepLinkGone && (
+          <div role="status" className="mb-4 flex items-start justify-between gap-3 rounded border border-amber-800 bg-amber-950/50 px-3 py-2 text-sm text-amber-300">
+            <span>The song in that link isn&apos;t in this setlist anymore.</span>
+            <button onClick={() => setDeepLinkGone(false)} className="text-amber-400 hover:text-amber-200" aria-label="Dismiss">✕</button>
+          </div>
+        )}
         {/* Header */}
         <header className="mb-6">
           {showInfo.showName ? (
@@ -3918,7 +3969,7 @@ function ChartNavigator({
               title={`${song.title} – ${activeChart.role}`}
               buildUrl={() =>
                 activeChart.fileId
-                  ? buildChartShareUrl(window.location.origin, owner, slug, song.position, activeChart.role)
+                  ? buildChartShareUrl(window.location.origin, owner, slug, song, activeChart.role)
                   : activeChart.url
               }
               getFile={
@@ -5290,6 +5341,7 @@ function AgentChat({
   updateConfig,
   owner,
   slug,
+  userId,
 }: {
   config: AppConfig;
   updateConfig: (fn: (prev: AppConfig) => AppConfig) => void;
@@ -5297,10 +5349,12 @@ function AgentChat({
   // surface in another. Same identity the sibling tabs already receive.
   owner: string;
   slug: string;
+  // The signed-in owner; the device key is scoped to this account (#134).
+  userId: string;
 }) {
   const [apiKey, setApiKey] = useState(() => {
     if (typeof window === 'undefined') return '';
-    return readKey(localStorage, sessionStorage);
+    return readKey(localStorage, sessionStorage, userId);
   });
   // The settings overlay (chunk 4). Opening it renders `ByoaKeySettings` on TOP of
   // this still-mounted host, so restored composer text and the transcript survive
@@ -5309,6 +5363,9 @@ function AgentChat({
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
+  // Held across the send-time identity check below, which awaits BEFORE
+  // `streaming` flips — without it a double-tap passes the `streaming` guard twice.
+  const checkingSendRef = useRef(false);
   const [error, setError] = useState('');
   const [tryitRemaining, setTryitRemaining] = useState<number | null>(null);
   const [tryitExhausted, setTryitExhausted] = useState(false);
@@ -5368,7 +5425,37 @@ function AgentChat({
 
   async function sendMessage(text?: string) {
     const userText = text ?? input.trim();
-    if (!userText || streaming) return;
+    if (!userText || streaming || checkingSendRef.current) return;
+
+    // #134 / Codex R1 on #197: the key in memory was read for the account this
+    // tab mounted with. Re-check against who is signed in NOW before anything
+    // is spent — the composer is untouched on refusal, so no text is lost.
+    checkingSendRef.current = true;
+    let liveUserId = '';
+    try {
+      const { data: { session: liveSession } } = await getSupabaseBrowser().auth.getSession();
+      liveUserId = liveSession?.user?.id ?? '';
+    } catch {
+      // Unreadable session ⇒ '' ⇒ refused below. Never send on an unknown identity.
+    }
+    let send: ReturnType<typeof keyForSend>;
+    try {
+      send = keyForSend(localStorage, sessionStorage, userId, liveUserId);
+    } catch {
+      // Codex R2 NIT: storage can throw (blocked mid-session). Release the guard
+      // on EVERY exit, or each later Send returns at the top of this function.
+      checkingSendRef.current = false;
+      setError("Couldn't read this browser's storage. Reload this page to continue.");
+      return;
+    }
+    if (!send.ok) {
+      checkingSendRef.current = false;
+      setApiKey('');
+      setError('Your sign-in changed (in another tab, or it expired). Reload this page to continue.');
+      return;
+    }
+    // Another tab's Settings may have removed the stored key this tab still held.
+    if (send.key !== apiKey) setApiKey(send.key);
 
     // §5.2a.3: the cache write and the clear are ONE action — the composer must
     // never be emptied without the text landing somewhere first. `rememberPrompt`
@@ -5392,12 +5479,14 @@ function AgentChat({
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
     setStreaming(true);
+    // `streaming` now guards re-entry; the check window is closed.
+    checkingSendRef.current = false;
 
     try {
       const apiMessages = [...buildApiMessages(messages), { role: 'user', content: userText }];
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+      if (send.key) headers['Authorization'] = `Bearer ${send.key}`;
 
       const res = await fetch('/api/agent/chat', {
         method: 'POST',
@@ -5622,7 +5711,7 @@ function AgentChat({
   // entry from BOTH stores regardless of the `remember` flag (lib/byoa-key-storage,
   // pinned by tests/byoa-key-storage.test.ts).
   function handleClearKey() {
-    persistKey(localStorage, sessionStorage, '', true);
+    persistKey(localStorage, sessionStorage, userId, '', true);
     setApiKey('');
     // A rejection describes a key we no longer hold.
     setRejectedKey(null);
@@ -5739,6 +5828,7 @@ function AgentChat({
       {settingsOpen && (
         <SettingsOverlay onClose={() => setSettingsOpen(false)}>
           <ByoaKeySettings
+            userId={userId}
             onDeviceKeyChange={handleDeviceKeyChange}
             onAccountKeyChange={handleAccountKeyChange}
           />

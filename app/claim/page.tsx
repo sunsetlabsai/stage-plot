@@ -1,8 +1,20 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { DEFAULT_REDIRECT, internalRedirect } from '@/lib/safe-redirect';
 // No useRouter, deliberately: every exit from this page must be a document
 // load. See the comment on the post-claim redirect below.
+
+// Where to go once a handle exists (UAT S10): the `?redirect=` middleware.ts set
+// — e.g. the shared show that bounced here — or /dashboard. Read from `window`
+// at use time, not useSearchParams: this page is statically prerendered, and
+// internalRedirect needs the real origin (same as app/sign-in/page.tsx).
+function destination(): string {
+  return internalRedirect(
+    new URLSearchParams(window.location.search).get('redirect'),
+    window.location.origin,
+  );
+}
 
 export default function ClaimPage() {
   const [handle, setHandle] = useState('');
@@ -12,6 +24,9 @@ export default function ClaimPage() {
   const [checking, setChecking] = useState(true);
   const [alreadyClaimed, setAlreadyClaimed] = useState<string | null>(null);
   const [claimed, setClaimed] = useState(false);
+  // Resolved after mount (window); the default until then is what it resolves
+  // to with no parameter anyway.
+  const [next, setNext] = useState(DEFAULT_REDIRECT);
 
   const slug = handle.toLowerCase().replace(/[^a-z0-9-]/g, '');
   const isValid = /^[a-z0-9][a-z0-9-]{1,28}[a-z0-9]$/.test(slug);
@@ -29,13 +44,17 @@ export default function ClaimPage() {
           // note this branch `return`s without clearing `checking`, so if the
           // navigation does not land the page is pinned on "Loading..."
           // forever. A document load cannot fail to land.
-          window.location.assign('/sign-in?redirect=/claim');
+          // Keep the onward destination through sign-in: /claim?redirect=…
+          window.location.assign(
+            `/sign-in?redirect=${encodeURIComponent('/claim' + window.location.search)}`,
+          );
           return;
         }
         // 404 = no profile, show form
       } catch {
         // Network error — show form as fallback
       }
+      setNext(destination());
       setChecking(false);
     }
     checkProfile();
@@ -67,7 +86,7 @@ export default function ClaimPage() {
       // route only (next/docs use-router.md:46); measured, it changed nothing.
       // A document load is the one documented reset: "The client cache is
       // cleared on page refresh" (next/docs glossary.md:45).
-      setTimeout(() => window.location.assign('/dashboard'), 1500);
+      setTimeout(() => window.location.assign(destination()), 1500);
     } else {
       const data = await res.json();
       // Handle 409 gracefully — user already has a profile, fetch real handle
@@ -117,13 +136,13 @@ export default function ClaimPage() {
               redirect, which is why this CTA appeared dead in UAT.
               no-html-link-for-pages assumes a client navigation is always
               preferable. Here it is the defect, so the rule is wrong for these
-              two links specifically — suppressed per-line, not per-file. */}
-          {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
+              two links specifically. (No suppression needed now the href is
+              the computed destination — the rule only checks literals.) */}
           <a
-            href="/dashboard"
+            href={next}
             className="inline-block px-6 py-2.5 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 transition-colors"
           >
-            Go to Dashboard
+            {next === DEFAULT_REDIRECT ? 'Go to Dashboard' : 'Continue'}
           </a>
         </div>
       </div>
@@ -138,14 +157,15 @@ export default function ClaimPage() {
           <h1 className="text-2xl font-bold text-white">
             Claimed <span className="font-mono">{slug}</span>!
           </h1>
-          <p className="text-zinc-400">Redirecting to your dashboard...</p>
+          <p className="text-zinc-400">
+            {next === DEFAULT_REDIRECT ? 'Redirecting to your dashboard...' : 'Taking you back...'}
+          </p>
           {/* Plain <a> for the same reason as the CTA above. */}
-          {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
           <a
-            href="/dashboard"
+            href={next}
             className="text-sm text-blue-400 hover:text-blue-300 transition-colors"
           >
-            Go to Dashboard
+            {next === DEFAULT_REDIRECT ? 'Go to Dashboard' : 'Continue'}
           </a>
         </div>
       </div>
