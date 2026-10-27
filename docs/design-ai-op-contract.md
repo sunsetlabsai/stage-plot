@@ -952,7 +952,11 @@ safe on its own — so no deploy in the sequence is a half-wired state.
    nothing, so an applied card would lose its record of what it did.
 4. **Card text is pure `lib/`** (`summaryLines`), and **every line says what
    Apply will write** — Codex R1 on #196 found four places it did not:
-   - an ADDED row lists **every field it sets**, in `RULES` order
+   - an ADDED row lists every **required** field (a blank one as "—", since
+     Apply writes it) and every optional field it sets, in `RULES` order; an
+     input always shows its link ("no performer" when unlinked) and a performer
+     no input links to says "no inputs" (Codex R3 on #196 — the #195 markers had
+     been lost when the pending card moved to this formatter). Before that,
      (`+ ch 7 BGV — mic SM58, stand Straight, performer DSC — Dee`). R1's fix
      chose the "important" fields and R2 found more it missed; choosing was the
      defect. `RULES` is `Record<keyof T>`, so a new field appears without anyone

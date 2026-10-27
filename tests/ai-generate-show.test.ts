@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { planChanges, planGenerateShow, replaceShowPrompt, describeProblems, notesReplacePrompt, validateNotes } from '@/lib/ai-ops';
+import { planChanges, planGenerateShow, replaceShowPrompt, describeProblems, notesReplacePrompt, validateNotes, summaryLines } from '@/lib/ai-ops';
 import { SYSTEM_PROMPT, TOOLS } from '@/lib/agent';
 import type { InputChannel, MonitorMix, StageSlot } from '@/lib/types';
 
@@ -116,11 +116,35 @@ describe('generate_show on an empty show (§10.4 14, 15)', () => {
     ok(planGenerateShow(empty(), show));
   });
 
-  it('the preview makes a missing link visible in both directions', () => {
+  // Codex R3 on #196: the pending card moved to summaryLines and lost these
+  // markers, and the old test still passed because it read the unused branch.
+  // Now asserted on the text the PENDING card actually renders.
+  it('★ the pending card shows blanks, an unlinked input, and a performer with no inputs', () => {
+    const repro = {
+      stagePlot: [
+        { tempId: 'new:ana', name: 'Ana', pos: 'DSC', role: 'Lead Vox', mix: 1 },
+        { tempId: 'new:mc', name: 'MC', pos: 'DSL', role: 'Host', mix: 0 },
+      ],
+      inputs: [
+        { ch: 1, inst: 'Playback', mic: 'DI', stand: '', slotId: null },
+        { ch: 2, inst: 'Ana Vox', mic: 'SM58', stand: 'Straight', slotId: 'new:ana' },
+      ],
+      monitors: [{ mix: 1, name: 'Ana', needs: '' }],
+    };
+    const cfg = empty();
+    const plan = ok(planGenerateShow(cfg, repro));
+    const text = summaryLines(plan.summary, cfg, plan.next).flatMap((s) => s.lines.map((l) => l.text));
+    expect(text).toEqual([
+      'DSC — Ana — role Lead Vox, mix 1',
+      'DSL — MC — role Host, mix none, no inputs',
+      'ch 1 Playback — mic DI, stand —, no performer',
+      'ch 2 Ana Vox — mic SM58, stand Straight, performer DSC — Ana',
+      'Mix 1 (Ana) — needs —',
+    ]);
+    // And it IS what the pending card renders.
     const src = readFileSync('app/[owner]/[show]/page.tsx', 'utf8');
-    const preview = src.slice(src.indexOf("case 'generate_show': {", src.indexOf('function ToolCallPreview(')));
-    expect(preview).toMatch(/→ no performer/);
-    expect(preview).toMatch(/\(no inputs\)/);
+    const preview = src.slice(src.indexOf('function GeneratePreview('), src.indexOf('function SummaryList('));
+    expect(preview).toMatch(/summaryLines\(plan\.summary, config, plan\.next\)/);
   });
 
   it('an id echoed from current_config into a generated row is refused, not trusted', () => {

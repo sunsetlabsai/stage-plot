@@ -485,7 +485,7 @@ describe('summaryLines — the approve card diff (§7)', () => {
     const out = lines(cfg, [{ entity: 'monitors', action: 'add', values: { mix: 3, name: 'Rhythm', needs: '', colour: 'red' } }]);
     expect(out).toEqual([
       { title: 'Monitors', lines: [
-        { kind: 'add', text: 'Mix 3 (Rhythm)' },
+        { kind: 'add', text: 'Mix 3 (Rhythm) — needs —' },
         { kind: 'join', text: 'Mix 3 is back, so performers still on it rejoin: USC — Sam, DSR — Ray' },
       ] },
       { title: 'Ignored', lines: [{ kind: 'warn', text: 'Ignored "colour" — monitor mixes have no such field.' }] },
@@ -496,13 +496,13 @@ describe('summaryLines — the approve card diff (§7)', () => {
 
   it('★ an added input shows its mic and performer — same channel, different performer, different line', () => {
     const add = (slotId: string) => lines(band(), [{ entity: 'inputs', action: 'add', values: { ch: 7, inst: 'BGV', mic: 'SM58', stand: '', slotId } }]);
-    expect(add('s-dee')).toEqual([{ title: 'Inputs', lines: [{ kind: 'add', text: 'ch 7 BGV — mic SM58, performer DSC — Dee' }] }]);
-    expect(add('s-ray')[0].lines[0].text).toBe('ch 7 BGV — mic SM58, performer DSR — Ray');
+    expect(add('s-dee')).toEqual([{ title: 'Inputs', lines: [{ kind: 'add', text: 'ch 7 BGV — mic SM58, stand —, performer DSC — Dee' }] }]);
+    expect(add('s-ray')[0].lines[0].text).toBe('ch 7 BGV — mic SM58, stand —, performer DSR — Ray');
     // An added slot shows its role and mix; a new performer on a new mix too.
     expect(lines(band(), [{ entity: 'stagePlot', action: 'add', values: { name: 'Jo', pos: 'MSR', role: 'Keys', mix: 1 } }])).toEqual([
-      { title: 'Stage plot', lines: [{ kind: 'add', text: 'MSR — Jo — role Keys, mix 1' }] },
+      { title: 'Stage plot', lines: [{ kind: 'add', text: 'MSR — Jo — role Keys, mix 1, no inputs' }] },
     ]);
-    expect(lines(band(), [{ entity: 'stagePlot', action: 'add', values: { name: 'Jo', pos: 'MSR', role: '', mix: 0 } }])[0].lines[0].text).toBe('MSR — Jo — mix none');
+    expect(lines(band(), [{ entity: 'stagePlot', action: 'add', values: { name: 'Jo', pos: 'MSR', role: '', mix: 0 } }])[0].lines[0].text).toBe('MSR — Jo — role —, mix none, no inputs');
   });
 
   // Codex R2 on #196: the R1 fix CHOSE which fields an added row shows, and
@@ -527,6 +527,15 @@ describe('summaryLines — the approve card diff (§7)', () => {
         // Mix 2 already exists, so a monitor add uses a free number (a collision is refused, not shown).
         const v = entity === 'monitors' && field === 'mix' ? 5 : variant[field];
         expect(line({ ...base[entity], [field]: v }), `${entity}.${field}`).not.toBe(ref);
+        // …and a BLANK or ABSENT value must read differently from a set one (Codex R3).
+        if (typeof (base[entity] as Record<string, unknown>)[field] === 'string' && !['pos', 'slotId'].includes(field)) {
+          expect(line({ ...base[entity], [field]: '' }), `${entity}.${field} blank`).not.toBe(ref);
+        }
+        if (field === 'slotId') {
+          const unlinked: Record<string, unknown> = { ...base.inputs };
+          delete unlinked.slotId;
+          expect(line(unlinked)).toContain(', no performer,');
+        }
       }
     }
   });

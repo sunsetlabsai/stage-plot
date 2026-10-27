@@ -479,7 +479,7 @@ export function summaryLines(summary: ChangeSummary, prev: ShowLists, next: Show
   const show = (field: string, v: unknown, side: 'from' | 'to'): string => {
     if (v === undefined && field === 'needsReview') return 'no'; // absent flag = off
     if (field === 'mix' && v === 0) return 'none'; // the unassigned sentinel
-    if (v === undefined || v === '') return field === 'slotId' ? 'no performer' : '—';
+    if (v === undefined || v === '') return field === 'slotId' ? 'none' : '—';
     if (field === 'slotId') return (side === 'from' ? before : after).get(String(v)) ?? 'a removed performer';
     if (typeof v === 'boolean') return v ? 'yes' : 'no';
     return String(v);
@@ -500,9 +500,15 @@ export function summaryLines(summary: ChangeSummary, prev: ShowLists, next: Show
     (next[entity] as unknown as Record<string, unknown>[])
       .filter((r) => !prevIds.has(String(r.id)))
       .map((r) => {
-        const rest = Object.keys(RULES[entity])
-          .filter((f) => f !== 'id' && !HEAD[entity].includes(f) && r[f] !== undefined && r[f] !== '')
-          .map((f) => `${fieldLabel(f)} ${show(f, r[f], 'to')}`);
+        // Every REQUIRED field, blank ones as "—" (Apply writes them), plus
+        // every optional field the row sets. An input's link is always shown:
+        // "no performer" is a state the user must see before Apply, not an
+        // absence (Codex R3 on #196 — the #195 marker had been lost).
+        const rest = Object.entries(RULES[entity])
+          .filter(([f, rule]) => f !== 'id' && !HEAD[entity].includes(f) && (rule.required || r[f] !== undefined || (entity === 'inputs' && f === 'slotId')))
+          .map(([f]) => (f === 'slotId' && r[f] === undefined ? 'no performer' : `${fieldLabel(f)} ${show(f, r[f], 'to')}`));
+        // A performer nobody's input links to is flagged, in both directions.
+        if (entity === 'stagePlot' && !next.inputs.some((i) => i.slotId === r.id)) rest.push('no inputs');
         return rest.length > 0 ? `${headText[entity](r)} — ${rest.join(', ')}` : headText[entity](r);
       });
   const prevIds = new Set([...prev.stagePlot, ...prev.inputs, ...prev.monitors].map((r) => String(r.id)));
