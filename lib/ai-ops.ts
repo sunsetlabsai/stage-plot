@@ -14,7 +14,7 @@
 // O1 (a row the model does not name is not modified) is structural: rows are
 // only ever touched by an op that names their id.
 
-import type { InputChannel, MonitorMix, StageSlot } from './types';
+import type { GeneralNote, InputChannel, MonitorMix, StageSlot } from './types';
 import { POSITIONS, blockIndexOf, isOrphanedMix, nextMixNumber, slotLabel } from './setlist';
 
 export const OP_ENTITIES = ['stagePlot', 'inputs', 'monitors'] as const;
@@ -272,15 +272,25 @@ export function planChanges<C extends ShowLists>(
   });
   if (problems.length > 0) return { ok: false, problems };
 
+  // Ids are unique per list after the batch. Only a broken `mintId` could
+  // violate it, but pass 3 below relies on it, so it is checked, not assumed.
+  for (const entity of OP_ENTITIES) {
+    const ids = lists[entity].map((r) => r.id);
+    if (new Set(ids).size !== ids.length) return { ok: false, problems: [{ message: `two ${NOUN[entity]}s ended up with the same id — ask again` }] };
+  }
+
   // Pass 3 — positional numbers an add may omit (§3.5). Assigned after every op
   // has run, so an auto number never takes one a later explicit op claims.
+  // Rows are assigned only when they are NOT one of the caller's objects, so the
+  // input config is never mutated even if an id were to collide (Codex R2 NIT on #194).
+  const callerRows = new Set<unknown>([...config.stagePlot, ...config.inputs, ...config.monitors]);
   for (const row of lists.inputs) {
-    if (added.inputs.has(row.id) && row.ch === undefined) {
+    if (added.inputs.has(row.id) && !callerRows.has(row) && row.ch === undefined) {
       row.ch = Math.max(0, ...lists.inputs.map((r) => (typeof r.ch === 'number' ? r.ch : 0))) + 1;
     }
   }
   for (const row of lists.monitors) {
-    if (added.monitors.has(row.id) && row.mix === undefined) {
+    if (added.monitors.has(row.id) && !callerRows.has(row) && row.mix === undefined) {
       const numbered = lists.monitors.filter((r) => typeof r.mix === 'number') as unknown as MonitorMix[];
       // Skips orphaned slot mixes too, like "+ Add Mix" (tier1 §3.6 item 1).
       row.mix = nextMixNumber(numbered, lists.stagePlot as unknown as StageSlot[]);
@@ -312,6 +322,122 @@ export function planChanges<C extends ShowLists>(
 
   const nextConfig = { ...config, stagePlot: next.stagePlot, inputs: next.inputs, monitors: next.monitors };
   return { ok: true, next: nextConfig, summary: summarize(config, nextConfig, warnings) };
+}
+
+// ── generate_show (§9.2, §9.2a) ──────────────────────────────────────────────
+
+/**
+ * The whole-show create. Expressed AS a batch — add every row the model sent,
+ * remove every row the show has — and run through `planChanges`, so the
+ * flagship first run and an edit are judged by one validator, not two that can
+ * drift. The model links an input to a performer by giving the slot a `new:`
+ * `tempId` and the input that `slotId` (§14, step 3).
+ *
+ * Only `stagePlot`, `inputs` and `monitors` are replaced. Setlist, charts, notes
+ * and show info ride through untouched: they are not the AI's to destroy
+ * (§9.2a), and a user regenerating a stage plot has not asked to lose songs.
+ */
+export function planGenerateShow<C extends ShowLists>(
+  config: C,
+  input: unknown,
+  mintId: () => string = () => crypto.randomUUID(),
+): PlanResult<C> {
+  const body = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  const missing = (['stagePlot', 'inputs', 'monitors'] as const).filter((k) => !Array.isArray(body[k]));
+  if (missing.length > 0) {
+    return { ok: false, problems: [{ message: `generate_show needs ${missing.join(', ')} as ${missing.length === 1 ? 'a list' : 'lists'}` }] };
+  }
+  const rows = (k: OpEntity) => body[k] as unknown[];
+  const ops: unknown[] = [];
+  for (const row of rows('stagePlot')) {
+    if (row && typeof row === 'object' && !Array.isArray(row)) {
+      const { tempId, ...values } = row as Record<string, unknown>;
+      ops.push({ entity: 'stagePlot', action: 'add', ...(tempId !== undefined ? { tempId } : {}), values });
+    } else {
+      ops.push({ entity: 'stagePlot', action: 'add', values: row });
+    }
+  }
+  // Every generated input must DECLARE its owner: a performer's tempId, or
+  // null for a source no performer owns (playback, click, talkback). An
+  // omitted slotId is indistinguishable from a forgotten one, and a forgotten
+  // one is exactly the unlinked-input defect this tool exists to end (Codex R1
+  // on #195). `null` is stripped on add, so it stores as "no link".
+  const undeclared = rows('inputs').filter(
+    (row) => row !== null && typeof row === 'object' && !Array.isArray(row) && !Object.prototype.hasOwnProperty.call(row, 'slotId'),
+  ) as Record<string, unknown>[];
+  if (undeclared.length > 0) {
+    const names = undeclared.map((r) => `ch ${String(r.ch ?? '?')} ${typeof r.inst === 'string' ? r.inst : ''}`.trim());
+    return {
+      ok: false,
+      problems: [{ message: `${names.length === 1 ? 'an input has' : `${names.length} inputs have`} no slotId (${names.join(', ')}) — give each its performer's tempId, or null if no performer owns it` }],
+    };
+  }
+  for (const entity of ['inputs', 'monitors'] as const) {
+    for (const row of rows(entity)) ops.push({ entity, action: 'add', values: row });
+  }
+  for (const entity of OP_ENTITIES) {
+    for (const row of config[entity]) ops.push({ entity, action: 'remove', id: row.id });
+  }
+  return planChanges(config, ops, mintId);
+}
+
+/** True when there is nothing for a `generate_show` to replace. */
+export function isShowEmpty(config: ShowLists): boolean {
+  return config.stagePlot.length === 0 && config.inputs.length === 0 && config.monitors.length === 0;
+}
+
+/**
+ * The confirm for a `generate_show` on a show that has content, or null on an
+ * empty one (§9.2a). It states the cost in rows, because replace is the most
+ * destructive thing the AI can do. Distinct from an ordinary Apply: the card
+ * labels the button "Replace everything", and this confirm follows it.
+ */
+export function replaceShowPrompt(config: ShowLists): string | null {
+  if (isShowEmpty(config)) return null;
+  return (
+    `Replace the whole show?\n\nThis discards ${replaceCounts(config)} and builds a new show from your description.\n\n` +
+    'The setlist, charts, notes and show info are not touched.'
+  );
+}
+
+/** "6 performers, 24 inputs and 4 monitor mixes" — the card and the confirm say the same thing. */
+export function replaceCounts(config: ShowLists): string {
+  const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+  return `${n(config.stagePlot.length, 'performer', 'performers')}, ${n(config.inputs.length, 'input', 'inputs')} and ${n(config.monitors.length, 'monitor mix', 'monitor mixes')}`;
+}
+
+// ── update_notes ─────────────────────────────────────────────────────────────
+
+/**
+ * `update_notes` replaces the whole notes list, and notes carry no identity, so
+ * a model that sends only the note it was asked to add deletes the rest (Codex
+ * R1 on #195). Shape-checked here, and every existing note the new list does
+ * not keep VERBATIM is named before Apply — the same confirm-with-names rule as
+ * `replaceShowPrompt`. An edited note counts: its old text is what is lost.
+ */
+export function validateNotes(incoming: unknown): string | null {
+  if (!Array.isArray(incoming)) return 'notes must be a list';
+  const bad = incoming.findIndex((n) => !n || typeof n !== 'object' || typeof n.label !== 'string' || typeof n.text !== 'string');
+  return bad === -1 ? null : `note ${bad + 1} needs a text label and text`;
+}
+
+export function notesReplacePrompt(current: readonly GeneralNote[], incoming: readonly GeneralNote[]): string | null {
+  // Matched as a MULTISET: the notes editor allows identical rows, so two
+  // copies kept as one is a loss a Set would not see (Codex R2 on #195).
+  const key = (n: GeneralNote) => JSON.stringify([n.label, n.text]);
+  const available = new Map<string, number>();
+  for (const n of incoming) available.set(key(n), (available.get(key(n)) ?? 0) + 1);
+  const lost = current.filter((n) => {
+    const left = available.get(key(n)) ?? 0;
+    if (left === 0) return true;
+    available.set(key(n), left - 1);
+    return false;
+  });
+  if (lost.length === 0) return null;
+  return (
+    `Replace the general notes?\n\nThis removes or rewrites ${lost.length === 1 ? '1 existing note' : `${lost.length} existing notes`}:\n` +
+    lost.map((n) => `  • ${n.label || '(no label)'}`).join('\n')
+  );
 }
 
 /** One sentence for the refused card and for the model's `tool_result` (§5.4, §5.5). */

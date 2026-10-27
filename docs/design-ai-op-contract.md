@@ -893,3 +893,45 @@ safe on its own — so no deploy in the sequence is a half-wired state.
    replaced on patch, never mutated or cloned — so O1 holds by reference.
 10. **A config containing an id-less row is refused**, keeping the function total.
    The page guarantees ids (§9.4), so this is a guard, not a path.
+
+### Step 3 — `generate_show`, cascade deleted (`lib/ai-ops.ts`, `lib/agent.ts`, page)
+
+1. **`generate_show` is expressed AS a batch** (`planGenerateShow`): add every row
+   the model sent, remove every row the show has, run through `planChanges`. The
+   first run and an edit are judged by one validator, not two that can drift.
+2. **Slots carry a `tempId`; inputs carry `slotId`.** §9.2 did not say how a
+   whole-show create links inputs to performers, and without it the flagship
+   first run produces unlinked inputs — half of the B2 defect. `tempId` is
+   required on slots, and **`slotId` is required on every input, with `null`
+   meaning "no performer"** (playback, click, talkback). An omitted link would be
+   indistinguishable from a forgotten one, so omission is refused (Codex R1 on
+   #195); the card also marks inputs with no performer and performers with no
+   inputs, so a deliberate gap is visible before Apply.
+3. **An `id` echoed from `<current_config>` into a generated row is refused**, not
+   silently dropped or trusted. Every old row is being removed, so an echoed id
+   names nothing.
+4. **The `'refused'` status and its history fix (§5.5) moved here from step 4.**
+   `generate_show` is the first thing that can be refused, and without the fix a
+   refusal 400s the next request. The tool_result reads *"Refused by the app, not
+   the user: <reason> Nothing was applied."*, `is_error: true`. The two remaining
+   single-value tools now refuse invalid input the same way, instead of marking
+   it `'rejected'`, which told the model the user declined.
+5. **The replace confirm is two-layered:** the card shows the cost in rows and its
+   button reads "Replace everything" (never "Apply"), and a `window.confirm`
+   follows, the same mechanism as B3's prompts. Cancel leaves the card pending.
+6. **Every apply decision is made before any state update.** The old
+   `applyToolCall` called `updateConfig` inside the `setMessages` updater, which
+   StrictMode runs twice. The write swaps only the three lists onto the LATEST
+   config, so a stale copy can never drop the setlist.
+7. **Interim prompt (until step 4):** on a show with content, a targeted request
+   gets an explanation and the tables, not a regenerate. Step 4 replaces that
+   rule with `apply_changes`.
+8. **`validateMonitorReplace` and `monitorReplacePrompt` (B3) are deleted** with
+   `update_monitors`, their only caller. Their rules live on in `planChanges`
+   (tier-1 §3.6 items 5 and 7 updated to point there).
+9. **`update_notes` is still a whole-list write, and notes have no identity** — so
+   a model asked to "add a Power note" that sends only that note would delete the
+   rest (Codex R1 on #195; §9.2 had called it "no identity to lose", which is the
+   problem, not the defence). Shapes are validated, and any existing note the new
+   list does not keep verbatim is named on the card ("Replace notes") and
+   confirmed. The prompt and tool description say the list is whole.

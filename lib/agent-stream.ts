@@ -17,7 +17,13 @@ export interface StreamToolCall {
   id: string;
   name: string;
   input: Record<string, unknown>;
-  status: 'pending' | 'applied' | 'rejected';
+  /**
+   * `refused` = the APP declined it as invalid (design-ai-op-contract §5.4), as
+   * distinct from `rejected` = the USER declined it. The model is told which.
+   */
+  status: 'pending' | 'applied' | 'rejected' | 'refused';
+  /** Why it was refused — shown on the card and sent back as the tool_result. */
+  reason?: string;
 }
 
 export interface StreamState {

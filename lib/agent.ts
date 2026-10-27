@@ -28,7 +28,7 @@ You understand:
 
 When the user describes their band, you should:
 1. Set up stage positions based on their description, using the zone model — name distinct occupants individually (multiple may share a position) or collapse large/interchangeable sections into a single named zone; detail individuals in inputs
-2. **ALWAYS cascade: when you update the stage plot, also update the input list and monitor mixes in the same response.** Every person/instrument on the stage plot must appear in the input list with appropriate channel, mic, stand, and notes. Every person must appear in at least one monitor mix. Call update_stage_plot, update_inputs, and update_monitors together.
+2. Call generate_show ONCE with the whole show — stagePlot, inputs and monitors together. A performer's stage slot and their input channels travel together: every person on the stage plot gets their inputs, and each of those inputs carries its performer's slotId. Give each stage-plot slot a tempId starting with "new:" (e.g. "new:dee") and set each input's slotId to that tempId. Every input must have a slotId: use null only for a source no performer owns (playback, click, talkback). Every stagePlot.mix of 1 or more must be the mix number of one of the monitors you send; 0 means "no monitor". Every person should be on a monitor mix.
 3. Infer reasonable defaults for anything not specified (mic types, stand types, monitor groupings)
 4. Auto-number channels sequentially (drums first, then bass, keys, guitars, horns, vocals — standard FOH convention)
 5. Ask clarifying questions only when genuinely ambiguous
@@ -41,123 +41,92 @@ Monitor mix conventions:
 - BGVs (background vocalists) typically share a mix
 - Horn sections typically share a mix
 
-Data conventions:
-- SetlistSong.lead is a required string. For instrumental tracks, use "Instrumental" as the lead value. For multi-lead, use "+" to separate names (e.g., "Graham + Rachel").
-
 Always use the provided tools to make changes. Never just describe what you would do — actually do it via tool calls.
 
-The current show configuration is provided in each message. Build on what exists rather than starting over, unless the user asks for a fresh start.`;
+The current show configuration is provided in each message.
+- If the show has no stage plot, inputs or monitors yet, build it with generate_show.
+- If the show already has content, generate_show REPLACES its stage plot, inputs and monitors (never the setlist, charts, notes or show info), and the user is asked to confirm first. Use it only when the user wants to start over or regenerate.
+- For a targeted change to a show that already has content ("Beta 91 on the kick", "add a BGV mic for the bassist"), do NOT regenerate. Tell the user targeted AI edits are not available yet: they can make the change directly in the tables, or ask you to regenerate the whole show.
+- update_notes REPLACES the whole notes list. To add or change one note, send every existing note you are keeping as well.
+- You cannot change the setlist or charts. Point the user to setlist import or the Setlist tab.
+- If a tool result says a change was refused, it tells you why. Fix the problem and try again, or ask the user.`;
 
 const POS_ENUM = [...POSITIONS];
 
+const STAGE_SLOT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    tempId: {
+      type: 'string' as const,
+      description: 'A handle for this new slot so inputs can reference it. MUST start with "new:" and be unique, e.g. "new:dee".',
+    },
+    name: { type: 'string' as const, description: 'Person or section name' },
+    pos: { type: 'string' as const, enum: POS_ENUM, description: 'Stage zone position' },
+    role: { type: 'string' as const, description: 'Instrument(s) or role description' },
+    mix: { type: 'number' as const, description: 'Monitor mix number — a mix you send in monitors, or 0 for none' },
+    power: { type: 'boolean' as const, description: 'Needs AC power drop' },
+    featured: { type: 'boolean' as const, description: 'Primary performer highlight' },
+  },
+  required: ['tempId', 'name', 'pos', 'role', 'mix'],
+};
+
+const INPUT_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    ch: { type: 'number' as const, description: 'Channel number' },
+    inst: { type: 'string' as const, description: 'Instrument or source' },
+    mic: { type: 'string' as const, description: 'Microphone or DI type' },
+    stand: { type: 'string' as const, description: 'Stand type' },
+    notes: { type: 'string' as const, description: 'Notes (e.g., player name, position)' },
+    slotId: {
+      type: ['string', 'null'] as const,
+      description: 'The tempId of the stage-plot slot this input belongs to, or null ONLY for a source no performer owns (playback, click, talkback). Always present.',
+    },
+  },
+  // slotId is REQUIRED (null allowed): an omitted link is indistinguishable
+  // from a forgotten one, so every input must declare its owner.
+  required: ['ch', 'inst', 'mic', 'stand', 'slotId'],
+};
+
+const MONITOR_SCHEMA = {
+  type: 'object' as const,
+  properties: {
+    mix: { type: 'number' as const, description: 'Mix number' },
+    name: { type: 'string' as const, description: 'Who gets this mix' },
+    needs: { type: 'string' as const, description: 'What they need in the mix' },
+    // Optional and free-text on purpose — suggestions, not a whitelist
+    // (MONITOR_TYPES in lib/setlist.ts). Leaving it out is valid; the
+    // viewer renders nothing rather than guessing.
+    type: {
+      type: 'string' as const,
+      description:
+        'How they hear it — typically "Wedge" or "IEM"; also "Side-fill", "Drum fill", "None". Omit if the user has not said.',
+    },
+  },
+  required: ['mix', 'name', 'needs'],
+};
+
 export const TOOLS = [
   {
-    name: 'update_stage_plot',
-    description: 'Replace the entire stage plot with a new set of slots. Each slot occupies a zone position; multiple slots may share the same pos to place several occupants in one zone. A zone can hold one person or a section.',
+    // design-ai-op-contract §9.2: ONE whole-show create replaces the three
+    // prompt-coordinated tools and the client cascade, so the model's lists are
+    // the only writer and the plan is one approve card, all or nothing.
+    name: 'generate_show',
+    description:
+      'Build the whole show — stage plot, input list and monitor mixes — in one call. On a show that already has content this REPLACES all three (the user confirms first); the setlist, charts, notes and show info are never touched.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        stagePlot: {
-          type: 'array' as const,
-          items: {
-            type: 'object' as const,
-            properties: {
-              name: { type: 'string' as const, description: 'Person or section name' },
-              pos: { type: 'string' as const, enum: POS_ENUM, description: 'Stage zone position' },
-              role: { type: 'string' as const, description: 'Instrument(s) or role description' },
-              mix: { type: 'number' as const, description: 'Monitor mix number' },
-              power: { type: 'boolean' as const, description: 'Needs AC power drop' },
-              featured: { type: 'boolean' as const, description: 'Primary performer highlight' },
-            },
-            required: ['name', 'pos', 'role', 'mix'],
-          },
-        },
+        stagePlot: { type: 'array' as const, items: STAGE_SLOT_SCHEMA },
+        inputs: { type: 'array' as const, items: INPUT_SCHEMA },
+        monitors: { type: 'array' as const, items: MONITOR_SCHEMA },
       },
-      required: ['stagePlot'],
-    },
-  },
-  {
-    name: 'update_inputs',
-    description: 'Replace the entire input list (channel list for FOH).',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        inputs: {
-          type: 'array' as const,
-          items: {
-            type: 'object' as const,
-            properties: {
-              ch: { type: 'number' as const, description: 'Channel number' },
-              inst: { type: 'string' as const, description: 'Instrument or source' },
-              mic: { type: 'string' as const, description: 'Microphone or DI type' },
-              stand: { type: 'string' as const, description: 'Stand type' },
-              notes: { type: 'string' as const, description: 'Notes (e.g., player name, position)' },
-            },
-            required: ['ch', 'inst', 'mic', 'stand'],
-          },
-        },
-      },
-      required: ['inputs'],
-    },
-  },
-  {
-    name: 'update_monitors',
-    description: 'Replace the entire monitor mix list.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        monitors: {
-          type: 'array' as const,
-          items: {
-            type: 'object' as const,
-            properties: {
-              mix: { type: 'number' as const, description: 'Mix number' },
-              name: { type: 'string' as const, description: 'Who gets this mix' },
-              needs: { type: 'string' as const, description: 'What they need in the mix' },
-              // Optional and free-text on purpose — suggestions, not a whitelist
-              // (MONITOR_TYPES in lib/setlist.ts). Leaving it out is valid; the
-              // viewer renders nothing rather than guessing.
-              type: {
-                type: 'string' as const,
-                description:
-                  'How they hear it — typically "Wedge" or "IEM"; also "Side-fill", "Drum fill", "None". Omit if the user has not said.',
-              },
-            },
-            required: ['mix', 'name', 'needs'],
-          },
-        },
-      },
-      required: ['monitors'],
-    },
-  },
-  {
-    name: 'update_setlist',
-    description: 'Replace the entire setlist.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        setlist: {
-          type: 'array' as const,
-          items: {
-            type: 'object' as const,
-            properties: {
-              position: { type: 'number' as const, description: 'Song order (1-based)' },
-              title: { type: 'string' as const, description: 'Song title' },
-              key: { type: 'string' as const, description: 'Musical key (e.g., "Eb", "Am", "F#m")' },
-              lead: { type: 'string' as const, description: 'Lead singer(s) or "Instrumental"' },
-              notes: { type: 'string' as const, description: 'Arrangement notes, special instructions' },
-              sceneNote: { type: 'string' as const, description: 'Engineer cue (e.g., "save scene after")' },
-            },
-            required: ['position', 'title', 'lead'],
-          },
-        },
-      },
-      required: ['setlist'],
+      required: ['stagePlot', 'inputs', 'monitors'],
     },
   },
   {
     name: 'update_notes',
-    description: 'Replace the general notes section.',
+    description: 'Replace the general notes section. This is the WHOLE list: include every existing note you are keeping.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -214,4 +183,4 @@ export interface ContentBlock {
   is_error?: boolean;
 }
 
-export type ToolName = 'update_stage_plot' | 'update_inputs' | 'update_monitors' | 'update_setlist' | 'update_notes' | 'update_show_info';
+export type ToolName = 'generate_show' | 'update_notes' | 'update_show_info';

@@ -38,9 +38,10 @@ import type {
   Bar,
   RoadmapMarker,
 } from '@/lib/types';
-import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, validateMonitorReplace, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, monitorReplacePrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES, POSITIONS } from '@/lib/setlist';
+import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES, POSITIONS } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
+import { planGenerateShow, replaceShowPrompt, replaceCounts, isShowEmpty, describeProblems, validateNotes, notesReplacePrompt } from '@/lib/ai-ops';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
 import { AgentAvailabilityPanel } from '@/components/AgentAvailabilityPanel';
 import { ByoaKeySettings } from '@/components/ByoaKeySettings';
@@ -4910,7 +4911,7 @@ function SetupSortableRow({
             as editable that cannot persist.
             A row with NO songId is different and stays editable: route.ts:100
             genuinely resolves (or auto-creates) that row BY its title, so making
-            it read-only would break CSV import and the AI's update_setlist. */}
+            it read-only would break CSV import. */}
         {!isTitleEditableInSetlist(song) ? (
           <div className="flex items-center gap-1.5 group">
             <span className="text-sm text-gray-700 truncate" title={song.title}>{song.title}</span>
@@ -5269,7 +5270,10 @@ interface AgentMessage {
     id: string;
     name: string;
     input: Record<string, unknown>;
-    status: 'pending' | 'applied' | 'rejected';
+    // 'refused' = the app declined it as invalid; 'rejected' = the user did
+    // (design-ai-op-contract §5.4). `reason` is shown and sent back to Claude.
+    status: 'pending' | 'applied' | 'rejected' | 'refused';
+    reason?: string;
   }>;
   // §5.2a.2b: the stream opened and then died. The turn stays visible — the
   // partial content WAS delivered and billed — but it is excluded from API
@@ -5488,201 +5492,88 @@ function AgentChat({
     }
   }
 
-  // Expand a stage slot into one or more input channels based on role keywords.
-  // Produces a realistic skeleton — user refines mic/stand details from here.
-  function expandSlotToInputs(slot: StageSlot): Omit<InputChannel, 'ch'>[] {
-    const role = (slot.role || '').toLowerCase();
-    const name = slot.name;
-    const results: Omit<InputChannel, 'ch'>[] = [];
-
-    const add = (inst: string, mic: string, stand: string, notes?: string) =>
-      results.push({ inst, mic, stand, notes: notes || name });
-
-    // Drums — expand to full kit
-    if (role.includes('drum')) {
-      add('Kick', 'Beta 52 / D6', 'Short Boom', name);
-      add('Snare', 'SM57', 'Short Boom', name);
-      add('Hi-Hat', 'Condenser', 'Small Boom', name);
-      add('Rack Tom', 'Clip', 'N/A', name);
-      add('Floor Tom', 'Clip', 'N/A', name);
-      add('OH L', 'Condenser', 'Tall Boom', name);
-      add('OH R', 'Condenser', 'Tall Boom', name);
-    }
-    // Bass — DI, possibly amp mic
-    else if (role.includes('bass')) {
-      add('Bass DI', 'DI', 'N/A', name);
-      if (role.includes('amp')) add('Bass Amp', 'SM57 / e906', 'Short Boom', name);
-    }
-    // Keys / keyboard / piano
-    else if (role.includes('key') || role.includes('piano') || role.includes('organ')) {
-      if (role.includes('piano') && (role.includes('hi') || role.includes('lo') || role.includes('mic'))) {
-        add('Piano Hi', 'Condenser', 'Tall Boom', name);
-        add('Piano Lo', 'Condenser', 'Tall Boom', name);
-      }
-      if (role.includes('stereo')) {
-        add('Keys L', 'DI', 'N/A', name);
-        add('Keys R', 'DI', 'N/A', name);
-      } else {
-        add('Keys', 'DI', 'N/A', name);
-      }
-    }
-    // Guitar
-    else if (role.includes('gtr') || role.includes('guitar')) {
-      add('Guitar', 'SM57 / e906', 'Short Boom', name);
-    }
-    // Horn instruments — one channel each
-    else if (role.includes('sax')) {
-      add('Sax', 'SM57 / Clip', 'Tall Boom', name);
-    } else if (role.includes('trumpet') || role.includes('tpt') || role.includes('pet')) {
-      add('Trumpet', 'SM57 / Clip', 'Tall Boom', name);
-    } else if (role.includes('trombone') || role.includes('bone')) {
-      add('Trombone', 'SM57 / Clip', 'Tall Boom', name);
-    }
-    // Horn section (grouped zone) — expand per instrument in the role
-    else if (role.includes('horn') || (role.includes('sax') && role.includes('tpt'))) {
-      const parts = role.split(/[,&+\/]/);
-      for (const part of parts) {
-        const p = part.trim().toLowerCase();
-        if (p.includes('sax')) add('Sax', 'SM57 / Clip', 'Tall Boom', name);
-        else if (p.includes('tpt') || p.includes('trumpet') || p.includes('pet')) add('Trumpet', 'SM57 / Clip', 'Tall Boom', name);
-        else if (p.includes('bone') || p.includes('trombone')) add('Trombone', 'SM57 / Clip', 'Tall Boom', name);
-        else if (p) add(part.trim(), 'SM57 / Clip', 'Tall Boom', name);
-      }
-    }
-    // Lead vocals
-    else if (role.includes('lead vox') || role.includes('lead vocal') || role.includes('singer') || role.includes('vox')) {
-      add('Lead Vox', 'Beta 58', 'Straight', name);
-    }
-    // Generic fallback — one channel
-    else {
-      add(slot.role || name, '', '', name);
-    }
-
-    // Add vocal mic if role mentions BGV, vocal, or singing alongside an instrument
-    if (!role.includes('lead vox') && !role.includes('lead vocal') && !role.includes('singer')) {
-      if (role.includes('bgv') || role.includes('vocal') || role.includes('vox') || role.includes('sing')) {
-        add('BGV', 'SM58', 'Boom', name);
-      }
-    }
-
-    return results;
-  }
-
+  // Shape checks for the single-value tools. `generate_show` is judged by
+  // `planGenerateShow` instead — the same validator `apply_changes` will use.
   function validateToolInput(name: string, input: Record<string, unknown>): string | null {
     switch (name) {
-      case 'update_stage_plot':
-        if (!Array.isArray(input.stagePlot)) return 'stagePlot must be an array';
-        break;
-      case 'update_inputs':
-        if (!Array.isArray(input.inputs)) return 'inputs must be an array';
-        break;
-      case 'update_monitors':
-        if (!Array.isArray(input.monitors)) return 'monitors must be an array';
-        // Same rules the editor enforces (design-core-path-tier1 §3.3): no
-        // duplicate or non-positive numbers, and no renumber of an existing mix
-        // (by id), which would leave its performers behind. Refused before
-        // apply, so the config is untouched.
-        return validateMonitorReplace(configRef.current.monitors, input.monitors as { id?: unknown; mix?: unknown }[]);
-      case 'update_setlist':
-        if (!Array.isArray(input.setlist)) return 'setlist must be an array';
-        break;
       case 'update_notes':
-        if (!Array.isArray(input.notes)) return 'notes must be an array';
-        break;
+        return validateNotes(input.notes);
       case 'update_show_info':
         if (input.showInfo && typeof input.showInfo !== 'object') return 'showInfo must be an object';
         break;
+      default:
+        return `"${name}" is not a tool this app accepts`;
     }
     return null;
   }
 
-  function applyToolCall(msgIdx: number, toolIdx: number) {
-    // Asked HERE, outside the updater: a confirm inside setMessages would run
-    // twice under StrictMode. Cancel leaves the card pending.
-    const pending = messages[msgIdx]?.toolCalls?.[toolIdx];
-    if (pending?.name === 'update_monitors' && Array.isArray(pending.input.monitors)) {
-      const cur = configRef.current;
-      const prompt = monitorReplacePrompt(cur.stagePlot, cur.monitors, pending.input.monitors as { mix?: unknown }[]);
-      if (prompt && !window.confirm(prompt)) return;
-    }
+  function setToolStatus(msgIdx: number, toolIdx: number, status: 'applied' | 'refused', reason?: string) {
     setMessages((prev) => {
       const updated = [...prev];
       const msg = { ...updated[msgIdx], toolCalls: [...(updated[msgIdx].toolCalls || [])] };
-      const tc = msg.toolCalls![toolIdx];
-
-      const validationError = validateToolInput(tc.name, tc.input);
-      if (validationError) {
-        setError(`Invalid tool output: ${validationError}`);
-        msg.toolCalls![toolIdx] = { ...tc, status: 'rejected' as const };
-        updated[msgIdx] = msg;
-        return updated;
-      }
-
-      msg.toolCalls![toolIdx] = { ...tc, status: 'applied' as const };
+      msg.toolCalls![toolIdx] = { ...msg.toolCalls![toolIdx], status, ...(reason ? { reason } : {}) };
       updated[msgIdx] = msg;
-
-      const toolInput = tc.input;
-      updateConfig((p) => {
-        switch (tc.name) {
-          case 'update_stage_plot': {
-            const newPlot = toolInput.stagePlot as StageSlot[];
-            const result = { ...p, stagePlot: newPlot };
-
-            // Cascade: expand stage slots into per-channel input list.
-            let ch = 1;
-            const inputs: InputChannel[] = [];
-            for (const slot of newPlot) {
-              for (const input of expandSlotToInputs(slot)) {
-                inputs.push({ ...input, ch: ch++ });
-              }
-            }
-            result.inputs = inputs;
-
-            // Cascade: generate monitor mixes from stage plot
-            const mixMap = new Map<number, string[]>();
-            for (const slot of newPlot) {
-              if (!slot.mix) continue; // skip slots with no monitor assignment
-              const names = mixMap.get(slot.mix) || [];
-              names.push(slot.name);
-              mixMap.set(slot.mix, names);
-            }
-            const monitors: MonitorMix[] = [];
-            for (const [mix, names] of Array.from(mixMap.entries()).sort((a, b) => a[0] - b[0])) {
-              monitors.push({
-                mix,
-                name: names.join(', '),
-                needs: '',
-              });
-            }
-            result.monitors = monitors;
-
-            return result;
-          }
-          case 'update_inputs':
-            return { ...p, inputs: toolInput.inputs as InputChannel[] };
-          case 'update_monitors':
-            return { ...p, monitors: toolInput.monitors as MonitorMix[] };
-          case 'update_setlist':
-            return { ...p, setlist: toolInput.setlist as SetlistSong[] };
-          case 'update_notes':
-            return { ...p, notes: toolInput.notes as GeneralNote[] };
-          case 'update_show_info': {
-            const si = toolInput.showInfo as { bandName?: string; showName?: string; eventDate?: string; venue?: string } | undefined;
-            const lineup = toolInput.lineup as string | undefined;
-            const merged = si ? { ...p.showInfo, ...si } : p.showInfo;
-            merged.showName = merged.showName?.trim() || undefined;
-            return {
-              ...p,
-              ...(lineup ? { lineup } : {}),
-              showInfo: merged,
-            };
-          }
-          default:
-            return p;
-        }
-      });
-
       return updated;
+    });
+  }
+
+  // Every decision — refuse, confirm, apply — is made HERE, before any state
+  // update. The old version called updateConfig inside the setMessages updater,
+  // which StrictMode runs twice, and asked its confirm in a different place
+  // from its validation. A refusal is a state (§5.4): the config is untouched,
+  // the card stays with its reason, and Claude is told why (§5.5).
+  function applyToolCall(msgIdx: number, toolIdx: number) {
+    const tc = messages[msgIdx]?.toolCalls?.[toolIdx];
+    if (!tc || tc.status !== 'pending') return;
+
+    if (tc.name === 'generate_show') {
+      const cur = configRef.current;
+      const plan = planGenerateShow(cur, tc.input);
+      if (!plan.ok) {
+        setToolStatus(msgIdx, toolIdx, 'refused', describeProblems(plan.problems));
+        return;
+      }
+      // §9.2a: replacing a show with content needs its own, explicit confirm.
+      // Cancel leaves the config untouched and the card pending.
+      const ask = replaceShowPrompt(cur);
+      if (ask && !window.confirm(ask)) return;
+      setToolStatus(msgIdx, toolIdx, 'applied');
+      // Only the three lists are swapped in, onto the LATEST config, so the
+      // setlist, charts, notes and show info cannot be lost to a stale copy.
+      updateConfig((p) => ({ ...p, stagePlot: plan.next.stagePlot, inputs: plan.next.inputs, monitors: plan.next.monitors }));
+      return;
+    }
+
+    const invalid = validateToolInput(tc.name, tc.input);
+    if (invalid) {
+      setToolStatus(msgIdx, toolIdx, 'refused', `This change was refused because ${invalid}.`);
+      return;
+    }
+    // A whole-list notes write that drops existing notes names them first.
+    if (tc.name === 'update_notes') {
+      const ask = notesReplacePrompt(configRef.current.notes, tc.input.notes as GeneralNote[]);
+      if (ask && !window.confirm(ask)) return;
+    }
+    setToolStatus(msgIdx, toolIdx, 'applied');
+    const toolInput = tc.input;
+    updateConfig((p) => {
+      switch (tc.name) {
+        case 'update_notes':
+          return { ...p, notes: toolInput.notes as GeneralNote[] };
+        case 'update_show_info': {
+          const si = toolInput.showInfo as { bandName?: string; showName?: string; eventDate?: string; venue?: string } | undefined;
+          const lineup = toolInput.lineup as string | undefined;
+          const merged = si ? { ...p.showInfo, ...si } : p.showInfo;
+          merged.showName = merged.showName?.trim() || undefined;
+          return {
+            ...p,
+            ...(lineup ? { lineup } : {}),
+            showInfo: merged,
+          };
+        }
+        default:
+          return p;
+      }
     });
   }
 
@@ -5790,11 +5681,16 @@ function AgentChat({
   const canSend = canSendMessage({ availability, streaming, hasPendingTools });
   const needsKey = availability.showKeyField && !apiKey;
 
+  const replacesContent = (tc: { name: string; status: string }) =>
+    tc.name === 'generate_show' && tc.status === 'pending' && !isShowEmpty(config);
+  // Notes that a pending update_notes would remove or rewrite (Codex R1 on #195).
+  const notesLost = (tc: { name: string; status: string; input: Record<string, unknown> }) =>
+    tc.name === 'update_notes' && tc.status === 'pending' && validateNotes(tc.input.notes) === null
+      ? notesReplacePrompt(config.notes, tc.input.notes as GeneralNote[])
+      : null;
+
   const toolNameLabels: Record<string, string> = {
-    update_stage_plot: 'Stage Plot',
-    update_inputs: 'Input List',
-    update_monitors: 'Monitor Mixes',
-    update_setlist: 'Setlist',
+    generate_show: 'Stage Plot, Inputs & Monitors',
     update_notes: 'General Notes',
     update_show_info: 'Show Info',
   };
@@ -5863,13 +5759,26 @@ function AgentChat({
                     <div className="text-xs text-gray-600 mb-2 max-h-32 overflow-y-auto">
                       <ToolCallPreview name={tc.name} input={tc.input} />
                     </div>
+                    {/* §9.2a: a replace states its cost in rows BEFORE the click, and
+                        its button never reads "Apply" — the same click must not mean
+                        "tweak" here and "discard everything" there. */}
+                    {replacesContent(tc) && (
+                      <p className="text-xs font-bold text-red-700 mb-2">
+                        ⚠ Replaces the whole show: discards {replaceCounts(config)}. Setlist, charts, notes and show info are kept.
+                      </p>
+                    )}
+                    {notesLost(tc) && (
+                      <p className="text-xs font-bold text-red-700 mb-2 whitespace-pre-line">
+                        ⚠ {notesLost(tc)!.split('\n\n')[1]}
+                      </p>
+                    )}
                     {tc.status === 'pending' ? (
                       <div className="flex gap-2">
                         <button
                           onClick={() => applyToolCall(msgIdx, tcIdx)}
-                          className="px-3 py-1 text-xs font-bold bg-black text-white rounded hover:bg-gray-800 transition-colors"
+                          className={`px-3 py-1 text-xs font-bold text-white rounded transition-colors ${replacesContent(tc) || notesLost(tc) ? 'bg-red-700 hover:bg-red-800' : 'bg-black hover:bg-gray-800'}`}
                         >
-                          Apply
+                          {replacesContent(tc) ? 'Replace everything' : notesLost(tc) ? 'Replace notes' : 'Apply'}
                         </button>
                         <button
                           onClick={() => rejectToolCall(msgIdx, tcIdx)}
@@ -5877,6 +5786,15 @@ function AgentChat({
                         >
                           Reject
                         </button>
+                      </div>
+                    ) : tc.status === 'refused' ? (
+                      // §5.4: no Apply button at all — a disabled one invites
+                      // re-clicking something that can never succeed. The reason
+                      // and the recovery, and no auto-retry.
+                      <div className="text-xs">
+                        <p className="font-bold text-amber-700">Not applied — nothing was changed.</p>
+                        <p className="text-amber-700">{tc.reason}</p>
+                        <p className="text-gray-500 mt-1">Ask again, or make the change directly in the tables.</p>
                       </div>
                     ) : (
                       <p className={`text-xs font-bold ${tc.status === 'applied' ? 'text-green-600' : 'text-red-500'}`}>
@@ -5970,9 +5888,14 @@ function AgentChat({
 function ToolCallPreview({ name, input }: { name: string; input: Record<string, unknown> }) {
   const fallback = <pre className="whitespace-pre-wrap">{JSON.stringify(input, null, 2)}</pre>;
   switch (name) {
-    case 'update_stage_plot': {
-      const slots = input.stagePlot;
-      if (!Array.isArray(slots)) return fallback;
+    case 'generate_show': {
+      const { stagePlot: slots, inputs, monitors } = input;
+      if (!Array.isArray(slots) || !Array.isArray(inputs) || !Array.isArray(monitors)) return fallback;
+      // Exactly what the model sent — there is no cascade any more, so the
+      // preview is the plan, not a guess at what apply will invent.
+      const owner = new Map(slots.map((s: Record<string, unknown>) => [s.tempId, String(s.name)]));
+      // A missing link must be VISIBLE before Apply, in both directions.
+      const owned = new Set(inputs.map((inp: Record<string, unknown>) => inp.slotId));
       return (
         <div className="space-y-2">
           <div>
@@ -5982,99 +5905,36 @@ function ToolCallPreview({ name, input }: { name: string; input: Record<string, 
                 <li key={i}>
                   <span className="font-bold">{String(s.name)}</span> — {String(s.role)}, {String(s.pos)}
                   {s.featured ? ' (featured)' : ''}{s.power ? ' [POWER]' : ''}
+                  {!owned.has(s.tempId) && <span className="text-amber-700"> (no inputs)</span>}
                 </li>
               ))}
             </ul>
           </div>
           <div>
-            <p className="font-bold text-gray-500 mb-1">Input List (auto-generated, editable after apply)</p>
+            <p className="font-bold text-gray-500 mb-1">Input List</p>
             <ul className="space-y-0.5">
-              {(() => {
-                let ch = 1;
-                return slots.flatMap((s: Record<string, unknown>) => {
-                  const role = String(s.role || '').toLowerCase();
-                  const nm = String(s.name);
-                  const lines: { ch: number; inst: string; note: string }[] = [];
-                  const add = (inst: string) => lines.push({ ch: ch++, inst, note: nm });
-                  if (role.includes('drum')) { add('Kick'); add('Snare'); add('Hi-Hat'); add('Rack Tom'); add('Floor Tom'); add('OH L'); add('OH R'); }
-                  else if (role.includes('bass')) { add('Bass DI'); if (role.includes('amp')) add('Bass Amp'); }
-                  else if (role.includes('key') || role.includes('piano') || role.includes('organ')) {
-                    if (role.includes('piano') && (role.includes('hi') || role.includes('lo') || role.includes('mic'))) { add('Piano Hi'); add('Piano Lo'); }
-                    if (role.includes('stereo')) { add('Keys L'); add('Keys R'); } else add('Keys');
-                  }
-                  else if (role.includes('gtr') || role.includes('guitar')) add('Guitar');
-                  else if (role.includes('sax')) add('Sax');
-                  else if (role.includes('trumpet') || role.includes('tpt') || role.includes('pet')) add('Trumpet');
-                  else if (role.includes('trombone') || role.includes('bone')) add('Trombone');
-                  else if (role.includes('lead vox') || role.includes('lead vocal') || role.includes('singer') || role.includes('vox')) add('Lead Vox');
-                  else add(String(s.role || s.name));
-                  if (!role.includes('lead vox') && !role.includes('singer') && (role.includes('bgv') || role.includes('vocal'))) add('BGV');
-                  return lines;
-                }).map((l) => <li key={l.ch}>Ch {l.ch}: {l.inst} ({l.note})</li>);
-              })()}
+              {inputs.map((inp: Record<string, unknown>, i: number) => (
+                <li key={i}>
+                  Ch {String(inp.ch)}: {String(inp.inst)} — {String(inp.mic)}{inp.stand ? `, ${String(inp.stand)}` : ''}
+                  {owner.has(inp.slotId) ? ` → ${owner.get(inp.slotId)}` : <span className="text-amber-700"> → no performer</span>}
+                </li>
+              ))}
             </ul>
           </div>
           <div>
-            <p className="font-bold text-gray-500 mb-1">Monitor Mixes (auto-generated)</p>
+            <p className="font-bold text-gray-500 mb-1">Monitor Mixes</p>
             <ul className="space-y-0.5">
-              {(() => {
-                const mixMap = new Map<number, string[]>();
-                for (const s of slots) {
-                  const mix = Number(s.mix);
-                  if (!mix) continue; // skip slots with no monitor assignment
-                  const names = mixMap.get(mix) || [];
-                  names.push(String(s.name));
-                  mixMap.set(mix, names);
-                }
-                return Array.from(mixMap.entries()).sort((a, b) => a[0] - b[0]).map(([mix, names]) => (
-                  <li key={mix}>Mix {mix}: {names.join(', ')}</li>
-                ));
-              })()}
+              {monitors.map((m: Record<string, unknown>, i: number) => (
+                <li key={i}>
+                  {/* `m.type ?` not `String(m.type)`: an absent type must render
+                      nothing, and String(undefined) is the literal "undefined". */}
+                  Mix {String(m.mix)}: {String(m.name)}
+                  {m.type ? ` (${String(m.type)})` : ''}{m.needs ? ` — ${String(m.needs)}` : ''}
+                </li>
+              ))}
             </ul>
           </div>
         </div>
-      );
-    }
-    case 'update_inputs': {
-      const inputs = input.inputs;
-      if (!Array.isArray(inputs)) return fallback;
-      return (
-        <ul className="space-y-0.5">
-          {inputs.map((inp: Record<string, unknown>, i: number) => (
-            <li key={i}>
-              Ch {String(inp.ch)}: {String(inp.inst)} — {String(inp.mic)}, {String(inp.stand)}{inp.notes ? ` (${String(inp.notes)})` : ''}
-            </li>
-          ))}
-        </ul>
-      );
-    }
-    case 'update_monitors': {
-      const monitors = input.monitors;
-      if (!Array.isArray(monitors)) return fallback;
-      return (
-        <ul className="space-y-0.5">
-          {monitors.map((m: Record<string, unknown>, i: number) => (
-            <li key={i}>
-              {/* `m.type &&` not `String(m.type)`: an absent type must render
-                  nothing, and String(undefined) is the literal "undefined". */}
-              Mix {String(m.mix)}: {String(m.name)}
-              {m.type ? ` (${String(m.type)})` : ''} — {String(m.needs)}
-            </li>
-          ))}
-        </ul>
-      );
-    }
-    case 'update_setlist': {
-      const songs = input.setlist;
-      if (!Array.isArray(songs)) return fallback;
-      return (
-        <ul className="space-y-0.5">
-          {songs.map((s: Record<string, unknown>, i: number) => (
-            <li key={i}>
-              {String(s.position)}. {String(s.title)} — {String(s.lead)}{s.notes ? ` (${String(s.notes)})` : ''}
-            </li>
-          ))}
-        </ul>
       );
     }
     case 'update_notes': {
