@@ -467,3 +467,32 @@ describe('getClientIp', () => {
     });
   });
 });
+
+// UAT S15 / design-ai-key-availability §13.4.1: the chart routes resolve through the
+// same resolver as the AI tab. These pin the two things resolveChartKey adds.
+describe('resolveChartKey — the chart routes share the AI tab resolver', () => {
+  const req = (auth?: string) => ({ headers: new Headers(auth ? { authorization: auth } : {}) });
+
+  it('a device key in the header wins, with no account lookup and no quota', async () => {
+    secretsBackend.keys.set('owner-1', 'sk-ant-account-key-value');
+    const { resolveChartKey } = await agentKey();
+    const r = await resolveChartKey(req('Bearer sk-ant-device'), 'owner-1');
+    expect(r.mode === 'byoa' && r.apiKey).toBe('sk-ant-device');
+    expect(secretsBackend.calls).toBe(0);
+    expect(quotaBackend.calls).toBe(0);
+  });
+
+  it('no header ⇒ the signed-in user\'s account key', async () => {
+    secretsBackend.keys.set('owner-1', 'sk-ant-account-key-value');
+    const { resolveChartKey } = await agentKey();
+    const r = await resolveChartKey(req(), 'owner-1');
+    expect(r.mode === 'byoa' && r.source).toBe('account');
+  });
+
+  it('an empty "Bearer " is no key (Headers trims it to "Bearer")', async () => {
+    const { bearerKey } = await agentKey();
+    expect(bearerKey(new Headers({ authorization: 'Bearer ' }))).toBeUndefined();
+    expect(bearerKey(new Headers())).toBeUndefined();
+    expect(bearerKey(new Headers({ authorization: 'Bearer sk-x' }))).toBe('sk-x');
+  });
+});

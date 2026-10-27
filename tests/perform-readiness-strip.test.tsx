@@ -246,3 +246,20 @@ describe('PerformReadinessStrip', () => {
     expect(onCalibrate).toHaveBeenCalledWith('bars');
   });
 });
+
+// UAT S15 / design-ai-key-availability §13.6 Q6: no key, or a rejected own key, is
+// not a failed build — "Try again" cannot help, Settings can.
+describe('PerformReadinessStrip — key states (UAT S15)', () => {
+  it.each([
+    ['no_key', /need an Anthropic API key/],
+    ['key_rejected', /rejected your API key/],
+  ] as const)('%s → says so and links Settings in a new tab, with no retry', (convertState, text) => {
+    const onBuildOverlay = vi.fn();
+    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), convertState, onBuildOverlay })} />);
+    expect(screen.getByText(text)).toBeTruthy();
+    const link = screen.getByRole('link', { name: 'Open Settings' });
+    expect(link.getAttribute('href')).toBe('/dashboard/settings');
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(screen.queryByRole('button', { name: /try again|build overlay/i })).toBeNull();
+  });
+});

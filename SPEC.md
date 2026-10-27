@@ -298,7 +298,7 @@ its setlist and charts keep working on that device with no signal.
 21. A BYOA key Anthropic rejects returns 401 with `keyReject: 'device'|'account'` (`chat/route.ts:131-142`); the AI tab shows "Clear saved key" for device, "Manage key in Settings" for account (`page.tsx:5893-5920`). A rejected shared key carries no `keyReject`.
 22. Key entry lives in `ByoaKeySettings`, shown standalone at `/dashboard/settings` or as an overlay over the AI tab (`page.tsx:5805`). Two choices, default "Remember on this device" (`components/ByoaKeySettings.tsx:37`): device → localStorage (`:89`); account → `PUT /api/settings/byoa` → `set_user_secret` → Vault (`:94`). Saved keys show masked (`sk-ant-…abcd`); Remove per backend.
 23. No route returns a stored key. `GET /api/settings/byoa` returns only `key_hint` (`app/api/settings/byoa/route.ts:45-61`); `user_secrets` has no client RLS policy at all (`015_user_secrets_vault.sql:22-23`); write errors are opaque (`route.ts:26-29`). Deleting the row deletes the Vault secret via trigger (`015_user_secrets_vault.sql:225-227`).
-24. Chart convert and roadmap parse require sign-in but use the platform `CLAUDE_TRYIT_KEY` directly — no BYOA, no quota (`app/api/charts/convert/route.ts:174`, `app/api/charts/roadmap/parse/route.ts:49`).
+24. Chart convert and roadmap parse require sign-in and resolve their key like the AI tab — device key (`Authorization`, sent by `lib/chart-key-headers.ts` for the signed-in account) → account key → try-it + quota, one call = one unit (`resolveChartKey`, `lib/agent-key.ts`). Roadmap parse runs the no-AI grammar first, so a grammar-clean description needs no key and spends no quota. No key or try-it spent → parse 503/429 and convert degrades `no_key`; the owner's own key rejected → parse 401 / convert `key_rejected`; both show copy that links `/dashboard/settings` (`lib/chart-key-copy.ts`). A rejected platform key stays a generic 502 / `failed`. The admin overlay backfill still uses the platform key directly (operator tool).
 
 **Offline / PWA**
 25. Installable PWA: `start_url: '/'`, standalone, 192/512 icons (`app/manifest.ts`). The service worker is registered when a show page loads (`page.tsx:557`), not globally.
@@ -337,7 +337,6 @@ its setlist and charts keep working on that device with no signal.
 - Collaborator invite issuance (any writer of `show_collaborators`, invite UI, token vs email redemption) — backlog-admin-identity.
 - Account deletion: `shows.owner_id`, `chart_library.owner_id`, `show_collaborators.user_id` are NO ACTION → `deleteUser` fails for any real owner; no endpoint; Storage orphan handling — backlog-admin-identity §1.
 - `profiles` privacy (Public read) and admin rate-limit persistence — backlog-admin-identity §2-3.
-- §13 single key resolver: BYOA + quota for convert/parse, `no_key` degrade reason, actionable parse copy — design-ai-key-availability §13.
 - Fix for BYOA key surviving sign-out — issue #134.
 - Handle rename / profile editing, owner public page `/{owner}`, vanity subdomains, QR/social links on profile — design-owner-namespacing Phase 2.
 - Global SW registration, build-time asset manifest, SW cache of `/api/shows/*`, install prompt, "Offline — showing cached data" banner — design-alpha-ready Part 2.
@@ -441,7 +440,7 @@ its setlist and charts keep working on that device with no signal.
 ## 5. Chart builder — native charts + AI text-to-chart
 
 **What it is.** An owner describes a song in plain English ("4/4 in G, Verse: 2 bars D, 2 bars G7 …") and
-ShowRunr builds a clean Nashville-number chart from it. The owner can then fix it by hand (click a bar to
+ShowRunr builds a clean Nashville-number chart from it. The owner can then fix it by hand (tap or click a bar to
 type chords, add/remove/reorder sections, change key, flip Numbers ⇄ Letters) or re-describe it and
 regenerate. Saving produces an ordinary PDF chart in the song's library slot, plus an exact bar map, so
 it works everywhere an uploaded chart does (show viewer, offline, Perform, conductor) with no review step.
@@ -457,10 +456,10 @@ The saved chart can be re-opened and edited later.
 5. A chromatic root is `{degree, alter:±1}` and prints ♭/♯ before the number; a chromatic slash **bass** is rejected, never downgraded (`1/b2` → error). `lib/roadmap-view.ts:126-150`, `lib/roadmap-view.ts:462-506`
 
 **AI parse (description → spec)** — `POST /api/charts/roadmap/parse`, authed, never writes
-6. Description required, ≤ 8,000 chars; no platform key → 503 "Parser is not configured" (checked *before* the no-AI grammar path, so even grammar-clean text needs a key); model failure/timeout (50 s) → 502. `app/api/charts/roadmap/parse/route.ts:39-73`
+6. Description required, ≤ 8,000 chars. The no-AI grammar runs first and needs no key; a grammar miss resolves a key (Platform item 24): none → 503, try-it spent → 429, own key rejected → 401, each with Settings copy + an "Open Settings →" link (new tab); model failure/timeout (50 s) → 502. A time signature stated at the start ("4/4, …", "3/4 in D, …") or marked ("in 6/8", "12/8 time") sets the chart's time signature and is never read as a chord. `app/api/charts/roadmap/parse/route.ts`, `extractTimeSig` (`lib/roadmap-authoring.ts`)
 7. Key resolution (L0), in order: Review-toolbar key (override) → key stated in the prose ("in Bb", "key of F sharp", "D minor") → Compose "Key" selector → `C`. `lib/roadmap-authoring.ts:378-389`
 8. L1 deterministic grammar is tried first: optional `Label:` headers, clauses split on `, ; . newline then`, each clause `N bars [of] CHORD` / `CHORD for N bars` / bare `CHORD` (= 1 bar). Any unparseable clause → whole description falls to the model. Multi-chord bars are accepted only with an explicit `-` tie. L1 always assumes 4/4. `lib/roadmap-authoring.ts:465-581`, `lib/roadmap-parse.ts:226-231`
-9. L2 model **transcribes** into a per-span draft (one span per contiguous region, no invented repeats); our code folds it into the sparse spec; the validator disposes. Model is `AGENT_MODEL_ROADMAP` via the admin `claude_tryit_key`. `lib/roadmap-parse.ts:35-85,148-189`, `parse/route.ts:49`
+9. L2 model **transcribes** into a per-span draft (one span per contiguous region, no invented repeats); our code folds it into the sparse spec; the validator disposes. Model is `AGENT_MODEL_ROADMAP`, with the key the route resolved. `lib/roadmap-parse.ts` (`parseWithoutModel`, `parseWithModel`)
 10. After the fold, a run of 2+ adjacent sections with the same base label (`Verse 1` = `Verse 2`), identical bars and changes, no existing repeat, ≥ 2 bars, and no nav ref into any but the first merges into the first as a plain `×N` repeat — only when the merged chart plays the same written content step for step (two identical Verses before a D.C. stay longhand). `lib/roadmap-merge.ts`, `lib/roadmap-parse.ts` `foldAndValidateDraft`
 10a. Every parse that reaches a draft returns a per-section read-back tally shown on Compose and Review (empty or non-JSON model output returns errors only). On success it is rendered from the final spec, repeat appended to the label ("Chorus ×2: 8 bars — G×4, A×4"; "Verse, 2 endings: …"); when the spec is invalid it is rendered from the draft's spans (pre-op) as the diagnosis. `lib/roadmap-authoring.ts` `tallySpec` / `tallyDraft`, `components/RoadmapBuilder.tsx:754-770`
 11. Invalid result = HTTP 200 `{ok:false, errors}`; the UI lists up to 6 errors and keeps the user's text. `components/RoadmapBuilder.tsx:92-115`
@@ -468,7 +467,7 @@ The saved chart can be re-opened and edited later.
 **Builder UI** — `components/RoadmapBuilder.tsx`, full-screen overlay
 12. Entry (owner only, only when the song has a free role): "Build chart" on a Library song row, or "Build a chart with AI" in Manage Charts (library + show). `app/library/page.tsx:280,313-318`, `components/ManageChartsModal.tsx:313-320`
 13. Compose → Review. Review is three panes on desktop (refine | chart | structure), stacked on phone. There is no path to Review without a successful parse. `RoadmapBuilder.tsx:216-243,492`
-14. Chord entry = click a bar on the chart → inline input (grammar `1`, `IV`, `5 4`, `1 - 4 5`, letters like `G7` in key context) with a live split preview; Enter/blur commits a valid parse, Esc cancels, empty input clears the bar to "inherits previous". Bars show pointer cursor + blue hover and an empty bar shows ＋ on hover. `RoadmapBuilder.tsx:960-1080`
+14. Chord entry = tap or click a bar on the chart → inline input (grammar `1`, `IV`, `5 4`, `1 - 4 5`, letters like `G7` in key context) with a live split preview; Enter/blur commits a valid parse, Esc cancels, empty input clears the bar to "inherits previous". Bars show pointer cursor + blue hover; an empty bar shows ＋ on hover, and always on a touch screen (`pointer-coarse`). A line directly above the chart reads "Tap or click any bar to enter chords — e.g. 1, 5 4, 1 - 4 5". `RoadmapBuilder.tsx:960-1080`
 15. Structure panel: drag to reorder, rename, edit bar count (min 1; shrinking truncates chords), remove (✕, no confirm), `+ Add section` (4 empty bars). Repeats and nav markers are **read-only** badges/chips. `RoadmapBuilder.tsx:375-400,555-590,691-750`
 16. Toolbar: Numbers ⇄ Letters toggle and a key picker (24 keys + any off-menu current key). Changing key in numbers mode changes only the key label. `RoadmapBuilder.tsx:780-818`, `lib/roadmap-spec.ts:142-148`
 17. Preview is fit-to-width: bars/line = spec value if set, else 2 (< 480 px), 4 (< 700 px), 8; constant bar width, partial last line left-aligned, never horizontal scroll; each line shows its first bar's global number. `RoadmapBuilder.tsx:840-958`, `lib/roadmap-layout.ts:41-86`
@@ -744,7 +743,6 @@ Code wins. Each item is a doc to fix the next time someone touches that area. No
 10. **Manual "download charts for offline" CTA** (design-offline-chart-cache) renders only when `!showId` inside the Config tab (`page.tsx:6926`) — but Config is owner-only and owners always have a `showId`, so it is unreachable for Supabase shows.
 11. **Reserved handles** differ across three lists: profiles route omits `library` (a real route), `mockup`, `dev`; middleware `RESERVED_PATHS` also omits `library`. RLS "Owner manage" FOR ALL lets a signed-in browser client insert/update its own profile directly, bypassing the route's regex and reserved list (`005:12`). Not key-related.
 12. owner-onboarding Out-of-Scope says "collaborators use public links, no auth needed" while supabase-backend designs authenticated collaborators — code matches the former in effect (public link) and keeps the latter's tables.
-13. Stale comments: `app/api/charts/convert/route.ts:169-170` and `roadmap/parse/route.ts:47` still say the key comes from "Redis admin:claude_tryit_key"; it is env only.
 
 ### A4. Charts
 
@@ -759,8 +757,6 @@ Code wins. Each item is a doc to fix the next time someone touches that area. No
 
 ### A5. Chart builder
 
-- **L1 grammar misreads a time signature as a chord (verified by running `parseGrammarDraft`).** Header-less "4/4 in G, 4 bars G, 4 bars C, 4 bars D" → `Section: 13 bars — C/C, G×4, …`: "4/4" is parsed as degree 4 over bass 4, adding a bogus bar; "3/4, 2 bars D…" in D gives an extra F#/G bar and stays 4/4. Doc §7 says non-grammar prose falls to L2. `lib/roadmap-authoring.ts:511-543`, `lib/roadmap-view.ts:126-150`
-- Issue #173 says bars have "no hover state, no cursor change, no hint". Main has `cursor-pointer hover:bg-blue-50`, ＋ on hover for empty bars (both since June) and a tip "click a bar — 1 or IV …" at the bottom of the refine rail. The real gap: hover-only cues are invisible on touch, the tip is 11 px grey and far from the chart, and there's no empty-chart prompt. `RoadmapBuilder.tsx:516-519,988,994`
 - `docs/INDEX.md` cites `relabelSection (lib/chart-calibration.ts:101)` for key resolution (and expressiveness repeats it). `relabelSection` renames a calibration section anchor; the key relabel is `roadmap-render.ts:252-256` + `page.tsx:3874`.
 - Builder doc Open Q1 / Codex NB requires an embedded bundled font; code uses `StandardFonts.Helvetica` and says the bundled font is deferred. `roadmap-render.ts:11-16,216`
 - Builder doc: periodic GC sweeps orphaned objects; none exists (grep). `save/route.ts:184-190`

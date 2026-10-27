@@ -756,3 +756,40 @@ describe('RoadmapBuilder — endings and markers', () => {
     expect((screen.getAllByRole('spinbutton', { name: 'Bars' })[0] as HTMLInputElement).value).toBe('2');
   });
 });
+
+// UAT S16 / #173: chord entry is tapping a bar, and on a phone nothing said so —
+// the empty-bar ＋ was hover-only and the only hint was an 11px tip in the side panel.
+describe('chord entry is discoverable on touch (UAT S16)', () => {
+  it('a hint beside the chart says to tap a bar, with the grammar', async () => {
+    await renderInReview();
+    const hint = screen.getByText(/tap or click any bar to enter chords/i);
+    expect(hint.closest('main')).not.toBeNull();
+    expect(hint.textContent).toContain('1 - 4 5');
+  });
+
+  it('an empty bar keeps its ＋ visible on a coarse pointer, not only on hover', async () => {
+    await renderInReview();
+    // SPEC has bars with no chords (intro bars 2–4, the turnaround).
+    const plus = screen.getAllByText('＋');
+    expect(plus.length).toBeGreaterThan(0);
+    for (const p of plus) expect(p.className).toMatch(/\bpointer-coarse:text-zinc-300\b/);
+  });
+});
+
+// UAT S15: a parse refused for want of a key says how to fix it.
+describe('a key problem links Settings (UAT S15)', () => {
+  it('reason no_key → the message plus an Open Settings link; another error gets no link', async () => {
+    const msg = "AI chart generation isn't available. Add your Anthropic API key in Settings to generate charts from a description.";
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, json: async () => ({ error: msg, reason: 'no_key' }) }));
+    render(<RoadmapBuilder songTitle="9 to 5" charts={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'a slow blues' } });
+    fireEvent.click(screen.getByRole('button', { name: /generate chart/i }));
+    await screen.findByText(msg);
+    expect(screen.getByRole('link', { name: /open settings/i }).getAttribute('href')).toBe('/dashboard/settings');
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, json: async () => ({ error: 'Parser is temporarily unavailable' }) }));
+    fireEvent.click(screen.getByRole('button', { name: /generate chart/i }));
+    await screen.findByText('Parser is temporarily unavailable');
+    expect(screen.queryByRole('link', { name: /open settings/i })).toBeNull();
+  });
+});

@@ -456,6 +456,26 @@ export function tallySpec(spec: RoadmapSpec): string[] {
 // the L0-pinned key (e.g. a chromatic root) fails the whole parse to L2 / Gap-1
 // rather than being rounded.
 
+// A time signature, in the only places it cannot be a chord (UAT S14). Number
+// notation makes "4/4" a legal chord (IV over 4), so a bare N/D mid-clause stays a
+// chord. It is a time signature when it opens the description as a clause of its
+// own ("4/4, …", "4/4 in G, …", "3/4\n…"), or is marked as one ("in 3/4", "3/4
+// time"). Bounds match the model path's normalizeTimeSig (beats 1–32, unit
+// 1|2|4|8|16) so L1 and L2 accept the same signatures.
+const TIME_SIG = String.raw`([1-9]|[12]\d|3[0-2])\/(1|2|4|8|16)`;
+const RE_TIME_LEADING = new RegExp(String.raw`^\s*${TIME_SIG}(?:\s+time)?(?=\s*(?:[,;.\n]|$)|\s+(?:in|key)\b)`, 'i');
+const RE_TIME_MARKED = new RegExp(String.raw`\bin\s+${TIME_SIG}\b(?:\s+time\b)?|\b${TIME_SIG}\s+time\b`, 'i');
+
+// The time signature the description states, and the text without it, so the
+// span grammar never reads it as a bar. First match only, like stripKeyPhrase.
+function extractTimeSig(text: string): { text: string; timeSig: { beats: number; unit: number } | null } {
+  const m = text.match(RE_TIME_LEADING) ?? text.match(RE_TIME_MARKED);
+  if (!m || m.index === undefined) return { text, timeSig: null };
+  const beats = Number(m[1] ?? m[3]);
+  const unit = Number(m[2] ?? m[4]);
+  return { text: `${text.slice(0, m.index)} ${text.slice(m.index + m[0].length)}`, timeSig: { beats, unit } };
+}
+
 // Strip a leading/inline key statement (the L0 grammar already consumed it for the
 // renderKey) so it can't masquerade as span prose. Removes the FIRST match only —
 // conservative, mirrors resolveRenderKey's single-key resolution.
@@ -572,9 +592,13 @@ function parseSpanClause(clause: string, renderKey: string, beats: number): Chor
 export function parseDescription(
   description: string,
   renderKey: string,
-  timeSig: { beats: number; unit: number } = { beats: 4, unit: 4 },
+  defaultTimeSig: { beats: number; unit: number } = { beats: 4, unit: 4 },
 ): AuthoringDraft | null {
-  const secs = splitSections(stripKeyPhrase(description));
+  // A stated time signature wins over the default, and is removed before the
+  // span grammar sees it — else "4/4" reads as a chord and adds a bar (UAT S14).
+  const stated = extractTimeSig(description);
+  const timeSig = stated.timeSig ?? defaultTimeSig;
+  const secs = splitSections(stripKeyPhrase(stated.text));
   if (!secs) return null;
 
   const beats = timeSig.beats;

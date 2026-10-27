@@ -162,3 +162,18 @@ export function keyForSend(
   if (!mountedUserId || liveUserId !== mountedUserId) return { ok: false };
   return { ok: true, key: readKey(local, session, mountedUserId) };
 }
+
+/**
+ * The `Authorization` header for a chart AI request — roadmap parse or overlay
+ * convert (design-ai-key-availability §13.4.2) — or none.
+ *
+ * Read for the account signed in NOW, at the moment of the request. Unlike the AI
+ * tab, a chart surface holds no key in memory and is not bound to the account it
+ * mounted with: the route authenticates the same live session, so the key read
+ * here and the user the server resolves are one account (#134). No device key ⇒
+ * no header, and the server falls back to the account key, then try-it.
+ */
+export function deviceKeyHeaders(local: KeyStore, session: KeyStore, liveUserId: string): Record<string, string> {
+  const key = readKey(local, session, liveUserId);
+  return key ? { Authorization: `Bearer ${key}` } : {};
+}

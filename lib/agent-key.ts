@@ -417,6 +417,29 @@ export async function resolveTryitMode(ip: string, consume: boolean): Promise<Tr
   };
 }
 
+/**
+ * The device key a request carries in `Authorization: Bearer`, or undefined.
+ * One reader for every AI route, so they cannot disagree on what counts as a key.
+ */
+export function bearerKey(headers: Headers): string | undefined {
+  // Parsed, not `.replace('Bearer ', '')`: Headers trims the value, so an empty
+  // "Bearer " arrives as "Bearer", which the replace passed through AS the key.
+  return headers.get('authorization')?.match(/^Bearer\s+(\S+)$/)?.[1];
+}
+
+/**
+ * Key resolution for the two AUTHENTICATED chart routes — roadmap parse and
+ * overlay convert (design-ai-key-availability §13.4.1). The same resolver,
+ * precedence and try-it quota as the AI tab: device key, then the signed-in
+ * user's account key, then try-it. One call = one quota unit (§13.6 Q5, ruled).
+ * Unlike chat, the caller is always signed in, so the account key is always
+ * consulted when no device key came.
+ */
+export function resolveChartKey(request: { headers: Headers }, userId: string): Promise<KeyMode> {
+  const clientKey = bearerKey(request.headers);
+  return resolveKeyMode(clientKey, getClientIp(request.headers), { consume: true }, clientKey ? undefined : userId);
+}
+
 /** `x-forwarded-for`'s first hop, or 'unknown'. Shared so probe and send key alike. */
 export function getClientIp(headers: Headers): string {
   return headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';

@@ -2,6 +2,7 @@
 
 import type { PerformReadiness, PerformReadinessView } from '@/lib/chart-calibration';
 import type { OverlaySkipReason } from '@/lib/chart-converter';
+import { CHART_KEY_COPY, SETTINGS_HREF } from '@/lib/chart-key-copy';
 
 // ── Perform readiness: the can't-Perform/Conduct strip (presentational) ───────
 //
@@ -27,7 +28,11 @@ export type CalTool = 'sections' | 'bars' | 'roadmap'; // matches page.tsx calTo
 // outcome of a build attempt, which is exactly what this type models. It is still a
 // never-gate: no retry CTA is offered, because the answer is deterministic for these
 // bytes and a "Try again" that always loses is a lie.
-export type ConvertState = 'idle' | 'running' | 'error' | 'gated';
+//
+// 'no_key' / 'key_rejected': there was nothing to convert with — no key, try-it
+// spent, or the owner's own key refused (design-ai-key-availability §13.6 Q6).
+// Not 'error': "Try again" cannot help, and Settings can.
+export type ConvertState = 'idle' | 'running' | 'error' | 'gated' | 'no_key' | 'key_rejected';
 
 export interface PerformReadinessStripProps {
   view: PerformReadinessView;
@@ -56,7 +61,10 @@ export interface PerformReadinessStripProps {
 
 // One CTA per line, always. A second button here would compete with the header's
 // Calibrate toggle, which is already visible in exactly these states.
-type Action = { kind: 'calibrate'; label: string; tool: CalTool } | { kind: 'build'; label: string };
+type Action =
+  | { kind: 'calibrate'; label: string; tool: CalTool }
+  | { kind: 'build'; label: string }
+  | { kind: 'settings'; label: string };
 
 interface Line {
   text: string;
@@ -143,6 +151,9 @@ function readyLine(
             text: 'No staves found on any page — nothing to detect. Calibrate to set up Perform.',
             cta: { kind: 'calibrate', label: 'Calibrate', tool: 'sections' },
           };
+        case 'no_key':
+        case 'key_rejected':
+          return { text: CHART_KEY_COPY.convert[convertState], cta: { kind: 'settings', label: 'Open Settings' } };
         case 'idle':
           return { text: 'No overlay for these bytes.', cta: { kind: 'build', label: 'Build overlay' } };
       }
@@ -179,7 +190,18 @@ export default function PerformReadinessStrip({
     <div className="bg-zinc-900 border-t border-zinc-800 text-xs">
       <div className="flex items-center justify-center gap-3 px-3 py-2 text-center">
         <span className="text-zinc-400">{line.text}</span>
-        {cta && (
+        {cta?.kind === 'settings' && (
+          // A new tab: leaving Perform mid-set to fix a key must not lose the show.
+          <a
+            href={SETTINGS_HREF}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3 py-1 rounded bg-zinc-800 text-zinc-200 font-bold hover:bg-zinc-700"
+          >
+            {cta.label}
+          </a>
+        )}
+        {cta && cta.kind !== 'settings' && (
           <button
             onClick={() => (cta.kind === 'build' ? onBuildOverlay() : onCalibrate(cta.tool))}
             className="px-3 py-1 rounded bg-zinc-800 text-zinc-200 font-bold hover:bg-zinc-700"

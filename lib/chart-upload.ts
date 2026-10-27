@@ -1,4 +1,5 @@
 import type { ChartCalibration } from './types';
+import { chartKeyHeaders } from './chart-key-headers';
 
 // Shared chart-ADD path. Both add surfaces (the library Manage-Charts modal and
 // the in-show ChartNavigator) go through uploadChart().
@@ -39,7 +40,12 @@ export type ConvertReason =
   | 'failed'
   | 'authored'
   | 'lyrics'
-  | 'not_notation';
+  | 'not_notation'
+  // No key to convert with — none configured, or try-it spent — and a rejected own
+  // key. NOT `failed`: nothing failed, and the user can fix both in Settings
+  // (design-ai-key-availability §13.6 Q6).
+  | 'no_key'
+  | 'key_rejected';
 
 export interface ConvertResult {
   generated: boolean;
@@ -121,7 +127,8 @@ export async function postConvert(
   try {
     const res = await fetch('/api/charts/convert', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // The device key, if any, so the converter can use the owner's own key (§13.4.2).
+      headers: { 'Content-Type': 'application/json', ...(await chartKeyHeaders()) },
       body: JSON.stringify(body),
     });
     if (!res.ok) return { status: res.status, result: null };

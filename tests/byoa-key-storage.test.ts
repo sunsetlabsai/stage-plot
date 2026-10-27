@@ -6,6 +6,7 @@ import {
   initialRemember,
   persistKey,
   keyForSend,
+  deviceKeyHeaders,
   type KeyStore,
 } from '../lib/byoa-key-storage';
 
@@ -237,5 +238,21 @@ describe('round trips — the behaviour the user actually reported', () => {
     expect(readKey(local, session, A)).toBe(KEY);
     // New tab: sessionStorage starts empty, and we correctly have no key.
     expect(readKey(local, store(), A)).toBe('');
+  });
+});
+
+// UAT S15 / design-ai-key-availability §13.4.2: the chart routes get the device key
+// too, read for whoever is signed in at the moment of the request (#134).
+describe('deviceKeyHeaders', () => {
+  it("sends the signed-in account's key as a bearer header", () => {
+    expect(deviceKeyHeaders(store(at(A)), store(), A)).toEqual({ Authorization: `Bearer ${KEY}` });
+  });
+
+  it("never another account's key on the same browser", () => {
+    expect(deviceKeyHeaders(store(at(A)), store(), B)).toEqual({});
+  });
+
+  it('no session ⇒ no header (the server then has no device key to use)', () => {
+    expect(deviceKeyHeaders(store(at(A)), store(), '')).toEqual({});
   });
 });

@@ -208,32 +208,36 @@ export function parseGrammarDraft(
   return result.ok ? result : null;
 }
 
-// Thin transport: pin the key (L0), send the description to Claude, gate the
-// reply. Throws on transport/auth/timeout (the route maps that to a clean
-// failure); otherwise returns the uniform ParseResult. Key sourcing stays the
-// route's concern (shared platform key today, per-owner BYOA later). `uiKey` is the
-// key the calling surface is showing; `keyOverride` says whether that surface is the
-// Review toolbar (an explicit override that outranks the prose) rather than Compose's
-// pre-parse hint (which does not) — see resolveRenderKey.
-export async function parseRoadmapSpec(
+// L0 + L1, no IO: pin the key, then try the deterministic span-grammar. A hit is
+// the whole answer — the count is right by construction and NO model, key or
+// quota is needed (UAT S15: a grammar-able description must not be refused for a
+// missing key). A miss returns grammar: null and the route resolves a key for L2.
+// `uiKey` is the key the calling surface is showing; `keyOverride` says whether
+// that surface is the Review toolbar (an explicit override that outranks the
+// prose) rather than Compose's pre-parse hint (which does not) — see resolveRenderKey.
+export function parseWithoutModel(
   description: string,
-  apiKey: string,
-  signal?: AbortSignal,
   uiKey?: string,
   keyOverride?: boolean,
-): Promise<ParseResult> {
+): { renderKey: string; grammar: Extract<ParseResult, { ok: true }> | null } {
   const renderKey = resolveRenderKey(description, uiKey, { override: keyOverride });
-
-  // L1: try the deterministic span-grammar first. A hit skips the model entirely —
-  // the count is right by construction. A miss falls through to L2. Log the
-  // hit/miss ratio as coverage telemetry (§7) to steer where the grammar widens.
   const grammar = parseGrammarDraft(description, renderKey);
-  if (grammar) {
-    console.info('[roadmap-parse] L1 grammar hit', { renderKey, sections: grammar.tally.length });
-    return grammar;
-  }
-  console.info('[roadmap-parse] L1 grammar miss — falling to L2', { renderKey });
+  // Coverage telemetry (§7): the hit/miss ratio steers where the grammar widens.
+  if (grammar) console.info('[roadmap-parse] L1 grammar hit', { renderKey, sections: grammar.tally.length });
+  else console.info('[roadmap-parse] L1 grammar miss — falling to L2', { renderKey });
+  return { renderKey, grammar };
+}
 
+// L2 transport: send the description to Claude with the L0-pinned key, gate the
+// reply. Throws on transport/auth/timeout (the route maps that to a clean
+// failure); otherwise returns the uniform ParseResult. Key sourcing is the
+// route's concern (resolveChartKey).
+export async function parseWithModel(
+  description: string,
+  renderKey: string,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<ParseResult> {
   const client = new Anthropic({ apiKey });
 
   const response = await client.messages.create(

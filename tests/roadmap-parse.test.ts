@@ -140,7 +140,7 @@ describe('parseModelDraft — fold + validate the model SpanList', () => {
 
 // parseGrammarDraft is the L1 transport gate: a description that the deterministic
 // span-grammar transcribes whole → a folded+validated spec (NO model call); else
-// null so parseRoadmapSpec falls to L2. It shares foldAndValidateDraft with the
+// null so the route falls to L2 (parseWithModel). It shares foldAndValidateDraft with the
 // model path, so a grammar hit disposes identically.
 describe('parseGrammarDraft — L1 deterministic path (skips the model)', () => {
   it('folds + validates the failing verse to 16 bars with the pinned key', () => {
@@ -174,5 +174,47 @@ describe('parseGrammarDraft — L1 deterministic path (skips the model)', () => 
 
   it('still returns null on a chromatic slash bass (root-only canonicalization)', () => {
     expect(parseGrammarDraft('Verse: 2 bars E/Eb', 'D')).toBeNull();
+  });
+  // UAT S14: number notation makes "4/4" a legal chord (IV over 4), so a leading
+  // time signature was read as a bogus first bar, C/C in G.
+  describe('a stated time signature is a time signature, not a bar (UAT S14)', () => {
+    const only = (text: string) => {
+      const r = parseGrammarDraft(text, 'G');
+      if (!r || !r.ok) throw new Error(`no grammar hit for ${JSON.stringify(text)}`);
+      return r.spec;
+    };
+
+    it('the reported repro: "4/4 in G, 4 bars G" is 4 bars of G in 4/4', () => {
+      const spec = only('4/4 in G, 4 bars G');
+      expect(spec.timeSig).toEqual({ beats: 4, unit: 4 });
+      expect(spec.sections[0].bars).toBe(4);
+      expect(spec.sections[0].changes).toEqual([{ bar: 1, chords: [{ degree: 1 }] }]);
+    });
+
+    it.each([
+      ['3/4, 4 bars G', { beats: 3, unit: 4 }],
+      ['6/8\nVerse: 4 bars G', { beats: 6, unit: 8 }],
+      ['12/8 time, 4 bars G', { beats: 12, unit: 8 }],
+      ['4 bars G in 3/4', { beats: 3, unit: 4 }],
+      ['Verse: 4 bars G. 7/8 time', { beats: 7, unit: 8 }],
+    ])('%j → %j, and the bars are untouched', (text, timeSig) => {
+      const spec = only(text);
+      expect(spec.timeSig).toEqual(timeSig);
+      expect(spec.sections[0].bars).toBe(4);
+    });
+
+    it('a slash number chord mid-clause stays a chord (controls)', () => {
+      // Same digits as a time signature, but in a span: IV over 4 is still a chord.
+      const spec = only('Verse: 2 bars 1, 2 bars 4/4');
+      expect(spec.timeSig).toEqual({ beats: 4, unit: 4 });
+      expect(spec.sections[0].bars).toBe(4);
+      expect(spec.sections[0].changes?.[1]).toEqual({ bar: 3, chords: [{ degree: 4, bass: 4 }] });
+      // A leading one that is part of a span ("for 2 bars") is a chord too.
+      expect(only('1/4 for 2 bars, 2 bars G').sections[0].changes?.[0]).toEqual({ bar: 1, chords: [{ degree: 1, bass: 4 }] });
+    });
+
+    it('with no time signature stated, the default 4/4 is unchanged', () => {
+      expect(only('in G, 4 bars G').timeSig).toEqual({ beats: 4, unit: 4 });
+    });
   });
 });
