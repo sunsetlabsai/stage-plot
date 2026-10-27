@@ -858,7 +858,9 @@ safe on its own — so no deploy in the sequence is a half-wired state.
    and each performer silently lands on the other's wedge. That is exactly the
    hole Codex R1 found on #193, and `design-core-path-tier1.md` §3.6 item 5
    already rules the AI path refuses renumbers. A patch re-sending the *same*
-   number is not a renumber.
+   number is not a renumber, and neither is setting the number of a monitor
+   **added in the same batch** — nobody is routed to it yet (Codex R1 on #194);
+   the collision rule still applies to it.
 2. **A mix added at an orphaned number lists who rejoins it** in
    `ChangeSummary.joins`. Tier-1 §3.6 item 7 requires it be confirmed with names;
    the §7 diff card is shown before Apply, so the card is that confirmation.
@@ -879,10 +881,15 @@ safe on its own — so no deploy in the sequence is a half-wired state.
    `nextMixNumber`, which skips orphaned slot mixes like "+ Add Mix".
 6. **`null` in a patch clears an optional field** (the model's only way to
    unlink an input). On a required field it stays and fails the shape check.
-7. **Setting an input's `slotId` clears `needsReview`**, as the manual relink in
-   the Position dropdown does, unless the op sets the flag itself.
+7. **Changing a flagged input's `slotId` clears `needsReview`**, as the manual
+   relink in the Position dropdown does, unless the op sets the flag itself.
+   Re-sending the same (dangling) link leaves the flag alone, and an unflagged
+   row never gains one — either would show a change on the card that apply
+   does not make.
 8. **`ChangeSummary` is a diff of config → next by id**, not a reading-back of
    the ops — so §10.2 test 10 holds by construction, and a patch re-sending
    current values shows as no change.
-9. **A config containing an id-less row is refused**, keeping the function total.
+9. **Untouched rows keep their object identity in `next`** — rows are
+   replaced on patch, never mutated or cloned — so O1 holds by reference.
+10. **A config containing an id-less row is refused**, keeping the function total.
    The page guarantees ids (§9.4), so this is a guard, not a path.

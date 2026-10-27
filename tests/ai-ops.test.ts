@@ -62,9 +62,12 @@ describe('planChanges — merge and identity (§10.2 1–3)', () => {
   it('2. a row no op names is byte-identical — and keeps its object identity', () => {
     const cfg = band();
     const { next } = accepted(planChanges(cfg, [{ entity: 'inputs', action: 'patch', id: 'in-1', values: { mic: 'Beta 91' } }]));
-    expect(next.inputs.slice(1)).toEqual(cfg.inputs.slice(1));
-    expect(next.stagePlot).toEqual(cfg.stagePlot);
-    expect(next.monitors).toEqual(cfg.monitors);
+    // toBe, not toEqual: an implementation that clones every untouched row
+    // passes a value comparison (Codex R1 NIT on #194).
+    next.inputs.slice(1).forEach((row, i) => expect(row).toBe(cfg.inputs[i + 1]));
+    next.stagePlot.forEach((row, i) => expect(row).toBe(cfg.stagePlot[i]));
+    next.monitors.forEach((row, i) => expect(row).toBe(cfg.monitors[i]));
+    expect(next.inputs[0]).not.toBe(cfg.inputs[0]); // the patched row is a new object, never mutated in place
     expect(next.setlist).toBe(cfg.setlist);
   });
 
@@ -215,6 +218,11 @@ describe('planChanges — post-batch references (§5.2, §10.2 6–7)', () => {
     const { next } = accepted(planChanges(cfg, [{ entity: 'inputs', action: 'patch', id: 'in-3', values: { slotId: 's-ray' } }]));
     expect(byId(next.inputs, 'in-3')).toMatchObject({ slotId: 's-ray', needsReview: false });
 
+    // Re-sending the SAME dangling slotId resolves nothing — the flag stays (Codex R1 NIT on #194).
+    const resent = accepted(planChanges(cfg, [{ entity: 'inputs', action: 'patch', id: 'in-3', values: { slotId: 's-gone', mic: 'DI box' } }]));
+    expect(byId(resent.next.inputs, 'in-3')).toMatchObject({ slotId: 's-gone', needsReview: true });
+    expect(resent.summary.inputs.patched[0].changes.map((c) => c.field)).toEqual(['mic']);
+
     // An unflagged row gains no flag — a phantom `needsReview: false` would show on the card.
     const relinked = accepted(planChanges(band(), [{ entity: 'inputs', action: 'patch', id: 'in-6', values: { slotId: 's-ray' } }]));
     expect(byId(relinked.next.inputs, 'in-6')).not.toHaveProperty('needsReview');
@@ -244,6 +252,24 @@ describe('planChanges — mix numbers are aux numbers (design-core-path-tier1 §
       ]),
     );
     expect(problems[0].message).toBe('it changes Mix 1 to Mix 2 — renumber a mix in the Monitor Mixes table, which moves its performers with it');
+  });
+
+  it('setting the number of a mix ADDED in this batch is not a renumber (Codex R1 on #194)', () => {
+    const { next } = accepted(
+      planChanges(band(), [
+        { entity: 'monitors', action: 'add', tempId: 'new:keys', values: { name: 'Keys', needs: '' } },
+        { entity: 'monitors', action: 'patch', id: 'new:keys', values: { mix: 5 } },
+        { entity: 'stagePlot', action: 'add', values: { name: 'Jo', pos: 'MSR', role: 'Keys', mix: 5 } },
+      ]),
+    );
+    expect(next.monitors.at(-1)!.mix).toBe(5);
+    // Still subject to the collision rule.
+    expect(
+      refused(planChanges(band(), [
+        { entity: 'monitors', action: 'add', tempId: 'new:keys', values: { mix: 5, name: 'Keys', needs: '' } },
+        { entity: 'monitors', action: 'patch', id: 'new:keys', values: { mix: 2 } },
+      ]))[0].message,
+    ).toBe('Mix 2 already exists');
   });
 
   it('a patch that re-sends the SAME mix number is not a renumber', () => {

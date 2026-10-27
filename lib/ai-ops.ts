@@ -180,11 +180,13 @@ export function planChanges<C extends ShowLists>(
   });
   if (problems.length > 0) return { ok: false, problems };
 
-  // Pass 2 — apply in order to working copies.
+  // Pass 2 — apply in order to copies of the ARRAYS. Rows are never mutated:
+  // a patch replaces its row with a merged copy, so a row no op names keeps its
+  // object identity in `next` (O1, held by reference, not just by value).
   const lists = {
-    stagePlot: config.stagePlot.map((r) => ({ ...r })) as Row[],
-    inputs: config.inputs.map((r) => ({ ...r })) as Row[],
-    monitors: config.monitors.map((r) => ({ ...r })) as Row[],
+    stagePlot: [...config.stagePlot] as unknown as Row[],
+    inputs: [...config.inputs] as unknown as Row[],
+    monitors: [...config.monitors] as unknown as Row[],
   };
   const added: Record<OpEntity, Set<string>> = { stagePlot: new Set(), inputs: new Set(), monitors: new Set() };
   const touched: Record<OpEntity, Map<string, number>> = { stagePlot: new Map(), inputs: new Map(), monitors: new Map() };
@@ -246,8 +248,10 @@ export function planChanges<C extends ShowLists>(
     // moves its performers with it (design-core-path-tier1 §3.6 item 5). A swap
     // of Mix 1 and Mix 2 would pass every post-batch reference check — both
     // numbers still exist — and silently put each performer on the other's
-    // wedge. Refused, with the recovery named.
-    if (op.entity === 'monitors' && 'mix' in values && values.mix !== row.mix) {
+    // wedge. Refused, with the recovery named. A monitor ADDED in this batch has
+    // no performers routed to it yet, so setting its number is not a renumber
+    // (Codex R1 on #194); a collision is still caught in pass 5.
+    if (op.entity === 'monitors' && 'mix' in values && values.mix !== row.mix && !added.monitors.has(row.id)) {
       problems.push({
         op: i,
         message: `it changes Mix ${String(row.mix)} to Mix ${String(values.mix)} — renumber a mix in the Monitor Mixes table, which moves its performers with it`,
@@ -257,8 +261,10 @@ export function planChanges<C extends ShowLists>(
     // Re-linking a flagged input resolves its flag, exactly as the manual
     // relink does (the Position dropdown sets `needsReview: false`). Only a
     // flagged row: writing `false` onto one that never had the flag would show
-    // as a phantom change on the card.
-    if (op.entity === 'inputs' && 'slotId' in values && !('needsReview' in values) && row.needsReview) {
+    // as a phantom change on the card. Only a CHANGED link: re-sending the same
+    // dangling slotId resolves nothing, and clearing the flag would describe a
+    // change `withStableIds` reverts on apply (Codex R1 NIT on #194).
+    if (op.entity === 'inputs' && 'slotId' in values && values.slotId !== row.slotId && !('needsReview' in values) && row.needsReview) {
       values.needsReview = false;
     }
     list[idx] = mergePatch(row, values);
