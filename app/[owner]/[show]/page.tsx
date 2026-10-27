@@ -3735,6 +3735,12 @@ function ChartNavigator({
       setConvertState('gated');
       return;
     }
+    // Nothing to convert with, or the owner's own key refused: Settings fixes it,
+    // a retry cannot (§13.6 Q6).
+    if (result && !result.generated && (result.reason === 'no_key' || result.reason === 'key_rejected')) {
+      setConvertState(result.reason);
+      return;
+    }
     if (buildOverlayStep(result) === 'failed') {
       setConvertState('error');
       return;

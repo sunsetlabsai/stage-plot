@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { SYSTEM_PROMPT, TOOLS } from '@/lib/agent';
 import { parseContentLength } from '@/lib/http-headers';
-import { resolveKeyMode, getClientIp } from '@/lib/agent-key';
+import { resolveKeyMode, getClientIp, bearerKey } from '@/lib/agent-key';
 import { getSupabaseServer } from '@/lib/supabase-server';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Determine auth mode
-  const clientKey = request.headers.get('authorization')?.replace('Bearer ', '');
+  const clientKey = bearerKey(request.headers);
   const ip = getClientIp(request.headers);
 
   // The account-stored key (§4.5) is only consulted when the request did not

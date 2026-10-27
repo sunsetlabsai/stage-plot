@@ -22,6 +22,11 @@ const state = {
   existingRow: null as null | { chart_id: string },
   role: 'guitar',
   sourceSpec: null as unknown,
+  /** What the shared key resolver answers (design-ai-key-availability §13.4). */
+  key: { mode: 'tryit', apiKey: 'sk-test', model: 'm', maxTokens: 1, remaining: 9 } as Record<string, unknown>,
+  keyCalls: [] as { auth: string | null; userId: string }[],
+  /** Thrown by the vision call instead of returning, when set. */
+  visionError: null as unknown,
 };
 
 vi.mock('@/lib/supabase-server', () => ({
@@ -58,12 +63,18 @@ vi.mock('@/lib/supabase-admin', () => ({
   }),
 }));
 
-vi.mock('@/lib/admin-config', () => ({ getAdminConfig: async () => 'sk-test' }));
+vi.mock('@/lib/agent-key', () => ({
+  resolveChartKey: async (req: { headers: Headers }, userId: string) => {
+    state.keyCalls.push({ auth: req.headers.get('authorization'), userId });
+    return state.key;
+  },
+}));
 
 vi.mock('@/lib/chart-vision', () => ({
   VISION_TIMEOUT_MS: 50_000,
   extractChartVision: async () => {
     state.visionCalls++;
+    if (state.visionError) throw state.visionError;
     return {
       // Deliberately DIFFERENT geometry from the measured payload, so which one got
       // installed is decidable from the stored row rather than by inspection.
@@ -77,6 +88,7 @@ vi.mock('@/lib/chart-vision', () => ({
 
 const { POST } = await import('@/app/api/charts/convert/route');
 const { hashPdfBytes } = await import('@/lib/chart-calibration');
+const Anthropic = (await import('@anthropic-ai/sdk')).default;
 
 const CHART_ID = '11111111-2222-4333-8444-555555555555';
 const REAL_HASH = await hashPdfBytes(PDF);
@@ -112,6 +124,9 @@ beforeEach(() => {
   state.existingRow = null;
   state.role = 'guitar';
   state.sourceSpec = null;
+  state.key = { mode: 'tryit', apiKey: 'sk-test', model: 'm', maxTokens: 1, remaining: 9 };
+  state.keyCalls = [];
+  state.visionError = null;
 });
 
 describe('the legacy request is untouched', () => {
@@ -233,5 +248,45 @@ describe('the roadmap-presence branch', () => {
     });
     expect(res.status).toBe(200);
     expect(graph().systems[0].yTop).toBe(0.5);
+  });
+});
+
+// UAT S15 / design-ai-key-availability §13: the converter resolves its key like the
+// AI tab — device, account, try-it — and a missing key is its own reason, not
+// `failed`, because nothing was attempted and Settings can fix it (§13.6 Q6).
+describe('the key comes from the shared resolver (UAT S15)', () => {
+  const authError = () => new Anthropic.AuthenticationError(401, { type: 'error' }, 'invalid x-api-key', new Headers());
+
+  it('resolves for the signed-in owner, after every gate, and converts with that key', async () => {
+    const res = await post({ chart_id: CHART_ID });
+    expect(await res.json()).toMatchObject({ generated: true });
+    expect(state.keyCalls).toEqual([{ auth: null, userId: 'owner-1' }]);
+  });
+
+  it('a gated chart never reaches the resolver, so no quota is spent on it', async () => {
+    state.sourceSpec = { version: 1 }; // a builder chart: the `authored` never-gate
+    const res = await post({ chart_id: CHART_ID });
+    expect(await res.json()).toMatchObject({ generated: false, reason: 'authored' });
+    expect(state.keyCalls).toHaveLength(0);
+  });
+
+  it.each(['unconfigured', 'exhausted'])('%s ⇒ no_key, and no vision call', async (mode) => {
+    state.key = { mode };
+    const res = await post({ chart_id: CHART_ID });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ generated: false, reason: 'no_key' });
+    expect(state.visionCalls).toBe(0);
+    expect(state.inserted).toBeNull();
+  });
+
+  it("the owner's own key rejected ⇒ key_rejected (theirs to fix in Settings)", async () => {
+    state.key = { mode: 'byoa', source: 'device', apiKey: 'sk-bad', model: 'm', maxTokens: 1 };
+    state.visionError = authError();
+    expect(await (await post({ chart_id: CHART_ID })).json()).toEqual({ generated: false, reason: 'key_rejected' });
+  });
+
+  it('the PLATFORM key rejected stays failed — ours to fix, not the owner\'s', async () => {
+    state.visionError = authError();
+    expect(await (await post({ chart_id: CHART_ID })).json()).toEqual({ generated: false, reason: 'failed' });
   });
 });

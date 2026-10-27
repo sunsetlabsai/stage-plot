@@ -58,6 +58,8 @@ import { pickBarsPerLine, chunkIntoLines, lineStartNumbers } from '@/lib/roadmap
 import { slashBeats } from '@/lib/roadmap-rhythm';
 import { chartShareFilename } from '@/lib/share';
 import ShareButton from '@/components/ShareButton';
+import { chartKeyHeaders } from '@/lib/chart-key-headers';
+import { SETTINGS_HREF, isChartKeyReason } from '@/lib/chart-key-copy';
 
 // ── Roadmap Builder — describe a song's structure, render an exact chart ─────
 // Full-screen overlay launched from ManageChartsModal. Compose (big prompt) →
@@ -106,11 +108,18 @@ function KeyOptions({ current }: { current?: string }) {
 // set state that nothing displayed: the button flipped back and the chart sat
 // unchanged, indistinguishable from "the click did nothing". One component now, and
 // both call sites render it.
-function ParseErrors({ error, specErrors }: { error: string; specErrors: string[] }) {
+function ParseErrors({ error, keyFix, specErrors }: { error: string; keyFix: boolean; specErrors: string[] }) {
   if (!error && specErrors.length === 0) return null;
   return (
     <div className="mt-3 text-sm text-amber-400 space-y-0.5">
       {error && <p>{error}</p>}
+      {/* A key problem is the user's to fix, so the message comes with the way to
+          fix it (§13.5). A new tab: the builder holds an unsaved description. */}
+      {error && keyFix && (
+        <a href={SETTINGS_HREF} target="_blank" rel="noopener noreferrer" className="inline-block font-semibold text-white underline hover:text-zinc-300">
+          Open Settings →
+        </a>
+      )}
       {specErrors.length > 0 && (
         <>
           <p>The description was understood but produced an invalid chart:</p>
@@ -168,6 +177,8 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
   const [view, setView] = useState<ViewModel | null>(editChart ? specToView(editChart.spec) : null);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
+  // The error is a key problem (none, used up, or rejected) — fixable in Settings.
+  const [keyFix, setKeyFix] = useState(false);
   const [specErrors, setSpecErrors] = useState<string[]>([]);
   const [tally, setTally] = useState<string[]>([]); // L4 read-back echo
 
@@ -182,12 +193,14 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
     if (reset && view && !confirm('Regenerate will replace your manual edits. Continue?')) return;
     setGenerating(true);
     setError('');
+    setKeyFix(false);
     setSpecErrors([]);
     setTally([]);
     try {
       const res = await fetch('/api/charts/roadmap/parse', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // The device key, if any, so the parse can use the owner's own key (§13.4.2).
+        headers: { 'Content-Type': 'application/json', ...(await chartKeyHeaders()) },
         body: JSON.stringify({
           description: text,
           key: uiKey || undefined,
@@ -198,6 +211,7 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(data.error || 'Could not reach the parser.');
+        setKeyFix(isChartKeyReason(data.reason));
         return;
       }
       if (Array.isArray(data.tally)) setTally(data.tally);
@@ -240,6 +254,7 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
           setComposeKey={setComposeKey}
           generating={generating}
           error={error}
+          keyFix={keyFix}
           specErrors={specErrors}
           tally={tally}
           onGenerate={() => generate(false, composeKey)}
@@ -255,6 +270,7 @@ export default function RoadmapBuilder({ songTitle, charts, editChart, onClose, 
           setDescription={setDescription}
           generating={generating}
           error={error}
+          keyFix={keyFix}
           specErrors={specErrors}
           tally={tally}
           onRegenerate={() => generate(true, view.renderKey, true)}
@@ -273,6 +289,7 @@ function Compose({
   setComposeKey,
   generating,
   error,
+  keyFix,
   specErrors,
   tally,
   onGenerate,
@@ -283,6 +300,7 @@ function Compose({
   setComposeKey: (v: string) => void;
   generating: boolean;
   error: string;
+  keyFix: boolean;
   specErrors: string[];
   tally: string[];
   onGenerate: () => void;
@@ -310,7 +328,7 @@ function Compose({
           placeholder="e.g. 4/4 in G. 4-bar intro on the 1, 8-bar verse (4 of 1, 2 of 4, then 5) played twice, 8-bar chorus with 1st and 2nd endings, an 8-bar solo, then a 4-bar outro…"
           className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-3 text-base text-white outline-none focus:border-blue-500 resize-none leading-relaxed"
         />
-        <ParseErrors error={error} specErrors={specErrors} />
+        <ParseErrors error={error} keyFix={keyFix} specErrors={specErrors} />
         {tally.length > 0 && <ReadBack tally={tally} defaultOpen />}
         <div className="flex items-center justify-between mt-4">
           <label className="inline-flex items-center gap-2 text-xs text-zinc-500">
@@ -348,6 +366,7 @@ function Review({
   setDescription,
   generating,
   error,
+  keyFix,
   specErrors,
   tally,
   onRegenerate,
@@ -362,6 +381,7 @@ function Review({
   setDescription: (v: string) => void;
   generating: boolean;
   error: string;
+  keyFix: boolean;
   specErrors: string[];
   tally: string[];
   onRegenerate: () => void;
@@ -613,9 +633,9 @@ function Review({
         >
           {generating ? 'Generating…' : 'Regenerate'}
         </button>
-        <ParseErrors error={error} specErrors={specErrors} />
+        <ParseErrors error={error} keyFix={keyFix} specErrors={specErrors} />
         <p className="text-[11px] text-zinc-600">
-          Tip: click a bar — &ldquo;1&rdquo; or &ldquo;IV&rdquo; for a whole bar, &ldquo;5 4&rdquo; to
+          Tip: tap or click a bar — &ldquo;1&rdquo; or &ldquo;IV&rdquo; for a whole bar, &ldquo;5 4&rdquo; to
           split evenly, &ldquo;1 - 4 5&rdquo; to tie (2 of 1, then 4, then 5). The buttons under an
           open bar split it into one bar per chord, insert a bar, delete it, or put a marker (Segno,
           Coda, Fine, D.S./D.C.) on it.
@@ -632,6 +652,12 @@ function Review({
           renderKey={view.renderKey}
           setRenderKey={(k) => setView((prev) => (prev ? { ...prev, renderKey: k } : prev))}
         />
+        {/* Next to the chart, not only in the side panel's tip: chord entry is
+            tapping a bar, and nothing else on the sheet says so (UAT S16, #173). */}
+        <p className="text-xs text-zinc-400">
+          Tap or click any bar to enter chords — e.g. <span className="font-mono text-zinc-300">1</span>,{' '}
+          <span className="font-mono text-zinc-300">5 4</span>, <span className="font-mono text-zinc-300">1 - 4 5</span>
+        </p>
         <ChartSheet
           title={songTitle}
           renderKey={view.renderKey}
@@ -1351,7 +1377,10 @@ function Measure({
       )}
       <div className="h-5 flex items-stretch">
         {isEditing ? null : cells.length === 0 ? (
-          <span className="flex-1 text-transparent group-hover:text-zinc-300 text-xs text-center">＋</span>
+          // The ＋ is the only cue an empty bar is editable. Tailwind gates
+          // group-hover behind (hover: hover), so on a phone it never showed:
+          // pointer-coarse keeps it visible there (UAT S16, #173).
+          <span className="flex-1 text-transparent group-hover:text-zinc-300 pointer-coarse:text-zinc-300 text-xs text-center">＋</span>
         ) : (
           cells.map((c, i) => (
             <span

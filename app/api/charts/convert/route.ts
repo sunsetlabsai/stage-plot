@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 import { getSupabaseServer } from '@/lib/supabase-server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
-import { getAdminConfig } from '@/lib/admin-config';
+import { resolveChartKey } from '@/lib/agent-key';
 import { hashPdfBytes, isValidCalibration } from '@/lib/chart-calibration';
 import {
   MAX_PDF_BYTES,
@@ -166,13 +166,14 @@ export async function POST(request: NextRequest) {
   //     pages and incomplete geometry fall through to the VLM instead.
   if (measured && measuredDisposition(measured) === 'gated') return degrade('not_notation');
 
-  // 6. Resolve the Anthropic key from the SAME source as the agent-assist route
-  //    (Redis admin:claude_tryit_key, env CLAUDE_TRYIT_KEY fallback) so the
-  //    converter reuses the already-provisioned platform key — no separate
-  //    ANTHROPIC_API_KEY env needed. (Per-owner BYOA resolves here later.)
-  //    Unconfigured key ⟹ degrade to manual, never error.
-  const apiKey = await getAdminConfig('claude_tryit_key');
-  if (!apiKey) return degrade('failed');
+  // 6. Resolve the key exactly as the AI tab does — device, account, then try-it
+  //    with its quota (design-ai-key-availability §13.4). Last, after every gate,
+  //    so no quota is spent on a call the gates would have saved. No key ⟹
+  //    degrade to manual with `no_key`, never `failed`: nothing was attempted, and
+  //    the user can fix it in Settings (§13.6 Q6).
+  const resolved = await resolveChartKey(request, user.id);
+  if (resolved.mode === 'unconfigured' || resolved.mode === 'exhausted') return degrade('no_key');
+  const apiKey = resolved.apiKey;
 
   // 7. Vision extract, aborted under maxDuration so we degrade rather than 504.
   const controller = new AbortController();
@@ -187,6 +188,9 @@ export async function POST(request: NextRequest) {
     // An over-limit PDF (too many pages for the vision API) surfaces as a 400 →
     // too_large; anything else (timeout, transport, auth) is a generic failure.
     if (err instanceof Anthropic.BadRequestError) return degrade('too_large');
+    // The user's OWN key rejected is theirs to fix in Settings; a rejected
+    // platform key is ours, and stays `failed` with the cause in the log.
+    if (resolved.mode === 'byoa' && err instanceof Anthropic.AuthenticationError) return degrade('key_rejected');
     return degrade('failed');
   } finally {
     clearTimeout(timer);

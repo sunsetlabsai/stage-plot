@@ -467,3 +467,58 @@ describe('getClientIp', () => {
     });
   });
 });
+
+// UAT S15 / design-ai-key-availability §13.4.1: the chart routes resolve through the
+// same resolver as the AI tab. These pin the two things resolveChartKey adds.
+describe('resolveChartKey — the chart routes share the AI tab resolver', () => {
+  const req = (auth?: string, account?: string) => ({
+    headers: new Headers({ ...(auth ? { authorization: auth } : {}), ...(account ? { 'x-showrunr-key-account': account } : {}) }),
+  });
+
+  it('a device key bound to the signed-in user wins, with no account lookup and no quota', async () => {
+    secretsBackend.keys.set('owner-1', 'sk-ant-account-key-value');
+    const { resolveChartKey } = await agentKey();
+    const r = await resolveChartKey(req('Bearer sk-ant-device', 'owner-1'), 'owner-1');
+    expect(r.mode === 'byoa' && r.apiKey).toBe('sk-ant-device');
+    expect(secretsBackend.calls).toBe(0);
+    expect(quotaBackend.calls).toBe(0);
+  });
+
+  it('no header ⇒ the signed-in user\'s account key', async () => {
+    secretsBackend.keys.set('owner-1', 'sk-ant-account-key-value');
+    const { resolveChartKey } = await agentKey();
+    const r = await resolveChartKey(req(), 'owner-1');
+    expect(r.mode === 'byoa' && r.source).toBe('account');
+  });
+
+  // ★ Codex R1 on #199: A's tab reads A's key, a sign-in in another tab switches the
+  // cookie to B, and the request authenticates as B. A's key must not be spent.
+  it("★ a device key read for ANOTHER account is ignored — B's request never spends A's key", async () => {
+    secretsBackend.keys.set('user-b', 'sk-ant-b-account');
+    const { resolveChartKey } = await agentKey();
+    const r = await resolveChartKey(req('Bearer sk-ant-a-device', 'user-a'), 'user-b');
+    expect(r.mode === 'byoa' && r.apiKey).toBe('sk-ant-b-account');
+  });
+
+  it('a device key naming no account is ignored too (fail closed)', async () => {
+    const { resolveChartKey } = await agentKey();
+    const r = await resolveChartKey(req('Bearer sk-ant-device'), 'owner-1');
+    expect(r.mode).toBe('unconfigured');
+  });
+
+  it('the client names the account under the header the server reads', async () => {
+    const { KEY_ACCOUNT_HEADER } = await agentKey();
+    const { deviceKeyHeaders } = await import('../lib/byoa-key-storage');
+    const mem = new Map([['showrunr-claude-key:u1', 'sk-x']]);
+    const st = { getItem: (k: string) => mem.get(k) ?? null, setItem: () => {}, removeItem: () => {} };
+    const empty = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+    expect(new Headers(deviceKeyHeaders(st, empty, 'u1')).get(KEY_ACCOUNT_HEADER)).toBe('u1');
+  });
+
+  it('an empty "Bearer " is no key (Headers trims it to "Bearer")', async () => {
+    const { bearerKey } = await agentKey();
+    expect(bearerKey(new Headers({ authorization: 'Bearer ' }))).toBeUndefined();
+    expect(bearerKey(new Headers())).toBeUndefined();
+    expect(bearerKey(new Headers({ authorization: 'Bearer sk-x' }))).toBe('sk-x');
+  });
+});
