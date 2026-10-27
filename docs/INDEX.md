@@ -114,7 +114,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 |---|---|---|
 | `design-agent-codesigner.md` | SHIPPED-RECORD | Zone grid + BYOA/try-it modes (`lib/agent.ts:7-18`). |
 | `design-core-path-tier1.md` | SHIPPED-RECORD | §1 shipped (#144). §2 superseded by `design-ai-op-contract.md`. §3 mix identity shipped (`lib/setlist.ts` `renumberMix`; §3.6 lists choices made while building). |
-| `design-ai-op-contract.md` | UNBUILT-DESIGN | No op type, no applier. Full-replace path still live (`page.tsx:5588`). |
+| `design-ai-op-contract.md` | PARTIAL | Steps 0–1 shipped (#147–#149). Step 2 `planChanges` built (`lib/ai-ops.ts`) but **not wired** — the full-replace tools and the `update_stage_plot` cascade are still live (`page.tsx:5629`). Steps 3–4 unbuilt. §14 records choices made while building. |
 
 ## Show, setlist, inputs, sharing
 

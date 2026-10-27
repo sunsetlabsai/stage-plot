@@ -8,6 +8,16 @@ import type { SetlistSong, StagePosition, StageSlot, InputChannel, MonitorMix } 
  */
 export const MONITOR_TYPES = ['Wedge', 'IEM', 'Side-fill', 'Drum fill', 'None'] as const;
 
+/**
+ * The stage positions the plot can RENDER — the 3×3 grid. Narrower than
+ * `StagePosition`, which also carries `PIT`/`FOH`/`OTHER`: the UI can neither
+ * create nor draw those, so a slot holding one silently vanishes from the plot.
+ * One definition for the editor's `<select>`, the AI tool schema and the AI
+ * validator (design-ai-op-contract §5.3 (a)) — a duplicated list is how the
+ * Drive-export regression on #144 happened.
+ */
+export const POSITIONS: readonly StagePosition[] = ['USR', 'USC', 'USL', 'MSR', 'MSC', 'MSL', 'DSR', 'DSC', 'DSL'];
+
 // ── Stage-plot grouping / derivation (multi-occupant blocks) ──────────────
 
 // Group slots by stage position, preserving stable insertion (array) order within

@@ -1,6 +1,8 @@
 // Agent codesigner — system prompt, tool definitions, and types
 // See docs/design-agent-codesigner.md for full design
 
+import { POSITIONS } from './setlist';
+
 export const SYSTEM_PROMPT = `You are a live sound engineer and stage manager assistant. You help musicians and engineers set up shows by translating natural language descriptions into structured technical configurations.
 
 You understand:
@@ -46,7 +48,7 @@ Always use the provided tools to make changes. Never just describe what you woul
 
 The current show configuration is provided in each message. Build on what exists rather than starting over, unless the user asks for a fresh start.`;
 
-const POS_ENUM = ['USR', 'USC', 'USL', 'MSR', 'MSC', 'MSL', 'DSR', 'DSC', 'DSL'];
+const POS_ENUM = [...POSITIONS];
 
 export const TOOLS = [
   {
