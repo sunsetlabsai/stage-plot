@@ -1,6 +1,6 @@
 # Version-checked show save (UAT S5, and S3 rebuilt on it)
 
-**Status:** DESIGN — Q1–Q5 ruled by Graham 2026-10-27 (§10); Codex R1–R4 folded, R5 answered by §4.0 (Q5 ruled) (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R5. Nothing here is built.
+**Status:** DESIGN, approved — Q1–Q5 ruled by Graham 2026-10-27 (§10); Codex R1–R5 folded (§3.1, §3.3–§3.6, §4.0, §4.2, §4.2a, §7); Codex R6 = GO. Nothing here is built.
 **Supersedes:** the client-side reconcile in PR #200 (`lib/offline-sync.ts` `reconcileOnLoad`,
 the set-aside store and its Restore/Discard banner, the page's reconnect effect). #200's S2 (offline owner editing) and S4 (flush on page hide)
 stand; its S3 is rebuilt on §3–§5 once this merges.
