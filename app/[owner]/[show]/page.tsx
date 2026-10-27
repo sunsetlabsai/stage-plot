@@ -38,7 +38,7 @@ import type {
   Bar,
   RoadmapMarker,
 } from '@/lib/types';
-import { moveSetlistSong, moveInput, moveMonitor, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES } from '@/lib/setlist';
+import { moveSetlistSong, moveInput, nextMixNumber, renumberMix, validateMonitors, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
@@ -255,20 +255,35 @@ function mixColor(mix: number): string {
 
 // Shared occupant chip — name, role, per-mix MIX badge, ×n inputs badge, power.
 // `featured` styles the chip (not the cell). `grip` is the drag handle (config view only).
+// `monitors` is required, not optional: the MIX badge is checked against it so a
+// rider never prints a confident "MIX 7" for a mix the monitor section does not
+// list (design-core-path-tier1 §3.5) — on screen AND in print.
 function OccupantChip({
   slot,
   indexInBlock,
   inputCount,
+  monitors,
   grip,
 }: {
   slot: StageSlot;
   indexInBlock: number;
   inputCount: number;
+  monitors: MonitorMix[];
   grip?: ReactNode;
 }) {
   const featured = slot.featured;
   const badges: ReactNode[] = [];
-  if (slot.mix) {
+  if (slot.mix && isOrphanedMix(slot.mix, monitors)) {
+    badges.push(
+      <span
+        key="mix"
+        className="px-1.5 py-0.5 bg-amber-100 text-amber-800 border border-amber-400 rounded text-[9px] font-bold"
+        title={`Mix ${slot.mix} is not in the monitor list — reassign this performer`}
+      >
+        &#9888; MIX {slot.mix} REMOVED
+      </span>
+    );
+  } else if (slot.mix) {
     badges.push(
       <span key="mix" className={`px-1.5 py-0.5 ${mixColor(slot.mix)} text-white rounded text-[9px] font-bold`}>MIX {slot.mix}</span>
     );
@@ -1228,7 +1243,7 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, is
 
 // Read-only / print container cell: TLA header + occupant count, stacked chips
 // (stable insertion order), or "empty".
-function StageSlotCell({ pos, slots, inputs }: { pos: StagePosition; slots: StageSlot[]; inputs: InputChannel[] }) {
+function StageSlotCell({ pos, slots, inputs, monitors }: { pos: StagePosition; slots: StageSlot[]; inputs: InputChannel[]; monitors: MonitorMix[] }) {
   const count = slots.length;
   return (
     <div className="rounded-lg border-2 border-dashed border-blue-100 bg-blue-50/30 overflow-hidden">
@@ -1243,7 +1258,7 @@ function StageSlotCell({ pos, slots, inputs }: { pos: StagePosition; slots: Stag
           <p className="text-[10px] text-gray-300 italic text-center py-1">empty</p>
         ) : (
           slots.map((s, i) => (
-            <OccupantChip key={s.id ?? i} slot={s} indexInBlock={i} inputCount={countLinkedInputs(s.id, inputs)} />
+            <OccupantChip key={s.id ?? i} slot={s} indexInBlock={i} inputCount={countLinkedInputs(s.id, inputs)} monitors={monitors} />
           ))
         )}
       </div>
@@ -1254,7 +1269,7 @@ function StageSlotCell({ pos, slots, inputs }: { pos: StagePosition; slots: Stag
 function StagePlotView({ band }: { band: BandConfig }) {
   const byPos = groupByPos(band.stagePlot);
   const cell = (pos: StagePosition) => (
-    <StageSlotCell key={pos} pos={pos} slots={byPos.get(pos) ?? []} inputs={band.inputs} />
+    <StageSlotCell key={pos} pos={pos} slots={byPos.get(pos) ?? []} inputs={band.inputs} monitors={band.monitors} />
   );
   const hasMidStage = (['MSR', 'MSC', 'MSL'] as StagePosition[]).some((p) => byPos.has(p));
 
@@ -1296,7 +1311,7 @@ function StagePlotView({ band }: { band: BandConfig }) {
 // One draggable occupant chip — the grip is the drag handle (id `drag-${slot.id}`,
 // so input links survive a reposition). Dimmed while dragging; the moving copy is
 // rendered in the DragOverlay.
-function DraggableOccupantChip({ slot, indexInBlock, inputCount }: { slot: StageSlot; indexInBlock: number; inputCount: number }) {
+function DraggableOccupantChip({ slot, indexInBlock, inputCount, monitors }: { slot: StageSlot; indexInBlock: number; inputCount: number; monitors: MonitorMix[] }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `drag-${slot.id}`,
     disabled: !slot.id,
@@ -1315,7 +1330,7 @@ function DraggableOccupantChip({ slot, indexInBlock, inputCount }: { slot: Stage
   );
   return (
     <div className={isDragging ? 'opacity-30' : ''}>
-      <OccupantChip slot={slot} indexInBlock={indexInBlock} inputCount={inputCount} grip={grip} />
+      <OccupantChip slot={slot} indexInBlock={indexInBlock} inputCount={inputCount} monitors={monitors} grip={grip} />
     </div>
   );
 }
@@ -1326,11 +1341,13 @@ function DraggableStageCell({
   pos,
   slots,
   inputs,
+  monitors,
   onAddOccupant,
 }: {
   pos: StagePosition;
   slots: StageSlot[];
   inputs: InputChannel[];
+  monitors: MonitorMix[];
   onAddOccupant: (pos: StagePosition) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `drop-${pos}` });
@@ -1350,7 +1367,7 @@ function DraggableStageCell({
       </div>
       <div className="p-1.5 space-y-1">
         {slots.map((s, i) => (
-          <DraggableOccupantChip key={s.id ?? i} slot={s} indexInBlock={i} inputCount={countLinkedInputs(s.id, inputs)} />
+          <DraggableOccupantChip key={s.id ?? i} slot={s} indexInBlock={i} inputCount={countLinkedInputs(s.id, inputs)} monitors={monitors} />
         ))}
         <button
           type="button"
@@ -1367,11 +1384,13 @@ function DraggableStageCell({
 function DraggableStagePlotView({
   stagePlot,
   inputs,
+  monitors,
   onMove,
   onAddOccupant,
 }: {
   stagePlot: StageSlot[];
   inputs: InputChannel[];
+  monitors: MonitorMix[];
   onMove: (slotId: string, toPos: StagePosition) => void;
   onAddOccupant: (pos: StagePosition) => void;
 }) {
@@ -1400,7 +1419,7 @@ function DraggableStagePlotView({
   };
 
   const cell = (pos: StagePosition) => (
-    <DraggableStageCell key={pos} pos={pos} slots={byPos.get(pos) ?? []} inputs={inputs} onAddOccupant={onAddOccupant} />
+    <DraggableStageCell key={pos} pos={pos} slots={byPos.get(pos) ?? []} inputs={inputs} monitors={monitors} onAddOccupant={onAddOccupant} />
   );
 
   return (
@@ -1430,7 +1449,7 @@ function DraggableStagePlotView({
       </div>
       <DragOverlay>
         {activeSlot && (
-          <OccupantChip slot={activeSlot} indexInBlock={0} inputCount={countLinkedInputs(activeSlot.id, inputs)} />
+          <OccupantChip slot={activeSlot} indexInBlock={0} inputCount={countLinkedInputs(activeSlot.id, inputs)} monitors={monitors} />
         )}
       </DragOverlay>
       <p className="text-[10px] text-gray-400 text-center mt-2">Drag a chip by its grip to reposition</p>
@@ -1557,8 +1576,8 @@ export function MixTab({ band, setlist, printSections, showInfo, isOffline, acce
               Monitor Mixes
             </h2>
             <div className="space-y-4">
-              {band.monitors.map((m) => (
-                <div key={m.mix} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
+              {sortMonitorsByMix(band.monitors).map((m) => (
+                <div key={m.id ?? m.mix} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
                   <h3 className="font-bold flex items-center gap-2">
                     <span className="text-blue-600">Mix {m.mix}:</span> {m.name}
                     {/* Legacy mixes have no type — render nothing rather than
@@ -5128,66 +5147,43 @@ function SortableInputRow({
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// SORTABLE MONITOR TABLE (Config tab)
+// MONITOR TABLE (Config tab)
 // ════════════════════════════════════════════════════════════════════════════
 
-function SetupMonitorTable({
-  monitors, onReorder, onUpdate, onDelete, onAdd,
+// No drag, no ↑/↓: a mix number is an aux number, and you do not renumber a
+// console aux by dragging a row (design-core-path-tier1 §3.2). Rows render in
+// aux order and are addressed by id, never by array index — the index of a
+// sorted row is not its index in config.monitors.
+export function SetupMonitorTable({
+  monitors, onRenumber, onUpdate, onDelete, onAdd,
 }: {
-  monitors: import('@/lib/types').MonitorMix[];
-  onReorder: (from: number, to: number) => void;
-  onUpdate: (idx: number, field: string, value: string) => void;
-  onDelete: (idx: number) => void;
+  monitors: MonitorMix[];
+  /** Returns null on success, or why it did not happen ('cancelled' = user said no). */
+  onRenumber: (from: number, to: number) => string | null;
+  onUpdate: (id: string, field: 'name' | 'needs' | 'type', value: string) => void;
+  onDelete: (monitor: MonitorMix) => void;
   onAdd: () => void;
 }) {
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
-  );
-  const monitorIds = monitors.map((mon) => mon.id!);
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    const from = monitorIds.indexOf(active.id as string);
-    const to = monitorIds.indexOf(over.id as string);
-    if (from !== -1 && to !== -1) onReorder(from, to);
-  };
-
   return (
     <>
-      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-        <SortableContext items={monitorIds} strategy={verticalListSortingStrategy}>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b">
-                  <th className="w-8"></th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-14">Mix #</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[140px]">Name</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[160px]">Needs</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-28">Type</th>
-                  <th className="w-16"></th>
-                  <th className="w-10"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {monitors.map((mon, idx) => (
-                  <SortableMonitorRow
-                    key={mon.id!}
-                    monitor={mon}
-                    idx={idx}
-                    total={monitors.length}
-                    onUpdate={onUpdate}
-                    onDelete={onDelete}
-                    onMoveUp={() => onReorder(idx, idx - 1)}
-                    onMoveDown={() => onReorder(idx, idx + 1)}
-                  />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </SortableContext>
-      </DndContext>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b">
+              <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-20">Mix #</th>
+              <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[140px]">Name</th>
+              <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[160px]">Needs</th>
+              <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-28">Type</th>
+              <th className="w-10"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortMonitorsByMix(monitors).map((mon) => (
+              <MonitorRow key={mon.id!} monitor={mon} onRenumber={onRenumber} onUpdate={onUpdate} onDelete={onDelete} />
+            ))}
+          </tbody>
+        </table>
+      </div>
       {/* One datalist for the whole table — the rows reference it by id. */}
       <datalist id="monitor-types">
         {MONITOR_TYPES.map((t) => <option key={t} value={t} />)}
@@ -5197,33 +5193,52 @@ function SetupMonitorTable({
   );
 }
 
-function SortableMonitorRow({
-  monitor: mon, idx, total, onUpdate, onDelete, onMoveUp, onMoveDown,
+function MonitorRow({
+  monitor: mon, onRenumber, onUpdate, onDelete,
 }: {
-  monitor: import('@/lib/types').MonitorMix;
-  idx: number;
-  total: number;
-  onUpdate: (idx: number, field: string, value: string) => void;
-  onDelete: (idx: number) => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
+  monitor: MonitorMix;
+  onRenumber: (from: number, to: number) => string | null;
+  onUpdate: (id: string, field: 'name' | 'needs' | 'type', value: string) => void;
+  onDelete: (monitor: MonitorMix) => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: mon.id! });
-  const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 };
+  // The Mix # is a draft until committed (blur / Enter): renumbering on every
+  // keystroke would route through "1" on the way to "12" and collide.
+  const [draft, setDraft] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const commit = () => {
+    if (draft === null) return;
+    const trimmed = draft.trim();
+    // Number('') is 0 and Number('2.5') is 2.5 — both rejected by renumberMix,
+    // which owns the rule; this only stops '' reading as a silent no-op.
+    const to = trimmed === '' ? NaN : Number(trimmed);
+    const reason = onRenumber(mon.mix, to);
+    setDraft(null);
+    setError(reason === 'cancelled' ? null : reason);
+  };
 
   return (
-    <tr ref={setNodeRef} style={style} className="border-b border-gray-100">
-      <td className="px-1 py-1 cursor-grab" {...attributes} {...listeners}>
-        <span className="text-gray-300 text-sm select-none">&#x2630;</span>
+    <tr className="border-b border-gray-100 align-top">
+      <td className="px-2 py-1">
+        <input
+          className={`${inputCls} font-mono w-16 ${error ? 'border-red-400 bg-red-50' : ''}`}
+          inputMode="numeric"
+          aria-label={`Mix number (currently ${mon.mix})`}
+          value={draft ?? String(mon.mix)}
+          onChange={(e) => { setDraft(e.target.value); setError(null); }}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur();
+            if (e.key === 'Escape') { setDraft(null); setError(null); }
+          }}
+        />
+        {error && <p className="text-[10px] text-red-600 mt-0.5" role="alert">{error}</p>}
       </td>
       <td className="px-2 py-1">
-        <span className="text-xs font-mono text-gray-400">{mon.mix}</span>
+        <input className={inputCls} value={mon.name} onChange={(e) => onUpdate(mon.id!, 'name', e.target.value)} />
       </td>
       <td className="px-2 py-1">
-        <input className={inputCls} value={mon.name} onChange={(e) => onUpdate(idx, 'name', e.target.value)} />
-      </td>
-      <td className="px-2 py-1">
-        <input className={inputCls} value={mon.needs} onChange={(e) => onUpdate(idx, 'needs', e.target.value)} />
+        <input className={inputCls} value={mon.needs} onChange={(e) => onUpdate(mon.id!, 'needs', e.target.value)} />
       </td>
       <td className="px-2 py-1">
         {/* Datalist, not a select: MONITOR_TYPES suggests, it does not constrain
@@ -5235,17 +5250,11 @@ function SortableMonitorRow({
           list="monitor-types"
           placeholder="Wedge"
           value={mon.type ?? ''}
-          onChange={(e) => onUpdate(idx, 'type', e.target.value)}
+          onChange={(e) => onUpdate(mon.id!, 'type', e.target.value)}
         />
       </td>
-      <td className="px-1 py-1">
-        <div className="flex flex-col items-center">
-          <button className={arrowBtn} disabled={idx === 0} onClick={onMoveUp} title="Move up">&uarr;</button>
-          <button className={arrowBtn} disabled={idx === total - 1} onClick={onMoveDown} title="Move down">&darr;</button>
-        </div>
-      </td>
       <td className="px-2 py-1">
-        <button className="px-2 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors" onClick={() => onDelete(idx)}>X</button>
+        <button className="px-2 py-1 text-xs text-red-600 hover:text-red-800 hover:bg-red-50 rounded transition-colors" onClick={() => onDelete(mon)}>X</button>
       </td>
     </tr>
   );
@@ -5571,7 +5580,10 @@ function AgentChat({
         break;
       case 'update_monitors':
         if (!Array.isArray(input.monitors)) return 'monitors must be an array';
-        break;
+        // Same rule the editor enforces (design-core-path-tier1 §3.3): a duplicate
+        // mix number would route two wedges to one aux. Refused before apply, so
+        // the config is untouched.
+        return validateMonitors(input.monitors as { mix?: unknown }[]);
       case 'update_setlist':
         if (!Array.isArray(input.setlist)) return 'setlist must be an array';
         break;
@@ -6420,6 +6432,7 @@ function ConfigTab({
             <DraggableStagePlotView
               stagePlot={config.stagePlot}
               inputs={config.inputs}
+              monitors={config.monitors}
               onMove={(slotId, toPos) => updateConfig((p) => ({
                 ...p,
                 // Re-parent only the dragged slot; its id rides along so input links
@@ -6462,8 +6475,9 @@ function ConfigTab({
                       />
                     </td>
                     <td className="px-2 py-1">
+                      <div className="flex items-center gap-1">
                       <select
-                        className={`${inputCls} px-1 text-center`}
+                        className={`${inputCls} px-1 text-center ${isOrphanedMix(slot.mix, config.monitors) ? 'border-amber-400 bg-amber-50' : ''}`}
                         value={slot.mix}
                         onChange={(e) =>
                           updateConfig((p) => {
@@ -6474,13 +6488,25 @@ function ConfigTab({
                         }
                       >
                         <option value={0}>&mdash;</option>
-                        {config.monitors.map((m) => (
+                        {sortMonitorsByMix(config.monitors).map((m) => (
                           <option key={m.id ?? m.mix} value={m.mix}>{m.mix}</option>
                         ))}
-                        {slot.mix > 0 && !config.monitors.some((m) => m.mix === slot.mix) && (
-                          <option value={slot.mix}>{slot.mix}</option>
+                        {/* Orphaned-mix (§3.4): shown flagged and disabled, so the
+                            user sees they WERE on Mix 7 rather than it reading as
+                            None. Disabled = cannot be re-picked once left. */}
+                        {isOrphanedMix(slot.mix, config.monitors) && (
+                          <option value={slot.mix} disabled>Mix {slot.mix} — removed</option>
                         )}
                       </select>
+                      {isOrphanedMix(slot.mix, config.monitors) && (
+                        <span
+                          className="text-amber-500 text-sm select-none"
+                          title={`Mix ${slot.mix} is not in the monitor list — pick a mix for this performer`}
+                        >
+                          &#9888;
+                        </span>
+                      )}
+                      </div>
                     </td>
                     <td className="px-2 py-1">
                       <select
@@ -6635,19 +6661,41 @@ function ConfigTab({
           <h2 className="text-lg font-bold mb-4">Monitor Mixes</h2>
           <SetupMonitorTable
             monitors={config.monitors}
-            onReorder={(from, to) => updateConfig((p) => ({ ...p, monitors: moveMonitor(p.monitors, from, to) }))}
-            onUpdate={(idx, field, value) => updateConfig((p) => {
-              const arr = [...p.monitors];
-              arr[idx] = { ...arr[idx], [field]: field === 'mix' ? Number(value) : value };
-              return { ...p, monitors: arr };
-            })}
-            onDelete={(idx) => updateConfig((p) => ({
+            onRenumber={(from, to) => {
+              // Validate against the rendered config first so a rejection is
+              // reported, never swallowed inside the updater (I8).
+              const check = renumberMix(config, from, to);
+              if (!check.ok) return check.reason;
+              if (from === to) return null;
+              // A renumber moves a group of performers — confirm and name them.
+              const prompt = renumberMixPrompt(config.stagePlot, from, to);
+              if (prompt && !window.confirm(prompt)) {
+                return 'cancelled';
+              }
+              updateConfig((p) => {
+                const r = renumberMix(p, from, to);
+                return r.ok ? r.config : p;
+              });
+              return null;
+            }}
+            onUpdate={(id, field, value) => updateConfig((p) => ({
               ...p,
-              monitors: p.monitors.filter((_, i) => i !== idx).map((mon, i) => ({ ...mon, mix: i + 1 })),
+              monitors: p.monitors.map((m) => (m.id === id ? { ...m, [field]: value } : m)),
             }))}
+            onDelete={(mon) => {
+              // Delete orphans, it does not cascade (§3.4): there is no aux to
+              // remap to, so performers on it keep their number and get flagged.
+              const prompt = deleteMixPrompt(config.stagePlot, mon.mix);
+              if (prompt && !window.confirm(prompt)) {
+                return;
+              }
+              updateConfig((p) => ({ ...p, monitors: p.monitors.filter((m) => m.id !== mon.id) }));
+            }}
             onAdd={() => updateConfig((p) => ({
               ...p,
-              monitors: [...p.monitors, { id: crypto.randomUUID(), mix: p.monitors.length + 1, name: '', needs: '' }],
+              // max + 1, not length + 1: sparse numbering ([1, 2, 5]) would collide;
+              // past orphaned slot mixes too, so a blank mix never adopts them.
+              monitors: [...p.monitors, { id: crypto.randomUUID(), mix: nextMixNumber(p.monitors, p.stagePlot), name: '', needs: '' }],
             }))}
           />
         </section>

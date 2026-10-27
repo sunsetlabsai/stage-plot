@@ -6,7 +6,7 @@
 |---|---|---|
 | **1** | §1 — loud failures (save error, PDF-only charts, title ownership) | **BUILT & MERGED**, PR #144 (`cfdc07c`), Codex R1 NOGO → R2 GO |
 | **2** | §2 — AI apply integrity | **⚠ SUPERSEDED — DO NOT BUILD.** Replaced by `docs/design-ai-op-contract.md`. §2.3 alone survives; see the notice at §2. |
-| **3** | §3 — mix identity | **NOT STARTED** |
+| **3** | §3 — mix identity | **BUILT**, branch `opus/b3-mix-identity` (UAT plan B3). Four choices the spec left open are in §3.6 |
 
 ★ **This block is load-bearing. Keep it current.** This project has already been
 burned once by the opposite: `docs/design-input-plot-linkage.md` sat at
@@ -516,6 +516,29 @@ list.
 relationship to the slots pointing at it — the cross-view disagreement in gap-doc
 finding 7 is **reduced but not closed**, and that is a deliberate, recorded
 choice.
+
+### 3.6 Decided while building (not stated above)
+
+1. **"+ Add Mix" seeds past orphaned slot mixes too** — `nextMixNumber(monitors,
+   stagePlot)` takes the max over both. `max(monitors)+1` alone walks onto a
+   deleted number on a later add and silently re-attaches every performer still
+   pointing at it to a blank, unnamed mix. That is a new silent path (I8). Test 17
+   still holds when there are no orphans.
+2. **Renumbering onto an orphaned number is allowed, and the prompt names who
+   joins.** Mix 7 deleted, Cy still on 7: renumbering 3 → 7 puts Cy back on aux 7,
+   which is correct routing. The confirm lists both groups, the ones that move and
+   the ones that join (`renumberMixPrompt`).
+3. **The delete prompt fires only when performers are on the mix,** mirroring the
+   slot-delete prompt. **Cancel keeps the mix.** There is no remap option, because
+   §3.4 has no remap.
+4. **Mix # commits on blur or Enter, never per keystroke.** Escape abandons the
+   draft. Typing "12" would otherwise renumber through "1" and collide. A
+   rejection shows inline under the cell and the cell reverts.
+
+Also: `validateMonitors` guards the AI `update_monitors` apply through the existing
+`validateToolInput`, which refuses before apply and shows the error. Reporting the
+*reason* to the model (§4 11c) belongs to `design-ai-op-contract.md`, not here. The
+printed rider's monitor list renders in aux order as well.
 
 ---
 

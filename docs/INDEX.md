@@ -113,7 +113,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | Doc | State | Note |
 |---|---|---|
 | `design-agent-codesigner.md` | SHIPPED-RECORD | Zone grid + BYOA/try-it modes (`lib/agent.ts:7-18`). |
-| `design-core-path-tier1.md` | PARTIAL | §1 shipped. §2 superseded. §3 (mix identity / `renumberMix`) unbuilt. |
+| `design-core-path-tier1.md` | SHIPPED-RECORD | §1 shipped (#144). §2 superseded by `design-ai-op-contract.md`. §3 mix identity shipped (`lib/setlist.ts` `renumberMix`; §3.6 lists choices made while building). |
 | `design-ai-op-contract.md` | UNBUILT-DESIGN | No op type, no applier. Full-replace path still live (`page.tsx:5588`). |
 
 ## Show, setlist, inputs, sharing
