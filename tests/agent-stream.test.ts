@@ -62,14 +62,14 @@ describe('the happy path still works', () => {
 
   it('collects a completed tool call as pending', () => {
     const state = runStream([
-      toolStart('toolu_1', 'update_stage_plot'),
+      toolStart('toolu_1', 'generate_show'),
       toolJson('{"slots":'),
       toolJson('[]}'),
       blockStop(),
     ]);
 
     expect(finalizeTurn(state).toolCalls).toEqual([
-      { id: 'toolu_1', name: 'update_stage_plot', input: { slots: [] }, status: 'pending' },
+      { id: 'toolu_1', name: 'generate_show', input: { slots: [] }, status: 'pending' },
     ]);
   });
 
@@ -90,7 +90,7 @@ describe('the happy path still works', () => {
 
   it('skips a malformed tool payload rather than aborting the stream', () => {
     const state = runStream([
-      toolStart('toolu_1', 'update_stage_plot'),
+      toolStart('toolu_1', 'generate_show'),
       toolJson('{not json'),
       blockStop(),
       textDelta('carrying on'),
@@ -157,7 +157,7 @@ describe('13j — a mid-stream error is NOT the pre-stream case', () => {
 describe('13m — a failed turn does not lock the composer', () => {
   it('discards tool calls that completed before the error', () => {
     const state = runStream([
-      toolStart('toolu_1', 'update_stage_plot'),
+      toolStart('toolu_1', 'generate_show'),
       toolJson('{"slots":[]}'),
       blockStop(),
       errorEvent('Internal server error', 'api_error'),
@@ -176,7 +176,7 @@ describe('13m — a failed turn does not lock the composer', () => {
 
   it('keeps tool calls when the same stream SUCCEEDS', () => {
     // Separates the discard rule from "finalizeTurn drops tool calls".
-    const state = runStream([toolStart('toolu_1', 'update_inputs'), toolJson('{"inputs":[]}'), blockStop()]);
+    const state = runStream([toolStart('toolu_1', 'update_notes'), toolJson('{"notes":[]}'), blockStop()]);
 
     expect(finalizeTurn(state).toolCalls).toHaveLength(1);
     expect(hasPendingTools([finalizeTurn(state)])).toBe(true);

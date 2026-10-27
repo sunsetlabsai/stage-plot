@@ -11,8 +11,6 @@ import {
   deleteMixPrompt,
   deleteMonitor,
   addMonitor,
-  validateMonitorReplace,
-  monitorReplacePrompt,
 } from '@/lib/setlist';
 import { serializeShow, deserializeShow } from '@/lib/show-file';
 import type { StageSlot, MonitorMix, StagePosition } from '@/lib/types';
@@ -221,37 +219,6 @@ describe('addMonitor', () => {
   });
 });
 
-describe('validateMonitorReplace — the AI update_monitors apply (Codex R1 #1 on #193)', () => {
-  const current = [mon(1, 'Ann'), mon(2, 'Bo')];
-
-  it('★ refuses a swap that keeps the ids — the probe that passed validateMonitors alone', () => {
-    const incoming = [{ id: 'm-1', mix: 2, name: 'Ann', needs: '' }, { id: 'm-2', mix: 1, name: 'Bo', needs: '' }];
-    expect(validateMonitors(incoming)).toBeNull(); // the gap: unique and positive
-    expect(validateMonitorReplace(current, incoming)).toMatch(/changes Mix 1 to Mix 2/);
-  });
-
-  it('refuses moving one id-carrying row to a fresh number', () => {
-    expect(validateMonitorReplace(current, [{ id: 'm-1', mix: 9 }, { id: 'm-2', mix: 2 }])).toMatch(/Mix 1 to Mix 9/);
-  });
-
-  it('COUNTEREXAMPLE: same ids at the same numbers, edited names/needs — accepted', () => {
-    expect(validateMonitorReplace(current, [
-      { id: 'm-1', mix: 1, name: 'Ann (IEM)', needs: 'vox' },
-      { id: 'm-2', mix: 2, name: 'Bo', needs: 'keys' },
-    ])).toBeNull();
-  });
-
-  it('COUNTEREXAMPLE: adding, dropping, and id-less rows are accepted (the number is the identity)', () => {
-    expect(validateMonitorReplace(current, [{ id: 'm-1', mix: 1 }, { mix: 3 }])).toBeNull();
-    expect(validateMonitorReplace(current, [{ mix: 2 }, { mix: 1 }])).toBeNull();
-    expect(validateMonitorReplace(current, [{ id: 'new', mix: 4 }])).toBeNull();
-  });
-
-  it('still refuses duplicates', () => {
-    expect(validateMonitorReplace(current, [{ mix: 1 }, { mix: 1 }])).toMatch(/appears more than once/);
-  });
-});
-
 describe('show import refuses invalid mix numbers (Codex R1 #2 on #193)', () => {
   const base = {
     showInfo: { bandName: 'B', eventDate: '', venue: '' },
@@ -275,37 +242,5 @@ describe('show import refuses invalid mix numbers (Codex R1 #2 on #193)', () => 
     expect(deserializeShow(json, 'show.json').monitors.map((m) => m.mix)).toEqual([1, 2, 5]);
     const yaml = serializeShow({ ...base, monitors } as never);
     expect(deserializeShow(yaml, 'show.showrunr.yaml').monitors.map((m) => m.mix)).toEqual([1, 2, 5]);
-  });
-});
-
-describe('monitorReplacePrompt — an AI apply that revives an orphaned number (Codex R2 on #193)', () => {
-  it('★ Codex probe: Mix 1 live, Cy on deleted Mix 7, id-less [1, 7] → the prompt names Cy', () => {
-    const plot = [slot('Ann', 1), slot('Cy', 7, 'USR')];
-    const prompt = monitorReplacePrompt(plot, [mon(1)], [{ mix: 1 }, { mix: 7 }]);
-    expect(prompt).toMatch(/removed Mix 7, so they join the new Mix 7/);
-    expect(prompt).toContain('USR — Cy');
-    expect(prompt).not.toContain('Ann');
-  });
-
-  it('COUNTEREXAMPLE: a new number nobody points at needs no prompt', () => {
-    expect(monitorReplacePrompt([slot('Ann', 1), slot('Cy', 7)], [mon(1)], [{ mix: 1 }, { mix: 2 }])).toBeNull();
-  });
-
-  it('COUNTEREXAMPLE: re-emitting live mixes is not a revival', () => {
-    expect(monitorReplacePrompt([slot('Ann', 1)], [mon(1)], [{ mix: 1 }])).toBeNull();
-  });
-
-  it('mix 0 (unassigned) is never revived', () => {
-    expect(monitorReplacePrompt([slot('Di', 0)], [], [{ mix: 0 }])).toBeNull();
-  });
-
-  it('wiring: applyToolCall asks BEFORE the setMessages updater, and returns on cancel', async () => {
-    const { readFileSync } = await import('node:fs');
-    const src = readFileSync('app/[owner]/[show]/page.tsx', 'utf8');
-    const fn = src.slice(src.indexOf('function applyToolCall('));
-    const ask = fn.indexOf('monitorReplacePrompt(');
-    expect(ask).toBeGreaterThan(-1);
-    expect(ask).toBeLessThan(fn.indexOf('setMessages((prev)'));
-    expect(fn.slice(ask, fn.indexOf('setMessages((prev)'))).toMatch(/!window\.confirm\(prompt\)\) return;/);
   });
 });

@@ -10,7 +10,7 @@ import { buildApiMessages, hasPendingTools, type HistoryMessage } from '@/lib/ag
 
 const toolCall = (over: Partial<HistoryMessage['toolCalls'] extends (infer T)[] | undefined ? T : never> = {}) => ({
   id: 'toolu_1',
-  name: 'update_stage_plot',
+  name: 'generate_show',
   input: { slots: [] } as Record<string, unknown>,
   status: 'pending' as const,
   ...over,
@@ -42,7 +42,7 @@ describe('the ordinary transcript still replays unchanged', () => {
         role: 'assistant',
         content: [
           { type: 'text', text: 'Proposing:' },
-          { type: 'tool_use', id: 'toolu_1', name: 'update_stage_plot', input: { slots: [] } },
+          { type: 'tool_use', id: 'toolu_1', name: 'generate_show', input: { slots: [] } },
         ],
       },
     ]);
@@ -55,7 +55,7 @@ describe('the ordinary transcript still replays unchanged', () => {
     expect(buildApiMessages(applied)).toHaveLength(3);
     expect(buildApiMessages(applied)[2]).toEqual({
       role: 'user',
-      content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Applied. update_stage_plot updated successfully.' }],
+      content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Applied. generate_show updated successfully.' }],
     });
   });
 
@@ -149,5 +149,48 @@ describe('hasPendingTools — the composer gate', () => {
 
   it('is false for a transcript with no tool calls at all', () => {
     expect(hasPendingTools([{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }])).toBe(false);
+  });
+});
+
+// design-ai-op-contract §5.5 / §10.3 tests 11–13. `'refused'` is the APP declining
+// an invalid plan. Before it existed here, a refused call left a `tool_use` with
+// no `tool_result`, and the Messages API rejects every later request in that
+// conversation — the user's next message would fail outright.
+describe("a 'refused' call (§5.5)", () => {
+  const refusedTurn = (reason?: string): HistoryMessage[] => [
+    { role: 'user', content: 'strike mix 2' },
+    { role: 'assistant', content: '', toolCalls: [toolCall({ status: 'refused', reason })] },
+  ];
+
+  it('11. produces a tool_result carrying the real reason, flagged as an error', () => {
+    const reason = 'This plan was refused because it would leave 2 performers pointing at Mix 2, which it removes.';
+    expect(buildApiMessages(refusedTurn(reason))[2]).toEqual({
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'toolu_1',
+        content: `Refused by the app, not the user: ${reason} Nothing was applied.`,
+        is_error: true,
+      }],
+    });
+  });
+
+  it('12. is distinguishable from a user rejection', () => {
+    const refused = JSON.stringify(buildApiMessages(refusedTurn('x.'))[2]);
+    const rejected = JSON.stringify(buildApiMessages([refusedTurn()[0], { role: 'assistant', content: '', toolCalls: [toolCall({ status: 'rejected' })] }])[2]);
+    expect(refused).not.toContain('Rejected by user');
+    expect(refused).not.toBe(rejected);
+  });
+
+  it('every tool_use in history has exactly one tool_result once nothing is pending (O6)', () => {
+    for (const status of ['applied', 'rejected', 'refused'] as const) {
+      const msgs = buildApiMessages([{ role: 'user', content: 'go' }, { role: 'assistant', content: '', toolCalls: [toolCall({ status })] }]);
+      const results = (msgs[2]?.content as { type: string; tool_use_id: string }[] | undefined) ?? [];
+      expect(results.filter((b) => b.type === 'tool_result' && b.tool_use_id === 'toolu_1'), status).toHaveLength(1);
+    }
+  });
+
+  it('13. does not hold the composer — hasPendingTools is false', () => {
+    expect(hasPendingTools(refusedTurn('x.'))).toBe(false);
   });
 });

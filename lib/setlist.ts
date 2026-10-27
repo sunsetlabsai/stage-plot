@@ -207,59 +207,6 @@ export function validateMonitors(monitors: readonly { mix?: unknown }[]): string
   return null;
 }
 
-/**
- * Validity of an AI `update_monitors` full replace against the current list.
- * On top of `validateMonitors`: a row that comes back carrying an existing
- * monitor's id under a DIFFERENT number is a renumber, and is refused. The
- * model sees ids in `currentConfig`, so a swap of Mix 1 and Mix 2 that kept
- * both ids would otherwise pass. Slots would stay on their old numbers, and
- * both numbers still exist, so nothing would be flagged (Codex R1 on #193).
- * Refused rather than remapped because a renumber moves performers and §3.3
- * makes that confirm-worthy, naming who moves. An Apply card has no such
- * prompt, and the Monitor Mixes table does.
- */
-export function validateMonitorReplace(
-  current: readonly MonitorMix[],
-  incoming: readonly { id?: unknown; mix?: unknown; [field: string]: unknown }[],
-): string | null {
-  const invalid = validateMonitors(incoming);
-  if (invalid) return invalid;
-  for (const row of incoming) {
-    const was = current.find((m) => m.id !== undefined && m.id === row.id);
-    if (was && was.mix !== row.mix) {
-      return `it changes Mix ${was.mix} to Mix ${String(row.mix)} — renumber a mix in the Monitor Mixes table, which moves its performers with it`;
-    }
-  }
-  return null;
-}
-
-/**
- * The confirm text for a monitor-list replace that brings back a number
- * orphaned slots still point at, or null when it adopts nobody. A mix that
- * comes into existence at N re-attaches every performer already on N, which
- * is usually right: the AI recreates Mix 7 precisely because Cy is on it. But
- * it must not be silent (I8; Codex R2 on #193). Same "join" wording as
- * `renumberMixPrompt`. "+ Add Mix" never needs it, because `nextMixNumber`
- * skips orphaned numbers.
- */
-export function monitorReplacePrompt(
-  stagePlot: StageSlot[],
-  current: readonly MonitorMix[],
-  incoming: readonly { mix?: unknown }[],
-): string | null {
-  const revived = [...new Set(incoming.map((m) => m.mix))]
-    .filter((n): n is number => isMixNumber(n) && isOrphanedMix(n, current))
-    .sort((a, b) => a - b);
-  const groups = revived
-    .map((n) => ({ n, names: performersOnMix(stagePlot, n) }))
-    .filter((g) => g.names.length > 0);
-  if (groups.length === 0) return null;
-  return (
-    'Apply these monitor mixes?\n\n' +
-    groups.map((g) => `Still pointing at the removed Mix ${g.n}, so they join the new Mix ${g.n}:\n${bullets(g.names)}`).join('\n\n')
-  );
-}
-
 /** Add a blank mix, numbered by `nextMixNumber`. */
 export function addMonitor<T extends { stagePlot: StageSlot[]; monitors: MonitorMix[] }>(config: T): T {
   return {
@@ -388,7 +335,7 @@ export function renumberMix<T extends { stagePlot: StageSlot[]; monitors: Monito
  *
  * A row WITHOUT a `songId` is the opposite case and must stay editable: the
  * server resolves (or auto-creates) that row BY its title, so a blanket
- * read-only would break CSV/sheet import and the agent's `update_setlist`.
+ * read-only would break CSV/sheet import.
  *
  * A predicate rather than an inline ternary because that asymmetry is the whole
  * of §1.3's correctness, and nothing inside a 6700-line client component can be

@@ -272,15 +272,25 @@ export function planChanges<C extends ShowLists>(
   });
   if (problems.length > 0) return { ok: false, problems };
 
+  // Ids are unique per list after the batch. Only a broken `mintId` could
+  // violate it, but pass 3 below relies on it, so it is checked, not assumed.
+  for (const entity of OP_ENTITIES) {
+    const ids = lists[entity].map((r) => r.id);
+    if (new Set(ids).size !== ids.length) return { ok: false, problems: [{ message: `two ${NOUN[entity]}s ended up with the same id — ask again` }] };
+  }
+
   // Pass 3 — positional numbers an add may omit (§3.5). Assigned after every op
   // has run, so an auto number never takes one a later explicit op claims.
+  // Rows are assigned only when they are NOT one of the caller's objects, so the
+  // input config is never mutated even if an id were to collide (Codex R2 NIT on #194).
+  const callerRows = new Set<unknown>([...config.stagePlot, ...config.inputs, ...config.monitors]);
   for (const row of lists.inputs) {
-    if (added.inputs.has(row.id) && row.ch === undefined) {
+    if (added.inputs.has(row.id) && !callerRows.has(row) && row.ch === undefined) {
       row.ch = Math.max(0, ...lists.inputs.map((r) => (typeof r.ch === 'number' ? r.ch : 0))) + 1;
     }
   }
   for (const row of lists.monitors) {
-    if (added.monitors.has(row.id) && row.mix === undefined) {
+    if (added.monitors.has(row.id) && !callerRows.has(row) && row.mix === undefined) {
       const numbered = lists.monitors.filter((r) => typeof r.mix === 'number') as unknown as MonitorMix[];
       // Skips orphaned slot mixes too, like "+ Add Mix" (tier1 §3.6 item 1).
       row.mix = nextMixNumber(numbered, lists.stagePlot as unknown as StageSlot[]);
@@ -312,6 +322,73 @@ export function planChanges<C extends ShowLists>(
 
   const nextConfig = { ...config, stagePlot: next.stagePlot, inputs: next.inputs, monitors: next.monitors };
   return { ok: true, next: nextConfig, summary: summarize(config, nextConfig, warnings) };
+}
+
+// ── generate_show (§9.2, §9.2a) ──────────────────────────────────────────────
+
+/**
+ * The whole-show create. Expressed AS a batch — add every row the model sent,
+ * remove every row the show has — and run through `planChanges`, so the
+ * flagship first run and an edit are judged by one validator, not two that can
+ * drift. The model links an input to a performer by giving the slot a `new:`
+ * `tempId` and the input that `slotId` (§14, step 3).
+ *
+ * Only `stagePlot`, `inputs` and `monitors` are replaced. Setlist, charts, notes
+ * and show info ride through untouched: they are not the AI's to destroy
+ * (§9.2a), and a user regenerating a stage plot has not asked to lose songs.
+ */
+export function planGenerateShow<C extends ShowLists>(
+  config: C,
+  input: unknown,
+  mintId: () => string = () => crypto.randomUUID(),
+): PlanResult<C> {
+  const body = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
+  const missing = (['stagePlot', 'inputs', 'monitors'] as const).filter((k) => !Array.isArray(body[k]));
+  if (missing.length > 0) {
+    return { ok: false, problems: [{ message: `generate_show needs ${missing.join(', ')} as ${missing.length === 1 ? 'a list' : 'lists'}` }] };
+  }
+  const rows = (k: OpEntity) => body[k] as unknown[];
+  const ops: unknown[] = [];
+  for (const row of rows('stagePlot')) {
+    if (row && typeof row === 'object' && !Array.isArray(row)) {
+      const { tempId, ...values } = row as Record<string, unknown>;
+      ops.push({ entity: 'stagePlot', action: 'add', ...(tempId !== undefined ? { tempId } : {}), values });
+    } else {
+      ops.push({ entity: 'stagePlot', action: 'add', values: row });
+    }
+  }
+  for (const entity of ['inputs', 'monitors'] as const) {
+    for (const row of rows(entity)) ops.push({ entity, action: 'add', values: row });
+  }
+  for (const entity of OP_ENTITIES) {
+    for (const row of config[entity]) ops.push({ entity, action: 'remove', id: row.id });
+  }
+  return planChanges(config, ops, mintId);
+}
+
+/** True when there is nothing for a `generate_show` to replace. */
+export function isShowEmpty(config: ShowLists): boolean {
+  return config.stagePlot.length === 0 && config.inputs.length === 0 && config.monitors.length === 0;
+}
+
+/**
+ * The confirm for a `generate_show` on a show that has content, or null on an
+ * empty one (§9.2a). It states the cost in rows, because replace is the most
+ * destructive thing the AI can do. Distinct from an ordinary Apply: the card
+ * labels the button "Replace everything", and this confirm follows it.
+ */
+export function replaceShowPrompt(config: ShowLists): string | null {
+  if (isShowEmpty(config)) return null;
+  return (
+    `Replace the whole show?\n\nThis discards ${replaceCounts(config)} and builds a new show from your description.\n\n` +
+    'The setlist, charts, notes and show info are not touched.'
+  );
+}
+
+/** "6 performers, 24 inputs and 4 monitor mixes" — the card and the confirm say the same thing. */
+export function replaceCounts(config: ShowLists): string {
+  const n = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+  return `${n(config.stagePlot.length, 'performer', 'performers')}, ${n(config.inputs.length, 'input', 'inputs')} and ${n(config.monitors.length, 'monitor mix', 'monitor mixes')}`;
 }
 
 /** One sentence for the refused card and for the model's `tool_result` (§5.4, §5.5). */

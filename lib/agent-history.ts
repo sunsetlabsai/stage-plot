@@ -71,6 +71,18 @@ export function buildApiMessages(messages: HistoryMessage[]): ApiMessage[] {
           resultBlocks.push({ type: 'tool_result', tool_use_id: tc.id, content: `Applied. ${tc.name} updated successfully.` });
         } else if (tc.status === 'rejected') {
           resultBlocks.push({ type: 'tool_result', tool_use_id: tc.id, content: 'Rejected by user.', is_error: true });
+        } else if (tc.status === 'refused') {
+          // design-ai-op-contract §5.5. Without this a refused call leaves a
+          // `tool_use` with no `tool_result` and the NEXT request 400s. Not
+          // "Rejected by user." either: that would tell the model the user
+          // declined, when the app refused it as malformed — so it would learn
+          // nothing about what to fix.
+          resultBlocks.push({
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: `Refused by the app, not the user: ${tc.reason ?? 'the change was invalid.'} Nothing was applied.`,
+            is_error: true,
+          });
         }
       }
       if (resultBlocks.length > 0) {

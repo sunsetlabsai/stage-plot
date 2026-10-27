@@ -74,8 +74,8 @@ describe('MonitorMix.type — YAML round-trip', () => {
 });
 
 describe('MonitorMix.type — contract surfaces', () => {
-  it('the AI can set it: update_monitors exposes type, and does NOT require it', () => {
-    const tool = TOOLS.find((t) => t.name === 'update_monitors');
+  it('the AI can set it: generate_show exposes type on monitors, and does NOT require it', () => {
+    const tool = TOOLS.find((t) => t.name === 'generate_show');
     const items = (tool as unknown as {
       input_schema: { properties: { monitors: { items: { properties: Record<string, unknown>; required: string[] } } } };
     }).input_schema.properties.monitors.items;

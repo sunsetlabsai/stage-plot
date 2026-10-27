@@ -535,14 +535,15 @@ choice.
    draft. Typing "12" would otherwise renumber through "1" and collide. A
    rejection shows inline under the cell and the cell reverts.
 
-5. **The AI `update_monitors` apply refuses a renumber.** This came from Codex R1.
+5. **The AI path refuses a renumber.** This came from Codex R1.
    The model sees monitor ids in `currentConfig`, so it can echo an id under a
    different number; a swap of 1 and 2 passes "unique and positive" and leaves every
-   performer behind, unflagged. `validateMonitorReplace` refuses it. It refuses
+   performer behind, unflagged. `planChanges` (`lib/ai-ops.ts`) refuses a `patch`
+   that changes an existing monitor's `mix` (`design-ai-op-contract.md` §14 item 1);
+   `generate_show` replaces the whole list, so it has no renumber to make. It refuses
    rather than remapping because a renumber moves performers, and §3.3 makes that
    confirm-worthy, naming who moves. An Apply card has no such prompt. The refusal
-   names the Monitor Mixes table as where to do it. Id-less rows keep number-as-
-   identity, and renames, adds and drops are accepted.
+   names the Monitor Mixes table as where to do it.
 6. **Show import (JSON and YAML) refuses invalid mix numbers.** This also came from
    Codex R1. It uses the same `validateMonitors` rule, so a file cannot install two
    rows numbered Mix 1.
@@ -550,17 +551,17 @@ choice.
 7. **An AI apply that brings back an orphaned number confirms first, naming who
    joins.** This came from Codex R2. A mix that comes into existence at N
    re-attaches every slot already on N. That is usually right, because the AI
-   recreates Mix 7 *because* Cy is on it, but it was silent. `monitorReplacePrompt`
-   uses item 2's "join" wording. The question is asked before the Apply updater,
-   and Cancel leaves the card pending. This is the same class as items 1 and 2:
+   recreates Mix 7 *because* Cy is on it, but it was silent. `planChanges` names who
+   joins in `ChangeSummary.joins`, which the approve card shows before Apply
+   (`design-ai-op-contract.md` §14 item 2). A `generate_show` replace removes every
+   slot along with the list, so nobody is left on an old number to rejoin. This is the same class as items 1 and 2:
    **every way a number comes into existence is either skipped (add), or confirmed
    with names (renumber, AI apply).**
 
 **Every path that installs a whole monitor list,** and how each is covered:
 editor (`renumberMix`, `addMonitor`, `deleteMonitor`), AI apply (5, 7), file import (6).
-**Not covered here:** the `update_stage_plot` cascade rebuilds the whole monitor list from
-slot numbers, so it revives orphans and wipes needs. That is B2, and
-`design-ai-op-contract.md` deletes the cascade.
+The `update_stage_plot` cascade, which rebuilt the whole list from slot numbers (reviving
+orphans and wiping needs), was deleted with that tool by `design-ai-op-contract.md` §13 step 3.
 Two initializers install fixed lists and cannot misroute: the `fallbackBand` shown
 before a show loads (`initConfig`), and a new show's empty list (`app/dashboard/page.tsx`).
 **Not guarded, deliberately:** the server load and the local cache carry our own saved
