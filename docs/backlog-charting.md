@@ -215,13 +215,6 @@ today**: the builder's only navigation surface is `navMarkers`
 the global roadmap navigation as marker chips". There is no nav-editing UI, so this is
 latent until one is built — at which point it becomes reachable immediately.
 
-### `tallyDraft` is op-blind **[verified 2026-09-01]**
-`tallyDraft` (`lib/roadmap-authoring.ts:407`) sums `sec.spans` directly, and the function's
-own header comment says it renders "FROM the SpanList (pre-op spans)". So the L4 read-back
-echo can disagree with the folded spec — an intro `3x` repeat is not reflected. The
-read-back exists precisely to catch a dropped span on sight, so a fidelity hole in it is
-worth more than it looks.
-
 ---
 
 ## Deferred design questions

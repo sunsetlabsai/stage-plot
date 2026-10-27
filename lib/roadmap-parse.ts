@@ -3,6 +3,7 @@ import { validateRoadmapSpec, TIME_SIG_UNITS, type RoadmapSpec } from './roadmap
 import {
   foldDraft,
   tallyDraft,
+  tallySpec,
   resolveRenderKey,
   parseDescription,
   type AuthoringDraft,
@@ -10,6 +11,7 @@ import {
   type ChordSpan,
   type StructureOp,
 } from './roadmap-authoring';
+import { mergeRepeatedSections } from './roadmap-merge';
 import { resolveAgentModel, ROADMAP_MODEL_ENV } from './agent-key';
 
 // ── Roadmap Builder — chunk 5a: the AI parse boundary (SpanList contract) ─────
@@ -23,8 +25,11 @@ import { resolveAgentModel, ROADMAP_MODEL_ENV } from './agent-key';
 //   L3 foldDraft (PURE)      — WE compress: expand → splice → inheritance-diff →
 //                              sparse RoadmapSpec; then validateRoadmapSpec (the
 //                              unchanged DB-boundary gate) DISPOSES.
-//   L4 tallyDraft            — a read-back echo from the SpanList so a dropped span
-//                              is caught on sight before save.
+//   L3½ mergeRepeatedSections — adjacent identical sections fold into a ×N repeat
+//                              ("2x chorus"), only when playback is unchanged.
+//   L4 tallySpec             — a read-back echo from the FINAL spec so a dropped span
+//                              is caught on sight before save (tallyDraft, from the
+//                              SpanList, on failure — it is the diagnosis).
 // Split exactly like the converter: a PURE, fixture-tested gate (parseModelDraft)
 // and a thin transport (parseRoadmapSpec) that only adds the Claude call. The
 // route owns key sourcing + timeout; this stays "given a description + key, parse".
@@ -142,21 +147,20 @@ function safeTally(draft: AuthoringDraft): string[] {
 }
 
 // L3 + L4 shared by both fronts (L1 grammar and L2 model): an AuthoringDraft →
-// read-back tally → deterministic fold → the unchanged musical gate. The ONE place
-// a draft becomes a validated spec, so the grammar path and the model path dispose
-// identically. No IO — fixture-testable.
+// deterministic fold → merge repeated sections → the unchanged musical gate →
+// read-back tally. The ONE place a draft becomes a validated spec, so the grammar
+// path and the model path dispose identically. No IO — fixture-testable.
 function foldAndValidateDraft(draft: AuthoringDraft): ParseResult {
-  // L4 read-back, rendered FROM the SpanList so it reflects exactly what folds.
-  const tally = safeTally(draft);
-
   // L3: we compress (deterministic), then the unchanged musical gate disposes.
+  // On failure the tally is rendered FROM the SpanList — it is the diagnosis.
   const folded = foldDraft(draft);
-  if (!folded.ok) return { ok: false, errors: folded.errors, tally };
+  if (!folded.ok) return { ok: false, errors: folded.errors, tally: safeTally(draft) };
 
-  const validated = validateRoadmapSpec(folded.spec);
-  if (!validated.ok) return { ok: false, errors: validated.errors, tally };
+  const validated = validateRoadmapSpec(mergeRepeatedSections(folded.spec));
+  if (!validated.ok) return { ok: false, errors: validated.errors, tally: safeTally(draft) };
 
-  return { ok: true, spec: validated.spec, tally };
+  // L4 read-back from the FINAL spec, so it matches the chart (×N, endings, ops).
+  return { ok: true, spec: validated.spec, tally: tallySpec(validated.spec) };
 }
 
 // PURE gate: raw model text + the L0-pinned renderKey → a folded, validated

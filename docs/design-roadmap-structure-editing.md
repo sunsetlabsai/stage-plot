@@ -1,6 +1,6 @@
 # ShowRunr — Roadmap Builder: Repeats, Markers and Bar Editing DESIGN
 
-**Status: PROPOSED (2026-10-26), §8 ruled by Graham.** Not built. Companion to `design-roadmap-builder.md`
+**§8 ruled by Graham 2026-10-26.** Build state lives in `docs/INDEX.md`. Companion to `design-roadmap-builder.md`
 (the spec model) and `design-roadmap-edit-loop.md` (the editor this extends).
 
 ## 1. What UAT found (2026-10-26, Graham)
