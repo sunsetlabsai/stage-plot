@@ -75,7 +75,8 @@ export function readEntry(store: ShowStore, showId: string): ShowEntry | null {
  * edit, and only the owner's tab can classify it — a lapsed session must not erase
  * it. The old bundle wrote `showrunr-last-saved-{id}` only on an owner's save, so a
  * performer's phone has none and keeps refreshing. Only the key's presence is used,
- * never its value (R2).
+ * never its value (R2). A first-ever edit there has no key and is NOT protected —
+ * a documented limit, no worse than the pre-build code (design §4.1, Codex R4).
  */
 export function viewerMayOverwrite(store: ShowStore, showId: string): boolean {
   const e = readEntry(store, showId);

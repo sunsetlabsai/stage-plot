@@ -218,7 +218,13 @@ a current version and overwrite a newer save. Cost: a one-time prompt on upgrade
 show whose old copy differs from the server, edit or not. Until an owner tab has classified it, a VIEWER load
 (e.g. the owner's lapsed session) never overwrites an old copy in a browser where an owner
 saved — `showrunr-last-saved-{id}` present, only its presence is used (Codex R3 on #202,
-`viewerMayOverwrite`); a performer's phone never has that key and keeps refreshing. This also changes §3.4: a 428'd old tab's edit is in that old cache,
+`viewerMayOverwrite`); a performer's phone never has that key and keeps refreshing.
+**Limit (Graham, 2026-10-27, Codex R4 on #202):** recovering an old bundle's copy is
+best-effort. It is recovered when the owner next opens the show signed in. If a viewer load
+comes first in a browser with no last-saved key — e.g. the owner's FIRST edit there, tab
+closed mid-save, then a lapsed session — the server copy replaces it. Today's code loses
+that edit on any next load (its load overwrote the cache unconditionally), so this is no
+worse than the baseline; it is not a regression and not chased further. This also changes §3.4: a 428'd old tab's edit is in that old cache,
 so the reload its message asks for now recovers it (shown, and the owner is asked) — while
 Graham ruled the 428 copy accordingly (Q6). Also as built: an owner tab is
 read-only until its lock is granted (§4.0; the grant is asynchronous).
