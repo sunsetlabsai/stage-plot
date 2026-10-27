@@ -10,6 +10,8 @@ import {
   refusalMessage,
   splitToPageBars,
   surplusWarning,
+  countReadiness,
+  REFUSAL_REASONS,
   CANDIDATE_DEDUPE_TOL,
 } from '../lib/chart-review-sheet';
 import { confirmSystemSplit, isValidCalibration } from '../lib/chart-calibration';
@@ -262,10 +264,7 @@ describe('what the owner is told', () => {
     // allowed word — there is no plainer name for the thing they are looking at.
     const all = [
       surplusWarning(2, 3) ?? '',
-      refusalMessage('insufficient-evidence', 2),
-      refusalMessage('out-of-staff', 0),
-      refusalMessage('degenerate-span', 0),
-      refusalMessage('invalid-count', 0),
+      ...REFUSAL_REASONS.map((r) => refusalMessage(r, 2)),
     ].join(' ');
     for (const banned of ['measure', 'span', 'multirest', 'cluster', 'system', 'stave', 'staff']) {
       expect(all.toLowerCase(), `"${banned}" leaked into owner copy`).not.toContain(banned);
@@ -396,5 +395,40 @@ describe('splitToPageBars', () => {
     const pageBars = splitToPageBars(s, [0.25, 0.5, 1], 600);
     const mrs = [{ count: 4, xStart: 160, xEnd: 290 }];
     expect(attributeMultirestsToBars(mrs, pageBars)).toEqual([1, 4, 1]);
+  });
+});
+
+describe('whether the count can be answered yet', () => {
+  // `measured: null` used to mean three different things — still reading, read failed, and
+  // no line found on the page — and the count answered all three with "0 barlines".
+  const sys = msys();
+  const page = { pageWidth: W, pageHeight: 800, modalWidth: 0.8 } as never;
+
+  it('is reading until the read has come back, whatever else is set', () => {
+    expect(countReadiness({ read: 'reading', measured: null, page: null })).toBe('reading');
+    expect(countReadiness({ read: 'reading', measured: sys, page })).toBe('reading');
+  });
+
+  it('is ready only with both the line and its page', () => {
+    expect(countReadiness({ read: 'done', measured: sys, page })).toBe('ready');
+  });
+
+  it('is unreadable when the read came back without this line', () => {
+    expect(countReadiness({ read: 'done', measured: null, page: null })).toBe('unreadable');
+    expect(countReadiness({ read: 'done', measured: null, page })).toBe('unreadable');
+  });
+
+  it('an unreadable page never claims to have seen zero barlines', () => {
+    const msg = refusalMessage('unreadable', 0);
+    expect(msg).not.toMatch(/\b0 barlines?\b/);
+    expect(msg).toMatch(/couldn't read/);
+    expect(msg).toMatch(/by hand/i);
+  });
+
+  it('every refusal reason has copy — the list is complete by construction', () => {
+    expect(REFUSAL_REASONS).toEqual(
+      expect.arrayContaining(['insufficient-evidence', 'out-of-staff', 'degenerate-span', 'invalid-count', 'unreadable']),
+    );
+    for (const r of REFUSAL_REASONS) expect(refusalMessage(r, 2).length).toBeGreaterThan(10);
   });
 });

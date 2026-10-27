@@ -118,6 +118,7 @@ import { ChartReviewSheet } from '@/components/ChartReviewSheet';
 import { ChartSystemStrip } from '@/components/ChartSystemStrip';
 import {
   buildCandidates,
+  countReadiness,
   matchMeasuredSystem,
   proposeFromCount,
   reviewSheetKey,
@@ -3228,6 +3229,8 @@ function ChartNavigator({
     flagged: boolean;
     measured: MeasuredSystem | null;
     page: PageMeasurement | null;
+    /** Whether the page read has come back. `measured: null` alone cannot say. */
+    read: 'reading' | 'done';
     /** Chart-load generation at open. */
     gen: number;
     /** Hash of the bytes on screen at open. */
@@ -3496,19 +3499,21 @@ function ChartNavigator({
       // STORED bars, so the owner is never staring at a spinner for the common answer.
       // Only the count fallback needs the measurement, and it arrives before they can
       // reach it.
-      setReviewSheet({ systemId, flagged, measured: null, page: null, gen, hash });
+      setReviewSheet({ systemId, flagged, measured: null, page: null, read: 'reading', gen, hash });
       const doc = docRef.current;
-      if (!doc) return;
-      const one = await measureOnePage(doc, system.page);
+      const one = doc ? await measureOnePage(doc, system.page) : null;
       // Three ways to be stale, and `systemId` is not one of them: a newer open (`req`),
       // a different chart (`gen`), or different bytes for the same chart (`hash`).
       if (reviewReqRef.current !== req) return;
       if (calGenRef.current !== gen || sourceHashRef.current !== hash) return;
-      if (!one) return;
-      const best = matchMeasuredSystem(system, one.measurement.systems, one.measurement.pageHeight);
+      // A read that failed, or found no line here, still FINISHES — `read: 'done'` with no
+      // measurement is what lets the count refuse honestly instead of waiting forever.
+      const best = one
+        ? matchMeasuredSystem(system, one.measurement.systems, one.measurement.pageHeight)
+        : null;
       setReviewSheet((cur) =>
         cur && reviewSheetKey(cur) === reviewSheetKey({ gen, hash, systemId })
-          ? { ...cur, measured: best, page: one.measurement }
+          ? { ...cur, measured: best, page: best && one ? one.measurement : null, read: 'done' }
           : cur,
       );
     },
@@ -4726,6 +4731,7 @@ function ChartNavigator({
               flagged={reviewSheet.flagged}
               candidates={candidates}
               countChoices={countChoices}
+              countReadiness={countReadiness(reviewSheet)}
               renderStrip={(xs, tone, variant) => (
                 <ChartSystemStrip
                   doc={docRef.current}
@@ -4736,11 +4742,12 @@ function ChartNavigator({
                 />
               )}
               onProposeCount={(n): CountOutcome => {
-                // No measurement (still in flight, or this page could not be measured)
-                // ⇒ refuse and hand off rather than divide the band evenly. An even
-                // split is the thing Graham ruled "worse than none at all".
+                // The read came back without this line ⇒ refuse and hand off rather than
+                // divide the band evenly (an even split is the thing Graham ruled "worse
+                // than none at all"). Still READING never reaches here: the sheet holds the
+                // pad until `countReadiness` says the read has landed.
                 if (!reviewSheet.measured || !reviewSheet.page) {
-                  return { kind: 'refused', reason: 'insufficient-evidence', available: 0 };
+                  return { kind: 'refused', reason: 'unreadable', available: 0 };
                 }
                 return proposeFromCount(
                   reviewSheet.measured,

@@ -316,6 +316,28 @@ system at a time, per §The interaction.
   disagreement does not entitle us to a picture.
 - **"None of these" → "How many bars do you count in this line?"** N is visible
   barline-delimited spans, per §The interaction.
+- **The count waits for the page read.** Opening the sheet re-reads one page, and the sheet
+  shows before that read lands (picking a candidate works off the stored bars). Until it
+  lands the count pad is disabled with "Reading this page…". A read that fails or finds no
+  line where this band is refuses with its own copy (`unreadable`, "We couldn't read the
+  barlines on this line…"), never as "0 barlines", which was false while reading, and the
+  refusal screen has no Back. *(Found by the 2026-10-27 mockup diff.)*
+- **Built vs the approved interactive mockup** (artifact "ShowRunr — chunk C3 review sheet",
+  2026-09-08). Everything else matches screen for screen.
+  1. No per-option source tag ("measured" / "printed" / "current"). Only a printed-implied
+     option gets a line, in plain words ("Matches the numbers printed on your chart"),
+     because that is the only source a non-reader can check against the paper. *(Flagged to
+     Graham 2026-09-09.)*
+  2. Confirm-before-write is for multi-candidate picks only. See §The interaction. *(Flagged
+     2026-09-09.)*
+  3. No post-confirm "Saved / N lines still need a look / Next line" screen: confirm closes
+     the sheet. "Saved" would be false, because the answer joins the calibrate draft and
+     persists only on Save draft / Verify & save, like every calibrate edit. The flag queue
+     is walked with the existing review controls. *(Accepted as built, Graham 2026-10-27.)*
+  4. Tapping a count goes straight to its preview; there is no separate "Show me". The
+     preview already offers "Change count". *(Accepted as built, Graham 2026-10-27.)*
+  5. No caption row under the strip ("page 2 · tap a picture"). The sheet sits over the
+     calibrate canvas, which already shows the page.
 
 ### C4 — what an answer writes
 

@@ -7,7 +7,7 @@
 // rendering needs jsdom and a PDF.
 
 import type { Bar, System } from './types';
-import type { MeasuredSystem } from './chart-measure';
+import type { MeasuredSystem, PageMeasurement } from './chart-measure';
 import { resegment, type ResegmentFailure } from './chart-resegment';
 
 /**
@@ -220,9 +220,47 @@ export function splitToPageBars(
   });
 }
 
+/**
+ * Why a count was refused. The engine's own reasons, plus ONE the engine cannot produce:
+ * `unreadable` — the page read came back without this line (the read failed, or found no
+ * line where this band is), so there was nothing to ask the engine about at all.
+ */
+export type RefusalReason = ResegmentFailure | 'unreadable';
+
+// A Record, so adding a reason to either union is a compile error here until it is listed —
+// and every test that walks the reasons walks THIS, not a hand-picked subset.
+const REFUSAL_REASON_SET: Record<RefusalReason, true> = {
+  'insufficient-evidence': true,
+  'out-of-staff': true,
+  'degenerate-span': true,
+  'invalid-count': true,
+  unreadable: true,
+};
+export const REFUSAL_REASONS = Object.keys(REFUSAL_REASON_SET) as RefusalReason[];
+
 export type CountOutcome =
   | { kind: 'ok'; xs: number[]; surplus: number }
-  | { kind: 'refused'; reason: ResegmentFailure; available: number };
+  | { kind: 'refused'; reason: RefusalReason; available: number };
+
+/**
+ * Whether the count fallback can be answered YET.
+ *
+ * The sheet opens before the page read lands (pick-a-candidate works off the stored bars),
+ * so `measured: null` alone means three different things: still reading, the read failed,
+ * or the read found no line here. Answering a count while still reading as though the read
+ * had come back empty told the owner "we can only see 0 barlines" — false — and the refusal
+ * has no Back. So: `reading` holds the count, `unreadable` refuses honestly.
+ */
+export type CountReadiness = 'reading' | 'ready' | 'unreadable';
+
+export function countReadiness(s: {
+  read: 'reading' | 'done';
+  measured: MeasuredSystem | null;
+  page: PageMeasurement | null;
+}): CountReadiness {
+  if (s.read === 'reading') return 'reading';
+  return s.measured && s.page ? 'ready' : 'unreadable';
+}
 
 /**
  * Turn the owner's bar count into a proposed split, or a refusal.
@@ -274,8 +312,10 @@ export function surplusWarning(surplus: number, n: number): string | null {
 }
 
 /** Why a refusal happened, in the owner's terms. Never blames their count. */
-export function refusalMessage(reason: ResegmentFailure, available: number): string {
+export function refusalMessage(reason: RefusalReason, available: number): string {
   switch (reason) {
+    case 'unreadable':
+      return `We couldn't read the barlines on this line, so we won't guess where the bars go. Setting them by hand keeps the overlay honest.`;
     case 'insufficient-evidence':
       return `We can only see ${available} barline${available === 1 ? '' : 's'} here, so we can't place the rest. Setting them by hand keeps the overlay honest.`;
     case 'out-of-staff':

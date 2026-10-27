@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { Candidate, CountOutcome } from '@/lib/chart-review-sheet';
+import type { Candidate, CountOutcome, CountReadiness } from '@/lib/chart-review-sheet';
 import { candidateNote, refusalMessage, surplusWarning } from '@/lib/chart-review-sheet';
 
 // ── The chart review sheet (docs/design-chart-review-step.md §C3) ────────────
@@ -53,6 +53,11 @@ export interface ChartReviewSheetProps {
   ) => React.ReactNode;
   /** Counts offered on the pad. The page picks the range around what it measured. */
   countChoices: number[];
+  /**
+   * Whether a count can be answered yet. The page read that the count needs is still in
+   * flight when the sheet opens; while `reading`, the pad is held rather than answered.
+   */
+  countReadiness: CountReadiness;
   /** Resolve a count to a proposed split — pure, injected so the sheet stays testable. */
   onProposeCount: (n: number) => CountOutcome;
   /** Commit a split. `measures` is carried straight through to `confirmSystemSplit`. */
@@ -72,6 +77,7 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
     candidates,
     renderStrip,
     countChoices,
+    countReadiness,
     onProposeCount,
     onConfirm,
     onDismiss,
@@ -108,6 +114,10 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
       : 'you opened this';
 
   function chooseCount(n: number) {
+    // Never answer a count from a read that has not come back: that is the "0 barlines"
+    // refusal, which is false while reading and has no way back. The pad is disabled too;
+    // this is the guard, the disabled keys are the affordance.
+    if (countReadiness === 'reading') return;
     setCount(n);
     const res = onProposeCount(n);
     setOutcome(res);
@@ -212,14 +222,20 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
         <div className="mb-1">{renderStrip(null)}</div>
         <p className="text-xs text-zinc-500 mt-1 mb-3">A repeated section counts once.</p>
         <p className="text-sm font-semibold mb-2">How many bars?</p>
+        {countReadiness === 'reading' ? (
+          <p className="text-xs text-zinc-500 mb-2" aria-live="polite">
+            Reading this page…
+          </p>
+        ) : null}
         <div className="grid grid-cols-5 gap-2 mb-3">
           {countChoices.map((n) => (
             <button
               key={n}
               type="button"
               aria-pressed={count === n}
+              disabled={countReadiness === 'reading'}
               onClick={() => chooseCount(n)}
-              className={`rounded-lg py-3 text-base tabular-nums border ${
+              className={`rounded-lg py-3 text-base tabular-nums border disabled:opacity-40 ${
                 count === n
                   ? 'border-sky-400 bg-sky-400 text-sky-950 font-bold'
                   : 'border-zinc-700 bg-zinc-800 hover:bg-zinc-700'

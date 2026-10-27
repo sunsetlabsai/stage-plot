@@ -2,7 +2,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { ChartReviewSheet, type ChartReviewSheetProps } from '../components/ChartReviewSheet';
-import type { CountOutcome } from '../lib/chart-review-sheet';
+import { REFUSAL_REASONS, type CountOutcome } from '../lib/chart-review-sheet';
 
 // ── The review sheet (jsdom) ─────────────────────────────────────────────────
 // PURE presentational — props in, callbacks out, no PDF and no calibration. The
@@ -30,6 +30,7 @@ function props(over: Partial<ChartReviewSheetProps> = {}): ChartReviewSheetProps
       />
     ),
     countChoices: [3, 4, 5, 6, 7],
+    countReadiness: 'ready',
     onProposeCount: vi.fn(() => okCount([0.25, 0.5, 0.75, 1])),
     onConfirm: vi.fn(),
     onDismiss: vi.fn(),
@@ -319,7 +320,15 @@ describe('ChartReviewSheet — the words the owner actually sees', () => {
     check(surplus.container, 'surplus warning');
     surplus.unmount();
 
-    for (const reason of ['insufficient-evidence', 'out-of-staff', 'degenerate-span', 'invalid-count'] as const) {
+    // The count screen while the page is still being read.
+    const reading = render(<ChartReviewSheet {...props({ countReadiness: 'reading' })} />);
+    fireEvent.click(screen.getByText('None of these'));
+    check(reading.container, 'count (still reading)');
+    reading.unmount();
+
+    // EVERY refusal reason, from the exported list — not a hand-picked subset, which is
+    // how a new reason would ship unchecked.
+    for (const reason of REFUSAL_REASONS) {
       const r = render(
         <ChartReviewSheet
           {...props({ onProposeCount: vi.fn((): CountOutcome => ({ kind: 'refused', reason, available: 2 })) })}
@@ -375,5 +384,57 @@ describe('ChartReviewSheet — refusal', () => {
     fireEvent.click(screen.getByText('Skip this line'));
     expect(onDismiss).toHaveBeenCalled();
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChartReviewSheet — a count before the page has been read', () => {
+  // The page re-reads ONE page when the sheet opens, and the count needs that read. Before
+  // this, an early tap was answered as if the read had come back EMPTY: "We can only see 0
+  // barlines here" — false while the read is in flight — and the refusal screen has no
+  // Back, so the owner was put out of the sheet for tapping too soon.
+  it('★ while the page is still being read, a count cannot be chosen — and nothing claims zero barlines', () => {
+    const onProposeCount = vi.fn(() => okCount([0.25, 0.5, 0.75, 1]));
+    const { container } = render(
+      <ChartReviewSheet {...props({ countReadiness: 'reading', onProposeCount })} />,
+    );
+    fireEvent.click(screen.getByText('None of these'));
+    expect(screen.getByText(/Reading this page/)).toBeTruthy();
+    const key = screen.getByText('4') as HTMLButtonElement;
+    expect(key.disabled).toBe(true);
+    fireEvent.click(key);
+    expect(onProposeCount).not.toHaveBeenCalled();
+    expect(container.textContent).not.toMatch(/0 barlines/);
+    expect(screen.getByText('How many bars?')).toBeTruthy(); // still on the count
+  });
+
+  it('the counts come alive when the read lands, without leaving the count screen', () => {
+    const onProposeCount = vi.fn(() => okCount([0.25, 0.5, 0.75, 1]));
+    const { rerender } = render(
+      <ChartReviewSheet {...props({ countReadiness: 'reading', onProposeCount })} />,
+    );
+    fireEvent.click(screen.getByText('None of these'));
+    rerender(<ChartReviewSheet {...props({ countReadiness: 'ready', onProposeCount })} />);
+    expect(screen.queryByText(/Reading this page/)).toBeNull();
+    fireEvent.click(screen.getByText('4'));
+    expect(onProposeCount).toHaveBeenCalledWith(4);
+  });
+
+  it('a page that could not be read says so, rather than claiming it saw no barlines', () => {
+    const onOpenCalibrate = vi.fn();
+    render(
+      <ChartReviewSheet
+        {...props({
+          countReadiness: 'unreadable',
+          onOpenCalibrate,
+          onProposeCount: vi.fn((): CountOutcome => ({ kind: 'refused', reason: 'unreadable', available: 0 })),
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByText('None of these'));
+    fireEvent.click(screen.getByText('5'));
+    expect(screen.getByText(/couldn't read/)).toBeTruthy();
+    expect(screen.queryByText(/0 barlines/)).toBeNull();
+    fireEvent.click(screen.getByText('Set them by hand'));
+    expect(onOpenCalibrate).toHaveBeenCalledWith(5); // the count is still carried over
   });
 });
