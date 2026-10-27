@@ -935,3 +935,32 @@ safe on its own — so no deploy in the sequence is a half-wired state.
    problem, not the defence). Shapes are validated, and any existing note the new
    list does not keep verbatim is named on the card ("Replace notes") and
    confirmed. The prompt and tool description say the list is whole.
+
+### Step 4 — `apply_changes` wired, the diff card
+
+1. **No second confirm after Apply.** The card IS the confirmation: it renders
+   the diff `planChanges` computes, the same call apply then runs (§6, §7). A mix
+   brought back at an orphaned number is a `↺` line naming who rejoins
+   (step 2 item 2), so tier-1 §3.6 item 7's "confirmed with names" is met before
+   the click, not by a dialog after it.
+2. **A plan that would be refused says so on the pending card**, before the
+   click. Apply then records `'refused'` and Claude gets the reason (§5.4,
+   §5.5). The button is not hidden while pending: the refusal has to reach
+   Claude, and Apply is how it does.
+3. **The approved diff is stored on the tool call at Apply** (`sections`).
+   Re-planning after Apply would run against the changed config and describe
+   nothing, so an applied card would lose its record of what it did.
+4. **Card text is pure `lib/`** (`summaryLines`). `needsReview` is hidden as
+   bookkeeping; `slotId`/`pos`/`inst` read as performer/position/source, and a
+   re-link names performers (`DSR — Ray`), never ids. Past
+   `SUMMARY_ROW_LIMIT` (5) patched rows in one list, the card counts by field
+   set (*"6 monitor mixes — type changed"*), per §7.
+5. **The prompt reuses the spike's tested rules verbatim where it can** (§10.1),
+   plus three the spike's harness did not need: `null` clears an optional field
+   (step 2 item 6), a monitor's mix number is never changed (step 2 item 1), and
+   `generate_show` only on an empty show or "start over".
+6. **⚠ The spike measured its own prompt, not this one.** The shipped prompt
+   embeds the same rules inside the larger codesigner prompt, with four tools
+   instead of one. That is a different input to the model, so the 6/7 result is
+   evidence, not proof, for what ships. Re-running `~/op-spike.mjs` against
+   `lib/agent.ts`'s `SYSTEM_PROMPT` and `TOOLS` would measure it.

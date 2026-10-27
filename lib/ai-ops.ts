@@ -202,7 +202,7 @@ export function planChanges<C extends ShowLists>(
         const tag = `${op.entity}.${key}`;
         if (!warned.has(tag)) {
           warned.add(tag);
-          warnings.push(`Ignored "${key}" — ${NOUN[op.entity]}s have no such field.`);
+          warnings.push(`Ignored "${key}" — ${PLURAL[op.entity]} have no such field.`);
         }
         continue;
       }
@@ -276,7 +276,7 @@ export function planChanges<C extends ShowLists>(
   // violate it, but pass 3 below relies on it, so it is checked, not assumed.
   for (const entity of OP_ENTITIES) {
     const ids = lists[entity].map((r) => r.id);
-    if (new Set(ids).size !== ids.length) return { ok: false, problems: [{ message: `two ${NOUN[entity]}s ended up with the same id — ask again` }] };
+    if (new Set(ids).size !== ids.length) return { ok: false, problems: [{ message: `two ${PLURAL[entity]} ended up with the same id — ask again` }] };
   }
 
   // Pass 3 — positional numbers an add may omit (§3.5). Assigned after every op
@@ -438,6 +438,83 @@ export function notesReplacePrompt(current: readonly GeneralNote[], incoming: re
     `Replace the general notes?\n\nThis removes or rewrites ${lost.length === 1 ? '1 existing note' : `${lost.length} existing notes`}:\n` +
     lost.map((n) => `  • ${n.label || '(no label)'}`).join('\n')
   );
+}
+
+// ── The approve card's diff (§7) ─────────────────────────────────────────────
+
+export interface SummaryLine {
+  kind: 'add' | 'remove' | 'patch' | 'join' | 'warn';
+  text: string;
+}
+
+export interface SummarySection {
+  title: string;
+  lines: SummaryLine[];
+}
+
+/** Bookkeeping, not something a performer changed — never shown as a change. */
+const HIDDEN_FIELDS = new Set(['needsReview']);
+/** Field names as the tables label them, where the type's name would mean nothing to a performer. */
+const FIELD_LABEL: Record<string, string> = { slotId: 'performer', pos: 'position', inst: 'source' };
+const fieldLabel = (f: string) => FIELD_LABEL[f] ?? f;
+
+/** Past this many patched rows in one list, the card counts instead of listing (§7). */
+export const SUMMARY_ROW_LIMIT = 5;
+
+const PLURAL: Record<OpEntity, string> = { stagePlot: 'performers', inputs: 'inputs', monitors: 'monitor mixes' };
+const TITLE: Record<OpEntity, string> = { stagePlot: 'Stage plot', inputs: 'Inputs', monitors: 'Monitors' };
+
+/**
+ * `ChangeSummary` as plain-language lines, grouped by list. A raw op list is
+ * worse than useless to a performer; this is what they approve. `prev`/`next`
+ * resolve a `slotId` to the performer it names, so a re-link reads
+ * "→ DSR — Ray", never a UUID.
+ */
+export function summaryLines(summary: ChangeSummary, prev: ShowLists, next: ShowLists): SummarySection[] {
+  const slotNames = new Map<string, string>();
+  for (const list of [prev.stagePlot, next.stagePlot]) {
+    list.forEach((s, idx) => {
+      if (s.id) slotNames.set(s.id, `${s.pos} — ${slotLabel(s, blockIndexOf(list, idx))}`);
+    });
+  }
+  const show = (field: string, v: unknown): string => {
+    if (v === undefined || v === '') return '—';
+    if (field === 'slotId') return slotNames.get(String(v)) ?? 'a removed performer';
+    if (typeof v === 'boolean') return v ? 'yes' : 'no';
+    return String(v);
+  };
+
+  const sections: SummarySection[] = [];
+  for (const entity of OP_ENTITIES) {
+    const changes = summary[entity];
+    const lines: SummaryLine[] = [];
+    for (const label of changes.removed) lines.push({ kind: 'remove', text: label });
+    for (const label of changes.added) lines.push({ kind: 'add', text: label });
+
+    const patched = changes.patched
+      .map((p) => ({ label: p.label, changes: p.changes.filter((c) => !HIDDEN_FIELDS.has(c.field)) }))
+      .filter((p) => p.changes.length > 0);
+    if (patched.length > SUMMARY_ROW_LIMIT) {
+      const byFields = new Map<string, number>();
+      for (const p of patched) {
+        const fields = p.changes.map((c) => fieldLabel(c.field)).join(', ');
+        byFields.set(fields, (byFields.get(fields) ?? 0) + 1);
+      }
+      for (const [fields, count] of byFields) {
+        lines.push({ kind: 'patch', text: `${count} ${count === 1 ? PLURAL[entity].replace(/es$|s$/, '') : PLURAL[entity]} — ${fields} changed` });
+      }
+    } else {
+      for (const p of patched) {
+        lines.push({ kind: 'patch', text: `${p.label}: ${p.changes.map((c) => `${fieldLabel(c.field)} ${show(c.field, c.from)} → ${show(c.field, c.to)}`).join('; ')}` });
+      }
+    }
+    if (entity === 'monitors') {
+      for (const j of summary.joins) lines.push({ kind: 'join', text: `Mix ${j.mix} is back, so performers still on it rejoin: ${j.names.join(', ')}` });
+    }
+    if (lines.length > 0) sections.push({ title: TITLE[entity], lines });
+  }
+  if (summary.warnings.length > 0) sections.push({ title: 'Ignored', lines: summary.warnings.map((w) => ({ kind: 'warn' as const, text: w })) });
+  return sections;
 }
 
 /** One sentence for the refused card and for the model's `tool_result` (§5.4, §5.5). */

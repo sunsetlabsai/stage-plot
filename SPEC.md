@@ -188,16 +188,19 @@ AI co-designer
 36. AI tab (owner only): chat proxied through `POST /api/agent/chat`; device key → account key →
     free "try-it" key (50 messages per IP per 30 days), model from env (default
     `claude-sonnet-4-6`) (`app/api/agent/chat/route.ts:46-103`, `lib/agent-key.ts:14-29`).
-37. Three tools (`lib/agent.ts`): `generate_show` builds or replaces the stage plot, inputs and
-    monitors in one call (slots carry a `new:` tempId, every input a `slotId` or null), validated by
-    `planGenerateShow` → `planChanges` (`lib/ai-ops.ts`); `update_notes` (whole list) and
-    `update_show_info` (merge). Only the nine on-grid positions are allowed. The AI cannot touch the
-    setlist or charts. Each tool call is a card with **Apply / Reject**; nothing changes until Apply.
-38. A `generate_show` on a show with content, or an `update_notes` that drops existing notes, warns
-    on the card with what is lost, labels its button "Replace everything" / "Replace notes", and
-    confirms. An invalid call is **refused**: config untouched, reason on the card, and Claude is told
-    it was the app, not the user (`lib/agent-history.ts`). No cascade: the AI's lists are the only
-    writer. Targeted AI edits (`apply_changes`) are not built yet (`design-ai-op-contract.md` §13 step 4).
+37. Four tools (`lib/agent.ts`). `apply_changes({ops})` is the only edit tool: add/remove/patch on
+    stagePlot, inputs and monitors, where a row no op names cannot change, validated whole by
+    `planChanges` (`lib/ai-ops.ts`). `generate_show` builds or replaces the stage plot, inputs and
+    monitors in one call (slots carry a `new:` tempId, every input a `slotId` or null), through
+    `planGenerateShow` → `planChanges`. `update_notes` writes the whole list; `update_show_info`
+    merges. Only the nine on-grid positions are allowed. The AI cannot touch the setlist or charts.
+    Each tool call is a card with **Apply / Reject**; nothing changes until Apply.
+38. An `apply_changes` card is a plain-language diff (`summaryLines`) of exactly what Apply does,
+    including performers who rejoin a revived mix. A `generate_show` on a show with content, or an
+    `update_notes` that drops notes, warns with what is lost, labels its button "Replace
+    everything" / "Replace notes", and confirms. An invalid call is **refused**: config untouched,
+    reason on the card, and Claude is told it was the app, not the user (`lib/agent-history.ts`).
+    There is no cascade: the AI's lists are the only writer.
 
 ### 2.2 Data & key files
 

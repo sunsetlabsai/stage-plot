@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { planChanges, describeProblems, type Problem } from '@/lib/ai-ops';
+import { planChanges, describeProblems, summaryLines, SUMMARY_ROW_LIMIT, type Problem } from '@/lib/ai-ops';
 import { POSITIONS } from '@/lib/setlist';
 import { TOOLS } from '@/lib/agent';
 import type { InputChannel, MonitorMix, StageSlot } from '@/lib/types';
@@ -438,5 +438,61 @@ describe('planChanges — totality', () => {
 
   it('describeProblems joins distinct messages into one sentence', () => {
     expect(describeProblems([{ message: 'a' }, { message: 'b' }, { message: 'a' }])).toBe('This plan was refused because a; b.');
+  });
+});
+
+// §7 — the approve card renders `summaryLines`, not raw ops.
+describe('summaryLines — the approve card diff (§7)', () => {
+  const lines = (cfg: ReturnType<typeof band>, ops: unknown) => {
+    const r = accepted(planChanges(cfg, ops));
+    return summaryLines(r.summary, cfg, r.next);
+  };
+
+  it('spike case A — strike the second guitar: removes, plus the stale name patched off the shared mix', () => {
+    expect(lines(band(), [
+      { entity: 'stagePlot', action: 'remove', id: 's-priya' },
+      { entity: 'inputs', action: 'remove', id: 'in-5' },
+      { entity: 'monitors', action: 'patch', id: 'm-2', values: { name: 'Tomás' } },
+    ])).toEqual([
+      { title: 'Stage plot', lines: [{ kind: 'remove', text: 'USR — Priya' }] },
+      { title: 'Inputs', lines: [{ kind: 'remove', text: 'ch 5 Guitar 2' }] },
+      { title: 'Monitors', lines: [{ kind: 'patch', text: 'Mix 2 (Tomás, Priya): name Tomás, Priya → Tomás' }] },
+    ]);
+  });
+
+  it('a re-link reads as performers, never ids; the review flag it clears is not shown', () => {
+    const cfg = band();
+    cfg.inputs[2] = { ...cfg.inputs[2], slotId: 's-gone', needsReview: true };
+    expect(lines(cfg, [{ entity: 'inputs', action: 'patch', id: 'in-3', values: { slotId: 's-ray' } }])).toEqual([
+      { title: 'Inputs', lines: [{ kind: 'patch', text: 'ch 3 Bass: performer a removed performer → DSR — Ray' }] },
+    ]);
+    // Plausible-wrong: print the raw field — a UUID and "needsReview true → false".
+    expect(JSON.stringify(lines(band(), [{ entity: 'inputs', action: 'patch', id: 'in-6', values: { slotId: 's-ray' } }]))).toContain('DSC — Dee → DSR — Ray');
+  });
+
+  it(`past ${SUMMARY_ROW_LIMIT} patched rows it counts instead of listing — spike case B, all wedges to IEMs`, () => {
+    const cfg = band();
+    cfg.monitors.push(...[4, 5, 6].map((n) => ({ id: `m-${n}`, mix: n, name: `M${n}`, needs: '', type: 'Wedge' })));
+    const ops = cfg.monitors.map((m) => ({ entity: 'monitors', action: 'patch', id: m.id, values: { type: 'IEM' } }));
+    expect(lines(cfg, ops)).toEqual([{ title: 'Monitors', lines: [{ kind: 'patch', text: '6 monitor mixes — type changed' }] }]);
+    // At the limit, every row is still listed.
+    expect(lines(band(), ops.slice(0, 3))[0].lines).toHaveLength(3);
+  });
+
+  it('a revived mix names who rejoins it, and ignored fields are listed', () => {
+    const cfg = band();
+    cfg.monitors = cfg.monitors.filter((m) => m.mix !== 3);
+    const out = lines(cfg, [{ entity: 'monitors', action: 'add', values: { mix: 3, name: 'Rhythm', needs: '', colour: 'red' } }]);
+    expect(out).toEqual([
+      { title: 'Monitors', lines: [
+        { kind: 'add', text: 'Mix 3 (Rhythm)' },
+        { kind: 'join', text: 'Mix 3 is back, so performers still on it rejoin: USC — Sam, DSR — Ray' },
+      ] },
+      { title: 'Ignored', lines: [{ kind: 'warn', text: 'Ignored "colour" — monitor mixes have no such field.' }] },
+    ]);
+  });
+
+  it('a plan that re-sends current values has no lines', () => {
+    expect(lines(band(), [{ entity: 'inputs', action: 'patch', id: 'in-1', values: { mic: 'Beta 52' } }])).toEqual([]);
   });
 });

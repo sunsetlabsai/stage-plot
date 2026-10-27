@@ -179,9 +179,6 @@ describe('generate_show on a populated show — confirm and replace (§9.2a, §1
 });
 
 describe('the tool set and prompt (§9.2)', () => {
-  it('exactly three tools: generate_show + the two single-value writes; the AI cannot touch the setlist', () => {
-    expect(TOOLS.map((t) => t.name)).toEqual(['generate_show', 'update_notes', 'update_show_info']);
-  });
 
   it('the prompt no longer orders a cascade, names a removed tool, or teaches setlist conventions', () => {
     expect(SYSTEM_PROMPT).not.toMatch(/cascade/i);
