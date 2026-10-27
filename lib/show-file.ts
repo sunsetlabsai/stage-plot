@@ -1,5 +1,5 @@
 import { stringify, parse } from 'yaml';
-import { renumberSetlist } from './setlist';
+import { renumberSetlist, validateMonitors } from './setlist';
 import type { StageSlot, InputChannel, MonitorMix, GeneralNote, SetlistSong } from './types';
 
 // ─── Internal AppConfig shape (mirrors page.tsx) ─────────────────────────────
@@ -117,6 +117,7 @@ function fromJson(content: string): AppConfig {
   ) {
     throw new Error('Invalid show file — missing required sections (stagePlot, inputs, setlist, monitors, notes, showInfo).');
   }
+  assertValidMonitors(parsed.monitors);
 
   // Strip songId from imported setlist entries (internal DB UUIDs must not cross owners)
   if (Array.isArray(parsed.setlist)) {
@@ -151,9 +152,18 @@ function validate(parsed: unknown): asserts parsed is ShowFileV1 {
   if (!Array.isArray(obj.monitors)) {
     throw new Error('Invalid show file — missing "monitors" array.');
   }
+  assertValidMonitors(obj.monitors);
   if (!Array.isArray(obj.notes)) {
     throw new Error('Invalid show file — missing "notes" array.');
   }
+}
+
+// Two rows both numbered Mix 1 make every slot on 1 ambiguous, and nothing
+// would flag it (Codex R1 on #193). Refuse at import, the same rule the
+// editor and the AI apply enforce (design-core-path-tier1 §3.3).
+function assertValidMonitors(monitors: { mix?: unknown }[]): void {
+  const reason = validateMonitors(monitors);
+  if (reason) throw new Error(`Invalid show file — monitor mixes: ${reason}.`);
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -161,7 +161,17 @@ export function moveInput(inputs: InputChannel[], from: number, to: number): Inp
   return arr.map((inp, i) => (inp.ch === i + 1 ? inp : { ...inp, ch: i + 1 }));
 }
 
-// ── Monitor mix reorder ───────────────────────────────────────────────────
+// ── Monitor mix identity (design-core-path-tier1 §3) ──────────────────────
+//
+// A mix number IS an aux number — "Mix 3" is aux 3, like a console. Slots point
+// at it by value (`StageSlot.mix`), so it is a routing identity: it changes only
+// through `renumberMix`, which moves the pointers with it. There is deliberately
+// no reorder — `moveMonitor` rewrote `mix = i + 1` and left every slot pointing
+// at someone else's wedge (B3). Contrast `moveInput` above: nothing references
+// `ch` (input links are by `slotId`), which is why input reorder is safe.
+//
+// `StageSlot.mix === 0` is the "no monitor" sentinel and is never an orphan;
+// `MonitorMix.mix` itself is always ≥ 1 (design-ai-op-contract §5 (c)).
 
 export function ensureMonitorIds(monitors: MonitorMix[]): MonitorMix[] {
   return monitors.map((mon) =>
@@ -169,14 +179,189 @@ export function ensureMonitorIds(monitors: MonitorMix[]): MonitorMix[] {
   );
 }
 
-export function moveMonitor(monitors: MonitorMix[], from: number, to: number): MonitorMix[] {
-  if (from === to || from < 0 || to < 0 || from >= monitors.length || to >= monitors.length) {
-    return monitors;
+function isMixNumber(n: unknown): n is number {
+  return typeof n === 'number' && Number.isInteger(n) && n > 0;
+}
+
+/**
+ * Unique positive-integer mix numbers, or the reason they are not. Sparse
+ * numbering (`[1, 2, 5]`) is valid — a gap is an unpatched aux, not an error.
+ */
+export function validateMonitors(monitors: readonly { mix?: unknown }[]): string | null {
+  const seen = new Set<number>();
+  for (const m of monitors) {
+    if (!isMixNumber(m.mix)) return `mix number ${String(m.mix)} is not a positive whole number`;
+    if (seen.has(m.mix)) return `mix ${m.mix} appears more than once`;
+    seen.add(m.mix);
   }
-  const arr = [...monitors];
-  const [moved] = arr.splice(from, 1);
-  arr.splice(to, 0, moved);
-  return arr.map((mon, i) => (mon.mix === i + 1 ? mon : { ...mon, mix: i + 1 }));
+  return null;
+}
+
+/**
+ * Validity of an AI `update_monitors` full replace against the current list.
+ * On top of `validateMonitors`: a row that comes back carrying an existing
+ * monitor's id under a DIFFERENT number is a renumber, and is refused. The
+ * model sees ids in `currentConfig`, so a swap of Mix 1 and Mix 2 that kept
+ * both ids would otherwise pass. Slots would stay on their old numbers, and
+ * both numbers still exist, so nothing would be flagged (Codex R1 on #193).
+ * Refused rather than remapped because a renumber moves performers and §3.3
+ * makes that confirm-worthy, naming who moves. An Apply card has no such
+ * prompt, and the Monitor Mixes table does.
+ */
+export function validateMonitorReplace(
+  current: readonly MonitorMix[],
+  incoming: readonly { id?: unknown; mix?: unknown; [field: string]: unknown }[],
+): string | null {
+  const invalid = validateMonitors(incoming);
+  if (invalid) return invalid;
+  for (const row of incoming) {
+    const was = current.find((m) => m.id !== undefined && m.id === row.id);
+    if (was && was.mix !== row.mix) {
+      return `it changes Mix ${was.mix} to Mix ${String(row.mix)} — renumber a mix in the Monitor Mixes table, which moves its performers with it`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The confirm text for a monitor-list replace that brings back a number
+ * orphaned slots still point at, or null when it adopts nobody. A mix that
+ * comes into existence at N re-attaches every performer already on N, which
+ * is usually right: the AI recreates Mix 7 precisely because Cy is on it. But
+ * it must not be silent (I8; Codex R2 on #193). Same "join" wording as
+ * `renumberMixPrompt`. "+ Add Mix" never needs it, because `nextMixNumber`
+ * skips orphaned numbers.
+ */
+export function monitorReplacePrompt(
+  stagePlot: StageSlot[],
+  current: readonly MonitorMix[],
+  incoming: readonly { mix?: unknown }[],
+): string | null {
+  const revived = [...new Set(incoming.map((m) => m.mix))]
+    .filter((n): n is number => isMixNumber(n) && isOrphanedMix(n, current))
+    .sort((a, b) => a - b);
+  const groups = revived
+    .map((n) => ({ n, names: performersOnMix(stagePlot, n) }))
+    .filter((g) => g.names.length > 0);
+  if (groups.length === 0) return null;
+  return (
+    'Apply these monitor mixes?\n\n' +
+    groups.map((g) => `Still pointing at the removed Mix ${g.n}, so they join the new Mix ${g.n}:\n${bullets(g.names)}`).join('\n\n')
+  );
+}
+
+/** Add a blank mix, numbered by `nextMixNumber`. */
+export function addMonitor<T extends { stagePlot: StageSlot[]; monitors: MonitorMix[] }>(config: T): T {
+  return {
+    ...config,
+    monitors: [...config.monitors, { id: crypto.randomUUID(), mix: nextMixNumber(config.monitors, config.stagePlot), name: '', needs: '' }],
+  };
+}
+
+/**
+ * Delete one mix by id. Delete orphans and does not cascade (§3.4). The
+ * surviving numbers do not move and no slot is touched, so performers on the
+ * removed mix keep its number and are flagged by `isOrphanedMix`.
+ */
+export function deleteMonitor<T extends { monitors: MonitorMix[] }>(config: T, id: string): T {
+  return { ...config, monitors: config.monitors.filter((m) => m.id !== id) };
+}
+
+/**
+ * The number a new mix gets: one past the highest, so sparse numbering never
+ * collides. "Highest" includes ORPHANED slot mixes — seeding a blank mix onto a
+ * removed number would silently re-attach the performers still pointing at it.
+ */
+export function nextMixNumber(monitors: readonly MonitorMix[], stagePlot: readonly StageSlot[] = []): number {
+  const highest = Math.max(0, ...monitors.map((m) => m.mix), ...stagePlot.map((s) => s.mix));
+  return highest + 1;
+}
+
+/** Monitor rows in aux order — the only order a mix list has now that it cannot be dragged. */
+export function sortMonitorsByMix(monitors: readonly MonitorMix[]): MonitorMix[] {
+  return [...monitors].sort((a, b) => a.mix - b.mix);
+}
+
+/** A slot pointing at a mix the monitor list does not have (after a delete, or a hand-edited import). */
+export function isOrphanedMix(mix: number, monitors: readonly MonitorMix[]): boolean {
+  return mix > 0 && !monitors.some((m) => m.mix === mix);
+}
+
+/**
+ * Who is routed to `mix` — what a renumber moves and a delete orphans — labeled
+ * "TLA — <slot label>" as in the input list's Position dropdown, so a prompt
+ * names performers the same way every other surface does.
+ */
+export function performersOnMix(stagePlot: StageSlot[], mix: number): string[] {
+  if (mix <= 0) return [];
+  const out: string[] = [];
+  stagePlot.forEach((s, idx) => {
+    if (s.mix === mix) out.push(`${s.pos} — ${slotLabel(s, blockIndexOf(stagePlot, idx))}`);
+  });
+  return out;
+}
+
+const bullets = (names: string[]) => names.map((n) => `  • ${n}`).join('\n');
+
+/**
+ * The confirm text for renumbering `from` → `to`, or null when nobody is
+ * affected and no prompt is needed. Call only after `renumberMix` accepted the
+ * move: `to` is then not a live mix, so anyone already on it is an orphan of a
+ * removed Mix `to` — and joins this one. Both groups are named.
+ */
+export function renumberMixPrompt(stagePlot: StageSlot[], from: number, to: number): string | null {
+  const moving = performersOnMix(stagePlot, from);
+  const joining = performersOnMix(stagePlot, to);
+  if (moving.length === 0 && joining.length === 0) return null;
+  let msg = `Renumber Mix ${from} to Mix ${to}?`;
+  if (moving.length > 0) {
+    msg += `\n\n${moving.length === 1 ? 'This performer moves' : `These ${moving.length} performers move`} with it:\n${bullets(moving)}`;
+  }
+  if (joining.length > 0) {
+    msg += `\n\nStill pointing at the removed Mix ${to}, so they join this mix:\n${bullets(joining)}`;
+  }
+  return msg;
+}
+
+/**
+ * The confirm text for deleting Mix `mix`, or null when nobody is on it.
+ * Delete orphans rather than cascades (§3.4), so the prompt says who will be
+ * left flagged — mirroring the slot-delete prompt.
+ */
+export function deleteMixPrompt(stagePlot: StageSlot[], mix: number): string | null {
+  const affected = performersOnMix(stagePlot, mix);
+  if (affected.length === 0) return null;
+  return (
+    `${affected.length === 1 ? '1 performer is' : `${affected.length} performers are`} on Mix ${mix}:\n` +
+    `${bullets(affected)}\n\nOK: delete the mix (they'll be flagged to reassign).\nCancel: keep it.`
+  );
+}
+
+export type RenumberMixResult<T> = { ok: true; config: T } | { ok: false; reason: string };
+
+/**
+ * The one deliberate path that changes a mix number. Moves the monitor row
+ * AND every slot on it, in one step, so no reference is rewritten underneath
+ * the thing pointing at it (I6). Rejects — mutating nothing — when `to` is not
+ * a positive whole number or is already another live mix.
+ */
+export function renumberMix<T extends { stagePlot: StageSlot[]; monitors: MonitorMix[] }>(
+  config: T,
+  from: number,
+  to: number,
+): RenumberMixResult<T> {
+  if (!config.monitors.some((m) => m.mix === from)) return { ok: false, reason: `there is no mix ${from}` };
+  if (!isMixNumber(to)) return { ok: false, reason: 'a mix number must be a positive whole number' };
+  if (to === from) return { ok: true, config };
+  if (config.monitors.some((m) => m.mix === to)) return { ok: false, reason: `mix ${to} already exists` };
+  return {
+    ok: true,
+    config: {
+      ...config,
+      monitors: config.monitors.map((m) => (m.mix === from ? { ...m, mix: to } : m)),
+      stagePlot: config.stagePlot.map((s) => (s.mix === from ? { ...s, mix: to } : s)),
+    },
+  };
 }
 
 // ── Setlist title ownership (design-core-path-tier1 §1.3) ─────────────────

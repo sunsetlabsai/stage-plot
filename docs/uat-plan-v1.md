@@ -39,18 +39,12 @@ fixed are listed in §2.5. `P` = `app/[owner]/[show]/page.tsx`.
 |---|---|---|---|
 | **B1** | **Nothing since Sep 4 reaches production.** The Vercel account was blocked (team `salonhqs-projects`); Graham reports it unblocked 2026-10-26. Still open until the next merge to `main` is confirmed deployed to production. | §1 | S (ops) |
 | **B2** | **Applying an AI stage-plot change wipes the hand-built input list and monitor needs, then says "Applied."** `update_stage_plot` regenerates every input from a keyword guess, renumbers channels, rebuilds monitors with blank needs, and cuts every input↔performer link. There is no confirm, no undo, and autosave commits it. The system prompt tells the model to "ALWAYS cascade". **Same loss with no stage-plot card:** the separate `update_inputs` tool replaces the entire input list, its schema has no `slotId`, and Apply assigns the list directly — so asking the AI to change one input erases every performer link. | `P:5608-5640`, `:5642` · `lib/agent.ts:29`, `:78` · `docs/design-ai-op-contract.md` (unbuilt) | **S stop-gap:** drop the client cascade + a confirm naming what gets replaced. M–L: the op contract |
-| **B3** | **Deleting or reordering a monitor mix silently moves performers onto other people's wedges.** Mixes renumber to `1..N`, but performers keep the old number, so the rider prints `MIX 3` for a mix that is now someone else's. Monitor delete has no confirm, and add uses `length+1`, which collides when the numbers have gaps. | `lib/setlist.ts:172-179` · `P:6638`, `:6646`, `:6650`, `:273` · `design-core-path-tier1.md` §3 (not started) | **S stop-gap:** stop renumbering, seed `max+1`, confirm on delete. M: full §3 |
+| **B3** | **FIXED: full `design-core-path-tier1.md` §3 built.** A mix number is now immutable except through `renumberMix`, which moves its performers with it. Delete orphans and flags them; drag reorder is gone. Cases SH-20 and SH-37 verify it. | `lib/setlist.ts` (`renumberMix`, `validateMonitors`, `nextMixNumber`, `isOrphanedMix`) | Done |
 | **B4** | **The offline gig path has never been run on a real phone.** Risks from the code: pdf.js is a lazy chunk that the service worker caches only if it was fetched while the SW was in control; the show fetch has no timeout, so captive "lie-fi" Wi-Fi hangs while showing the built-in demo band; an offline cold start reopens only the *last* show. | `lib/pdf-viewer.ts:10-12` · `public/sw.js:7-12,72-90` · `P:499` · `app/page.tsx:39-45` | S to test (cases PL-03/04, CH-03 below). Fix size depends on the result |
 
-### 2.2 Blockers only if the conductor is in v1 — **Graham to rule**
+### 2.2 Conductor: not in v1 UAT (ruled 2026-10-26)
 
-Both were found by reading the code and neither has been reproduced on a device. UAT cases C-11
-and C-12 are written to confirm them.
-
-| ID | Gap | Evidence | Fix size |
-|---|---|---|---|
-| **K1** | **The conductor loses its controls whenever its connection drops.** While the relay is (re)joining, the hook reports the role as `follower`, and the page mounts the conductor cluster only for non-followers. On every Wi-Fi blip, and on the first Go live, the MD sees "Joining the room…" with only Leave. A running clock keeps advancing out of sight. | `lib/use-conductor-session.ts:1041` · `P:4278` | S |
-| **K2** | **After "Conductor lost", a follower can't drive its own chart,** although the banner says "you're on your own chart for now". Taps are inert for any follower, and the page stays pinned to the last mirrored bar. The only way out is Leave. | `P:3402`, `:3512` · `CC:928` · `components/RelayStrip.tsx:101` | S |
+Graham ruled the conductor out of v1. K1 and K2 are now listed under §2.4.
 
 ### 2.3 Should fix before UAT
 
@@ -82,6 +76,10 @@ and C-12 are written to confirm them.
 - **PR #184, the C3 review sheet.** It is overlay-calibration polish, not core path. Drive it once in a real browser before merging, and merging can't deploy while B1 stands.
 - **`RENDER_SCALE` profiling on Graham's phone** (`/dev/measure-profile` is live in prod).
 - **Smaller fixes:** replacing a chart silently drops its verified overlay; `featured` can't be unset; no `sceneNote` editor; account deletion is impossible (FK `NO ACTION`); the library row has no Share; the `cacheChart` cross-version eviction race; issues #100, #136 (fix shipped, so close it), #138, #139.
+- **The conductor (ruled out of v1, 2026-10-26).** Two known gaps were found by code read, never reproduced on a device:
+  - **K1:** the conductor loses its controls whenever its connection drops (`lib/use-conductor-session.ts:1041` · `P:4278`).
+  - **K2:** after "Conductor lost", a follower can't drive its own chart (`P:3402`, `:3512` · `CC:928` · `components/RelayStrip.tsx:101`).
+  The C-series case catalogue was removed from §6.5 and is in git at `e462b47`.
 - **Designed but not built:** chart role overrides, song-form-from-lyrics, `keyShift`, conductor cross-part alignment / audio clock / relay chunks 4–7, input sends, off-grid zones, BYOS.
 
 ### 2.5 Dropped: older findings verified fixed on `40a4318`
@@ -102,7 +100,7 @@ and C-12 are written to confirm them.
 
 **Entry (all required before the first tester gets a link):**
 1. B1 cleared and `main` deployed. `vercel inspect showrunr.ai` shows a deploy at or after the fix commits.
-2. B2, B3 fixed (at least the S stop-gaps) and deployed. K1/K2 too, if the conductor is in scope.
+2. B2 and B3 fixed in full and deployed. Graham's 2026-10-26 ruling: no stop-gaps.
 3. The B4 phone run (§4, steps 10–13) passes on one iPhone and one Android phone, run by Graham.
 4. One successful chart-builder Generate on prod, which proves the platform AI key.
 5. `relay.showrunr.ai/healthz` returns `ok` on the day.
@@ -137,7 +135,6 @@ failure.
 | 14 | Signed-in non-owner · laptop | Open the link; confirm read-only everywhere | PL-07, SH-10, RB-30 |
 | 15 | Owner · laptop | Print the rider | SH-09 |
 | 16 | Owner · phone | Offline edit, then reconnect | SH-05, PL-23 |
-| 17 | *If conductor in scope:* MD + 2 phones | Conduct, Go live, scan to follow, conductor drop, take baton, Wi-Fi blip | C-01…C-12 |
 
 ## 5. Test setup
 
@@ -155,7 +152,7 @@ failure.
 ## 6. Case catalogue
 
 Cases are grouped by area and numbered by prefix: SH = show, PL = platform, CH = charts,
-RB = chart builder, C = conductor. P0 = gig-blocking. A case whose expected result says
+RB = chart builder. P0 = gig-blocking. A case whose expected result says
 **"EXPECT TODAY"** or **"known defect"** records a gap from §2. It passes once that gap is fixed.
 Each line reads: *Title — Preconditions · Steps · Expected · Role · Device.*
 
@@ -187,7 +184,8 @@ noted) · **Laptop** (Chrome).
 - [SH-17] Duplicate show — Show with setlist + charts · Dashboard → Duplicate → accept "Copy of …" · New URL; same band name, venue, date, plot, inputs, setlist; charts appear; editing the copy does not change the original · Owner · Laptop
 - [SH-18] Link to stage plot and inputs — Config · Add performer "Bill" at USC mix 2; add input "Kick" → Position = USC — Bill · Mix tab chip shows "MIX 2" and "×1 inputs" · Owner · Laptop
 - [SH-19] Delete performer with linked inputs — Bill has 3 linked inputs · Delete Bill → OK (keep) ; repeat on another with Cancel · OK: inputs flagged amber to relink; Cancel: inputs show no position, no flag · Owner · Laptop
-- [SH-20] Monitor delete re-routes (known defect) — Mixes 1–4; performers on mix 3 and 4 · Delete Mix 2 · **Expected today**: remaining mixes renumber to 1–3 while performers still show MIX 3/MIX 4 — record as the mix-identity bug, not a pass · Owner · Laptop
+- [SH-20] Monitor delete keeps routing — Mixes 1–4; performers on mix 2, 3 and 4 · Delete Mix 2 · The prompt names the Mix 2 performer. After OK, Mixes 1, 3, 4 remain (no renumber). The mix 3/4 performers still show MIX 3/MIX 4. The mix 2 performer shows an amber "MIX 2 REMOVED" chip on Mix tab and in print, plus a ⚠ and "Mix 2 — removed" in the Config Mix dropdown · Owner · Laptop
+- [SH-37] Renumber a mix — Mixes 1, 3; two performers on 3 · Config → Monitor Mixes: change Mix # 3 to 7, press Enter · The prompt names both performers. After OK, both show MIX 7 and the row reads 7. Typing 1 into Mix 7's cell shows "mix 1 already exists" and the cell reverts. "+ Add Mix" then adds Mix 8. No drag grip or ↑/↓ on mix rows · Owner · Laptop
 - [SH-21] Patch export — 20+ inputs incl. a name with a comma and "&" · Export Patch (.csv) and (.xml) · CSV opens in Excel/Sheets with correct columns, sorted by Ch; XML opens in a browser without errors · Owner · Laptop; also try Phone (iOS download behaviour)
 - [SH-22] YAML round trip — Show with everything filled · Export Show (.yaml) → Dashboard → Import YAML · New show with same content; setlist songs linked to library · Owner · Laptop
 - [SH-23] Share show from Perform — Any show · Tap Share in Perform header · Phone: share sheet with the show link; Laptop without Web Share: "Link copied" · Anon · Phone + Laptop
@@ -209,7 +207,6 @@ noted) · **Laptop** (Chrome).
 - [SH-36] Tab-bar copy-link icon — Owner · Click upload icon in tab bar · Link copied; icon briefly shows a tick · Owner · Laptop
 
 #### Can't be UAT'd yet
-- Mix renumber that keeps performers on their mix, orphaned-mix badge (core-path-tier1 §3 unbuilt).
 - AI edits that change one thing without regenerating the rest; diff view; confirm-and-replace
   (ai-op-contract unbuilt).
 - PIT / FOH / OTHER zones; input send matrix (parked, issue #138).
@@ -369,63 +366,3 @@ Roles: **Owner** (signed in, owns the library/show) · **Collab** (signed-in non
 - Duplicate a builder chart as a key variant — unbuilt.
 - Song form from lyrics sheets (L0 import) — unbuilt.
 - Orphaned PDF cleanup — no GC job; not tester-visible.
-
-### 6.5 Conductor + relay (C)
-
-Shared preconditions: a show with at least 2 songs. Song A has a **verified bar calibration**
-with a roadmap containing a repeat, a D.S. or D.C. al Coda, and at least 3 labelled sections
-(one label repeated, e.g. two Choruses). Song A has a library BPM; song B has none. Production
-`NEXT_PUBLIC_RELAY_URL=wss://relay.showrunr.ai`. Devices: **MD phone** (iOS Safari), **laptop**
-(Chrome), **2nd phone** (Android or iOS), plus an LTE hotspot for the different-network case.
-Roles: Owner (signed in), Signed-in non-owner (show shared to them), Signed-out viewer.
-
-#### Core gig path (P0)
-- [C-01] Conduct is offered to non-owners — Song A opened, perform mode · Open the bar transport · "Conduct" link is visible next to Prev/Next bar; tapping it shows the cluster headed "Local MD mode" · Signed-in non-owner AND signed-out viewer · phone — P0
-- [C-02] Advance follows the played roadmap — C-01 done · Tap Advance through the whole song · Redline walks bars in played order, takes the repeat and the D.S./Coda jump, the readout shows "Bar N · 2nd" on repeated passes, the page turns at the same moment the redline moves, and Advance greys out at the end · Owner · phone — P0
-- [C-03] Arm + Go to Coda — mid-song before the To-Coda · Arm change… → Coda → Go · Strip shows "Change pending → Coda @ bar N · tap Go"; Go jumps to the Coda bar immediately; Cancel instead clears it with no move · Owner · phone — P0
-- [C-04] Go live creates a room with a QR — relay reachable, cluster open · Tap "Go live" (enter a name the first time) · The "Follow this performance" dialog appears, then a QR plus a 6-character code (no 0/O/1/I); the header turns green: "Conducting · LIVE · Room XXXXXX · QR" · Owner · phone — P0
-- [C-05] Scan to follow — C-04 live · Scan the QR with the 2nd phone (signed out) and enter a name · It lands on the show, opens Song A on the same chart, and the strip reads "<MD name> is conducting · Bar N"; the follower's redline and page turns track every MD Advance within about 1 s · Signed-out viewer · phone — P0
-- [C-06] Follow from a different network — C-05 with the follower on an LTE hotspot · MD advances 10 bars · Follower matches every bar, with no drift and no stall · Signed-in non-owner · phone — P0
-- [C-07] Song change carries followers — 2 followers mirroring Song A · MD exits, opens Song B's same-role chart, and conducts · Followers auto-open Song B's chart and mirror it. If a follower's role filter hides that chart, it shows "The room is playing <title> — not on this device" instead · any · phone + laptop — P0
-- [C-08] Typed-code join — C-04 live · On the laptop, open the show, click Join, and type the code in lowercase with a stray dash · The input normalises to uppercase and Join enables only at 6 valid characters; mirroring then starts · Signed-in non-owner · laptop — P0
-- [C-09] Conductor's phone dies — C-05 mirroring · Force-quit the MD browser (or turn on airplane mode) · Within about 6 s the followers show "Conductor lost — you're on your own chart for now" with a "Take the baton" button · any · phone — P0
-- [C-10] Take the baton — C-09 state · On the 2nd phone tap Take the baton → "Take it" · The 2nd phone gets the cluster ("Conducting · LIVE"); the other followers show "<name> is conducting" and follow the new MD from the bar where they stopped · Signed-out viewer · phone — P0
-- [C-11] Follower can steer after conductor lost (**suspected FAIL**) — C-09 state · Try to tap a bar, step, or turn pages · Expected per design: the follower can drive its own chart. Code read says taps do nothing and the page is pinned until Leave. Record what happens · any · phone — P0
-- [C-12] MD Wi-Fi blip mid-song (**suspected FAIL**) — C-05 mirroring · Toggle the MD phone's Wi-Fi off for 3 s, then on · Expected per design: the MD keeps the cluster (amber "relay connecting…") and can keep advancing. Code read says the cluster is replaced by "Joining the room…" with only Leave until the baton is re-held. Record whether the MD can advance and whether followers resync · Owner · phone — P0
-
-#### Calls, auto-fire, clock (P1)
-- [C-13] Next section fire point — mid-verse · Arm → Chorus with "Fire at: Next section" · The fire bar shown is the next section's first bar; "Next section" is greyed when vamping in the last section · Owner · phone — P1
-- [C-14] Insert-and-return — playing the last section, a Chorus earlier · Arm → "Chorus 1" (no al Coda) → Go · The band plays Chorus 1 once, then the redline returns to the section that followed where you were. A forward call (to the Coda) just continues from the target · Owner · phone — P1
-- [C-15] Immediate redirects — inside a repeated section · Check the redirect row · Only buttons that would change something appear (Another round / Vamp (hold) / Release vamp / Re-arm jump). Vamp holds the repeat across Advances; Release lets it exit · Owner · phone — P1
-- [C-16] Auto-fire on arrival — Auto-fire: on, a change armed for the next bar · Tap Advance once · The change fires on arrival with no Go tap. While a vamp is held the copy reads "release to fire" and it does not fire until Release · Owner · phone — P1
-- [C-17] Clock with stated BPM — Song A (has BPM) · Clock: on → "On the 1" on a downbeat · The readout says "fixed tempo" and the redline advances one bar per bar at the stated tempo; Song B shows "manual" and does not move · Owner · phone — P1
-- [C-18] Clock pause after sleep — C-17 running · Lock the phone for 10 s, then unlock · "Clock paused — tap 'On the 1' to catch up" appears, with no fast-forward; On the 1 resumes it · Owner · phone — P1
-- [C-19] Followers mirror clock motion — C-17 + a follower · Watch the follower · The follower advances in step with the MD's clock (clock advances are sent as normal bar moves) · any · phone — P1
-- [C-20] Exit vs Leave — MD live with followers · MD taps Exit · Followers show "Conductor lost"; the MD's device stays in the room as a follower. Leave instead fully disconnects · Owner · phone — P1
-- [C-21] Room not found — none · Open `/<owner>/<show>?join=ZZZZZZ` (a code that doesn't exist) · After the name step: "Room not found — it may have ended." plus Leave, with no endless spinner · Signed-out viewer · phone — P1
-- [C-22] Recalibration mid-session — follower mirroring Song A · The owner re-verifies Song A's calibration on the MD device · Followers on the old map show the chart-mismatch line until they reload the new map, never a wrong bar · Owner + non-owner · laptop + phone — P1
-- [C-23] In-show BPM edit — owner, setlist editor · Set Song B's BPM via TapTempo · The hint "sets this song's tempo everywhere" is shown; Song B's Clock now reads "fixed tempo". A non-owner sees no control; an inline (non-library) song shows no control · Owner / non-owner · laptop — P1
-
-#### Polish / shadow (P2)
-- [C-24] Mic shadow readout — cluster open · Enable mic (allow permission) with music playing · It shows "stated X · detected Y (Z%) · shadow" plus "measuring only — doesn't drive the chart yet"; the redline does not move; Copy log copies JSON; exiting the cluster releases the mic (the iOS mic indicator turns off) · Owner · phone — P2
-- [C-25] Toggle labels read as state — cluster · Toggle Clock and Auto-fire · The labels read "Clock: on/off" and "Auto-fire: on/off", and the filled colour appears when on · any · phone — P2
-- [C-26] Relay health pre-gig — none · Open https://relay.showrunr.ai/healthz in a browser · It shows "ok" · Owner · laptop — P2
-- [C-27] Hide connecting dialog — tap Go live on a slow network · Tap Hide on the "Follow this performance" dialog · There is a way back to the QR once the room code arrives (the "Room XXXXXX · QR" chip). Note whether the MD is stranded in the meantime (see C-12) · Owner · phone — P2
-
-#### Can't be UAT'd yet
-- Following a **different part's chart** (horn following the piano chart); tacet / unmapped
-  sections. The canonical SongStructure layer is unbuilt.
-- Followers seeing "change pending → X" before it fires (not rendered on followers).
-- Follower detach + one-tap resync.
-- The audio-driven clock (live/coasting rungs, 4b); non-4/4 meters; tempo shown on followers.
-- The conductor seeing who is following (`presence`, relay chunk 6).
-- The six-state connection copy: "Lost connection — reconnecting", "Your room code changed —
-  followers must re-scan" (relay chunk 7). Today a relay restart mid-show silently rotates the
-  MD's code and strands the followers. That can be observed, but there is no expected copy to
-  test against.
-- Uptime alerting on `/healthz` (relay chunk 5).
-- Rate limits, origin rejection, 1 KB pre-join cap, journal fsync and 15 min / 24 h room GC.
-  These need scripted clients or time travel, not a human. They are covered by `tests/relay-*.test.ts`.
-- The `cacheChart` cross-version eviction race. It needs two overlapping cache writes of
-  different chart versions, which can't be reproduced by hand.
-
