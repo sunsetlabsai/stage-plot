@@ -630,3 +630,129 @@ describe('RoadmapBuilder — section repeat control', () => {
     expect(screen.getAllByRole('spinbutton', { name: 'Bars' })).toHaveLength(2);
   });
 });
+
+// Structure editing PR D (design-roadmap-structure-editing.md §5.2 / §5.4):
+// endings from the repeat control, markers from the bar's Marker menu.
+describe('RoadmapBuilder — endings and markers', () => {
+  const MK: RoadmapSpec = {
+    version: 1,
+    timeSig: { beats: 4, unit: 4 },
+    renderKey: 'C',
+    sections: [
+      { id: 'verse', label: 'Verse', bars: 2, repeat: { kind: 'plain', times: 2 }, changes: [{ bar: 1, chords: [{ degree: 1 }] }] },
+      { id: 'outro', label: 'Outro', bars: 2, changes: [{ bar: 1, chords: [{ degree: 5 }] }] },
+    ],
+  };
+
+  function renderEdit(spec: RoadmapSpec = MK) {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ chart_id: 'c1', role: 'guitar', url: 'u', song_key: 'k' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <RoadmapBuilder
+        songTitle="X"
+        charts={[]}
+        editChart={{ chartId: 'c1', role: 'guitar', spec, updatedAt: '2026-10-26T00:00:00Z' }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+    return fetchMock;
+  }
+
+  async function savedSpec(fetchMock: ReturnType<typeof vi.fn>): Promise<RoadmapSpec> {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    return JSON.parse(fetchMock.mock.calls[0][1].body as string).spec;
+  }
+
+  const marker = () => screen.getByRole('combobox', { name: 'Marker' }) as HTMLSelectElement;
+  const optionLabels = (el: HTMLSelectElement) => [...el.options].map((o) => o.textContent);
+  // Open a bar by its chord text (numbers mode): '1' is Verse bar 1, '5' Outro bar 1.
+  const openBar = (text: string) => fireEvent.click(screen.getAllByText(text).find((el) => el.tagName === 'SPAN' && el.closest('.group'))!);
+
+  it('the Marker menu offers only what the validator accepts', () => {
+    renderEdit();
+    openBar('1');
+    expect(optionLabels(marker())).toEqual(['Marker…', 'Segno', 'Coda', 'Fine', 'D.C.']);
+  });
+
+  it('placing a Segno saves it on that bar and tags the bar in the preview', async () => {
+    const fetchMock = renderEdit();
+    openBar('5');
+    fireEvent.change(marker(), { target: { value: 'm:segno' } });
+    // The tag over the bar (the right panel's marker chip also says Segno).
+    expect(screen.getAllByText('Segno').some((el) => el.className.includes('absolute'))).toBe(true);
+    const spec = await savedSpec(fetchMock);
+    expect(spec.navigation).toEqual({ segno: { section: 1, bar: 1 } });
+  });
+
+  it('removing a marker confirms, naming what depends on it', () => {
+    const confirmMock = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmMock);
+    renderEdit({
+      ...MK,
+      navigation: { segno: { section: 1, bar: 1 }, jump: { at: { section: 1, bar: 2 }, from: 'segno', until: 'end' } },
+    });
+    openBar('5');
+    expect(optionLabels(marker())).toContain('Remove Segno');
+    fireEvent.change(marker(), { target: { value: 'r:segno' } });
+    expect(confirmMock).toHaveBeenCalledWith('Remove the Segno? This also removes the D.S.');
+  });
+
+  it('a placement that would never fire is refused under the bar', () => {
+    renderEdit({
+      ...MK,
+      sections: [
+        {
+          ...MK.sections[0],
+          bars: 3,
+          repeat: {
+            kind: 'volta',
+            endings: [
+              { bars: { start: 2, count: 1 }, passes: [1] },
+              { bars: { start: 3, count: 1 }, passes: [2] },
+            ],
+          },
+          changes: [
+            { bar: 1, chords: [{ degree: 1 }] },
+            { bar: 2, chords: [{ degree: 4 }] },
+          ],
+        },
+        MK.sections[1],
+      ],
+    });
+    openBar('4'); // the 1st ending's only bar
+    fireEvent.change(marker(), { target: { value: 'j:capo:end' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('the D.C. would never be played with the markers placed like this');
+  });
+
+  it('1st/2nd endings from the repeat control: the last bar becomes ending 1, a 2nd is appended', async () => {
+    const fetchMock = renderEdit();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Repeat Verse' }), { target: { value: 'e:1' } });
+    expect(screen.getByText('1.')).toBeInTheDocument();
+    expect(screen.getByText('2.')).toBeInTheDocument();
+    const spec = await savedSpec(fetchMock);
+    expect(spec.sections[0]).toMatchObject({
+      bars: 3,
+      repeat: {
+        kind: 'volta',
+        endings: [
+          { bars: { start: 2, count: 1 }, passes: [1] },
+          { bars: { start: 3, count: 1 }, passes: [2] },
+        ],
+      },
+    });
+  });
+
+  it('Remove endings confirms, naming the bars it deletes', () => {
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirmMock);
+    renderEdit();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Repeat Verse' }), { target: { value: 'e:1' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Remove endings' }));
+    expect(confirmMock).toHaveBeenCalledWith('Remove the endings on Verse? This also removes the later ending (bar 3).');
+    expect((screen.getAllByRole('spinbutton', { name: 'Bars' })[0] as HTMLInputElement).value).toBe('2');
+  });
+});

@@ -31,6 +31,16 @@ import {
   setBarCount,
   setPlainRepeat,
   unrollRepeat,
+  addEndings,
+  removeEndings,
+  setMarker,
+  setJump,
+  removeMarker,
+  markerOptions,
+  markersAt,
+  markerLabel,
+  type MarkerKey,
+  type PlaceableMarker,
   removeSection as removeSectionOp,
   type OpResult,
   type ViewModel,
@@ -403,7 +413,9 @@ function Review({
       setNotice({ text: result.reason, where });
       return false;
     }
-    if (result.removes.length > 0 && !confirm(`${verb}? This also removes ${joinList(result.removes)}.`)) {
+    // "…removes the D.S." — a list ending in an abbreviation already has its stop.
+    const list = joinList(result.removes);
+    if (result.removes.length > 0 && !confirm(`${verb}? This also removes ${list}${list.endsWith('.') ? '' : '.'}`)) {
       return false;
     }
     setNotice(null);
@@ -452,6 +464,18 @@ function Review({
   function barAction(sectionId: string, barIndex: number, action: BarAction, draft: ViewBar | undefined) {
     const base = draft === undefined ? view : withBar(view, sectionId, barIndex, draft);
     const bar = barIndex + 1;
+    if (typeof action === 'object') {
+      // The Marker menu: m:<kind> place/move · j:<from>:<until> D.S./D.C. · r:<key> remove.
+      const [verb, a, b] = action.marker.split(':');
+      const result =
+        verb === 'm'
+          ? setMarker(base, sectionId, bar, a as PlaceableMarker)
+          : verb === 'j'
+            ? setJump(base, sectionId, bar, { from: a as 'capo' | 'segno', until: b as 'end' | 'fine' | 'coda' })
+            : removeMarker(base, a as MarkerKey);
+      if (runOp(result, `Remove the ${keyLabel(base, a as MarkerKey)}`, 'bar')) setEditing(null);
+      return;
+    }
     const result =
       action === 'split'
         ? splitBar(base, sectionId, bar)
@@ -461,6 +485,28 @@ function Review({
     const label = view.sections.find((s) => s.id === sectionId)?.label ?? '';
     const verb = `${action === 'split' ? 'Split' : 'Delete'} ${label} bar ${bar}`;
     if (runOp(result, verb, 'bar')) setEditing(null);
+  }
+
+  // The Marker menu for one bar: what the validator allows (markerOptions), each
+  // marker type once — "(move here)" when it is elsewhere — plus Remove for what
+  // already sits on this bar.
+  function markerMenu(sectionId: string, barIndex: number): MenuItem[] {
+    const bar = barIndex + 1;
+    const nav = view.navigation ?? {};
+    const here = markersAt(view, sectionId, bar);
+    const opts = markerOptions(view);
+    const items: MenuItem[] = [];
+    for (const k of opts.markers) {
+      if (here.includes(k)) continue;
+      items.push({ value: `m:${k}`, label: nav[k] ? `${markerLabel(k)} (move here)` : markerLabel(k) });
+    }
+    for (const j of opts.jumps) {
+      const same = nav.jump && nav.jump.from === j.from && nav.jump.until === j.until;
+      if (same && here.includes('jump')) continue;
+      items.push({ value: `j:${j.from}:${j.until}`, label: nav.jump && !here.includes('jump') ? `${markerLabel(j)} (move here)` : markerLabel(j) });
+    }
+    for (const k of here) items.push({ value: `r:${k}`, label: `Remove ${keyLabel(view, k)}` });
+    return items;
   }
 
   async function save() {
@@ -571,7 +617,8 @@ function Review({
         <p className="text-[11px] text-zinc-600">
           Tip: click a bar — &ldquo;1&rdquo; or &ldquo;IV&rdquo; for a whole bar, &ldquo;5 4&rdquo; to
           split evenly, &ldquo;1 - 4 5&rdquo; to tie (2 of 1, then 4, then 5). The buttons under an
-          open bar split it into one bar per chord, insert a bar, or delete it.
+          open bar split it into one bar per chord, insert a bar, delete it, or put a marker (Segno,
+          Coda, Fine, D.S./D.C.) on it.
         </p>
         {tally.length > 0 && <ReadBack tally={tally} />}
       </aside>
@@ -599,6 +646,8 @@ function Review({
           }}
           onCommitBar={commitBar}
           onBarAction={barAction}
+          markerMenu={markerMenu}
+          tagsFor={(sectionId, barIndex) => barTags(view, sectionId, barIndex)}
           barNotice={notice?.where === 'bar' ? notice.text : ''}
         />
       </main>
@@ -628,6 +677,12 @@ function Review({
                       onRename={(label) => renameSection(s.id, label)}
                       onBars={(n) => setSectionBars(s, n)}
                       onRepeat={(times) => setSectionRepeat(s, times)}
+                      onEndings={(n) =>
+                        runOp(addEndings(view, s.id, n), `Give ${s.label} 1st/2nd endings`, 'sections')
+                      }
+                      onRemoveEndings={() =>
+                        runOp(removeEndings(view, s.id), `Remove the endings on ${s.label}`, 'sections')
+                      }
                       onUnroll={() => unrollSection(s)}
                       onRemove={() => removeSection(s)}
                     />
@@ -740,7 +795,39 @@ interface OpNotice {
   where: 'bar' | 'sections';
 }
 
-type BarAction = 'split' | 'insertBefore' | 'insertAfter' | 'delete';
+type BarAction = 'split' | 'insertBefore' | 'insertAfter' | 'delete' | { marker: string };
+
+interface MenuItem {
+  value: string;
+  label: string;
+}
+
+// What the preview prints over a bar: ending numbers and start-edge markers on
+// the left, end-edge markers on the right.
+interface BarTags {
+  start: string[];
+  end: string[];
+}
+
+// A marker's printed name, from the chart it is in (the D.S./D.C. carries its
+// al Fine / al Coda).
+function keyLabel(view: ViewModel, key: MarkerKey): string {
+  const j = view.navigation?.jump;
+  return key === 'jump' ? (j ? markerLabel(j) : 'D.C.') : markerLabel(key);
+}
+
+function barTags(view: ViewModel, sectionId: string, barIndex: number): BarTags {
+  const bar = barIndex + 1;
+  const tags: BarTags = { start: [], end: [] };
+  const r = view.sections.find((s) => s.id === sectionId)?.repeat;
+  const ending = r?.kind === 'volta' ? r.endings.find((e) => e.bars.start === bar) : undefined;
+  if (ending) tags.start.push(`${ending.passes.join(',')}.`);
+  for (const k of markersAt(view, sectionId, bar)) {
+    const label = keyLabel(view, k);
+    (k === 'segno' || k === 'coda' ? tags.start : tags.end).push(label);
+  }
+  return tags;
+}
 
 // "the Fine", "the Fine and the D.C. al Fine", "a, b and c".
 function joinList(items: string[]): string {
@@ -792,6 +879,8 @@ function SortableSectionRow({
   onRename,
   onBars,
   onRepeat,
+  onEndings,
+  onRemoveEndings,
   onUnroll,
   onRemove,
 }: {
@@ -800,6 +889,8 @@ function SortableSectionRow({
   onRename: (label: string) => void;
   onBars: (bars: number) => boolean;
   onRepeat: (times: number | null) => void;
+  onEndings: (lastN: number) => void;
+  onRemoveEndings: () => void;
   onUnroll: () => void;
   onRemove: () => void;
 }) {
@@ -842,23 +933,36 @@ function SortableSectionRow({
           ✕
         </button>
       </div>
-      <RepeatControl section={section} onRepeat={onRepeat} onUnroll={onUnroll} />
+      <RepeatControl
+        section={section}
+        onRepeat={onRepeat}
+        onEndings={onEndings}
+        onRemoveEndings={onRemoveEndings}
+        onUnroll={onUnroll}
+      />
     </div>
   );
 }
 
-// The section's repeat (design-roadmap-structure-editing.md §5.1): — / ×2 / ×3 /
-// ×4 (plus the current count if a prompt set a bigger one), and Write out for a
-// ×N repeat. A volta repeat shows as its endings; picking a count replaces them
-// (the op names that in a confirm). Endings are built by hand in a later PR.
-// Disabled on a 1-bar section, which can't repeat.
+// The section's repeat (design-roadmap-structure-editing.md §5.1/§5.2): — / ×2 /
+// ×3 / ×4 (plus the current count if a prompt set a bigger one), "1st/2nd endings:
+// last N bars" (addEndings), Write out for a ×N repeat and Remove endings for a
+// volta one. Picking a count on a volta section replaces the endings but keeps
+// their bars (the op names that in a confirm); Remove endings deletes the later
+// endings' bars. Disabled on a 1-bar section, which can't repeat.
+const MAX_ENDING_BARS = 8;
+
 function RepeatControl({
   section,
   onRepeat,
+  onEndings,
+  onRemoveEndings,
   onUnroll,
 }: {
   section: ViewSection;
   onRepeat: (times: number | null) => void;
+  onEndings: (lastN: number) => void;
+  onRemoveEndings: () => void;
   onUnroll: () => void;
 }) {
   const r = section.repeat;
@@ -874,7 +978,11 @@ function RepeatControl({
         value={value}
         disabled={tooShort}
         title={tooShort ? "A 1-bar section can't repeat" : undefined}
-        onChange={(e) => onRepeat(e.target.value === '' ? null : Number(e.target.value))}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v.startsWith('e:')) onEndings(Number(v.slice(2)));
+          else onRepeat(v === '' ? null : Number(v));
+        }}
         className="bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-xs text-white outline-none focus:border-blue-500 disabled:opacity-40"
       >
         <option value="">—</option>
@@ -883,12 +991,28 @@ function RepeatControl({
             ×{n}
           </option>
         ))}
-        {r?.kind === 'volta' && (
+        {r?.kind === 'volta' ? (
           <option value="volta" disabled>
             {repeatLabel(r)}
           </option>
+        ) : (
+          Array.from({ length: Math.min(section.bars - 1, MAX_ENDING_BARS) }, (_, i) => i + 1).map((n) => (
+            <option key={`e${n}`} value={`e:${n}`}>
+              1st/2nd endings: last {n === 1 ? 'bar' : `${n} bars`}
+            </option>
+          ))
         )}
       </select>
+      {r?.kind === 'volta' && (
+        <button
+          type="button"
+          onClick={onRemoveEndings}
+          title="Delete the later endings' bars and the repeat"
+          className="text-[11px] text-zinc-400 hover:text-red-300"
+        >
+          Remove endings
+        </button>
+      )}
       {r?.kind === 'plain' && (
         <button
           type="button"
@@ -1040,6 +1164,8 @@ function ChartSheet({
   setEditing,
   onCommitBar,
   onBarAction,
+  markerMenu,
+  tagsFor,
   barNotice,
 }: {
   title: string;
@@ -1052,6 +1178,8 @@ function ChartSheet({
   setEditing: (k: string | null) => void;
   onCommitBar: (sectionId: string, barIndex: number, cells: ViewBar) => void;
   onBarAction: (sectionId: string, barIndex: number, action: BarAction, draft: ViewBar | undefined) => void;
+  markerMenu: (sectionId: string, barIndex: number) => MenuItem[];
+  tagsFor: (sectionId: string, barIndex: number) => BarTags;
   barNotice: string;
 }) {
   const beats = timeSig.beats;
@@ -1117,7 +1245,19 @@ function ChartSheet({
                   left-aligns, and the trailing barline tracks the last real bar. */}
               <div className="space-y-1">
                 {lines.map((line, li) => (
-                  <div key={li} className="flex items-stretch">
+                  // A line carrying an ending number or marker gets headroom for the
+                  // tag, so it never sits on the section label; other lines stay tight.
+                  <div
+                    key={li}
+                    className={`flex items-stretch ${
+                      line.some(({ bi }) => {
+                        const t = tagsFor(s.id, bi);
+                        return t.start.length + t.end.length > 0;
+                      })
+                        ? 'pt-3'
+                        : ''
+                    }`}
+                  >
                     <div className="w-6 shrink-0 pr-1 pt-0.5 text-right text-[9px] leading-none text-zinc-400 tabular-nums">
                       {lineNumbers[li]}
                     </div>
@@ -1137,6 +1277,8 @@ function ChartSheet({
                           onEdit={() => setEditing(`${s.id}:${bi}`)}
                           onCommit={(cells) => onCommitBar(s.id, bi, cells)}
                           onAction={(action, draft) => onBarAction(s.id, bi, action, draft)}
+                          markerMenu={editing === `${s.id}:${bi}` ? markerMenu(s.id, bi) : []}
+                          tags={tagsFor(s.id, bi)}
                           notice={barNotice}
                           onCancel={() => setEditing(null)}
                         />
@@ -1165,6 +1307,8 @@ function Measure({
   onEdit,
   onCommit,
   onAction,
+  markerMenu,
+  tags,
   notice,
   onCancel,
 }: {
@@ -1177,6 +1321,8 @@ function Measure({
   onEdit: () => void;
   onCommit: (cells: ViewBar) => void;
   onAction: (action: BarAction, draft: ViewBar | undefined) => void;
+  markerMenu: MenuItem[];
+  tags: BarTags;
   notice: string;
   onCancel: () => void;
 }) {
@@ -1191,6 +1337,18 @@ function Measure({
         trailing ? 'border-r-2 border-black' : 'border-zinc-300'
       }`}
     >
+      {/* Ending numbers + start-edge markers over the bar's left edge, end-edge
+          markers over its right — where the PDF draws them (roadmap-render). */}
+      {tags.start.length > 0 && (
+        <span className="absolute -top-3 left-0.5 text-[9px] font-bold leading-none text-blue-700 whitespace-nowrap">
+          {tags.start.join(' ')}
+        </span>
+      )}
+      {tags.end.length > 0 && (
+        <span className="absolute -top-3 right-0.5 text-[9px] font-bold leading-none text-blue-700 whitespace-nowrap">
+          {tags.end.join(' ')}
+        </span>
+      )}
       <div className="h-5 flex items-stretch">
         {isEditing ? null : cells.length === 0 ? (
           <span className="flex-1 text-transparent group-hover:text-zinc-300 text-xs text-center">＋</span>
@@ -1228,6 +1386,7 @@ function Measure({
           committedChords={cells.length}
           onCommit={onCommit}
           onAction={onAction}
+          markerMenu={markerMenu}
           notice={notice}
           onCancel={onCancel}
         />
@@ -1248,6 +1407,7 @@ function BarEditor({
   committedChords,
   onCommit,
   onAction,
+  markerMenu,
   notice,
   onCancel,
 }: {
@@ -1258,6 +1418,7 @@ function BarEditor({
   committedChords: number;
   onCommit: (cells: ViewBar) => void;
   onAction: (action: BarAction, draft: ViewBar | undefined) => void;
+  markerMenu: MenuItem[];
   notice: string;
   onCancel: () => void;
 }) {
@@ -1294,7 +1455,7 @@ function BarEditor({
         }`}
       />
       <SplitPreview parse={parse} mode={mode} renderKey={renderKey} />
-      <BarActions chordCount={chordCount} onAction={(a) => onAction(a, draftCells)} />
+      <BarActions chordCount={chordCount} markerMenu={markerMenu} onAction={(a) => onAction(a, draftCells)} />
       {notice && (
         <p role="alert" className="mt-1 rounded border border-amber-500/60 bg-zinc-900 p-1 text-center text-[9px] text-amber-400 shadow-lg">
           {notice}
@@ -1308,14 +1469,22 @@ function BarEditor({
 // §5.3). Plain buttons, no hover-reveal, so they work on touch. Pressing one must
 // not blur the chord input first (that would commit/close the bar before the
 // click lands), hence preventDefault on press.
-const BAR_ACTIONS: Array<{ action: BarAction; label: string; title: string }> = [
+const BAR_ACTIONS: Array<{ action: Exclude<BarAction, object>; label: string; title: string }> = [
   { action: 'split', label: 'Split', title: 'Split into bars' },
   { action: 'insertBefore', label: '+ Before', title: 'Insert a bar before' },
   { action: 'insertAfter', label: '+ After', title: 'Insert a bar after' },
   { action: 'delete', label: 'Delete', title: 'Delete this bar' },
 ];
 
-function BarActions({ chordCount, onAction }: { chordCount: number; onAction: (action: BarAction) => void }) {
+function BarActions({
+  chordCount,
+  markerMenu,
+  onAction,
+}: {
+  chordCount: number;
+  markerMenu: MenuItem[];
+  onAction: (action: BarAction) => void;
+}) {
   return (
     <div className="mt-1 grid grid-cols-2 gap-px overflow-hidden rounded border border-zinc-700 bg-zinc-700 shadow-lg">
       {BAR_ACTIONS.map(({ action, label, title }) => (
@@ -1335,6 +1504,21 @@ function BarActions({ chordCount, onAction }: { chordCount: number; onAction: (a
           {label}
         </button>
       ))}
+      {/* §5.4 Marker ▾ — a native select (works on touch). Focus moving into it is
+          not leaving the bar (BarEditor's blur guard); choosing applies at once. */}
+      <select
+        aria-label="Marker"
+        value=""
+        onChange={(e) => e.target.value && onAction({ marker: e.target.value })}
+        className="col-span-2 bg-zinc-900 px-1 py-2 text-[11px] font-medium text-zinc-200 outline-none"
+      >
+        <option value="">Marker…</option>
+        {markerMenu.map((m) => (
+          <option key={m.value} value={m.value}>
+            {m.label}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
