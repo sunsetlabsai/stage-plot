@@ -9,7 +9,11 @@ import {
   sortMonitorsByMix,
   renumberMixPrompt,
   deleteMixPrompt,
+  deleteMonitor,
+  addMonitor,
+  validateMonitorReplace,
 } from '@/lib/setlist';
+import { serializeShow, deserializeShow } from '@/lib/show-file';
 import type { StageSlot, MonitorMix, StagePosition } from '@/lib/types';
 
 // design-core-path-tier1 §3 — mix identity. UAT plan B3.
@@ -103,28 +107,25 @@ describe('renumberMix — the one deliberate path (§4 tests 12, 13)', () => {
 });
 
 describe('delete orphans, it does not cascade (§4 test 14)', () => {
-  it('14: deleting Mix 2 leaves every stagePlot[].mix untouched — the regression test', () => {
-    // The page's delete is `monitors.filter(m => m.id !== id)`. This pins the
-    // CONTRACT that delete must satisfy: the surviving numbers do not move, so
-    // the performer on Mix 3 is still on Mix 3, and the one on 2 is an orphan.
-    const monitors = [mon(1), mon(2), mon(3)];
-    const plot = [slot('Ann', 1), slot('Bo', 2), slot('Cy', 3)];
-    const after = monitors.filter((m) => m.id !== 'm-2');
+  it('14: deleteMonitor(Mix 2) leaves every stagePlot[].mix AND every surviving number untouched', () => {
+    // Runs the function the page's delete handler calls, not a local stand-in
+    // (Codex R1 on #193: the first version tested its own filter).
+    const before = config([mon(1), mon(2), mon(3)], [slot('Ann', 1), slot('Bo', 2), slot('Cy', 3)]);
+    const after = deleteMonitor(before, 'm-2');
 
-    expect(after.map((m) => m.mix)).toEqual([1, 3]);
-    expect(plot.map((s) => s.mix)).toEqual([1, 2, 3]);
-    expect(isOrphanedMix(2, after)).toBe(true);
-    expect(isOrphanedMix(3, after)).toBe(false);
+    expect(after.monitors.map((m) => m.mix)).toEqual([1, 3]);
+    expect(after.stagePlot).toBe(before.stagePlot);
+    expect(isOrphanedMix(2, after.monitors)).toBe(true);
+    expect(isOrphanedMix(3, after.monitors)).toBe(false);
   });
 
-  it('14 (source contract): the page delete handler no longer renumbers', async () => {
-    // The handler is inline in page.tsx and not drivable from here, so pin its
-    // shape: the old `.map((mon, i) => ({ ...mon, mix: i + 1 }))` must be gone
-    // from the WHOLE page, not just this handler.
+  it('14 (wiring): the page deletes and adds through the lib functions, and renumbers nowhere', async () => {
     const { readFileSync } = await import('node:fs');
     const src = readFileSync('app/[owner]/[show]/page.tsx', 'utf8');
-    expect(src).not.toMatch(/mix:\s*i\s*\+\s*1/);
-    expect(src).not.toMatch(/mix:\s*p\.monitors\.length\s*\+\s*1/);
+    expect(src).toContain('updateConfig((p) => deleteMonitor(p, mon.id!))');
+    expect(src).toContain('updateConfig(addMonitor)');
+    // Any spelling of the old rewrite, `mix: <anything> + 1`, in the page.
+    expect(src).not.toMatch(/\bmix:\s*[\w.]+\s*\+\s*1\b/);
   });
 
   it('the delete prompt names everyone left flagged, and is skipped when nobody is', () => {
@@ -206,5 +207,72 @@ describe('sortMonitorsByMix — rows render in aux order', () => {
     const list = [mon(5), mon(1), mon(3)];
     expect(sortMonitorsByMix(list).map((m) => m.mix)).toEqual([1, 3, 5]);
     expect(list.map((m) => m.mix)).toEqual([5, 1, 3]);
+  });
+});
+
+describe('addMonitor', () => {
+  it('appends a blank mix at nextMixNumber, leaving existing rows and slots alone', () => {
+    const before = config([mon(1), mon(5)], [slot('Cy', 7)]);
+    const after = addMonitor(before);
+    expect(after.monitors.map((m) => m.mix)).toEqual([1, 5, 8]);
+    expect(after.monitors[2]).toMatchObject({ name: '', needs: '' });
+    expect(after.stagePlot).toBe(before.stagePlot);
+  });
+});
+
+describe('validateMonitorReplace — the AI update_monitors apply (Codex R1 #1 on #193)', () => {
+  const current = [mon(1, 'Ann'), mon(2, 'Bo')];
+
+  it('★ refuses a swap that keeps the ids — the probe that passed validateMonitors alone', () => {
+    const incoming = [{ id: 'm-1', mix: 2, name: 'Ann', needs: '' }, { id: 'm-2', mix: 1, name: 'Bo', needs: '' }];
+    expect(validateMonitors(incoming)).toBeNull(); // the gap: unique and positive
+    expect(validateMonitorReplace(current, incoming)).toMatch(/changes Mix 1 to Mix 2/);
+  });
+
+  it('refuses moving one id-carrying row to a fresh number', () => {
+    expect(validateMonitorReplace(current, [{ id: 'm-1', mix: 9 }, { id: 'm-2', mix: 2 }])).toMatch(/Mix 1 to Mix 9/);
+  });
+
+  it('COUNTEREXAMPLE: same ids at the same numbers, edited names/needs — accepted', () => {
+    expect(validateMonitorReplace(current, [
+      { id: 'm-1', mix: 1, name: 'Ann (IEM)', needs: 'vox' },
+      { id: 'm-2', mix: 2, name: 'Bo', needs: 'keys' },
+    ])).toBeNull();
+  });
+
+  it('COUNTEREXAMPLE: adding, dropping, and id-less rows are accepted (the number is the identity)', () => {
+    expect(validateMonitorReplace(current, [{ id: 'm-1', mix: 1 }, { mix: 3 }])).toBeNull();
+    expect(validateMonitorReplace(current, [{ mix: 2 }, { mix: 1 }])).toBeNull();
+    expect(validateMonitorReplace(current, [{ id: 'new', mix: 4 }])).toBeNull();
+  });
+
+  it('still refuses duplicates', () => {
+    expect(validateMonitorReplace(current, [{ mix: 1 }, { mix: 1 }])).toMatch(/appears more than once/);
+  });
+});
+
+describe('show import refuses invalid mix numbers (Codex R1 #2 on #193)', () => {
+  const base = {
+    showInfo: { bandName: 'B', eventDate: '', venue: '' },
+    stagePlot: [{ name: 'Ann', pos: 'DSC', role: '', mix: 1 }],
+    inputs: [], notes: [], setlist: [],
+  };
+
+  it('★ JSON: two different rows both numbered Mix 1 are rejected', () => {
+    const json = JSON.stringify({ ...base, monitors: [{ mix: 1, name: 'A', needs: '' }, { mix: 1, name: 'B', needs: '' }] });
+    expect(() => deserializeShow(json, 'show.json')).toThrow(/monitor mixes: mix 1 appears more than once/);
+  });
+
+  it('★ YAML: the same duplicate is rejected', () => {
+    const yaml = serializeShow({ ...base, monitors: [mon(1, 'A'), { ...mon(1, 'B'), id: 'x' }] } as never);
+    expect(() => deserializeShow(yaml, 'show.showrunr.yaml')).toThrow(/mix 1 appears more than once/);
+  });
+
+  it('COUNTEREXAMPLE: sparse, unique numbering imports in both formats', () => {
+    const monitors = [mon(1), mon(2), mon(5)];
+    const json = JSON.stringify({ ...base, monitors });
+    expect(deserializeShow(json, 'show.json').monitors.map((m) => m.mix)).toEqual([1, 2, 5]);
+    const yaml = serializeShow({ ...base, monitors } as never);
+    expect(deserializeShow(yaml, 'show.showrunr.yaml').monitors.map((m) => m.mix)).toEqual([1, 2, 5]);
   });
 });

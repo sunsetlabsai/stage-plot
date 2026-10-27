@@ -198,6 +198,49 @@ export function validateMonitors(monitors: readonly { mix?: unknown }[]): string
 }
 
 /**
+ * Validity of an AI `update_monitors` full replace against the current list.
+ * On top of `validateMonitors`: a row that comes back carrying an existing
+ * monitor's id under a DIFFERENT number is a renumber, and is refused. The
+ * model sees ids in `currentConfig`, so a swap of Mix 1 and Mix 2 that kept
+ * both ids would otherwise pass. Slots would stay on their old numbers, and
+ * both numbers still exist, so nothing would be flagged (Codex R1 on #193).
+ * Refused rather than remapped because a renumber moves performers and §3.3
+ * makes that confirm-worthy, naming who moves. An Apply card has no such
+ * prompt, and the Monitor Mixes table does.
+ */
+export function validateMonitorReplace(
+  current: readonly MonitorMix[],
+  incoming: readonly { id?: unknown; mix?: unknown; [field: string]: unknown }[],
+): string | null {
+  const invalid = validateMonitors(incoming);
+  if (invalid) return invalid;
+  for (const row of incoming) {
+    const was = current.find((m) => m.id !== undefined && m.id === row.id);
+    if (was && was.mix !== row.mix) {
+      return `it changes Mix ${was.mix} to Mix ${String(row.mix)} — renumber a mix in the Monitor Mixes table, which moves its performers with it`;
+    }
+  }
+  return null;
+}
+
+/** Add a blank mix, numbered by `nextMixNumber`. */
+export function addMonitor<T extends { stagePlot: StageSlot[]; monitors: MonitorMix[] }>(config: T): T {
+  return {
+    ...config,
+    monitors: [...config.monitors, { id: crypto.randomUUID(), mix: nextMixNumber(config.monitors, config.stagePlot), name: '', needs: '' }],
+  };
+}
+
+/**
+ * Delete one mix by id. Delete orphans and does not cascade (§3.4). The
+ * surviving numbers do not move and no slot is touched, so performers on the
+ * removed mix keep its number and are flagged by `isOrphanedMix`.
+ */
+export function deleteMonitor<T extends { monitors: MonitorMix[] }>(config: T, id: string): T {
+  return { ...config, monitors: config.monitors.filter((m) => m.id !== id) };
+}
+
+/**
  * The number a new mix gets: one past the highest, so sparse numbering never
  * collides. "Highest" includes ORPHANED slot mixes — seeding a blank mix onto a
  * removed number would silently re-attach the performers still pointing at it.

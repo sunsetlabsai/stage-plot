@@ -38,7 +38,7 @@ import type {
   Bar,
   RoadmapMarker,
 } from '@/lib/types';
-import { moveSetlistSong, moveInput, nextMixNumber, renumberMix, validateMonitors, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES } from '@/lib/setlist';
+import { moveSetlistSong, moveInput, addMonitor, deleteMonitor, renumberMix, validateMonitorReplace, sortMonitorsByMix, isOrphanedMix, renumberMixPrompt, deleteMixPrompt, groupByPos, countLinkedInputs, slotLabel, slotOptionsForInputs, blockIndexOf, isTitleEditableInSetlist, withStableIds, MONITOR_TYPES } from '@/lib/setlist';
 import type { ImportedRow } from '@/lib/setlist-import';
 import { mergeSetlist } from '@/lib/setlist-import';
 import SetlistImportPreview from '@/components/SetlistImportPreview';
@@ -5580,10 +5580,11 @@ function AgentChat({
         break;
       case 'update_monitors':
         if (!Array.isArray(input.monitors)) return 'monitors must be an array';
-        // Same rule the editor enforces (design-core-path-tier1 §3.3): a duplicate
-        // mix number would route two wedges to one aux. Refused before apply, so
-        // the config is untouched.
-        return validateMonitors(input.monitors as { mix?: unknown }[]);
+        // Same rules the editor enforces (design-core-path-tier1 §3.3): no
+        // duplicate or non-positive numbers, and no renumber of an existing mix
+        // (by id), which would leave its performers behind. Refused before
+        // apply, so the config is untouched.
+        return validateMonitorReplace(configRef.current.monitors, input.monitors as { id?: unknown; mix?: unknown }[]);
       case 'update_setlist':
         if (!Array.isArray(input.setlist)) return 'setlist must be an array';
         break;
@@ -6689,14 +6690,9 @@ function ConfigTab({
               if (prompt && !window.confirm(prompt)) {
                 return;
               }
-              updateConfig((p) => ({ ...p, monitors: p.monitors.filter((m) => m.id !== mon.id) }));
+              updateConfig((p) => deleteMonitor(p, mon.id!));
             }}
-            onAdd={() => updateConfig((p) => ({
-              ...p,
-              // max + 1, not length + 1: sparse numbering ([1, 2, 5]) would collide;
-              // past orphaned slot mixes too, so a blank mix never adopts them.
-              monitors: [...p.monitors, { id: crypto.randomUUID(), mix: nextMixNumber(p.monitors, p.stagePlot), name: '', needs: '' }],
-            }))}
+            onAdd={() => updateConfig(addMonitor)}
           />
         </section>
 

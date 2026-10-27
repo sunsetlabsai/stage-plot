@@ -6,7 +6,7 @@
 |---|---|---|
 | **1** | §1 — loud failures (save error, PDF-only charts, title ownership) | **BUILT & MERGED**, PR #144 (`cfdc07c`), Codex R1 NOGO → R2 GO |
 | **2** | §2 — AI apply integrity | **⚠ SUPERSEDED — DO NOT BUILD.** Replaced by `docs/design-ai-op-contract.md`. §2.3 alone survives; see the notice at §2. |
-| **3** | §3 — mix identity | **BUILT**, branch `opus/b3-mix-identity` (UAT plan B3). Four choices the spec left open are in §3.6 |
+| **3** | §3 — mix identity | **BUILT**, branch `opus/b3-mix-identity` (UAT plan B3). Choices the spec left open are in §3.6 |
 
 ★ **This block is load-bearing. Keep it current.** This project has already been
 burned once by the opposite: `docs/design-input-plot-linkage.md` sat at
@@ -535,10 +535,29 @@ choice.
    draft. Typing "12" would otherwise renumber through "1" and collide. A
    rejection shows inline under the cell and the cell reverts.
 
-Also: `validateMonitors` guards the AI `update_monitors` apply through the existing
-`validateToolInput`, which refuses before apply and shows the error. Reporting the
-*reason* to the model (§4 11c) belongs to `design-ai-op-contract.md`, not here. The
-printed rider's monitor list renders in aux order as well.
+5. **The AI `update_monitors` apply refuses a renumber.** This came from Codex R1.
+   The model sees monitor ids in `currentConfig`, so it can echo an id under a
+   different number; a swap of 1 and 2 passes "unique and positive" and leaves every
+   performer behind, unflagged. `validateMonitorReplace` refuses it. It refuses
+   rather than remapping because a renumber moves performers, and §3.3 makes that
+   confirm-worthy, naming who moves. An Apply card has no such prompt. The refusal
+   names the Monitor Mixes table as where to do it. Id-less rows keep number-as-
+   identity, and renames, adds and drops are accepted.
+6. **Show import (JSON and YAML) refuses invalid mix numbers.** This also came from
+   Codex R1. It uses the same `validateMonitors` rule, so a file cannot install two
+   rows numbered Mix 1.
+
+**Every path that installs a whole monitor list,** and how each is covered:
+editor (`renumberMix`, `addMonitor`, `deleteMonitor`), AI apply (5), file import (6).
+**Not guarded, deliberately:** the server load and the local cache carry our own saved
+data. Per §5.2 they get no repair, though the pre-B3 `length + 1` add could have
+saved duplicates, and deleting one row by id untangles them. The legacy `?config=` URL
+also stays unguarded: refusing it would fall back silently to the demo band, which is
+worse than loading it.
+
+Also: reporting the *reason* for a refusal to the model (§4 11c) belongs to
+`design-ai-op-contract.md`, not here. The printed rider's monitor list renders in
+aux order as well.
 
 ---
 
