@@ -347,10 +347,10 @@ export function useShow(
     // A pre-v2 bundle's cache (Codex R1 on #202): it cached each edit before its
     // 2 s debounce, so it may hold an edit that never reached the server.
     //  - same content as the fresh load → nothing unsent: treat as clean;
-    //  - different → treat as unsynced. Its base is the version that bundle last
-    //    saved at: if that is still the server's, the edit goes through (200);
-    //    otherwise it 409s — or, with no base, goes straight to §4.3 — and the
-    //    owner is asked. Never dropped, never silently overwritten.
+    //  - different → unsynced with NO base, so it is never sent blind: §4.3 re-reads
+    //    the server and the owner chooses (Codex R2 on #202 — the old bundle's
+    //    separate last-saved version cannot prove which copy it belongs to).
+    //    Never dropped, never silently overwritten.
     const legacyUnsent = !!entry?.legacy && !(loaded && showContent(entry.config) === showContent(loaded.config));
     if (entry?.unsynced || legacyUnsent) {
       entry = { ...entry!, unsynced: true };

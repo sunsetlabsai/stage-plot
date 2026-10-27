@@ -270,16 +270,21 @@ describe('Codex R1 on #202 — nothing is editable before the lock, nothing lost
     if (lastSaved) store.m.set('showrunr-last-saved-show-1', lastSaved);
   }
 
-  it('old-bundle cache with an unsent edit on top of the CURRENT version → shown, re-homed, sent at that version', async () => {
+  it('old-bundle cache that differs, even with a MATCHING last-saved version → asked, never sent blind (Codex R2)', async () => {
+    // The R2 scenario: the old bundle's copy write failed (quota, swallowed) while
+    // its save landed and advanced last-saved, so the cache is STALE beside a
+    // current version. Sending it at that version would overwrite the newer save.
     const calls = controlledFetch();
     const store = memStore();
-    legacy(store, { n: 5 }, V0);
-    const { applyConfig } = setup({ store, loaded: { config: { n: 0 }, updatedAt: V0 } });
+    legacy(store, { n: 5 }, V2);
+    const server = { config: { n: 0 }, updatedAt: V2 };
+    const { hook, applyConfig } = setup({ store, loaded: server, fetchServer: async () => server });
     await flush();
+    expect(calls).toHaveLength(0);
+    expect(hook.result.current.context.conflict?.server).toEqual(server);
     expect(applyConfig).toHaveBeenCalledWith({ n: 5 });
-    expect(entry(store)).toMatchObject({ config: { n: 5 }, base: V0, unsynced: true });
+    expect(entry(store)).toMatchObject({ config: { n: 5 }, base: null, unsynced: true });
     expect(store.m.has(legacyKey('show-1'))).toBe(false);
-    expect(calls[0].body).toMatchObject({ config: { n: 5 }, base_updated_at: V0 });
   });
 
   it('old-bundle cache that differs with no usable version → the owner is asked, never dropped', async () => {

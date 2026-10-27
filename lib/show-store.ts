@@ -15,7 +15,6 @@ export const entryKey = (showId: string) => `showrunr-show-${showId}`;
 // never written — a NEW key, so an old bundle still served offline by the service
 // worker can never read this format as a show (it would render garbage).
 export const legacyKey = (showId: string) => `showrunr-cache-${showId}`;
-const legacyLastSavedKey = (showId: string) => `showrunr-last-saved-${showId}`;
 
 export interface ShowEntry {
   config: Record<string, unknown>;
@@ -37,8 +36,7 @@ interface StoredEntry extends ShowEntry {
 
 /**
  * The entry, or null. A pre-v2 value is a bare config written by an older bundle,
- * returned with `legacy: true` and, as its base, the version that bundle recorded
- * after its last successful save (`showrunr-last-saved-{id}`), if any.
+ * returned with `legacy: true` and no known base.
  */
 export function readEntry(store: ShowStore, showId: string): ShowEntry | null {
   let raw: string | null;
@@ -60,9 +58,11 @@ export function readEntry(store: ShowStore, showId: string): ShowEntry | null {
         unsynced: p.unsynced === true,
       };
     }
-    let lastSaved: string | null = null;
-    try { lastSaved = store.getItem(legacyLastSavedKey(showId)); } catch { /* unknown */ }
-    return { config: parsed as Record<string, unknown>, base: lastSaved || null, unsynced: false, legacy: true };
+    // NO base, ever (Codex R2 on #202): that bundle wrote the copy and its
+    // `showrunr-last-saved-{id}` version separately, and swallowed a failed copy
+    // write, so the version cannot prove the copy was built on it. Paired, a stale
+    // copy could be sent at a matching version and overwrite a newer save.
+    return { config: parsed as Record<string, unknown>, base: null, unsynced: false, legacy: true };
   } catch {
     return null;
   }

@@ -109,8 +109,8 @@ in its pill as-is, so the message reaches the user with no client change (Q1, ru
 
 **The old tab's rejected edit is recovered on reload (as built, Q6).** The old bundle cached
 it before sending; the reload the 428 asks for runs the new bundle, which classifies that
-cache against the server (§4.1 *Upgrade* note): it saves, or the owner is asked — never
-silent. (Codex R1 on #201 had this as not recoverable; Codex R1 on #202's upgrade fix made it
+cache against the server (§4.1 *Upgrade* note): the owner is asked (Keep mine / Use the
+saved one) — never silent, never sent blind. (Codex R1 on #201 had this as not recoverable; Codex R1 on #202's upgrade fix made it
 so.) **Limit:** once a NEW tab of that show has run in the browser, it reads only its own v2
 entry, so edits made afterwards in a still-open OLD tab are not recovered — each still got
 the 428, and the copy says "kept if it can be", not "kept".
@@ -210,10 +210,13 @@ service worker still serves offline never reads the new format as a show. The ol
 neither it nor `showrunr-last-saved-{id}` is written any more. **Upgrade (Codex R1 on #202):**
 that old bundle cached each edit before its 2 s debounce, so its copy may hold an edit that
 never reached the server (a reload inside the debounce cancels the unload save). The owner
-tab classifies it against the fresh load: same content → clean; different → unsynced, with
-the old bundle's last-saved version as its base — so it saves if the server is still there,
-else 409/§4.3 asks. This also changes §3.4: a 428'd old tab's edit is in that old cache,
-so the reload its message asks for now recovers it (saved, or the owner is asked) — while
+tab classifies it against the fresh load: same content → clean; different → unsynced with
+NO base, so §4.3 re-reads the server and the owner chooses — never sent blind. The old
+`showrunr-last-saved-{id}` is NOT used as its base (Codex R2 on #202): that bundle wrote it
+separately from the copy and swallowed failed copy writes, so a stale copy could sit beside
+a current version and overwrite a newer save. Cost: a one-time prompt on upgrade for any
+show whose old copy differs from the server, edit or not. This also changes §3.4: a 428'd old tab's edit is in that old cache,
+so the reload its message asks for now recovers it (shown, and the owner is asked) — while
 Graham ruled the 428 copy accordingly (Q6). Also as built: an owner tab is
 read-only until its lock is granted (§4.0; the grant is asynchronous).
 
