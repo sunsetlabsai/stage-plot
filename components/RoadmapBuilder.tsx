@@ -29,6 +29,8 @@ import {
   insertBar,
   deleteBar,
   setBarCount,
+  setPlainRepeat,
+  unrollRepeat,
   removeSection as removeSectionOp,
   type OpResult,
   type ViewModel,
@@ -417,6 +419,15 @@ function Review({
     return runOp(setBarCount(view, s.id, bars), `Change ${s.label} to ${bars} bars`, 'sections');
   }
 
+  function setSectionRepeat(s: ViewSection, times: number | null) {
+    const verb = times === null ? `Remove the repeat on ${s.label}` : `Repeat ${s.label} ×${times}`;
+    runOp(setPlainRepeat(view, s.id, times), verb, 'sections');
+  }
+
+  function unrollSection(s: ViewSection) {
+    runOp(unrollRepeat(view, s.id), `Write out ${s.label}`, 'sections');
+  }
+
   function removeSection(s: ViewSection) {
     runOp(removeSectionOp(view, s.id), `Remove ${s.label}`, 'sections');
   }
@@ -616,6 +627,8 @@ function Review({
                       index={i}
                       onRename={(label) => renameSection(s.id, label)}
                       onBars={(n) => setSectionBars(s, n)}
+                      onRepeat={(times) => setSectionRepeat(s, times)}
+                      onUnroll={() => unrollSection(s)}
                       onRemove={() => removeSection(s)}
                     />
                   ))}
@@ -778,57 +791,114 @@ function SortableSectionRow({
   index,
   onRename,
   onBars,
+  onRepeat,
+  onUnroll,
   onRemove,
 }: {
   section: ViewSection;
   index: number;
   onRename: (label: string) => void;
   onBars: (bars: number) => boolean;
+  onRepeat: (times: number | null) => void;
+  onUnroll: () => void;
   onRemove: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: section.id,
   });
   const style = { transform: CSS.Transform.toString(transform), transition };
-  const repeat = repeatLabel(section.repeat);
 
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border bg-zinc-900 ${
+      className={`px-2.5 py-2 rounded-lg border bg-zinc-900 space-y-1.5 ${
         isDragging ? 'border-blue-500 opacity-80 shadow-lg z-10 relative' : 'border-zinc-800'
       }`}
     >
-      <button
-        {...attributes}
-        {...listeners}
-        title="Drag to reorder"
-        className="text-zinc-600 hover:text-zinc-300 cursor-grab active:cursor-grabbing leading-none touch-none"
+      <div className="flex items-center gap-2">
+        <button
+          {...attributes}
+          {...listeners}
+          title="Drag to reorder"
+          className="text-zinc-600 hover:text-zinc-300 cursor-grab active:cursor-grabbing leading-none touch-none"
+        >
+          ⠿
+        </button>
+        <span className="text-zinc-600 text-[11px] w-4">{index + 1}</span>
+        <input
+          value={section.label}
+          onChange={(e) => onRename(e.target.value)}
+          className="bg-transparent text-white text-sm w-20 outline-none focus:text-blue-300"
+        />
+        {/* Keyed by the bar count so an applied edit re-seeds the draft. */}
+        <BarCountField key={section.bars} bars={section.bars} onCommit={onBars} />
+        <button
+          onClick={onRemove}
+          title="Remove section"
+          aria-label={`Remove ${section.label}`}
+          className="ml-auto text-[11px] text-zinc-600 hover:text-red-400"
+        >
+          ✕
+        </button>
+      </div>
+      <RepeatControl section={section} onRepeat={onRepeat} onUnroll={onUnroll} />
+    </div>
+  );
+}
+
+// The section's repeat (design-roadmap-structure-editing.md §5.1): — / ×2 / ×3 /
+// ×4 (plus the current count if a prompt set a bigger one), and Write out for a
+// ×N repeat. A volta repeat shows as its endings; picking a count replaces them
+// (the op names that in a confirm). Endings are built by hand in a later PR.
+// Disabled on a 1-bar section, which can't repeat.
+function RepeatControl({
+  section,
+  onRepeat,
+  onUnroll,
+}: {
+  section: ViewSection;
+  onRepeat: (times: number | null) => void;
+  onUnroll: () => void;
+}) {
+  const r = section.repeat;
+  const counts = [2, 3, 4];
+  if (r?.kind === 'plain' && !counts.includes(r.times)) counts.push(r.times);
+  const value = !r ? '' : r.kind === 'plain' ? String(r.times) : 'volta';
+  const tooShort = section.bars < 2 && !r;
+  return (
+    <div className="flex items-center gap-2 pl-8">
+      <span className="text-[10px] uppercase tracking-wide text-zinc-500">Repeat</span>
+      <select
+        aria-label={`Repeat ${section.label}`}
+        value={value}
+        disabled={tooShort}
+        title={tooShort ? "A 1-bar section can't repeat" : undefined}
+        onChange={(e) => onRepeat(e.target.value === '' ? null : Number(e.target.value))}
+        className="bg-zinc-800 border border-zinc-700 rounded px-1 py-0.5 text-xs text-white outline-none focus:border-blue-500 disabled:opacity-40"
       >
-        ⠿
-      </button>
-      <span className="text-zinc-600 text-[11px] w-4">{index + 1}</span>
-      <input
-        value={section.label}
-        onChange={(e) => onRename(e.target.value)}
-        className="bg-transparent text-white text-sm w-20 outline-none focus:text-blue-300"
-      />
-      {/* Keyed by the bar count so an applied edit re-seeds the draft. */}
-      <BarCountField key={section.bars} bars={section.bars} onCommit={onBars} />
-      {repeat && (
-        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-300 border border-blue-500/30 whitespace-nowrap">
-          {repeat}
-        </span>
+        <option value="">—</option>
+        {counts.map((n) => (
+          <option key={n} value={n}>
+            ×{n}
+          </option>
+        ))}
+        {r?.kind === 'volta' && (
+          <option value="volta" disabled>
+            {repeatLabel(r)}
+          </option>
+        )}
+      </select>
+      {r?.kind === 'plain' && (
+        <button
+          type="button"
+          onClick={onUnroll}
+          title="Write the repeat out as separate sections"
+          className="text-[11px] text-zinc-400 hover:text-blue-300"
+        >
+          Write out
+        </button>
       )}
-      <button
-        onClick={onRemove}
-        title="Remove section"
-        aria-label={`Remove ${section.label}`}
-        className="ml-auto text-[11px] text-zinc-600 hover:text-red-400"
-      >
-        ✕
-      </button>
     </div>
   );
 }

@@ -7,6 +7,8 @@ import {
   deleteBar,
   setBarCount,
   removeSection,
+  setPlainRepeat,
+  unrollRepeat,
   type ViewModel,
   type ViewNavigation,
   type ViewBar,
@@ -14,6 +16,7 @@ import {
 } from '../lib/roadmap-view';
 import { validateRoadmapSpec, type RoadmapSpec, type ChordHit } from '../lib/roadmap-spec';
 import { navLive } from '../lib/roadmap-calibration';
+import { playsTheSame } from '../lib/roadmap-merge';
 
 // design-roadmap-structure-editing.md §3 / §5.3 / §6 — the structure-edit op layer.
 
@@ -538,6 +541,115 @@ describe('removeSection', () => {
   });
 });
 
+describe('setPlainRepeat (§5.1)', () => {
+  it('sets, changes and clears a plain repeat without moving any bar or marker', () => {
+    const v = view(PLAIN);
+    const x3 = applied(setPlainRepeat(v, 'chorus', 3));
+    expect(sec(x3.view, 'chorus').repeat).toEqual({ kind: 'plain', times: 3 });
+    expect(x3.view.navigation).toEqual(v.navigation);
+    expect(x3.removes).toEqual([]);
+    const cleared = applied(setPlainRepeat(v, 'verse', null));
+    expect(sec(cleared.view, 'verse').repeat).toBeUndefined();
+    expect(degrees(cleared.view, 'verse')).toEqual(degrees(v, 'verse'));
+    expectValid(x3.view);
+    expectValid(cleared.view);
+  });
+
+  it("refuses a 1-bar section (\"a 1-bar section can't repeat\") and a count under 2", () => {
+    const one = view({ ...PLAIN_BARS, sections: [{ id: 'x', label: 'Tag', bars: 1 }] });
+    expect(setPlainRepeat(one, 'x', 2)).toEqual({ ok: false, reason: "a 1-bar section can't repeat" });
+    expect(setPlainRepeat(view(PLAIN), 'chorus', 1).ok).toBe(false);
+    // Clearing is always allowed.
+    expect(setPlainRepeat(one, 'x', null).ok).toBe(true);
+  });
+
+  it('from a volta repeat, names the endings it removes and keeps their bars', () => {
+    const r = applied(setPlainRepeat(view(VOLTA), 'verse', 2));
+    expect(r.removes).toEqual(['the 2 endings']);
+    expect(sec(r.view, 'verse')).toMatchObject({ bars: 5, repeat: { kind: 'plain', times: 2 } });
+    expect(degrees(r.view, 'verse')).toEqual(degrees(view(VOLTA), 'verse'));
+    expectValid(r.view);
+  });
+});
+
+describe('unrollRepeat (§5.1)', () => {
+  it('writes ×N out as N copies; copy 1 keeps the id and its markers, the rest get fresh ids', () => {
+    const v = view({
+      ...PLAIN_BARS,
+      sections: [{ ...PLAIN_BARS.sections[0], repeat: { kind: 'plain', times: 3 } }, PLAIN_BARS.sections[1]],
+      navigation: { fine: { section: 0, bar: 2 } },
+    });
+    const r = applied(unrollRepeat(v, 'verse'));
+    expect(r.view.sections.map((x) => [x.id, x.label, x.repeat])).toEqual([
+      ['verse', 'Verse', undefined],
+      ['verse-2', 'Verse', undefined],
+      ['verse-3', 'Verse', undefined],
+      ['chorus', 'Chorus', undefined],
+    ]);
+    for (const id of ['verse', 'verse-2', 'verse-3']) expect(degrees(r.view, id)).toEqual(degrees(v, 'verse'));
+    expect(r.view.navigation).toEqual({ fine: { sectionId: 'verse', bar: 2 } });
+    expect(playsTheSame(viewToSpec(v), viewToSpec(r.view))).toBe(true);
+    expectValid(r.view);
+  });
+
+  it('never reuses an id already in the chart', () => {
+    const v = view({
+      ...PLAIN_BARS,
+      sections: [
+        { ...PLAIN_BARS.sections[0], repeat: { kind: 'plain', times: 2 } },
+        { ...PLAIN_BARS.sections[1], id: 'verse-2' },
+      ],
+    });
+    const r = applied(unrollRepeat(v, 'verse'));
+    expect(r.view.sections.map((x) => x.id)).toEqual(['verse', 'verse-2-2', 'verse-2']);
+  });
+
+  it('is refused when a D.C. replays the repeat (Verse ×2 before a D.C. — the §4 counterexample mirrored)', () => {
+    // As a repeat the VM keeps the Verse's pass count when the D.C. fires, so the
+    // Verse plays 3 times; written out it would play 4.
+    const v = view({
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'G',
+      sections: [
+        { id: 'verse', label: 'Verse', bars: 2, repeat: { kind: 'plain', times: 2 }, changes: [{ bar: 1, chords: [h(1)] }] },
+        { id: 'outro', label: 'Outro', bars: 1, changes: [{ bar: 1, chords: [h(5)] }] },
+      ],
+      navigation: { jump: { at: { section: 1, bar: 1 }, from: 'capo', until: 'end' } },
+    });
+    expect(unrollRepeat(v, 'verse')).toEqual({
+      ok: false,
+      reason: 'this repeat is replayed by the D.C.; writing it out would change what is played',
+    });
+  });
+
+  it('is allowed when the jump does not replay the repeat', () => {
+    // D.S. to a Segno AFTER the Verse: the Verse is played once, as written.
+    const v = view({
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'G',
+      sections: [
+        { id: 'verse', label: 'Verse', bars: 2, repeat: { kind: 'plain', times: 2 }, changes: [{ bar: 1, chords: [h(1)] }] },
+        { id: 'chorus', label: 'Chorus', bars: 2, changes: [{ bar: 1, chords: [h(4)] }] },
+        { id: 'outro', label: 'Outro', bars: 1, changes: [{ bar: 1, chords: [h(5)] }] },
+      ],
+      navigation: {
+        segno: { section: 1, bar: 1 },
+        jump: { at: { section: 2, bar: 1 }, from: 'segno', until: 'end' },
+      },
+    });
+    const r = applied(unrollRepeat(v, 'verse'));
+    expect(r.view.sections).toHaveLength(4);
+    expectValid(r.view);
+  });
+
+  it('only a ×N repeat can be written out', () => {
+    expect(unrollRepeat(view(VOLTA), 'verse').ok).toBe(false);
+    expect(unrollRepeat(view(PLAIN), 'chorus').ok).toBe(false);
+  });
+});
+
 // ── §6 property test ─────────────────────────────────────────────────────────
 // Random op sequences over the fixtures. Each bar carries a SYNTHETIC stable id
 // carried through the op's own bar map (rendered bar ids are positional, so they
@@ -549,7 +661,8 @@ describe('removeSection', () => {
 //   (c) chords.length === bars;
 //   (d) no chord is written into or read out of a blank bar;
 //   (e) every bar keeps its volta group; an inserted bar joins its neighbour's;
-//   (f) no step turns a live chart not-live (§3), and the only section is never removed.
+//   (f) no step turns a live chart not-live (§3), and the only section is never removed;
+//   (g) a repeat never disappears without being named; Write out never changes playback.
 
 function mulberry32(seed: number) {
   let a = seed;
@@ -598,7 +711,7 @@ describe('structure ops — property test (§6)', () => {
       for (let step = 0; step < 20; step += 1) {
         const s = pick(v.sections);
         const bar = 1 + Math.floor(rand() * s.bars);
-        const op = pick(['split', 'before', 'after', 'delete', 'delete', 'count', 'remove'] as const);
+        const op = pick(['split', 'before', 'after', 'delete', 'delete', 'count', 'remove', 'repeat', 'unroll'] as const);
         const r =
           op === 'split'
             ? splitBar(v, s.id, bar)
@@ -608,7 +721,11 @@ describe('structure ops — property test (§6)', () => {
                 ? deleteBar(v, s.id, bar)
                 : op === 'count'
                   ? setBarCount(v, s.id, 1 + Math.floor(rand() * (s.bars + 3)))
-                  : removeSection(v, s.id);
+                  : op === 'repeat'
+                    ? setPlainRepeat(v, s.id, pick([null, 2, 3, 4]))
+                    : op === 'unroll'
+                      ? unrollRepeat(v, s.id)
+                      : removeSection(v, s.id);
         // The only section can never be removed (Codex PR B R1).
         if (op === 'remove' && v.sections.length === 1) {
           expect(r.ok).toBe(false);
@@ -624,6 +741,20 @@ describe('structure ops — property test (§6)', () => {
           }
           continue;
         }
+        // A repeat never disappears unnamed: endings dropped by any op, or a ×N
+        // dropped by anything but the repeat control's own "—", is in `removes`.
+        for (const ps of v.sections) {
+          const ns = r.view.sections.find((x) => x.id === ps.id);
+          if (!ns || !ps.repeat) continue;
+          if (ps.repeat.kind === 'volta' && ns.repeat?.kind !== 'volta') {
+            expect(r.removes).toContain(`the ${ps.repeat.endings.length} endings`);
+          }
+          if (ps.repeat.kind === 'plain' && !ns.repeat && op !== 'repeat' && op !== 'unroll') {
+            expect(r.removes).toContain(`the ×${ps.repeat.times} repeat`);
+          }
+        }
+        // §5.1: writing a repeat out never changes what is played.
+        if (op === 'unroll') expect(playsTheSame(viewToSpec(v), viewToSpec(r.view))).toBe(true);
         // §3 second rule: no applied step turns a live chart not-live.
         if (wasLive) expect(navLive(viewToSpec(r.view))).toEqual({ live: true });
         stats.applied.add(op);
@@ -637,7 +768,8 @@ describe('structure ops — property test (§6)', () => {
         const nextIds: Record<string, string[]> = {};
         for (const ns of next.sections) {
           if (!r.edit || r.edit.sectionId !== ns.id) {
-            nextIds[ns.id] = ids[ns.id];
+            // An unrolled copy is a new section: its bars are new bars.
+            nextIds[ns.id] = ids[ns.id] ?? ns.chords.map(() => `new.${fresh++}`);
             continue;
           }
           const seen = new Map<number, number>();
@@ -730,7 +862,7 @@ describe('structure ops — property test (§6)', () => {
     }
 
     // A property test that never exercised the hard paths would pass vacuously.
-    expect([...stats.applied].sort()).toEqual(['after', 'before', 'count', 'delete', 'remove', 'split']);
+    expect([...stats.applied].sort()).toEqual(['after', 'before', 'count', 'delete', 'remove', 'repeat', 'split', 'unroll']);
     expect(stats.refused).toBeGreaterThan(0);
     expect(stats.removed).toBeGreaterThan(0);
     expect(stats.deadRefused).toBeGreaterThan(0);
