@@ -88,8 +88,8 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { config, venue, show_date, setlist_songs } = body;
-  let { name } = body;
+  const { config, venue, show_date } = body;
+  let { name, setlist_songs } = body;
 
   if (!config) {
     return Response.json({ error: 'config is required' }, { status: 400 });
@@ -112,6 +112,21 @@ export async function POST(request: NextRequest) {
 
   if (RESERVED_SLUGS.has(slug)) {
     slug = `${baseSlug}-${Math.random().toString(36).slice(2, 6)}`;
+  }
+
+  // Never create a legacy show (design-version-checked-save §3.6): a non-empty
+  // config.setlist with no setlist_songs (an API caller, an older cached client)
+  // has them derived here, so every non-empty show has entries for 018's version
+  // triggers to track. sceneNote too: the RPC rebuilds config.setlist from entries,
+  // so an omitted field would drop the scene notes.
+  if (!(Array.isArray(setlist_songs) && setlist_songs.length > 0) && Array.isArray(config.setlist) && config.setlist.length > 0) {
+    setlist_songs = (config.setlist as Array<Record<string, unknown>>).map((row) => ({
+      title: row?.title,
+      key: row?.key ?? null,
+      lead: row?.lead ?? '',
+      notes: row?.notes ?? '',
+      sceneNote: row?.sceneNote ?? null,
+    }));
   }
 
   // If setlist_songs provided, use RPC for atomic create with song resolution
@@ -180,7 +195,7 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: 'Could not generate unique slug' }, { status: 409 });
   }
 
-  // Legacy path: create without setlist song references
+  // Empty setlist: a plain insert, created migrated — there is nothing to migrate.
   for (let attempt = 0; attempt < 5; attempt++) {
     // Validate date format — Postgres date column rejects invalid strings
     const validDate = show_date && /^\d{4}-\d{2}-\d{2}$/.test(show_date) ? show_date : null;
@@ -194,6 +209,7 @@ export async function POST(request: NextRequest) {
         name,
         venue: venue || null,
         show_date: validDate,
+        setlist_migrated: true,
       })
       .select('id, slug, updated_at')
       .single();

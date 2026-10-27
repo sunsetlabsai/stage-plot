@@ -1,6 +1,6 @@
 # Version-checked show save (UAT S5, and S3 rebuilt on it)
 
-**Status:** DESIGN, approved — Q1–Q5 ruled by Graham 2026-10-27 (§10); Codex R1–R5 folded (§3.1, §3.3–§3.6, §4.0, §4.2, §4.2a, §7); Codex R6 = GO. Nothing here is built.
+**Status:** BUILT (2026-10-27, branch `opus/s5-build`) — Q1–Q5 ruled by Graham 2026-10-27 (§10); Codex R1–R5 folded, R6 = GO. Migration `018` must be applied BEFORE the code deploys (Q4, §9). As-built notes are marked **As built** below.
 **Supersedes:** the client-side reconcile in PR #200 (`lib/offline-sync.ts` `reconcileOnLoad`,
 the set-aside store and its Restore/Discard banner, the page's reconnect effect). #200's S2 (offline owner editing) and S4 (flush on page hide)
 stand; its S3 is rebuilt on §3–§5 once this merges.
@@ -202,6 +202,11 @@ device" about the owner's own work. *Keep mine* is the right answer and is offer
 copy is built on. It is set from the show GET (which must return `updated_at`: #200 adds it, unmerged — the build carries it either way) and replaced
 by each successful save's response. It is stored verbatim with the cache
 (`showrunr-last-saved-{id}`, already written) so an offline-opened copy knows its base.
+**As built:** base, copy AND the unsynced marker are one entry, `showrunr-show-{id}`
+(`lib/show-store.ts`, `{v: 2, config, base, unsynced}`) — a NEW key, so an old bundle the
+service worker still serves offline never reads the new format as a show. The old
+`showrunr-cache-{id}` (bare config) is read as a fallback — clean, no known base — and
+removed on the first write; neither it nor `showrunr-last-saved-{id}` is written any more.
 
 ### 4.2 One save in flight
 
@@ -224,6 +229,8 @@ Everything above assumes the owner's copy is in the cache under a marker. Storag
 refuse either write (quota, private mode, blocked site data), and #200 swallowed both
 (Codex R2 on #201). Rule:
 
+   **As built:** the marker lives IN the entry (§4.1 note), so steps 1 and 3 hold by
+   construction — one `setItem`; a write that throws leaves the previous entry whole.
 1. **Marker first, then cache.** If the cache write then fails, the marker sits over the
    previous copy — which is still a correct thing to recover, never a newer one lost.
 2. **Either write throwing is shown, not swallowed:** the pill reads "Couldn't keep your
@@ -384,7 +391,7 @@ for them, and their screen must not change under them mid-gig.
   `config.setlist` without `setlist_songs` goes through the RPC with derived songs, and a
   row's `sceneNote` survives into the stored entry and the rebuilt `config.setlist`.
 - **Persistence:** a throwing marker write or cache write sets the "Couldn't keep your
-  changes on this device" pill; the marker is written before the cache. On a save's
+  changes on this device" pill; the marker is written with the cache (one entry, as built). On a save's
   success (and the other base-adopting paths) with a cache write that throws, the cache
   entry is gone — never the previous show beside the new base — before the marker clears.
   Edit A in flight, edit B made, A succeeds: the entry holds {B, A's base} and the marker

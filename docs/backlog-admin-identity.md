@@ -65,7 +65,7 @@ work, not after — otherwise the one outcome where the record is the only survi
 evidence (storage gone, account remains) is the one outcome that records nothing.
 
 No `DELETE /api/admin/users/[id]` endpoint exists; `app/api/admin/` holds only
-`backfill-chart-overlays`, `migrate-setlists`, `owners`, `settings`.
+`backfill-chart-overlays`, `owners`, `settings`.
 
 ## 2. `profiles` is anonymously enumerable **[verified 2026-08-31]**
 
@@ -111,8 +111,8 @@ and tidiness item, not a key-exposure item, and should not be sold as the latter
 ## 3. Admin rate limiting is process-local **[verified 2026-08-31]**
 
 `lib/admin-rate-limit.ts:5` is an in-process `Map`, so the limit resets on every cold
-start and is not shared across instances. Five live callers: `admin/settings`,
-`admin/backfill-chart-overlays`, `admin/migrate-setlists`, `admin/owners`, and
+start and is not shared across instances. Four live callers: `admin/settings`,
+`admin/backfill-chart-overlays`, `admin/owners`, and
 `agent/capabilities`. Minor, and only meaningful once there is something worth
 brute-forcing behind it.
 

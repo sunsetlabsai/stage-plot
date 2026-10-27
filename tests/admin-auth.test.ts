@@ -78,7 +78,7 @@ afterEach(() => {
  * Each route with a UNIQUE rate-limit bucket per case.
  *
  * `checkRateLimit` holds a module-scoped Map and the routes key it by IP, so
- * reusing one IP across 7 routes x 4 cases would trip the 5/min limit and turn
+ * reusing one IP across every route x 4 cases would trip the 5/min limit and turn
  * accept cases into 429s — a green-looking suite proving nothing.
  */
 let ipCounter = 0;
@@ -103,13 +103,6 @@ const ROUTES: RouteCase[] = [
     call: async () => {
       const { GET } = await import('@/app/api/admin/owners/route');
       return GET(req('http://localhost/api/admin/owners'));
-    },
-  },
-  {
-    name: 'POST /api/admin/migrate-setlists',
-    call: async () => {
-      const { POST } = await import('@/app/api/admin/migrate-setlists/route');
-      return POST(req('http://localhost/api/admin/migrate-setlists?dry_run=true', 'POST'));
     },
   },
   {

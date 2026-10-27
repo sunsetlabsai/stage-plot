@@ -136,7 +136,8 @@ import {
   normalizeRoomCode,
   saveDeviceLabel,
 } from '@/lib/relay-join';
-import { useShow } from '@/lib/use-show';
+import { useShow, PERSIST_WARNING, type ServerShow } from '@/lib/use-show';
+import { readEntry, writeEntry, readOwnership, rememberOwnership } from '@/lib/show-store';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { normalizeSongKeySafe, displayRole } from '@/lib/normalize';
 import type { ChartRole } from '@/lib/normalize';
@@ -413,6 +414,41 @@ export default function Page() {
   return <ShowWorkspace key={`${owner}/${slug}`} />;
 }
 
+type ApiChart = { id: string; role: string; url: string; mime_type: string; updated_at: string; file_name: string; is_builder?: boolean; authored_key?: string | null; notation?: 'numbers' | 'letters'; charted_key?: string | null };
+
+// The show GET's `charts` (owner's library, keyed by normalized song title) as Charts.
+function chartMapFrom(charts: unknown): Record<string, Chart[]> {
+  const chartMap: Record<string, Chart[]> = {};
+  if (!charts || typeof charts !== 'object') return chartMap;
+  for (const [songKey, list] of Object.entries(charts as Record<string, ApiChart[]>)) {
+    chartMap[songKey] = list.map((c) => ({
+      role: c.role,
+      url: c.url,
+      fileId: c.id,
+      mimeType: c.mime_type,
+      modifiedTime: c.updated_at,
+      label: c.file_name,
+      is_builder: c.is_builder,
+      authored_key: c.authored_key,
+      notation: c.notation,
+      charted_key: c.charted_key,
+    }));
+  }
+  return chartMap;
+}
+
+// Attach the owner's library charts to each setlist song, matched by normalized
+// title. A song with no library charts keeps whatever it carried.
+function withLibraryCharts(cfg: AppConfig, chartMap: Record<string, Chart[]>): AppConfig {
+  return {
+    ...cfg,
+    setlist: cfg.setlist.map((song) => {
+      const songKey = normalizeSongKeySafe(song.title);
+      return songKey && chartMap[songKey] ? { ...song, charts: chartMap[songKey] } : song;
+    }),
+  };
+}
+
 function ShowWorkspace() {
   const params = useParams();
   const owner = params.owner as string;
@@ -456,13 +492,45 @@ function ShowWorkspace() {
   // Synced in an effect, not written during render — same idiom as configRef
   // below. The one-commit lag is in the SAFE direction: the ref starts refusing
   // and only relaxes once ownership is known.
-  useEffect(() => { isReadOnlyRef.current = !isOwner; }, [isOwner]);
   const [loadError, setLoadError] = useState('');
   const [loadedPath, setLoadedPath] = useState<string | null>(null);
   const [chartCacheProgress, setChartCacheProgress] = useState<DownloadProgress | null>(null);
   const [setlistMigrated, setSetlistMigrated] = useState(false);
 
-  const { context: showContext, saveConfig } = useShow(showId, slug, isOwner, setlistMigrated);
+  // UAT S2: this show came from the copy saved in this browser, not the server.
+  const [fromDeviceCopy, setFromDeviceCopy] = useState(false);
+  // The show as the last online load got it — the base the owner's edits start
+  // from (design-version-checked-save §4.1). Null when opened from the device copy.
+  const [loadedShow, setLoadedShow] = useState<ServerShow | null>(null);
+  // The owner's library charts from the last load, by normalized song title, so a
+  // restored or server copy gets today's charts rather than the ones it cached.
+  const chartMapRef = useRef<Record<string, Chart[]>>({});
+
+  const applyConfig = useCallback((c: Record<string, unknown>) => {
+    setConfig(withLibraryCharts(withStableIds<AppConfig>(c as unknown as AppConfig), chartMapRef.current));
+  }, []);
+  // §4.3: the server's current copy for a 409, rendered the way a load renders it.
+  const fetchServer = useCallback(async (): Promise<ServerShow | null> => {
+    try {
+      const res = await fetch(`/api/shows/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data?.config || typeof data.updated_at !== 'string') return null;
+      const map = chartMapFrom(data.charts);
+      chartMapRef.current = map;
+      const cfg = withLibraryCharts(withStableIds<AppConfig>(data.config), map);
+      return { config: cfg as unknown as Record<string, unknown>, updatedAt: data.updated_at };
+    } catch {
+      return null;
+    }
+  }, [owner, slug]);
+
+  const { context: showContext, saveConfig, editHere, keepMine, useSaved } = useShow(
+    showId, slug, isOwner, setlistMigrated, { loaded: loadedShow, applyConfig, fetchServer },
+  );
+  // Read-only for a viewer, AND for an owner whose show is open for editing in
+  // another tab of this browser (§4.0).
+  useEffect(() => { isReadOnlyRef.current = showContext.isReadOnly; }, [showContext.isReadOnly]);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
 
@@ -502,22 +570,46 @@ function ShowWorkspace() {
 
     let cancelled = false;
 
-    function tryOfflineFallback(): boolean {
+    async function tryOfflineFallback(): Promise<boolean> {
+      let cachedShowId: string;
       try {
         const showIds = JSON.parse(localStorage.getItem('showrunr-show-ids') || '{}');
-        const showId = showIds[`${owner}/${slug}`];
-        if (!showId) return false;
-        const cached = localStorage.getItem(`showrunr-cache-${showId}`);
-        if (!cached) return false;
-        // Explicit type argument: withStableIds is generic, and `JSON.parse`
-        // returns `any`, so inference would make the whole config `any` and
-        // silently drop type-checking on every downstream field.
-        setConfig(withStableIds<AppConfig>(JSON.parse(cached)));
+        cachedShowId = showIds[`${owner}/${slug}`];
+        if (!cachedShowId) return false;
+        const entry = readEntry(localStorage, cachedShowId);
+        if (!entry) return false;
+        // Explicit type argument: withStableIds is generic, and the stored config
+        // is untyped, so inference would make the whole config `any` and silently
+        // drop type-checking on every downstream field.
+        setConfig(withStableIds<AppConfig>(entry.config as unknown as AppConfig));
         setLoadedPath(`/${owner}/${slug}`);
-        return true;
+        setFromDeviceCopy(true);
       } catch {
         return false;
       }
+      // ★ UAT S2: ownership used to come only from the server response, so an
+      // owner who opened a show offline became a silent read-only viewer. The
+      // session is held in this browser and readable offline; if it is the account
+      // that owned the show when it was cached, restore editing. Edits then save
+      // when back online, version-checked like any other (lib/use-show).
+      try {
+        const own = readOwnership(localStorage, cachedShowId);
+        const { data: { session } } = await getSupabaseBrowser().auth.getSession();
+        if (cancelled) return true;
+        const uid = session?.user?.id ?? null;
+        if (own && uid && uid === own.ownerId) {
+          setCurrentUserId(uid);
+          currentUserIdRef.current = uid;
+          setShowOwnerId(own.ownerId);
+          showOwnerIdRef.current = own.ownerId;
+          setSetlistMigrated(own.setlistMigrated);
+          setIsOwner(true);
+          setShowId(cachedShowId);
+        }
+      } catch {
+        // No session readable offline: read-only, with the banner saying why.
+      }
+      return true;
     }
 
     async function loadShow() {
@@ -530,6 +622,8 @@ function ShowWorkspace() {
       setTab('perform');
       setLoadError('');
       setChartCacheProgress(null);
+      setFromDeviceCopy(false);
+      setLoadedShow(null);
 
       try {
         const res = await fetch(`/api/shows/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}`);
@@ -538,7 +632,7 @@ function ShowWorkspace() {
         if (!res.ok) {
           // 5xx — try offline fallback
           if (res.status >= 500) {
-            if (tryOfflineFallback()) return;
+            if (await tryOfflineFallback()) return;
           }
           // Client errors (400-499) — hard fail, no fallback
           const err = await res.json().catch(() => ({ error: 'Load failed' }));
@@ -549,45 +643,43 @@ function ShowWorkspace() {
         const data = await res.json();
         if (cancelled || !data?.config) return;
 
-        const cfg = withStableIds<AppConfig>(data.config);
-
         // Apply charts from owner's library (matched by normalized song title)
-        if (data.charts && typeof data.charts === 'object') {
-          const chartMap = data.charts as Record<string, Array<{ id: string; role: string; url: string; mime_type: string; updated_at: string; file_name: string; is_builder?: boolean; authored_key?: string | null; notation?: 'numbers' | 'letters'; charted_key?: string | null }>>;
-          cfg.setlist = cfg.setlist.map((song) => {
-            const songKey = normalizeSongKeySafe(song.title);
-            if (!songKey || !chartMap[songKey]) return song;
-            const charts: Chart[] = chartMap[songKey].map((c) => ({
-              role: c.role,
-              url: c.url,
-              fileId: c.id,
-              mimeType: c.mime_type,
-              modifiedTime: c.updated_at,
-              label: c.file_name,
-              is_builder: c.is_builder,
-              authored_key: c.authored_key,
-              notation: c.notation,
-              charted_key: c.charted_key,
-            }));
-            return { ...song, charts };
-          });
-        }
+        const chartMap = chartMapFrom(data.charts);
+        chartMapRef.current = chartMap;
+        const cfg = withLibraryCharts(withStableIds<AppConfig>(data.config), chartMap);
 
         setConfig(cfg);
         setLoadError('');
         setLoadedPath(`/${owner}/${slug}`);
 
-        // Cache config for all viewers (offline fallback)
+        // Where this show's copy lives, and who owns it (UAT S2: an owner opening
+        // it offline keeps editing). Neither is show content.
         try {
           if (data.show_id) {
-            localStorage.setItem(`showrunr-cache-${data.show_id}`, JSON.stringify(cfg));
             const showIds = JSON.parse(localStorage.getItem('showrunr-show-ids') || '{}');
             showIds[`${owner}/${slug}`] = data.show_id;
             localStorage.setItem('showrunr-show-ids', JSON.stringify(showIds));
+            if (data.owner_id) rememberOwnership(localStorage, data.show_id, { ownerId: data.owner_id, setlistMigrated: !!data.setlist_migrated });
           }
         } catch {
           // Non-fatal — offline fallback won't be available
         }
+        // A viewer's offline copy. The OWNER's copy is written only by the tab
+        // holding the show's edit lock (lib/use-show, §4.0), and a viewer never
+        // writes over a copy holding an owner's unsaved edits (§4.0 item 5).
+        const cacheForViewer = () => {
+          try {
+            if (data.show_id && !readEntry(localStorage, data.show_id)?.unsynced) {
+              writeEntry(localStorage, data.show_id, {
+                config: cfg as unknown as Record<string, unknown>,
+                base: typeof data.updated_at === 'string' ? data.updated_at : null,
+                unsynced: false,
+              });
+            }
+          } catch {
+            // Non-fatal — offline fallback won't be available
+          }
+        };
 
         // Register SW + warm app cache (best-effort, fire-and-forget)
         registerServiceWorker().catch(() => {});
@@ -612,6 +704,11 @@ function ShowWorkspace() {
             // Ownership is the whole write gate. Collaborators are view-only
             // (§3.3c), so the show_collaborators lookup that used to run here is
             // gone — membership grants placement on the dashboard, not access.
+            if (data.owner_id === user.id && typeof data.updated_at === 'string') {
+              setLoadedShow({ config: cfg as unknown as Record<string, unknown>, updatedAt: data.updated_at });
+            } else {
+              cacheForViewer();
+            }
             setIsOwner(data.owner_id === user.id);
             setCurrentUserId(user.id);
             currentUserIdRef.current = user.id;
@@ -619,14 +716,18 @@ function ShowWorkspace() {
             setShowOwnerId(data.owner_id ?? null);
             showOwnerIdRef.current = data.owner_id ?? null;
             setSetlistMigrated(!!data.setlist_migrated);
+          } else {
+            cacheForViewer();
           }
         } catch {
           // Auth check failed — show content is already loaded, continue as anonymous
+          cacheForViewer();
         }
       } catch {
         if (!cancelled) {
           // Network error — try offline fallback
-          if (tryOfflineFallback()) return;
+          if (await tryOfflineFallback()) return;
+          if (cancelled) return;
           setLoadError(`Could not load show "${owner}/${slug}" — network error`);
         }
       }
@@ -811,7 +912,7 @@ function ShowWorkspace() {
   }, [owner, slug]);
 
   const band = configToBand(config);
-  const isReadOnly = !isOwner;
+  const isReadOnly = showContext.isReadOnly;
   // ★ UAT S1. Until THIS show loads, `config` is the built-in demo band (or, on
   // a show change, the previous show), so no panel may render from it. Compared
   // to the path, not a boolean: on the render after a route change the load
@@ -875,9 +976,33 @@ function ShowWorkspace() {
           </a>
         </div>
       )}
-      {isAuthenticated && isReadOnly && showId && (
+      {isAuthenticated && !isOwner && showId && (
         <div className="bg-blue-50 border-b border-blue-200 px-4 py-2 text-center text-sm text-blue-800">
           Viewing {owner}&apos;s show (read-only).
+        </div>
+      )}
+      {/* §4.0: one editing tab per show per browser. */}
+      {isOwner && showContext.lockState === 'elsewhere' && (
+        <div className="bg-blue-50 border-b border-blue-200 px-4 py-2 text-center text-sm text-blue-800">
+          This show is open for editing in another tab.{' '}
+          <button onClick={editHere} className="underline font-medium">Edit here</button>
+        </div>
+      )}
+      {/* §5: a 409 the owner decides. Saves are held until they do. */}
+      {isOwner && showContext.conflict && (
+        <div role="alert" className="bg-amber-50 border-b border-amber-300 px-4 py-2 text-center text-sm text-amber-900">
+          Not saved: this show was changed on another device. Bandmates see the saved version until you choose.{' '}
+          <button onClick={keepMine} className="underline font-medium mx-1">Keep mine</button>
+          ·
+          <button onClick={useSaved} className="underline font-medium mx-1">Use the saved one</button>
+        </div>
+      )}
+      {/* UAT S2: opened from this browser's copy because the server was unreachable. */}
+      {fromDeviceCopy && (isOffline || !isOwner) && (
+        <div className="bg-gray-100 border-b border-gray-200 px-4 py-2 text-center text-sm text-gray-700">
+          {isOwner
+            ? "Offline — you're editing the copy saved on this device. Changes save when you're back online."
+            : 'Offline — showing the copy saved on this device. It may not be the latest.'}
         </div>
       )}
       {/* ── Tab Bar ─────────────────────────────────────────────────────── */}
@@ -973,8 +1098,8 @@ function ShowWorkspace() {
           )}
           {/* Save status */}
           {isOwner && (
-            <span role="status" aria-live="polite" title={showContext.saveError ?? undefined} className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 max-w-[16rem] truncate ${
-              showContext.saveError
+            <span role="status" aria-live="polite" title={showContext.saveError ?? (showContext.persistWarning ? PERSIST_WARNING : undefined)} className={`text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 max-w-[16rem] truncate ${
+              showContext.saveError || showContext.conflict || showContext.persistWarning
                 ? 'text-red-600 bg-red-50'
                 : showContext.saving
                   ? 'text-amber-600 bg-amber-50'
@@ -982,8 +1107,12 @@ function ShowWorkspace() {
                     ? 'text-green-600 bg-green-50'
                     : 'text-gray-400'
             }`}>
-              {showContext.saveError
+              {showContext.conflict
+                ? 'Not saved'
+                : showContext.saveError
                 ? `Couldn't save — ${showContext.saveError}`
+                : showContext.persistWarning
+                ? PERSIST_WARNING
                 : showContext.saving ? 'Saving...' : showContext.lastSavedAt ? 'Saved' : ''}
             </span>
           )}

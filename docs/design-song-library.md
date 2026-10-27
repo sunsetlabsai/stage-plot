@@ -600,7 +600,7 @@ Add "Library" link.
 | `app/dashboard/page.tsx` | Add "Library" nav link |
 | `app/[owner]/[show]/page.tsx` | Config tab autocomplete, override UI, **owner-vs-collaborator** gate *(was "owner-vs-editor"; §3.3c)* |
 | `middleware.ts` | Add `/library` auth protection |
-| `scripts/migrate-setlists.ts` | Seed songs, convert inline setlists, set migrated flag |
+| `scripts/migrate-setlists.ts` | Seed songs, convert inline setlists, set migrated flag. **Deleted** once every show was migrated (design-version-checked-save §3.6). |
 
 ---
 
