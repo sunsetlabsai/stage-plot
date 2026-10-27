@@ -506,8 +506,14 @@ function ShowWorkspace() {
   // restored or server copy gets today's charts rather than the ones it cached.
   const chartMapRef = useRef<Record<string, Chart[]>>({});
 
+  // One-level import undo (§7, see below); declared here because applyConfig clears it.
+  const [importUndo, setImportUndo] = useState<ImportUndo<AppConfig> | null>(null);
   const applyConfig = useCallback((c: Record<string, unknown>) => {
     setConfig(withLibraryCharts(withStableIds<AppConfig>(c as unknown as AppConfig), chartMapRef.current));
+    // The screen was replaced from outside (taking editing over, Use the saved
+    // one, an unsynced copy restored): an import-undo snapshot no longer
+    // describes it, so it must not be offered (Codex R5 on #202).
+    setImportUndo(null);
   }, []);
   // §4.3: the server's current copy for a 409, rendered the way a load renders it.
   const fetchServer = useCallback(async (): Promise<ServerShow | null> => {
@@ -772,7 +778,7 @@ function ShowWorkspace() {
   // One-level, in-memory undo for a setlist import (design §7) or an Import Show
   // (UAT S7) — see lib/import-undo. Null ⇒ no affordance. Not persisted: a
   // reload drops it, which is the specified scope.
-  const [importUndo, setImportUndo] = useState<ImportUndo<AppConfig> | null>(null);
+  // (importUndo state is declared above, before applyConfig, which clears it.)
 
   const updateConfig = useCallback((
     fn: (prev: AppConfig) => AppConfig,
@@ -819,6 +825,9 @@ function ShowWorkspace() {
   // Commit an import merge and arm undo. Bypasses updateConfig on purpose — see
   // above — so the ordering of the two setStates carries no meaning.
   const applyImportMerge = useCallback((merged: SetlistSong[], before: SetlistSong[]) => {
+    // The refusal updateConfig would make, repeated (as in applyShowImport): a
+    // view-only tab must not show a change it cannot save (Codex R5 on #202).
+    if (isReadOnlyRef.current) return;
     // withStableIds, not ensureStageSlotIds: this is THE path CSV/sheet-imported
     // rows arrive on, and slot-only normalization left every imported song with
     // no `id` — the defect this fix exists for.
@@ -846,7 +855,9 @@ function ShowWorkspace() {
   // No side effect inside a state updater: React may invoke an updater twice in
   // StrictMode, so the snapshot is read from scope and each setState is called once.
   const undoImport = useCallback(() => {
-    if (!importUndo) return;
+    // Same refusal: after another tab takes editing over, an undo here would show
+    // on screen and never save (Codex R5 on #202).
+    if (!importUndo || isReadOnlyRef.current) return;
     // Same reason as applyImportMerge: undo restores pre-import rows, which may
     // themselves predate id-minting.
     setConfig((prev) => withStableIds(restoreImportUndo(prev, importUndo)));
@@ -1088,7 +1099,7 @@ function ShowWorkspace() {
           </button>
           {/* Undo import — one level, in-memory, alongside the save status (§7).
               Cleared by the next mutation (updateConfig) or a tab change. */}
-          {importUndo && isOwner && (
+          {importUndo && !isReadOnly && (
             <button
               onClick={undoImport}
               className="text-[10px] font-medium px-2 py-1 rounded mr-1 flex-shrink-0 text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors"
