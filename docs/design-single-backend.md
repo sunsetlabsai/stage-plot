@@ -140,9 +140,10 @@ The admin identity check is normative: read the email from
 `supabase.auth.getUser()` server-side (never a client value, never a
 browser-decoded JWT, never `getSession()`); compare case-insensitively, both sides
 trimmed; **fail closed when `PLATFORM_ADMIN_EMAIL` is unset**; enforce in the
-route, not by hiding UI. The same check guards all four former-`ADMIN_SECRET`
+route, not by hiding UI. The same check guards the former-`ADMIN_SECRET`
 routes: `admin/settings` (GET — its PUT was deleted with the Redis config write),
-`admin/owners`, `admin/migrate-setlists`, `admin/backfill-chart-overlays`.
+`admin/owners`, `admin/backfill-chart-overlays` (`admin/migrate-setlists` was
+deleted by the version-checked save build, design-version-checked-save §3.6).
 
 Conductor == owner for now. The "hand this song to someone to lead" delegate idea
 is backlog, and if built must be **ephemeral realtime session state, never a

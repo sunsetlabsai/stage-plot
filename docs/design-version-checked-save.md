@@ -1,6 +1,6 @@
 # Version-checked show save (UAT S5, and S3 rebuilt on it)
 
-**Status:** DESIGN, approved — Q1–Q5 ruled by Graham 2026-10-27 (§10); Codex R1–R5 folded (§3.1, §3.3–§3.6, §4.0, §4.2, §4.2a, §7); Codex R6 = GO. Nothing here is built.
+**Status:** BUILT (2026-10-27, branch `opus/s5-build`) — Q1–Q6 ruled by Graham 2026-10-27 (§10); Codex R1–R5 folded, R6 = GO. Migration `018` must be applied BEFORE the code deploys (Q4, §9). As-built notes are marked **As built** below.
 **Supersedes:** the client-side reconcile in PR #200 (`lib/offline-sync.ts` `reconcileOnLoad`,
 the set-aside store and its Restore/Discard banner, the page's reconnect effect). #200's S2 (offline owner editing) and S4 (flush on page hide)
 stand; its S3 is rebuilt on §3–§5 once this merges.
@@ -101,18 +101,19 @@ inference: a collaborator, who can READ the row at the matching version but not 
 |---|---|
 | `base_updated_at` matches | 200 `{ updated_at, slug }` (as today) |
 | `base_updated_at` stale | **409** `{ error: 'This show was changed somewhere else.', conflict: true }` |
-| `base_updated_at` missing | **428** `{ error: "This page is out of date and your last change was NOT saved. Reload, then make it again." }` |
+| `base_updated_at` missing | **428** `{ error: "This page is out of date. Reload — your last change will be checked and kept if it can be." }` (Q6; was Q1's "…NOT saved… make it again") |
 
 428, not "accept unchecked": an old bundle (a PWA can keep one for days) would otherwise
 keep doing exactly the blind overwrite this exists to stop. An old client renders `error`
 in its pill as-is, so the message reaches the user with no client change (Q1, ruled).
 
-**The old tab's rejected edit is NOT recovered automatically** (Codex R1 on #201): the old
-bundle caches it without a marker, and the reload overwrites that cache. Recovering it
-would need server-side storage of rejected payloads, or guessing from an unmarked cache —
-which also fires on every stale cache that holds no edit at all. Per Graham's rule (§5),
-the person is told plainly what was lost and redoes it: the loss is bounded to edits made
-in a tab opened before the deploy, and it is never silent.
+**The old tab's rejected edit is recovered on reload (as built, Q6).** The old bundle cached
+it before sending; the reload the 428 asks for runs the new bundle, which classifies that
+cache against the server (§4.1 *Upgrade* note): the owner is asked (Keep mine / Use the
+saved one) — never silent, never sent blind. (Codex R1 on #201 had this as not recoverable; Codex R1 on #202's upgrade fix made it
+so.) **Limit:** once a NEW tab of that show has run in the browser, it reads only its own v2
+entry, so edits made afterwards in a still-open OLD tab are not recovered — each still got
+the 428, and the copy says "kept if it can be", not "kept".
 
 ### 3.5 Library changes move the version — migration `018`
 
@@ -202,6 +203,31 @@ device" about the owner's own work. *Keep mine* is the right answer and is offer
 copy is built on. It is set from the show GET (which must return `updated_at`: #200 adds it, unmerged — the build carries it either way) and replaced
 by each successful save's response. It is stored verbatim with the cache
 (`showrunr-last-saved-{id}`, already written) so an offline-opened copy knows its base.
+**As built:** base, copy AND the unsynced marker are one entry, `showrunr-show-{id}`
+(`lib/show-store.ts`, `{v: 2, config, base, unsynced}`) — a NEW key, so an old bundle the
+service worker still serves offline never reads the new format as a show. The old
+`showrunr-cache-{id}` (bare config) is read as a fallback and removed on the first write;
+neither it nor `showrunr-last-saved-{id}` is written any more. **Upgrade (Codex R1 on #202):**
+that old bundle cached each edit before its 2 s debounce, so its copy may hold an edit that
+never reached the server (a reload inside the debounce cancels the unload save). The owner
+tab classifies it against the fresh load: same content → clean; different → unsynced with
+NO base, so §4.3 re-reads the server and the owner chooses — never sent blind. The old
+`showrunr-last-saved-{id}` is NOT used as its base (Codex R2 on #202): that bundle wrote it
+separately from the copy and swallowed failed copy writes, so a stale copy could sit beside
+a current version and overwrite a newer save. Cost: a one-time prompt on upgrade for any
+show whose old copy differs from the server, edit or not. Until an owner tab has classified it, a VIEWER load
+(e.g. the owner's lapsed session) never overwrites an old copy in a browser where an owner
+saved — `showrunr-last-saved-{id}` present, only its presence is used (Codex R3 on #202,
+`viewerMayOverwrite`); a performer's phone never has that key and keeps refreshing.
+**Limit (Graham, 2026-10-27, Codex R4 on #202):** recovering an old bundle's copy is
+best-effort. It is recovered when the owner next opens the show signed in. If a viewer load
+comes first in a browser with no last-saved key — e.g. the owner's FIRST edit there, tab
+closed mid-save, then a lapsed session — the server copy replaces it. Today's code loses
+that edit on any next load (its load overwrote the cache unconditionally), so this is no
+worse than the baseline; it is not a regression and not chased further. This also changes §3.4: a 428'd old tab's edit is in that old cache,
+so the reload its message asks for now recovers it (shown, and the owner is asked) — while
+Graham ruled the 428 copy accordingly (Q6). Also as built: an owner tab is
+read-only until its lock is granted (§4.0; the grant is asynchronous).
 
 ### 4.2 One save in flight
 
@@ -224,6 +250,8 @@ Everything above assumes the owner's copy is in the cache under a marker. Storag
 refuse either write (quota, private mode, blocked site data), and #200 swallowed both
 (Codex R2 on #201). Rule:
 
+   **As built:** the marker lives IN the entry (§4.1 note), so steps 1 and 3 hold by
+   construction — one `setItem`; a write that throws leaves the previous entry whole.
 1. **Marker first, then cache.** If the cache write then fails, the marker sits over the
    previous copy — which is still a correct thing to recover, never a newer one lost.
 2. **Either write throwing is shown, not swallowed:** the pill reads "Couldn't keep your
@@ -338,7 +366,7 @@ for them, and their screen must not change under them mid-gig.
 | 1 | a stale show save reverses a library change / recreates a deleted song | §3.1 + §3.5: library changes move the version; the owner arbitrates |
 | 2 | admin migration replaces a successful save; script missing from the inventory | §3.6: both retired; no unmigrated shows exist |
 | 3 | an older save's success clears the marker | §4.2 marker rule (latest sequence only, incl. during the 409 GET) |
-| 4 | old tabs' rejected edit lost on reload | §3.4: not recovered, but never silent — the 428 says it was not saved |
+| 4 | old tabs' rejected edit lost on reload | §3.4: recovered on reload from the old cache (as built, Q6); never silent |
 
 **Codex R2 on #201:**
 
@@ -384,7 +412,7 @@ for them, and their screen must not change under them mid-gig.
   `config.setlist` without `setlist_songs` goes through the RPC with derived songs, and a
   row's `sceneNote` survives into the stored entry and the rebuilt `config.setlist`.
 - **Persistence:** a throwing marker write or cache write sets the "Couldn't keep your
-  changes on this device" pill; the marker is written before the cache. On a save's
+  changes on this device" pill; the marker is written with the cache (one entry, as built). On a save's
   success (and the other base-adopting paths) with a cache write that throws, the cache
   entry is gone — never the previous show beside the new base — before the marker clears.
   Edit A in flight, edit B made, A succeeds: the entry holds {B, A's base} and the marker
@@ -414,12 +442,12 @@ for them, and their screen must not change under them mid-gig.
 3. On Graham's go: apply `018` through psql **before** the deploy (`project_showrunr_reference`:
    migrations run first). Between apply and deploy the OLD route still calls the dropped
    7-arg function and saves fail loudly for those minutes (Q4, accepted).
-4. Deploy. Old open tabs get 428 and the message that their last change was not saved.
+4. Deploy. Old open tabs get 428 telling them to reload; the reload recovers the change (§3.4).
 
 ## 10. Rulings (Graham, 2026-10-27)
 
 - **Q1 — old clients with no base: refuse with 428** ("This page is out of date. Reload to
-  keep editing.").
+  keep editing."). Copy superseded by Q6.
 - **Q2 — setlist migration on the owner's first real edit** instead of every owner load: OK.
 - **Q3 — a conflict is arbitrated by the owner** (§5): their copy stays on screen, saves
   are held, Keep mine / Use the saved one. Not a server-wins default with a restore list.
@@ -428,3 +456,6 @@ for them, and their screen must not change under them mid-gig.
 - **Q5 — one editing tab per show per browser** (§4.0): a second owner tab is
   view-only with *Edit here*; browsers without `navigator.locks` keep today's behaviour as
   a documented limit.
+- **Q6 — the 428 copy no longer says the change was lost** (2026-10-27): "This page is out
+  of date. Reload — your last change will be checked and kept if it can be." The reload
+  recovers it (§3.4), so "make it again" would duplicate it (e.g. a song added twice).

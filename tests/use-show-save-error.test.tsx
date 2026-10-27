@@ -37,9 +37,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Owner on a real show — the only combination that saves at all. */
+/**
+ * Owner on a real show — the only combination that saves at all — loaded online
+ * at version v0, so saves carry a base (design-version-checked-save §4.1).
+ * jsdom has no navigator.locks, so the tab edits as `unsupported` (§4.0 item 6).
+ */
+const LOADED = { config: {}, updatedAt: '2026-08-19T00:00:00.000001+00:00' };
 function renderUseShow() {
-  return renderHook(() => useShow('show-1', 'my-show', true, false));
+  return renderHook(() => useShow('show-1', 'my-show', true, false, {
+    loaded: LOADED, applyConfig: () => {}, fetchServer: async () => null,
+  }));
 }
 
 /**
@@ -69,7 +76,7 @@ describe('test 1 — a network failure is surfaced, not swallowed', () => {
     // so this carries the CAUSE only; asserting on content rather than an exact
     // string keeps the copy editable without a false failure.
     expect(result.current.context.saveError).toMatch(/offline/i);
-    expect(result.current.context.saveError).toMatch(/cached/i);
+    expect(result.current.context.saveError).toMatch(/kept in this browser/i);
   });
 
   it('★ leaves lastSavedAt untouched, so the pill cannot still read "Saved"', async () => {
@@ -167,6 +174,8 @@ describe('test 2b — a save that PERSISTED must never report failure (Codex R1 
     expect(result.current.context.saveError).toBeNull();
     expect(result.current.context.lastSavedAt).toBe('2026-08-20T12:00:00Z');
     expect(result.current.context.saving).toBe(false);
+    // …but the failed device write IS shown (§4.2a step 2), not swallowed.
+    expect(result.current.context.persistWarning).toBe(true);
   });
 
   it('★ still WRITES the conflict-detection cache — guarding it is not dropping it', async () => {
@@ -191,7 +200,9 @@ describe('test 2b — a save that PERSISTED must never report failure (Codex R1 
     act(() => result.current.saveConfig({ stagePlot: [] }));
     await flushDebounce();
 
-    expect(setItem).toHaveBeenCalledWith('showrunr-last-saved-show-1', '2026-08-20T12:00:00Z');
+    // The device copy is rewritten clean at the NEW base (§4.2a step 4).
+    const last = setItem.mock.calls.filter(([k]) => k === 'showrunr-show-show-1').at(-1);
+    expect(JSON.parse(last![1])).toMatchObject({ v: 2, base: '2026-08-20T12:00:00Z', unsynced: false, config: { stagePlot: [] } });
     expect(result.current.context.saveError).toBeNull();
   });
 

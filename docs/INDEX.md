@@ -107,7 +107,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | `design-alpha-ready.md` | SHIPPED-RECORD | Namespacing + PWA, both parts. |
 | `design-storage-notation.md` | PARTIAL | Phase 1 YAML shipped (`lib/show-file.ts:1`). Phase 2 BYOS/GitHub unbuilt. |
 | `backlog-offline-performer-cache.md` | BACKLOG | Needs a design first. |
-| `design-version-checked-save.md` | UNBUILT-DESIGN | UAT S5 + S3 rebuilt: server compare-and-set on `shows.updated_at` (migration 018, `PT409`), one save in flight, one editing tab per show (Web Locks), 409 → owner chooses Keep mine / Use the saved one (saves held meanwhile). Supersedes #200's client reconcile. Q1–Q5 ruled 2026-10-27. |
+| `design-version-checked-save.md` | SHIPPED-RECORD | Built: migration `018` (apply before deploy), `lib/use-show.ts`, `lib/show-store.ts`, `lib/edit-lock.ts`. UAT S5 + S3 rebuilt: server compare-and-set on `shows.updated_at` (migration 018, `PT409`), one save in flight, one editing tab per show (Web Locks), 409 → owner chooses Keep mine / Use the saved one (saves held meanwhile). Supersedes #200's client reconcile (never merged). Q1–Q5 ruled 2026-10-27. |
 
 ## AI agent
 

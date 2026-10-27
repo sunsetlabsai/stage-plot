@@ -21,6 +21,10 @@ const db = {
   userScopedWrite: false,
   /** What RLS says about the user-scoped write. 'deny' mimics post-014 for a collaborator. */
   rls: 'allow' as 'allow' | 'deny',
+  /** The show's current version; a save whose base differs is stale. */
+  version: '2026-08-25T00:00:00.123456+00:00',
+  rpcArgs: null as Record<string, unknown> | null,
+  legacyBase: null as string | null,
 };
 
 let currentUserId = 'owner-1';
@@ -34,13 +38,21 @@ vi.mock('@/lib/supabase-server', () => ({
     from: () => ({
       update: () => ({
         eq: () => ({
-          select: () => ({
-            single: async () => {
-              db.userScopedWrite = true;
-              return db.rls === 'deny'
-                ? { data: null, error: { message: 'new row violates row-level security policy for table "shows"' } }
-                : { data: { updated_at: '2026-08-25T00:00:00Z', slug: 'my-show' }, error: null };
-            },
+          // design-version-checked-save §3.3: the version-checked update.
+          eq: (_col: string, base: string) => ({
+            select: () => ({
+              maybeSingle: async () => {
+                db.userScopedWrite = true;
+                db.legacyBase = base;
+                if (db.rls === 'deny') {
+                  return { data: null, error: { message: 'new row violates row-level security policy for table "shows"' } };
+                }
+                // Zero rows when the version moved.
+                return base === db.version
+                  ? { data: { updated_at: '2026-08-25T00:00:01Z', slug: 'my-show' }, error: null }
+                  : { data: null, error: null };
+              },
+            }),
           }),
         }),
       }),
@@ -60,7 +72,7 @@ vi.mock('@/lib/supabase-admin', () => ({
       return {
         select: () => ({
           eq: () => ({
-            single: async () => ({
+            maybeSingle: async () => ({
               data: db.showExists ? { owner_id: db.ownerId } : null,
             }),
             in: async () => ({ data: [] }),
@@ -70,16 +82,21 @@ vi.mock('@/lib/supabase-admin', () => ({
         }),
       };
     },
-    rpc: async () => {
+    rpc: async (_fn: string, args: Record<string, unknown>) => {
       db.rpcCalled = true;
-      return { data: { updated_at: '2026-08-25T00:00:00Z', slug: 'my-show' }, error: null };
+      db.rpcArgs = args;
+      // rpc_save_show raises PT409 when the base is stale (migration 018).
+      if (args.p_base_updated_at !== db.version) {
+        return { data: null, error: { code: 'PT409', message: 'show changed since ...' } };
+      }
+      return { data: { updated_at: '2026-08-25T00:00:01Z', slug: 'my-show' }, error: null };
     },
   }),
 }));
 
 const { PUT } = await import('@/app/api/shows/update/route');
 
-function updateRequest() {
+function updateRequest(base: string | undefined = db.version) {
   return new NextRequest('http://localhost/api/shows/update', {
     method: 'PUT',
     body: JSON.stringify({
@@ -87,6 +104,7 @@ function updateRequest() {
       config: { showInfo: { showName: 'Friday Night' } },
       // `entries` present → the service-role path, where the guard lives.
       entries: [],
+      base_updated_at: base,
     }),
   });
 }
@@ -97,6 +115,8 @@ beforeEach(() => {
   db.rpcCalled = false;
   db.userScopedWrite = false;
   db.rls = 'allow';
+  db.rpcArgs = null;
+  db.legacyBase = null;
 });
 
 describe('§3.3c — a collaborator cannot write', () => {
@@ -148,33 +168,46 @@ describe('§3.3c — the LEGACY path stays user-scoped, so RLS is its control', 
   // and reopen non-owner writes — with no owner check anywhere on that path,
   // before OR after 014 — and every other test here would still pass.
 
-  function legacyRequest() {
+  // design-version-checked-save §3.3 adds an explicit ownership check BEFORE
+  // either path, so a collaborator is now refused 403 before the legacy write is
+  // attempted; RLS stays the write's own control underneath it.
+
+  function legacyRequest(base: string | undefined = db.version) {
     return new NextRequest('http://localhost/api/shows/update', {
       method: 'PUT',
       body: JSON.stringify({
         id: 'show-1',
         config: { showInfo: { showName: 'Friday Night' } },
         // no `entries` → legacy path
+        base_updated_at: base,
       }),
     });
   }
 
   it('routes the write through the USER-SCOPED client, never the service role', async () => {
-    currentUserId = 'collaborator-1';
-    db.rls = 'deny';
+    currentUserId = 'owner-1';
 
     await PUT(legacyRequest());
 
     expect(db.userScopedWrite).toBe(true);
-    // The service-role client must not appear on this path at all.
+    // The service-role client must not WRITE on this path (it only reads ownership).
     expect(db.rpcCalled).toBe(false);
   });
 
-  it('surfaces an RLS denial as 403 rather than a silent success', async () => {
-    // Post-014, a collaborator's legacy write is refused by row-level security.
-    // The route must report that, not swallow it — §1.1's rule that the app
-    // never claims a save it did not achieve.
+  it('refuses a collaborator 403 before the legacy write is even attempted', async () => {
     currentUserId = 'collaborator-1';
+    db.rls = 'allow'; // even if RLS were somehow to allow it
+
+    const res = await PUT(legacyRequest());
+
+    expect(res.status).toBe(403);
+    expect(db.userScopedWrite).toBe(false);
+  });
+
+  it('surfaces an RLS denial as 403 rather than a silent success', async () => {
+    // The route must report a refused write, not swallow it — §1.1's rule that
+    // the app never claims a save it did not achieve.
+    currentUserId = 'owner-1';
     db.rls = 'deny';
 
     const res = await PUT(legacyRequest());
@@ -203,5 +236,66 @@ describe('§3.3c — a missing show is still a 404, not a 403', () => {
     const res = await PUT(updateRequest());
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe('design-version-checked-save §3.4 — the version contract', () => {
+  it('428 when the request carries no base (an old bundle), and nothing is written', async () => {
+    currentUserId = 'owner-1';
+
+    // Built by hand: updateRequest(undefined) would take the default base.
+    const res = await PUT(new NextRequest('http://localhost/api/shows/update', {
+      method: 'PUT',
+      body: JSON.stringify({ id: 'show-1', config: { showInfo: {} }, entries: [] }),
+    }));
+
+    expect(res.status).toBe(428);
+    // Q6: the reload recovers the edit, so the copy must NOT tell them to redo it.
+    const { error } = await res.json();
+    expect(error).toMatch(/Reload/);
+    expect(error).not.toMatch(/make it again/i);
+    expect(db.rpcCalled).toBe(false);
+    expect(db.userScopedWrite).toBe(false);
+  });
+
+  it('passes the base to rpc_save_show VERBATIM — never through Date', async () => {
+    currentUserId = 'owner-1';
+
+    const res = await PUT(updateRequest());
+
+    expect(res.status).toBe(200);
+    // Microseconds survive: a Date round-trip would cut .123456 to .123.
+    expect(db.rpcArgs?.p_base_updated_at).toBe('2026-08-25T00:00:00.123456+00:00');
+  });
+
+  it('409 { conflict: true } when rpc_save_show raises PT409 (stale base)', async () => {
+    currentUserId = 'owner-1';
+
+    const res = await PUT(updateRequest('2026-08-24T00:00:00+00:00'));
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ conflict: true });
+  });
+
+  it('legacy path: zero rows at a stale base is a 409, not a silent success', async () => {
+    currentUserId = 'owner-1';
+
+    const legacy = new NextRequest('http://localhost/api/shows/update', {
+      method: 'PUT',
+      body: JSON.stringify({ id: 'show-1', config: { showInfo: {} }, base_updated_at: 'stale' }),
+    });
+    const res = await PUT(legacy);
+
+    expect(db.legacyBase).toBe('stale');
+    expect(res.status).toBe(409);
+  });
+
+  it('a collaborator at the MATCHING version is still 403 (owner check before either path)', async () => {
+    currentUserId = 'collaborator-1';
+
+    const res = await PUT(updateRequest());
+
+    expect(res.status).toBe(403);
+    expect(db.rpcCalled).toBe(false);
   });
 });

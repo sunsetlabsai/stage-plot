@@ -74,7 +74,7 @@ export async function GET(
   // Fetch show by (owner_id, slug) pair
   const { data: showData, error } = await admin
     .from('shows')
-    .select('id, config, name, venue, show_date, owner_id, setlist_migrated')
+    .select('id, config, name, venue, show_date, owner_id, setlist_migrated, updated_at')
     .eq('owner_id', profile.id)
     .eq('slug', show)
     .single();
@@ -141,5 +141,8 @@ export async function GET(
     show_id: showData.id,
     owner_id: showData.owner_id,
     setlist_migrated: showData.setlist_migrated,
+    // The version this load saw, verbatim: the owner's next save carries it back as
+    // its base (design-version-checked-save §4.1). Never round-trip it through Date.
+    updated_at: showData.updated_at,
   });
 }

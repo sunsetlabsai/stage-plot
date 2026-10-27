@@ -15,9 +15,19 @@ interface EntryInput {
   scene_note?: string | null;
 }
 
+// The version-check contract (docs/design-version-checked-save.md §3.4).
+const CONFLICT = { error: 'This show was changed somewhere else.', conflict: true } as const;
+const NO_BASE = {
+  // Q6 (Graham, 2026-10-27): the reload recovers the old tab's edit from its cache
+  // (lib/use-show onWritable), so the copy must not tell them to redo it.
+  error: 'This page is out of date. Reload — your last change will be checked and kept if it can be.',
+} as const;
+
 // PUT /api/shows/update — save show config (authenticated)
 // When entries are provided, uses rpc_save_show for atomic dual-write.
 // Server-side diffing: client sends effective values, server computes overrides vs library defaults.
+// Every save carries base_updated_at — the server version the client's copy is
+// built on — and is applied only if the show is still at it (409 otherwise).
 export async function PUT(request: NextRequest) {
   const supabase = await getSupabaseServer();
   const { data: { user } } = await supabase.auth.getUser();
@@ -27,38 +37,39 @@ export async function PUT(request: NextRequest) {
   }
 
   const body = await request.json();
-  const { id, config, name, venue, show_date, entries } = body;
+  const { id, config, name, venue, show_date, entries, base_updated_at } = body;
 
   if (!id || !config) {
     return Response.json({ error: 'id and config are required' }, { status: 400 });
+  }
+  // An old bundle sends no base. Accepting it unchecked would keep doing the blind
+  // overwrite this contract exists to stop (Q1: 428, and the message says so).
+  if (typeof base_updated_at !== 'string' || !base_updated_at) {
+    return Response.json(NO_BASE, { status: 428 });
+  }
+
+  // Ownership FIRST, for both paths (§3.3). The admin client bypasses RLS, so this
+  // check is the control on the entries path; on the legacy path it is what makes a
+  // zero-row version-checked update mean "the version moved", never "not allowed".
+  // Collaborators are view-only (§3.3c) — no membership grants a non-owner a write.
+  const admin = getSupabaseAdmin();
+  const { data: show } = await admin
+    .from('shows')
+    .select('owner_id')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (!show) {
+    return Response.json({ error: 'Show not found' }, { status: 404 });
+  }
+  if (show.owner_id !== user.id) {
+    return Response.json({ error: 'Not authorized' }, { status: 403 });
   }
 
   const effectiveName = name || config.showInfo?.showName || config.showInfo?.bandName || 'Untitled';
 
   // If entries are provided (reference-based save), use RPC
   if (entries !== undefined) {
-    const admin = getSupabaseAdmin();
-
-    // Verify the caller OWNS the show. Collaborators are view-only (§3.3c) —
-    // no membership grants a non-owner write access.
-    //
-    // ★ This check is the control, not a belt-and-braces duplicate of RLS: the
-    // client below is the service role, which bypasses row-level security
-    // entirely. Dropping the "Editor update" grant does not close this path.
-    const { data: show } = await admin
-      .from('shows')
-      .select('owner_id')
-      .eq('id', id)
-      .single();
-
-    if (!show) {
-      return Response.json({ error: 'Show not found' }, { status: 404 });
-    }
-
-    if (show.owner_id !== user.id) {
-      return Response.json({ error: 'Not authorized' }, { status: 403 });
-    }
-
     const entryList = entries as EntryInput[];
 
     // Resolve songs: by songId if present, otherwise by normalized title
@@ -202,8 +213,13 @@ export async function PUT(request: NextRequest) {
       p_show_date: show_date || config.showInfo?.eventDate || '',
       p_entries: resolvedEntries,
       p_inline_setlist: inlineSetlist,
+      p_base_updated_at: base_updated_at,
     });
 
+    // rpc_save_show raises PT409 under its row lock when the base is stale (018).
+    if (error?.code === 'PT409') {
+      return Response.json(CONFLICT, { status: 409 });
+    }
     if (error) {
       return Response.json({ error: error.message }, { status: 500 });
     }
@@ -233,11 +249,17 @@ export async function PUT(request: NextRequest) {
     .from('shows')
     .update(updatePayload)
     .eq('id', id)
+    .eq('updated_at', base_updated_at)
     .select('updated_at, slug')
-    .single();
+    .maybeSingle();
 
   if (error) {
     return Response.json({ error: error.message }, { status: 403 });
+  }
+  // Ownership is already proven, so zero rows means the version moved (or the show
+  // was deleted in between; the client's follow-up GET then 404s).
+  if (!data) {
+    return Response.json(CONFLICT, { status: 409 });
   }
 
   return Response.json({ updated_at: data.updated_at, slug: data.slug });

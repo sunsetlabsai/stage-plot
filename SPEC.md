@@ -105,8 +105,9 @@ Loading, access and saving
 12. Banners: signed-out viewer sees "Not signed in — changes won't be saved" (`page.tsx:788-793`);
     any signed-in non-owner sees "Viewing as collaborator (read-only)" (`page.tsx:794-798`).
 13. Owner edits autosave 2 s after the last change; config is also written to localStorage first
-    (`lib/use-show.ts:148-164`). The tab-bar pill shows Saving… / Saved / red "Couldn't save — …";
-    a network failure says "you appear to be offline…" (`use-show.ts:109-111`, `page.tsx:890-903`).
+    (`lib/use-show.ts`). The tab-bar pill shows Saving… / Saved / red "Couldn't save — …";
+    a network failure says "you appear to be offline…" (`lib/use-show.ts`, `page.tsx`). Offline and
+    version-checked save: Platform items 30–32.
 14. Setlist save: owners send entries; the server resolves each row by `songId`, else by normalized
     title, **auto-creating a missing library song**, then stores per-show key/lead/notes overrides
     (null = library default, '' = blank, value = override) (`update/route.ts:66-163`).
@@ -278,7 +279,7 @@ its setlist and charts keep working on that device with no signal.
 7. Sign-out (`app/dashboard/page.tsx:144-147`) calls `supabase.auth.signOut()` and does not clear the device BYOA key (issue #134, open).
 
 **Roles (three tiers + link viewers)**
-8. Platform admin = the signed-in user whose server-side `getUser()` email equals `PLATFORM_ADMIN_EMAIL` (both trimmed + lowercased); fails closed on unset env, no session, or auth error; every rejection is an identical 401 — `lib/admin-auth.ts:30-52`. Used by all four `/api/admin/*` routes (`settings`, `owners`, `migrate-setlists`, `backfill-chart-overlays`). `/api/admin/settings` is GET-only (masked config) — `app/api/admin/settings/route.ts:15`.
+8. Platform admin = the signed-in user whose server-side `getUser()` email equals `PLATFORM_ADMIN_EMAIL` (both trimmed + lowercased); fails closed on unset env, no session, or auth error; every rejection is an identical 401 — `lib/admin-auth.ts:30-52`. Used by all three `/api/admin/*` routes (`settings`, `owners`, `backfill-chart-overlays`). `/api/admin/settings` is GET-only (masked config) — `app/api/admin/settings/route.ts:15`.
 9. Admin routes are rate-limited 5 req/min per IP per route, in a process-local Map — `lib/admin-rate-limit.ts:3-5`.
 10. Owner = `shows.owner_id`. On the show page `isReadOnly = !isOwner` (`app/[owner]/[show]/page.tsx:749`); ownership is `data.owner_id === user.id` (`:579`). Config and AI tabs render only for the owner (`:830,842`; enforced again by `lib/show-tabs.ts:20,28`). Reorder on Mix is owner-only (`:1612`).
 11. Every non-owner (signed-out OR signed-in) is read-only. Signed-out sees "Not signed in — changes won't be saved. Sign in" (`:788-792`; the link carries no `redirect`, so sign-in lands on `/dashboard`). Any signed-in non-owner sees "Viewing as collaborator (read-only)." (`:794-797`) — regardless of whether a collaborator row exists.
@@ -303,10 +304,12 @@ its setlist and charts keep working on that device with no signal.
 **Offline / PWA**
 25. Installable PWA: `start_url: '/'`, standalone, 192/512 icons (`app/manifest.ts`). The service worker is registered when a show page loads (`page.tsx:557`), not globally.
 26. SW (`public/sw.js`): precaches `/` + PDF worker; on registration the page also sends the current URL and its loaded static assets to the worker to warm the cache (`lib/chart-cache.ts:247`, `sw.js:33`) — relevant when diagnosing an offline launch; `/_next/static/*` cache-first; page navigations network-first with fallback to the cached page, then cached `/`; `/api/*` never cached; `/api/chart-cache/*` served only from the chart cache.
-27. Every viewer (owner or not) caches the show config in localStorage on load (`page.tsx:544-555`); a network error or 5xx falls back to it (`:469-487,505,590`); 4xx does not.
+27. Every viewer caches the show in localStorage (`showrunr-show-{id}`: one entry holding config, server version and an unsynced flag — `lib/show-store.ts`); a network error or 5xx falls back to it; 4xx does not. A viewer never writes over an entry holding an owner's unsaved edits; an owner's entry is written only by the tab holding the show's edit lock (item 32).
 28. Every viewer auto-downloads all Supabase-hosted charts into Cache API `stageplot-charts-v1`, keyed `/api/chart-cache/{chartId}/{updated_at ms}` (`lib/chart-cache.ts:8-14`; `page.tsx:559-566`); Perform shows "Caching n/N" → "N charts cached" or "x of N cached" (`page.tsx:1106-1120`). The chart viewer reads cache first, then network, and writes back on fetch (`lib/pdf-viewer.ts:88-130`). A replaced chart gets a new key; old versions are deleted (`lib/chart-cache.ts:54-60`).
 29. Launching the PWA offline at `/` redirects to the last-viewed show (`app/page.tsx:39-46`, `showrunr-last-show`). Chart viewer shows an "OFFLINE" pill (`page.tsx:3889`).
-30. Owner edits write localStorage immediately and save to the server after a 2 s debounce; a failed fetch shows "you appear to be offline… will save on your next edit" (`lib/use-show.ts:110,153-163`). No auto-retry, no background sync.
+30. **Version-checked save** (`docs/design-version-checked-save.md`, migration 018). Owner edits are cached at once (marked unsynced) and saved after a 2 s debounce, one save in flight, each carrying the server version it is built on. The server refuses a stale one: `rpc_save_show` raises `PT409` → 409; no version → 428 "This page is out of date. Reload — your last change will be checked and kept if it can be." (the reload recovers it from the old cache). Library edits to a song's title/key/lead/notes, and setlist entry writes, move the versions of the shows they touch. Only changed content is sent. A failed fetch shows "you appear to be offline. Your changes are kept in this browser and will save when you're back online."; it re-sends on `online`, tab visible, or the next edit — no timer loop. A waiting edit is sent on `pagehide`/hidden (`keepalive`, S4).
+31. **On a 409** the page re-reads the show: same content → adopted silently; different → banner "Not saved: this show was changed on another device." with **Keep mine** / **Use the saved one** (both confirmed); saves are held, edits kept, until the owner chooses. Opened offline, a show loads from this browser's copy with a banner; if the browser's session is the account that owned it, the owner can edit (S2), and an unsynced copy is sent with its version on the next load or reconnect.
+32. **One editing tab per show per browser** (`lib/edit-lock.ts`, Web Locks `showrunr-edit-{id}`). A second owner tab of the same show is view-only — "This show is open for editing in another tab." with **Edit here** — and writes nothing. Browsers without Web Locks edit as before (documented limit).
 
 ### 3.2 Data & key files
 
@@ -339,9 +342,8 @@ its setlist and charts keep working on that device with no signal.
 - `profiles` privacy (Public read) and admin rate-limit persistence — backlog-admin-identity §2-3.
 - Fix for BYOA key surviving sign-out — issue #134.
 - Handle rename / profile editing, owner public page `/{owner}`, vanity subdomains, QR/social links on profile — design-owner-namespacing Phase 2.
-- Global SW registration, build-time asset manifest, SW cache of `/api/shows/*`, install prompt, "Offline — showing cached data" banner — design-alpha-ready Part 2.
+- Global SW registration, build-time asset manifest, SW cache of `/api/shows/*`, install prompt — design-alpha-ready Part 2. (An offline banner now exists: Platform item 31.)
 - Explicit "Ready for Offline" action, cache eviction after show date, stale-cache prompt — backlog-offline-performer-cache.
-- Offline conflict detection (`showrunr-last-saved-*` written at `lib/use-show.ts:123`, never read).
 - Payments/subscriptions/trial/tier limits (Stripe) — design-payments; commercial half of strategy-pwa-commercial.
 - BYOS / GitHub provider and .md-first charts — design-storage-notation Phases 2–3 (Phase 1 YAML import/export is built).
 - Drive retirement — will not ship (ruled).
