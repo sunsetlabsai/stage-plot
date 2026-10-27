@@ -5445,7 +5445,7 @@ function AgentChat({
       setError('Your sign-in changed (in another tab, or it expired). Reload this page to continue.');
       return;
     }
-    // A sign-out elsewhere may have removed the stored key this tab still held.
+    // Another tab's Settings may have removed the stored key this tab still held.
     if (send.key !== apiKey) setApiKey(send.key);
 
     // §5.2a.3: the cache write and the clear are ONE action — the composer must

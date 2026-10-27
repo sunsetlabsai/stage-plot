@@ -5,7 +5,6 @@ import { useRouter } from 'next/navigation';
 import { getSupabaseBrowser } from '@/lib/supabase-browser';
 import { deserializeShow } from '@/lib/show-file';
 import { ensureSetlistSongIds } from '@/lib/setlist';
-import { forgetKeyOnSignOut } from '@/lib/byoa-key-storage';
 
 interface ShowSummary {
   id: string;
@@ -144,10 +143,6 @@ export default function DashboardPage() {
 
   async function handleSignOut() {
     const supabase = getSupabaseBrowser();
-    // #134: device keys go before the session does, and ALL of them — the
-    // leaving account's id may already be gone with an expired session, and the
-    // intent ("I'm leaving this browser") holds even if signOut itself fails.
-    forgetKeyOnSignOut(localStorage, sessionStorage);
     await supabase.auth.signOut();
     router.push('/sign-in');
   }

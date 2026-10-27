@@ -5,7 +5,6 @@ import {
   readKey,
   initialRemember,
   persistKey,
-  forgetKeyOnSignOut,
   keyForSend,
   type KeyStore,
 } from '../lib/byoa-key-storage';
@@ -20,10 +19,6 @@ const store = (initial: Record<string, string> = {}): KeyStore & { map: Map<stri
     getItem: (k: string) => (map.has(k) ? map.get(k)! : null),
     setItem: (k: string, v: string) => void map.set(k, v),
     removeItem: (k: string) => void map.delete(k),
-    key: (i: number) => Array.from(map.keys())[i] ?? null,
-    get length() {
-      return map.size;
-    },
   };
 };
 
@@ -63,44 +58,35 @@ describe('scoped to the account (#134)', () => {
     expect(readKey(local, session, A)).toBe(KEY);
   });
 
-  it('sign-out REMOVES the leaving account\'s key from both stores, not just hides it', () => {
-    const local = store(at(A));
-    const session = store(at(A));
-    forgetKeyOnSignOut(local, session);
-    expect(local.map.size).toBe(0);
-    expect(session.map.size).toBe(0);
-  });
-
-  // ★ Codex R1 on #197: the dashboard looked the id up at click time and got ''
-  // from an expired session, so A's key stayed on disk for the next person.
-  it('sign-out needs no account id — it removes EVERY device key on the browser', () => {
-    const local = store({ ...at(A), ...at(B, 'sk-ant-b'), 'showrunr-cache-x': '{}' });
-    const session = store({ ...at(A) });
-    forgetKeyOnSignOut(local, session);
-    expect(readKey(local, session, A)).toBe('');
+  it('the legacy un-namespaced key MIGRATES to the first account that reads it', () => {
+    // A one-person browser (the supported case): its owner keeps their key.
+    const local = store({ [LEGACY_BYOA_KEY]: KEY });
+    const session = store();
+    expect(readKey(local, session, A)).toBe(KEY);
+    expect(local.map.has(LEGACY_BYOA_KEY)).toBe(false);
+    expect(local.getItem(byoaKeyName(A))).toBe(KEY);
+    // Moved, not copied: a second account does not get it too.
     expect(readKey(local, session, B)).toBe('');
-    // Only key entries: the show cache and everything else survives.
-    expect(local.map.get('showrunr-cache-x')).toBe('{}');
-    expect(session.map.size).toBe(0);
   });
 
-  it('the legacy un-namespaced key is DELETED on read, never adopted', () => {
-    // Nobody can say whose it was; adopting it is the inheritance being fixed.
-    const local = store({ [LEGACY_BYOA_KEY]: KEY });
+  it('a session-scoped legacy key migrates within sessionStorage', () => {
+    const local = store();
     const session = store({ [LEGACY_BYOA_KEY]: KEY });
-    expect(readKey(local, session, A)).toBe('');
-    expect(local.map.has(LEGACY_BYOA_KEY)).toBe(false);
-    expect(session.map.has(LEGACY_BYOA_KEY)).toBe(false);
+    expect(readKey(local, session, A)).toBe(KEY);
+    expect(session.getItem(byoaKeyName(A))).toBe(KEY);
+    expect(local.map.size).toBe(0);
   });
 
-  it('the legacy key goes on read even with no account, and on sign-out', () => {
-    const local = store({ [LEGACY_BYOA_KEY]: KEY });
-    readKey(local, store(), '');
+  it('migration never overwrites a key the account already has', () => {
+    const local = store({ ...at(A, 'sk-ant-new'), [LEGACY_BYOA_KEY]: 'sk-ant-old' });
+    expect(readKey(local, store(), A)).toBe('sk-ant-new');
     expect(local.map.has(LEGACY_BYOA_KEY)).toBe(false);
+  });
 
-    const again = store({ [LEGACY_BYOA_KEY]: KEY });
-    forgetKeyOnSignOut(again, store());
-    expect(again.map.has(LEGACY_BYOA_KEY)).toBe(false);
+  it('with no account, the legacy key is left for its owner to sign in and claim', () => {
+    const local = store({ [LEGACY_BYOA_KEY]: KEY });
+    expect(readKey(local, store(), '')).toBe('');
+    expect(local.getItem(LEGACY_BYOA_KEY)).toBe(KEY);
   });
 
   it('a write with no account throws rather than saving a key nobody can read', () => {
@@ -126,8 +112,8 @@ describe('keyForSend — re-checked against who is signed in NOW', () => {
   it('same account: sends the key as stored NOW, not the copy held in memory', () => {
     const local = store(at(A));
     expect(keyForSend(local, store(), A, A)).toEqual({ ok: true, key: KEY });
-    // Removed elsewhere (sign-out in another tab, then signed back in): nothing to send.
-    forgetKeyOnSignOut(local, store());
+    // Removed in another tab's Settings: nothing to send.
+    persistKey(local, store(), A, '', true);
     expect(keyForSend(local, store(), A, A)).toEqual({ ok: true, key: '' });
   });
 });

@@ -1669,38 +1669,29 @@ so main's copy of the design is never silently wrong.
 | item 2 (R1 fold) | **§5.2a.4's restore rule now keys on what reached the transcript, not on byte timing.** `shouldRestoreComposer(streamStarted)` becomes `shouldRestoreComposer({ text, completedToolCalls })`, fed by a new `arrivedFrom(state)` in `lib/agent-stream.ts`; the `streamStarted` flag is deleted. **This REVERSES a chunk-4 behaviour that a prior round pinned** (old test 13c-ii: "a started stream that produced only unparseable bytes is not restored"). | Chunk 4's byte rule was correct for chunk 4's scope — every failure that could reach it was a non-`ok` response, so "bytes arrived" and "content arrived" could not disagree. Item 2 makes them disagree: a stream can open, emit `message_start`, and die before any text or completed tool call. The byte rule then committed an assistant turn whose entire content was the red "interrupted" line and left the composer empty, stranding the user in exactly this document's recurring class. Codex R1 on item 2 raised it as a product preference and explicitly declined to block; **Graham ruled to fold it.** Codex R4's medium is preserved by counting completed tool calls, which is the distinction the bare boolean could not express: a tool-only turn that completed a call is delivered, a stream that produced nothing is not. An in-flight tool block counts as NOT delivered — it never completes, and `finalizeTurn` discards even completed calls on a failed turn, so nothing from it survives. Applied to BOTH failure paths (the `error` frame and the transport drop) so they cannot diverge; the `error`-frame branch is additionally guarded on `failed`, because a legitimately empty SUCCESSFUL turn satisfies the same predicate and must not refill the composer. |
 | item 2 (R1 fold) | **§5.2a.3's prompt cache ships WRITE-ONLY for the UAT window, and no reasoning may treat it as a live safety net.** `readPrompts` is exported and tested but has zero production callers; `page.tsx` imports only `rememberPrompt`. Its consumer is item 3 (edit-and-resend), deferred past UAT per §5.2a.0. | Recorded because the argument for *not* restoring the composer rested on the cache being able to hand the text back, and it cannot yet. The text is still visible in the transcript, so this was never data loss — but "the cache protects the user" is false until item 3 lands, and a design that quietly depends on an unbuilt consumer is how a stated justification outlives the mechanism behind it. |
 
-## 15. Device key scope: per account, removed on sign-out (#134, UAT S11 — ruled 2026-10-26)
+## 15. Device key scope: per account, re-checked at send (#134, UAT S11 — ruled 2026-10-26)
 
 **Supersedes the "this browser" scope in §1's table for the BYOA row.** The device
-key was one fixed `localStorage` entry, so the next person to sign in on a shared
-browser inherited it and spent against the first person's Anthropic bill.
+key was one fixed `localStorage` entry, so signing in as a second account on the
+same browser (every UAT tester with a test account) quietly spent the first
+account's key.
 
-Graham's ruling, the "both" option from #134:
-
-1. **Named per account** — `showrunr-claude-key:<auth user id>` (`byoaKeyName`,
-   `lib/byoa-key-storage.ts`). A different account never reads it, including when
-   nobody signed out first.
-2. **Removed on an explicit sign-out — every account's device key on the browser**
-   (`forgetKeyOnSignOut`, called from the dashboard's Sign Out before
-   `auth.signOut()`). Rule 1 alone hides the key from the app but leaves it on disk,
-   readable in devtools by the next person. *Every* account's, not only the leaving
-   one's: once a session has expired its id is unknowable, so a dashboard left open
-   past expiry and then signed out left the key behind (Codex R1 on #197). NOT on a
-   token expiry or a `SIGNED_OUT` auth event — those can fire without anyone leaving.
-2a. **Re-checked at send time** (`keyForSend`). An open AI tab held the key it read
-   at mount and kept sending it after another tab signed someone else in (Codex R1).
-   The show page now re-derives ownership and the account on every auth change and
-   remounts `AgentChat` per account; because the cross-tab broadcast is
-   best-effort, every send also re-reads the live session and refuses on a
+1. **Named per account:** `showrunr-claude-key:<auth user id>` (`byoaKeyName`,
+   `lib/byoa-key-storage.ts`). Another account never reads it.
+2. **Re-checked at send time** (`keyForSend`). An open AI tab held the key it read
+   at mount and kept sending it after another tab signed a different account in
+   (Codex R1 on #197). The show page re-derives ownership and the account on every
+   auth change and remounts `AgentChat` per account. The cross-tab broadcast is
+   best-effort, so every send also re-reads the live session, refuses on a
    mismatch, and re-reads the stored key on a match.
-3. **The old un-namespaced entry is deleted on first read, never adopted.** It
-   cannot be attributed to anyone; adopting it is the inheritance being fixed.
-   Cost: one re-entry per existing device key.
+3. **The old un-namespaced entry migrates** to the first account that reads it. On
+   a one-person browser that account is its owner, so nobody re-enters a key.
 
-The convenience #133 bought is kept for an owner who does not sign out, and
-"Save to my account" is the option that survives sign-out. The settings copy says
-so (UAT S12): the device key "is removed when you sign out" and "passes through
-our servers with each AI request but is never stored there".
+**⚠ Not designed for: a browser shared between PEOPLE** (Graham, 2026-10-26). The
+key survives sign-out, which is the convenience #133 bought, and stays on disk,
+readable in devtools, until it is removed in Settings. Clearing on sign-out was
+built and then removed in R1 of #197. It protects only that case, and it brings
+back the re-entry complaint #133 fixed.
 
 Write paths require an account and throw without one, rather than saving a key no
 one can read after the UI has said "Saved".

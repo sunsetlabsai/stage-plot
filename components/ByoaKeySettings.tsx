@@ -235,10 +235,9 @@ export function ByoaKeySettings({
             <span>
               <span className="text-sm block">Remember on this device</span>
               <span className="text-xs text-zinc-500 block mt-0.5">
-                Stays in this browser, for this account only, and is removed
-                when you sign out. It passes through our servers with each AI
-                request but is never stored there. You&apos;ll need to enter it
-                again on another device.
+                Stays in this browser, for this account only. It passes through
+                our servers with each AI request but is never stored there.
+                You&apos;ll need to enter it again on another device.
               </span>
             </span>
           </label>

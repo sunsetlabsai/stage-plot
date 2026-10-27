@@ -11,27 +11,21 @@
 // they lived inside a 6700-line component that no harness can drive.
 //
 // ★ SCOPED TO THIS BROWSER *AND* THIS ACCOUNT (issue #134, UAT S11, ruled
-// 2026-10-26). The key used to live under one fixed name, so whoever signed in
-// next on a shared browser inherited the previous person's key and spent
-// against their Anthropic bill. Two rules close that, and each covers a case the
-// other misses:
-//   1. The entry is named per account (`byoaKeyName`), so a different user never
-//      reads it — including when nobody signed out first.
-//   2. An explicit sign-out removes EVERY account's device key on this browser
-//      (`forgetKeyOnSignOut`), so none is left on disk for the next person to
-//      lift out of devtools. Namespacing alone hides a key; it does not remove it.
-//      Every account, not just the leaving one: the leaving account's id is
-//      unknowable once its session has expired, and a dashboard left open past
-//      expiry then clicked Sign Out is exactly the shared-browser case (Codex
-//      R1 on #197). Sign-out means "I am leaving this browser".
-//   3. A key read into memory is re-checked at SEND time against who is signed
-//      in now (`keyForSend`). An open tab outlives a sign-in or sign-out in
-//      another tab, and the cross-tab auth broadcast is best-effort (Codex R1).
-// The old un-namespaced entry cannot be attributed to anyone, so it is DELETED on
-// first read rather than adopted by whoever signs in first — adopting it is the
-// exact inheritance this fixes. Cost: one re-entry per existing device key.
+// 2026-10-26). The key used to live under one fixed name, so signing in as a
+// second account on the same browser — every UAT tester with a test account —
+// quietly spent the first account's key. Two rules:
+//   1. The entry is named per account (`byoaKeyName`), so another account never
+//      reads it.
+//   2. A key read into memory is re-checked at SEND time against who is signed
+//      in now (`keyForSend`). An open tab outlives a sign-in in another tab, and
+//      the cross-tab auth broadcast is best-effort (Codex R1 on #197).
+// ⚠ A browser SHARED BETWEEN PEOPLE is not designed for (Graham, 2026-10-26).
+// The key survives sign-out — that is the convenience #133 bought — and stays on
+// disk, readable in devtools, until it is removed in Settings.
+// The old un-namespaced entry is MIGRATED to the first account that reads it: on
+// a one-person browser that account is its owner, and nobody re-enters a key.
 
-/** The pre-#134 single entry, shared by every account on the browser. Read only to delete it. */
+/** The pre-#134 single entry, shared by every account on the browser. Read only to migrate it. */
 export const LEGACY_BYOA_KEY = 'showrunr-claude-key';
 
 /** The storage entry for one account's device key. */
@@ -40,11 +34,17 @@ export function byoaKeyName(userId: string): string {
 }
 
 /** The slice of the DOM Storage API these rules need — so tests can fake it. */
-export type KeyStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'>;
+export type KeyStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
-function dropLegacy(local: KeyStore, session: KeyStore): void {
-  local.removeItem(LEGACY_BYOA_KEY);
-  session.removeItem(LEGACY_BYOA_KEY);
+/** Move a pre-#134 entry, in whichever store it is, under this account's name. */
+function migrateLegacy(local: KeyStore, session: KeyStore, userId: string): void {
+  const name = byoaKeyName(userId);
+  for (const store of [local, session]) {
+    const legacy = store.getItem(LEGACY_BYOA_KEY);
+    if (legacy === null) continue;
+    if (!local.getItem(name) && !session.getItem(name)) store.setItem(name, legacy);
+    store.removeItem(LEGACY_BYOA_KEY);
+  }
 }
 
 function requireUser(userId: string): void {
@@ -62,8 +62,8 @@ function requireUser(userId: string): void {
  * wrote one.
  */
 export function readKey(local: KeyStore, session: KeyStore, userId: string): string {
-  dropLegacy(local, session);
   if (!userId) return '';
+  migrateLegacy(local, session, userId);
   const name = byoaKeyName(userId);
   return local.getItem(name) || session.getItem(name) || '';
 }
@@ -101,7 +101,7 @@ export function persistKey(
   remember: boolean,
 ): void {
   requireUser(userId);
-  dropLegacy(local, session);
+  migrateLegacy(local, session, userId);
   const name = byoaKeyName(userId);
   if (!apiKey) {
     local.removeItem(name);
@@ -114,25 +114,6 @@ export function persistKey(
   } else {
     session.setItem(name, apiKey);
     local.removeItem(name);
-  }
-}
-
-/**
- * An explicit sign-out: every account's device key on this browser goes (rule 2).
- *
- * Only an explicit sign-out — NOT a token expiry or a SIGNED_OUT auth event,
- * which can fire without the person leaving the browser. "Save to my account" is
- * the option that follows you between sign-ins.
- */
-export function forgetKeyOnSignOut(local: KeyStore, session: KeyStore): void {
-  for (const store of [local, session]) {
-    // Collect first: removing while indexing shifts the indices under the loop.
-    const names: string[] = [];
-    for (let i = 0; i < store.length; i++) {
-      const name = store.key(i);
-      if (name === LEGACY_BYOA_KEY || name?.startsWith(`${LEGACY_BYOA_KEY}:`)) names.push(name);
-    }
-    for (const name of names) store.removeItem(name);
   }
 }
 
@@ -149,7 +130,7 @@ export type SendKey =
  * `liveUserId` is the session's user id read at send time ('' if none). A mismatch
  * refuses outright rather than sending without the key: the whole tab — owner
  * gate, config, transcript — belongs to the mounted account. On a match the key
- * is re-read from storage, so a sign-out elsewhere that removed it is honoured
+ * is re-read from storage, so a removal in another tab's Settings is honoured
  * even though this tab still holds a copy in memory.
  */
 export function keyForSend(
