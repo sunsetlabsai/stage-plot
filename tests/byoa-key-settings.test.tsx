@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { ByoaKeySettings } from '../components/ByoaKeySettings';
-import { BYOA_KEY } from '../lib/byoa-key-storage';
+import { byoaKeyName } from '../lib/byoa-key-storage';
 
 // design-single-backend §3.1, §9 T22 + T24, chunk 4.
 //
@@ -14,6 +14,8 @@ import { BYOA_KEY } from '../lib/byoa-key-storage';
 
 const VALID_KEY = 'sk-ant-test-DEVICEKEYVALUE-abcd';
 const ACCOUNT_HINT = 'sk-ant-…wxyz';
+const USER = 'user-a';
+const BYOA_KEY = byoaKeyName(USER);
 
 /** Route fetch by method so load/save/remove can be driven independently. */
 function stubFetch(overrides: {
@@ -73,7 +75,7 @@ afterEach(() => {
 describe('ByoaKeySettings — standalone, no host (§9 T24)', () => {
   it('renders the key UI with no callbacks wired', async () => {
     stubFetch();
-    render(<ByoaKeySettings />);
+    render(<ByoaKeySettings userId={USER} />);
 
     // Waits out the async load pass, then the full UI is present.
     expect(await screen.findByText('Claude API key')).toBeTruthy();
@@ -83,7 +85,10 @@ describe('ByoaKeySettings — standalone, no host (§9 T24)', () => {
     expect(screen.getByText('Remember on this device')).toBeTruthy();
     expect(screen.getByText('Save to my account')).toBeTruthy();
     // §4.6.5 consent copy travels with the component into either presentation.
-    expect(screen.getByText(/deleting your account deletes\s+it too/i)).toBeTruthy();
+    expect(screen.getByText(/remove it here at any time/i)).toBeTruthy();
+    // PL-32 / S12: the two claims that were not true are gone.
+    expect(screen.queryByText(/deleting your account/i)).toBeNull();
+    expect(screen.queryByText(/we never receive it/i)).toBeNull();
   });
 });
 
@@ -93,7 +98,7 @@ describe('ByoaKeySettings — a device key reaches the host (§9 T22)', () => {
     const onDeviceKeyChange = vi.fn();
     const onAccountKeyChange = vi.fn();
     render(
-      <ByoaKeySettings onDeviceKeyChange={onDeviceKeyChange} onAccountKeyChange={onAccountKeyChange} />,
+      <ByoaKeySettings userId={USER} onDeviceKeyChange={onDeviceKeyChange} onAccountKeyChange={onAccountKeyChange} />,
     );
 
     fireEvent.change(await screen.findByPlaceholderText('sk-ant-...'), { target: { value: VALID_KEY } });
@@ -110,7 +115,7 @@ describe('ByoaKeySettings — a device key reaches the host (§9 T22)', () => {
   it('a malformed key is rejected before any callback or write', async () => {
     stubFetch();
     const onDeviceKeyChange = vi.fn();
-    render(<ByoaKeySettings onDeviceKeyChange={onDeviceKeyChange} />);
+    render(<ByoaKeySettings userId={USER} onDeviceKeyChange={onDeviceKeyChange} />);
 
     fireEvent.change(await screen.findByPlaceholderText('sk-ant-...'), { target: { value: 'not-a-key' } });
     fireEvent.click(screen.getByRole('button', { name: /save key/i }));
@@ -126,7 +131,7 @@ describe('ByoaKeySettings — a device key reaches the host (§9 T22)', () => {
     window.localStorage.setItem(BYOA_KEY, VALID_KEY);
     stubFetch();
     const onDeviceKeyChange = vi.fn();
-    render(<ByoaKeySettings onDeviceKeyChange={onDeviceKeyChange} />);
+    render(<ByoaKeySettings userId={USER} onDeviceKeyChange={onDeviceKeyChange} />);
 
     fireEvent.click(await screen.findByRole('button', { name: /remove/i }));
 
@@ -141,7 +146,7 @@ describe('ByoaKeySettings — an account key reaches the host (§9 T22, §3.2)',
     const onDeviceKeyChange = vi.fn();
     const onAccountKeyChange = vi.fn();
     render(
-      <ByoaKeySettings onDeviceKeyChange={onDeviceKeyChange} onAccountKeyChange={onAccountKeyChange} />,
+      <ByoaKeySettings userId={USER} onDeviceKeyChange={onDeviceKeyChange} onAccountKeyChange={onAccountKeyChange} />,
     );
 
     fireEvent.change(await screen.findByPlaceholderText('sk-ant-...'), { target: { value: VALID_KEY } });
@@ -162,7 +167,7 @@ describe('ByoaKeySettings — an account key reaches the host (§9 T22, §3.2)',
   it('removing an account key fires onAccountKeyChange', async () => {
     const calls = stubFetch({ get: () => ({ hint: ACCOUNT_HINT }) });
     const onAccountKeyChange = vi.fn();
-    render(<ByoaKeySettings onAccountKeyChange={onAccountKeyChange} />);
+    render(<ByoaKeySettings userId={USER} onAccountKeyChange={onAccountKeyChange} />);
 
     // The account hint loads, giving its own Remove control.
     fireEvent.click(await screen.findByRole('button', { name: /remove/i }));

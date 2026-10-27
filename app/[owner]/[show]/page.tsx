@@ -437,6 +437,8 @@ function ShowWorkspace() {
   const [showId, setShowId] = useState<string | null>(null);
   const [showOwnerId, setShowOwnerId] = useState<string | null>(null);
   const [isOwner, setIsOwner] = useState(false);
+  // The signed-in account, if any. The AI tab scopes the device key to it (#134).
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   // Read by updateConfig, which is deliberately ref-stable (deps: []) so that no
   // mutation callback on the page changes identity. A ref keeps the read-only
   // gate current without spending that stability. Defaults to refusing: until
@@ -591,6 +593,7 @@ function ShowWorkspace() {
             // (§3.3c), so the show_collaborators lookup that used to run here is
             // gone — membership grants placement on the dashboard, not access.
             setIsOwner(data.owner_id === user.id);
+            setCurrentUserId(user.id);
             setShowId(data.show_id);
             setShowOwnerId(data.owner_id ?? null);
             setSetlistMigrated(!!data.setlist_migrated);
@@ -798,16 +801,29 @@ function ShowWorkspace() {
 
   return (
     <div className="min-h-screen bg-gray-50 font-sans text-gray-900">
-      {/* ── Auth / save status banner ────────────────────────────────── */}
+      {/* ── Auth status line (UAT S9) ─────────────────────────────────
+          The main audience here is a performer opening a link from a text: they
+          have no edit surface (`isReadOnly = !isOwner`), so "changes won't be
+          saved" warned about something they cannot do. Signed out gets a quiet
+          Sign in — for the owner whose session lapsed — and a signed-in
+          non-owner is told whose show it is, not that they are a "collaborator"
+          (014 made every non-owner view-only; nobody is invited). */}
       {authChecked && !isAuthenticated && !loadError && (
-        <div className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-center text-sm text-amber-800">
-          Not signed in — changes won&apos;t be saved.{' '}
-          <Link href="/sign-in" className="underline font-semibold hover:text-amber-900">Sign in</Link>
+        <div className="bg-gray-50 border-b border-gray-200 px-4 py-1.5 text-right text-xs text-gray-500">
+          {/* S10: return to THIS page, query included (?song deep links), not
+              /dashboard. Window is safe: authChecked is only set client-side.
+              /sign-in validates it with lib/safe-redirect. */}
+          <a
+            href={`/sign-in?redirect=${encodeURIComponent(window.location.pathname + window.location.search)}`}
+            className="underline hover:text-gray-700"
+          >
+            Sign in
+          </a>
         </div>
       )}
       {isAuthenticated && isReadOnly && showId && (
         <div className="bg-blue-50 border-b border-blue-200 px-4 py-2 text-center text-sm text-blue-800">
-          Viewing as collaborator (read-only).
+          Viewing {owner}&apos;s show (read-only).
         </div>
       )}
       {/* ── Tab Bar ─────────────────────────────────────────────────────── */}
@@ -930,7 +946,7 @@ function ShowWorkspace() {
 
       {/* ── Content ────────────────────────────────────────────────────── */}
       {shownTab === 'perform' && (
-        <PerformTab setlist={config.setlist} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} chartCacheProgress={chartCacheProgress} />
+        <PerformTab setlist={config.setlist} setlistReady={loadedPath === `/${owner}/${slug}`} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} chartCacheProgress={chartCacheProgress} />
       )}
       {shownTab === 'mix' && (
         <MixTab band={band} setlist={config.setlist} printSections={printSections} showInfo={config.showInfo} isOffline={isOffline} accessToken={googleToken?.access_token} slug={slug} owner={owner} isOwner={isOwner} onReorder={(from, to) => updateConfig((p) => ({ ...p, setlist: moveSetlistSong(p.setlist, from, to) }))} />
@@ -941,7 +957,7 @@ function ShowWorkspace() {
       {shownTab === 'ai' && (
         <div className="p-4 md:p-8">
           <div className="max-w-4xl mx-auto">
-            <AgentChat config={config} updateConfig={updateConfig} owner={owner} slug={slug} />
+            <AgentChat config={config} updateConfig={updateConfig} owner={owner} slug={slug} userId={currentUserId ?? ''} />
           </div>
         </div>
       )}
@@ -1013,8 +1029,11 @@ function ShowWorkspace() {
 // PERFORM TAB — musician's gig-day view
 // ════════════════════════════════════════════════════════════════════════════
 
-function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, isOwner, chartCacheProgress }: {
+function PerformTab({ setlist, setlistReady, showInfo, isOffline, accessToken, slug, owner, isOwner, chartCacheProgress }: {
   setlist: SetlistSong[];
+  // True once THIS show's setlist has loaded — until then `setlist` can be the
+  // built-in demo band (UAT S1), which a deep link must not be resolved against.
+  setlistReady: boolean;
   showInfo: { bandName: string; eventDate: string; venue: string; showName?: string };
   isOffline: boolean;
   accessToken?: string;
@@ -1071,32 +1090,44 @@ function PerformTab({ setlist, showInfo, isOffline, accessToken, slug, owner, is
     };
   }, [setlist]);
 
-  // ── Share deep link (?song=N&chart=ROLE, lib/share buildChartShareUrl) ──
+  // ── Share deep link (?song=N&sid=ID&chart=ROLE, lib/share buildChartShareUrl) ──
   // A shared chart link opens the navigator on that song; the role rides along
   // as a prop and ChartNavigator selects the matching chart. Same read-once /
   // armed-ref / deferred-setState shape as the ?join handler above. Invalid
-  // song ⇒ ignore, land on the setlist as usual.
+  // song ⇒ ignore, land on the setlist as usual. A song that has left the
+  // setlist ⇒ land on the setlist WITH a notice (S6), never on a stranger.
   const [deepLinkRole, setDeepLinkRole] = useState<string | null>(null);
+  const [deepLinkGone, setDeepLinkGone] = useState(false);
   const chartLinkArmedRef = useRef(false);
   useEffect(() => {
-    if (chartLinkArmedRef.current) return;
+    if (chartLinkArmedRef.current || !setlistReady) return;
     const parsed = parseChartDeepLink(window.location.search, setlist);
     if (!parsed) return;
     chartLinkArmedRef.current = true;
     let cancelled = false;
     Promise.resolve().then(() => {
       if (cancelled) return;
+      if (parsed.kind === 'gone') {
+        setDeepLinkGone(true);
+        return;
+      }
       setNavigatorSongIdx(parsed.songIdx);
       setDeepLinkRole(parsed.role);
     });
     return () => {
       cancelled = true;
     };
-  }, [setlist]);
+  }, [setlist, setlistReady]);
 
   return (
     <div className="bg-zinc-950 min-h-screen text-zinc-100">
       <div className="max-w-2xl mx-auto px-4 py-6">
+        {deepLinkGone && (
+          <div role="status" className="mb-4 flex items-start justify-between gap-3 rounded border border-amber-800 bg-amber-950/50 px-3 py-2 text-sm text-amber-300">
+            <span>The song in that link isn&apos;t in this setlist anymore.</span>
+            <button onClick={() => setDeepLinkGone(false)} className="text-amber-400 hover:text-amber-200" aria-label="Dismiss">✕</button>
+          </div>
+        )}
         {/* Header */}
         <header className="mb-6">
           {showInfo.showName ? (
@@ -3918,7 +3949,7 @@ function ChartNavigator({
               title={`${song.title} – ${activeChart.role}`}
               buildUrl={() =>
                 activeChart.fileId
-                  ? buildChartShareUrl(window.location.origin, owner, slug, song.position, activeChart.role)
+                  ? buildChartShareUrl(window.location.origin, owner, slug, song, activeChart.role)
                   : activeChart.url
               }
               getFile={
@@ -5290,6 +5321,7 @@ function AgentChat({
   updateConfig,
   owner,
   slug,
+  userId,
 }: {
   config: AppConfig;
   updateConfig: (fn: (prev: AppConfig) => AppConfig) => void;
@@ -5297,10 +5329,12 @@ function AgentChat({
   // surface in another. Same identity the sibling tabs already receive.
   owner: string;
   slug: string;
+  // The signed-in owner; the device key is scoped to this account (#134).
+  userId: string;
 }) {
   const [apiKey, setApiKey] = useState(() => {
     if (typeof window === 'undefined') return '';
-    return readKey(localStorage, sessionStorage);
+    return readKey(localStorage, sessionStorage, userId);
   });
   // The settings overlay (chunk 4). Opening it renders `ByoaKeySettings` on TOP of
   // this still-mounted host, so restored composer text and the transcript survive
@@ -5622,7 +5656,7 @@ function AgentChat({
   // entry from BOTH stores regardless of the `remember` flag (lib/byoa-key-storage,
   // pinned by tests/byoa-key-storage.test.ts).
   function handleClearKey() {
-    persistKey(localStorage, sessionStorage, '', true);
+    persistKey(localStorage, sessionStorage, userId, '', true);
     setApiKey('');
     // A rejection describes a key we no longer hold.
     setRejectedKey(null);
@@ -5739,6 +5773,7 @@ function AgentChat({
       {settingsOpen && (
         <SettingsOverlay onClose={() => setSettingsOpen(false)}>
           <ByoaKeySettings
+            userId={userId}
             onDeviceKeyChange={handleDeviceKeyChange}
             onAccountKeyChange={handleAccountKeyChange}
           />

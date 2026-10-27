@@ -25,12 +25,15 @@ import { normalizeKey, keyFormatMessage } from '@/lib/byoa-key-format';
 type Storage = 'device' | 'account';
 
 export function ByoaKeySettings({
+  userId,
   onDeviceKeyChange,
   onAccountKeyChange,
 }: {
+  // The signed-in account the device key is scoped to (lib/byoa-key-storage, #134).
+  userId: string;
   onDeviceKeyChange?: (key: string) => void;
   onAccountKeyChange?: () => void;
-} = {}) {
+}) {
   const [loading, setLoading] = useState(true);
   const [accountHint, setAccountHint] = useState<string | null>(null);
   const [deviceKey, setDeviceKey] = useState('');
@@ -60,10 +63,10 @@ export function ByoaKeySettings({
         if (data.hint) setChoice('account');
       }
     } finally {
-      setDeviceKey(readKey(window.localStorage, window.sessionStorage));
+      setDeviceKey(readKey(window.localStorage, window.sessionStorage, userId));
       setLoading(false);
     }
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     load();
@@ -86,7 +89,7 @@ export function ByoaKeySettings({
     setBusy(true);
     try {
       if (choice === 'device') {
-        persistKey(window.localStorage, window.sessionStorage, parsed.key, true);
+        persistKey(window.localStorage, window.sessionStorage, userId, parsed.key, true);
         setDeviceKey(parsed.key);
         setStatus('Saved in this browser.');
         onDeviceKeyChange?.(parsed.key);
@@ -131,7 +134,7 @@ export function ByoaKeySettings({
 
   function handleRemoveDevice() {
     resetMessages();
-    persistKey(window.localStorage, window.sessionStorage, '', true);
+    persistKey(window.localStorage, window.sessionStorage, userId, '', true);
     setDeviceKey('');
     setStatus('Removed from this browser.');
     onDeviceKeyChange?.('');
@@ -232,8 +235,10 @@ export function ByoaKeySettings({
             <span>
               <span className="text-sm block">Remember on this device</span>
               <span className="text-xs text-zinc-500 block mt-0.5">
-                Stays in this browser. We never receive it. You&apos;ll need to
-                enter it again on another device.
+                Stays in this browser, for this account only, and is removed
+                when you sign out. It passes through our servers with each AI
+                request but is never stored there. You&apos;ll need to enter it
+                again on another device.
               </span>
             </span>
           </label>
@@ -274,8 +279,7 @@ export function ByoaKeySettings({
           Choosing &ldquo;Save to my account&rdquo; means we store your key,
           encrypted, so it follows you between devices. It is used only to make
           AI requests you trigger. It is never shown back to you or to anyone
-          else — remove it here at any time, and deleting your account deletes
-          it too.
+          else — remove it here at any time.
         </p>
         <p>
           Your key stays yours: Anthropic bills it to you, and you can revoke it

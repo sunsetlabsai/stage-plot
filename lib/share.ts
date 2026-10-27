@@ -33,15 +33,27 @@ export function chartShareFilename(songTitle: string, role: string): string {
   return `${scrub(songTitle) || 'Chart'} – ${scrub(role) || 'Chart'}.pdf`;
 }
 
-/** The chart deep link: show URL + ?song=POSITION&chart=ROLE (position as displayed, 1-based). */
+/**
+ * The chart deep link: show URL + ?song=POSITION&sid=SONG_ID&chart=ROLE.
+ *
+ * ★ UAT S6. The link used to carry only the setlist POSITION, so after a reorder
+ * it opened whichever song had moved into that slot, with no error. It now
+ * carries the canonical `songId` too, and the parser matches on that. Not the
+ * setlist ROW id: `rpc_save_show` deletes and re-inserts every setlist_entries
+ * row on each save (006), so a row id does not outlive the next edit. `songId`
+ * does — but it is not unique within a setlist (nothing stops a reprise), so the
+ * position stays in the link as the tie-break. An inline song with no `songId`
+ * gets a position-only link, the same as before.
+ */
 export function buildChartShareUrl(
   origin: string,
   owner: string,
   slug: string,
-  songPosition: number,
+  song: Pick<SetlistSong, 'position' | 'songId'>,
   role: string,
 ): string {
-  return `${buildShowShareUrl(origin, owner, slug)}?song=${encodeURIComponent(String(songPosition))}&chart=${encodeURIComponent(role)}`;
+  const sid = song.songId ? `&sid=${encodeURIComponent(song.songId)}` : '';
+  return `${buildShowShareUrl(origin, owner, slug)}?song=${encodeURIComponent(String(song.position))}${sid}&chart=${encodeURIComponent(role)}`;
 }
 
 /** The show-level share: the bare show URL. */
@@ -49,24 +61,42 @@ export function buildShowShareUrl(origin: string, owner: string, slug: string): 
   return `${origin}/${encodeURIComponent(owner)}/${encodeURIComponent(slug)}`;
 }
 
+/** What a chart deep link resolves to against the setlist as it is NOW. */
+export type ChartDeepLink =
+  | { kind: 'song'; songIdx: number; role: string | null }
+  /** The linked song is no longer in this setlist — say so, don't open a stranger. */
+  | { kind: 'gone' };
+
 /**
- * Parse ?song=N&chart=ROLE from a query string against the setlist.
- * N matches song.position (the number the sender saw). Invalid/absent song ⇒
- * null (ignore the link, land on the setlist as usual). Role is optional and
- * matched case-insensitively downstream; carried through raw here.
+ * Parse ?song=N[&sid=ID]&chart=ROLE against the setlist.
+ *
+ * With `sid` (links built since S6): match the song by `songId`. If it appears
+ * more than once, prefer the copy at position N, else the first. Not present ⇒
+ * 'gone' — the sender's song was removed, and position N is now some other song.
+ *
+ * Without `sid` (older links, and inline songs that have no `songId`): position
+ * is all there is, so N matches song.position as before.
+ *
+ * Absent or malformed ⇒ null (ignore the link, land on the setlist as usual).
+ * Role is optional and matched case-insensitively downstream; carried raw here.
  */
-export function parseChartDeepLink(
-  search: string,
-  setlist: SetlistSong[],
-): { songIdx: number; role: string | null } | null {
+export function parseChartDeepLink(search: string, setlist: SetlistSong[]): ChartDeepLink | null {
   const params = new URLSearchParams(search);
   const rawSong = params.get('song');
   if (!rawSong || !/^\d+$/.test(rawSong)) return null;
   const position = Number(rawSong);
+  const role = params.get('chart') || null;
+  const sid = params.get('sid');
+
+  if (sid) {
+    const atPosition = setlist.findIndex((s) => s.songId === sid && s.position === position);
+    const songIdx = atPosition !== -1 ? atPosition : setlist.findIndex((s) => s.songId === sid);
+    return songIdx === -1 ? { kind: 'gone' } : { kind: 'song', songIdx, role };
+  }
+
   const songIdx = setlist.findIndex((s) => s.position === position);
   if (songIdx === -1) return null;
-  const role = params.get('chart');
-  return { songIdx, role: role || null };
+  return { kind: 'song', songIdx, role };
 }
 
 // ── The thin navigator wrapper ────────────────────────────────────────────────

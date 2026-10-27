@@ -104,6 +104,15 @@ export async function middleware(request: NextRequest) {
       if (!profile) {
         const url = request.nextUrl.clone();
         url.pathname = '/claim';
+        // UAT S10: someone who opened a shared show and has no handle yet goes
+        // back to THAT show after claiming, not to /dashboard. Same
+        // server-derived, same-origin value as the /sign-in redirect above;
+        // /claim still runs it through lib/safe-redirect. A bare `/` adds
+        // nothing over the default, so it is left off.
+        url.search = '';
+        if (pathname !== '/') {
+          url.searchParams.set('redirect', pathname + request.nextUrl.search);
+        }
         return NextResponse.redirect(url);
       }
     }
