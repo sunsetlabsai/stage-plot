@@ -757,6 +757,30 @@ describe('removeEndings (§5.2)', () => {
     expect(r.removes).toEqual(['the later ending (bar 5)', 'the Fine']);
   });
 
+  it('names only the bars it deletes when they are not contiguous (3+ endings, Codex PR D)', () => {
+    // Prompt-only shape: the pass-1 ending sits BETWEEN the others.
+    const three = (endings: Array<[number, number, number]>) =>
+      view({
+        ...PLAIN_BARS,
+        sections: [
+          {
+            id: 'v',
+            label: 'Verse',
+            bars: 6,
+            repeat: { kind: 'volta', endings: endings.map(([start, count, pass]) => ({ bars: { start, count }, passes: [pass] })) },
+          },
+        ],
+      });
+    const a = applied(removeEndings(three([[2, 1, 2], [3, 2, 1], [5, 1, 3]]), 'v'));
+    expect(a.removes).toEqual(['the later endings (bars 2 and 5)']);
+    expect(sec(a.view, 'v').bars).toBe(4);
+    const b = applied(removeEndings(three([[2, 2, 2], [4, 1, 1], [5, 1, 3]]), 'v'));
+    expect(b.removes).toEqual(['the later endings (bars 2–3 and 5)']);
+    const c = applied(removeEndings(three([[2, 1, 1], [3, 2, 2], [5, 1, 3]]), 'v'));
+    expect(c.removes).toEqual(['the later endings (bars 3–5)']);
+    expectValid(a.view);
+  });
+
   it('is refused without endings', () => {
     expect(removeEndings(view(PLAIN), 'verse')).toEqual({ ok: false, reason: 'Verse has no endings' });
   });

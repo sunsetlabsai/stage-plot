@@ -772,8 +772,25 @@ export function removeEndings(view: ViewModel, sectionId: string): OpResult {
   const gone = groups.flatMap((g, i) => (typeof g === 'number' && g !== first ? [i + 1] : []));
   const res = applyPlan({ ...view, sections: view.sections.map((s) => (s.id === sectionId ? { ...s, repeat: undefined } : s)) }, sectionId, plan);
   if (!res.ok) return res;
-  const span = gone.length === 1 ? `bar ${gone[0]}` : `bars ${gone[0]}–${gone[gone.length - 1]}`;
-  return gate(view, { ...res, removes: [`the later ending${r.endings.length > 2 ? 's' : ''} (${span})`, ...res.removes] });
+  return gate(view, {
+    ...res,
+    removes: [`the later ending${r.endings.length > 2 ? 's' : ''} (${barList(gone)})`, ...res.removes],
+  });
+}
+
+// "bar 5", "bars 4–5", "bars 2 and 5", "bars 2–3 and 5" — the deleted bars as
+// runs, so a confirm never names a bar it keeps (Codex PR D: with 3+ endings the
+// deleted bars need not be contiguous).
+function barList(bars: number[]): string {
+  const runs: string[] = [];
+  for (let i = 0; i < bars.length; ) {
+    let j = i;
+    while (j + 1 < bars.length && bars[j + 1] === bars[j] + 1) j += 1;
+    runs.push(i === j ? `${bars[i]}` : `${bars[i]}–${bars[j]}`);
+    i = j + 1;
+  }
+  const list = runs.length === 1 ? runs[0] : `${runs.slice(0, -1).join(', ')} and ${runs[runs.length - 1]}`;
+  return `${bars.length === 1 ? 'bar' : 'bars'} ${list}`;
 }
 
 // ── Navigation markers (§5.4) ────────────────────────────────────────────────
