@@ -80,3 +80,12 @@ describe('the page seam (§5.4, §6, §7)', () => {
     expect(preview).not.toMatch(/JSON\.stringify/);
   });
 });
+
+describe('the generate_show card uses the same formatter (Codex R2 class on #196)', () => {
+  it('a pending generate_show renders planGenerateShow → summaryLines, not a hand-picked field list', () => {
+    expect(page).toMatch(/tc\.name === 'generate_show' && tc\.status === 'pending' \? \(\s*<GeneratePreview config=\{config\} input=\{tc\.input\} \/>/);
+    const preview = page.slice(page.indexOf('function GeneratePreview('), page.indexOf('function SummaryList('));
+    expect(preview).toMatch(/planGenerateShow\(config, input\)/);
+    expect(preview).toMatch(/summaryLines\(plan\.summary, config, plan\.next\)/);
+  });
+});

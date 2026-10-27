@@ -952,8 +952,14 @@ safe on its own — so no deploy in the sequence is a half-wired state.
    nothing, so an applied card would lose its record of what it did.
 4. **Card text is pure `lib/`** (`summaryLines`), and **every line says what
    Apply will write** — Codex R1 on #196 found four places it did not:
-   - an ADDED row shows its routing (`+ ch 7 BGV — SM58 → DSC — Dee`;
-     `+ MSR — Jo (Keys), Mix 1`), not just its name;
+   - an ADDED row lists **every field it sets**, in `RULES` order
+     (`+ ch 7 BGV — mic SM58, stand Straight, performer DSC — Dee`). R1's fix
+     chose the "important" fields and R2 found more it missed; choosing was the
+     defect. `RULES` is `Record<keyof T>`, so a new field appears without anyone
+     remembering it, and a test changes each field of each entity in turn and
+     requires the line to change. The `generate_show` card now renders through
+     the same planner and formatter (its hand-written preview had omitted slot
+     mix and input notes);
    - past `SUMMARY_ROW_LIMIT` (5) patched rows the card counts, grouped by
      fields **and destination values** (*"4 monitor mixes — type → IEM"*,
      *"2 … — type → Side-fill"*); a group of one is shown in full;

@@ -478,6 +478,7 @@ export function summaryLines(summary: ChangeSummary, prev: ShowLists, next: Show
   const after = names(next.stagePlot);
   const show = (field: string, v: unknown, side: 'from' | 'to'): string => {
     if (v === undefined && field === 'needsReview') return 'no'; // absent flag = off
+    if (field === 'mix' && v === 0) return 'none'; // the unassigned sentinel
     if (v === undefined || v === '') return field === 'slotId' ? 'no performer' : '—';
     if (field === 'slotId') return (side === 'from' ? before : after).get(String(v)) ?? 'a removed performer';
     if (typeof v === 'boolean') return v ? 'yes' : 'no';
@@ -485,24 +486,33 @@ export function summaryLines(summary: ChangeSummary, prev: ShowLists, next: Show
   };
   const changeText = (c: FieldChange) => `${fieldLabel(c.field)} ${show(c.field, c.from, 'from')} → ${show(c.field, c.to, 'to')}`;
 
-  // An ADDED row shows what it routes to, not just its name: two inputs on
-  // the same channel for different performers must not read alike (Codex R1).
-  const prevIds = new Set([...prev.stagePlot, ...prev.inputs, ...prev.monitors].map((r) => r.id));
-  const addedText: Record<OpEntity, () => string[]> = {
-    stagePlot: () =>
-      next.stagePlot.flatMap((s) => (prevIds.has(s.id) ? [] : [`${after.get(s.id)} (${s.role || '—'}), ${s.mix > 0 ? `Mix ${s.mix}` : 'no monitor'}`])),
-    inputs: () =>
-      next.inputs.flatMap((i) => (prevIds.has(i.id) ? [] : [`ch ${i.ch} ${i.inst} — ${i.mic || 'no mic'} → ${show('slotId', i.slotId, 'to')}`])),
-    monitors: () =>
-      next.monitors.flatMap((m) => (prevIds.has(m.id) ? [] : [`Mix ${m.mix}${m.name ? ` (${m.name})` : ''}${m.type ? `, ${m.type}` : ''}`])),
+  // An ADDED row lists EVERY field it sets, in `RULES` order. Choosing which
+  // fields "matter" was the defect — Codex found a missing one twice (routing
+  // in R1, stand/needs/power in R2). `RULES` is keyed `Record<keyof T, …>`, so
+  // a field added to lib/types.ts is shown here without anyone remembering to.
+  const HEAD: Record<OpEntity, string[]> = { stagePlot: ['pos', 'name'], inputs: ['ch', 'inst'], monitors: ['mix', 'name'] };
+  const headText: Record<OpEntity, (r: Record<string, unknown>) => string> = {
+    stagePlot: (r) => after.get(String(r.id)) ?? `${String(r.pos)} — ${String(r.name)}`,
+    inputs: (r) => `ch ${String(r.ch)} ${String(r.inst)}`.trim(),
+    monitors: (r) => `Mix ${String(r.mix)}${r.name ? ` (${String(r.name)})` : ''}`,
   };
+  const addedText = (entity: OpEntity): string[] =>
+    (next[entity] as unknown as Record<string, unknown>[])
+      .filter((r) => !prevIds.has(String(r.id)))
+      .map((r) => {
+        const rest = Object.keys(RULES[entity])
+          .filter((f) => f !== 'id' && !HEAD[entity].includes(f) && r[f] !== undefined && r[f] !== '')
+          .map((f) => `${fieldLabel(f)} ${show(f, r[f], 'to')}`);
+        return rest.length > 0 ? `${headText[entity](r)} — ${rest.join(', ')}` : headText[entity](r);
+      });
+  const prevIds = new Set([...prev.stagePlot, ...prev.inputs, ...prev.monitors].map((r) => String(r.id)));
 
   const sections: SummarySection[] = [];
   for (const entity of OP_ENTITIES) {
     const changes = summary[entity];
     const lines: SummaryLine[] = [];
     for (const label of changes.removed) lines.push({ kind: 'remove', text: label });
-    for (const text of addedText[entity]()) lines.push({ kind: 'add', text });
+    for (const text of addedText(entity)) lines.push({ kind: 'add', text });
 
     const patched = changes.patched
       .map((p) => ({ label: p.label, changes: p.changes.filter((c) => !isAutoCleared(c, p.changes)) }))

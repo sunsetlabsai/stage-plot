@@ -496,13 +496,39 @@ describe('summaryLines — the approve card diff (§7)', () => {
 
   it('★ an added input shows its mic and performer — same channel, different performer, different line', () => {
     const add = (slotId: string) => lines(band(), [{ entity: 'inputs', action: 'add', values: { ch: 7, inst: 'BGV', mic: 'SM58', stand: '', slotId } }]);
-    expect(add('s-dee')).toEqual([{ title: 'Inputs', lines: [{ kind: 'add', text: 'ch 7 BGV — SM58 → DSC — Dee' }] }]);
-    expect(add('s-ray')[0].lines[0].text).toBe('ch 7 BGV — SM58 → DSR — Ray');
+    expect(add('s-dee')).toEqual([{ title: 'Inputs', lines: [{ kind: 'add', text: 'ch 7 BGV — mic SM58, performer DSC — Dee' }] }]);
+    expect(add('s-ray')[0].lines[0].text).toBe('ch 7 BGV — mic SM58, performer DSR — Ray');
     // An added slot shows its role and mix; a new performer on a new mix too.
     expect(lines(band(), [{ entity: 'stagePlot', action: 'add', values: { name: 'Jo', pos: 'MSR', role: 'Keys', mix: 1 } }])).toEqual([
-      { title: 'Stage plot', lines: [{ kind: 'add', text: 'MSR — Jo (Keys), Mix 1' }] },
+      { title: 'Stage plot', lines: [{ kind: 'add', text: 'MSR — Jo — role Keys, mix 1' }] },
     ]);
-    expect(lines(band(), [{ entity: 'stagePlot', action: 'add', values: { name: 'Jo', pos: 'MSR', role: '', mix: 0 } }])[0].lines[0].text).toBe('MSR — Jo (—), no monitor');
+    expect(lines(band(), [{ entity: 'stagePlot', action: 'add', values: { name: 'Jo', pos: 'MSR', role: '', mix: 0 } }])[0].lines[0].text).toBe('MSR — Jo — mix none');
+  });
+
+  // Codex R2 on #196: the R1 fix CHOSE which fields an added row shows, and
+  // missed stand/needs/power. This pins the class: for EVERY field of EVERY
+  // entity, two added rows differing only in that field read differently.
+  it('★★ an added row shows every field it sets — any single-field difference changes the line', () => {
+    const base = {
+      stagePlot: { name: 'Jo', pos: 'MSR', role: 'Keys', mix: 1, power: true, featured: false },
+      inputs: { ch: 7, inst: 'Ana Vox', mic: 'SM58', stand: 'Straight', notes: 'wireless', slotId: 's-dee', needsReview: false },
+      monitors: { mix: 4, name: 'Keys', needs: 'Keys, vox', type: 'IEM' },
+    } as const;
+    const variant: Record<string, unknown> = {
+      name: 'Bo', pos: 'MSL', role: 'Synth', mix: 2, power: false, featured: true,
+      ch: 8, inst: 'Bo Vox', mic: 'Beta 58', stand: 'Tall boom', notes: 'wired', slotId: 's-ray', needsReview: true,
+      needs: 'Click', type: 'Wedge',
+    };
+    for (const entity of ['stagePlot', 'inputs', 'monitors'] as const) {
+      const line = (values: Record<string, unknown>) => lines(band(), [{ entity, action: 'add', values }])
+        .flatMap((sec) => sec.lines).find((l) => l.kind === 'add')!.text;
+      const ref = line({ ...base[entity] });
+      for (const field of Object.keys(base[entity])) {
+        // Mix 2 already exists, so a monitor add uses a free number (a collision is refused, not shown).
+        const v = entity === 'monitors' && field === 'mix' ? 5 : variant[field];
+        expect(line({ ...base[entity], [field]: v }), `${entity}.${field}`).not.toBe(ref);
+      }
+    }
   });
 
   it('★ bulk lines name the destination value — IEM and Side-fill never read alike', () => {

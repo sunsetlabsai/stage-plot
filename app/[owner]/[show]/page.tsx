@@ -5776,7 +5776,9 @@ function AgentChat({
                       Update: {toolNameLabels[tc.name] || tc.name}
                     </p>
                     <div className="text-xs text-gray-600 mb-2 max-h-32 overflow-y-auto">
-                      {tc.name === 'apply_changes' ? (
+                      {tc.name === 'generate_show' && tc.status === 'pending' ? (
+                        <GeneratePreview config={config} input={tc.input} />
+                      ) : tc.name === 'apply_changes' ? (
                         tc.status === 'pending' ? (
                           <ChangesPreview config={config} ops={tc.input.ops} />
                         ) : tc.sections ? (
@@ -5933,6 +5935,21 @@ function ChangesPreview({ config, ops }: { config: AppConfig; ops: unknown }) {
   }
   const sections = summaryLines(plan.summary, config, plan.next);
   if (sections.length === 0) return <p>No changes — every value is already as asked.</p>;
+  return <SummaryList sections={sections} />;
+}
+
+// The generate_show card, through the same planner and formatter as an edit,
+// so every created row lists every field it sets (the hand-written preview
+// left out each slot's mix and each input's notes — the class Codex R2 found
+// on #196). Removals are summarized by the card's row-count warning instead.
+function GeneratePreview({ config, input }: { config: AppConfig; input: Record<string, unknown> }) {
+  const plan = planGenerateShow(config, input);
+  if (!plan.ok) {
+    return <p className="text-amber-700">⚠ This plan can&apos;t be applied: {describeProblems(plan.problems)}</p>;
+  }
+  const sections = summaryLines(plan.summary, config, plan.next)
+    .map((sec) => ({ ...sec, lines: sec.lines.filter((l) => l.kind !== 'remove') }))
+    .filter((sec) => sec.lines.length > 0);
   return <SummaryList sections={sections} />;
 }
 
