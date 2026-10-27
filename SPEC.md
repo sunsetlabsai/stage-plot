@@ -164,8 +164,10 @@ Config tab (owner)
     Patch (.csv)** (BOM, RFC-4180, header `Channel,Name,Mic,Stand,Notes`, sorted by ch) and
     **Export Patch (.xml)** (`<showrunr-patch version="1">`, blank attrs omitted). Filenames use
     slugified show-or-band name (`page.tsx:6939-6985`, `lib/console-export.ts`, `lib/show-file.ts:35-60`).
-30. **Import Show** in Config replaces the whole current config from a file, with no confirm
-    (`page.tsx:6987-7003`).
+30. **Import Show** in Config replaces the whole current config from a file. If the show has
+    anything to lose (any list row, or a venue or date), it first confirms with counts of what is
+    discarded. Then it arms the same one-level **Undo import** as item 28, restoring the whole show
+    (`lib/import-undo.ts`; `page.tsx` `applyShowImport`).
 
 Sharing
 31. Share buttons use a 3-tier fallback: share the PDF file (chart only) → share the link →
@@ -495,7 +497,7 @@ The saved chart can be re-opened and edited later.
 - `chart_library.source_spec jsonb` (009), `source_prompt text` (016), `source_notation text check in ('numbers','letters')` (017); `is_builder` = `source_spec IS NOT NULL`. RPC `save_builder_chart` (17 args, `FOR UPDATE` slot lock, PT409, service_role only).
 - `chart_calibration (chart_id, source_hash)` row written `verified` by the RPC.
 - Pure libs: `roadmap-spec.ts` (model+validator) · `roadmap-authoring.ts` (key L0, grammar L1, fold L3, tally L4) · `roadmap-parse.ts` (model transport) · `roadmap-merge.ts` (repeated-section merge, server-only) · `roadmap-view.ts` (editor bridge, chord grammar, letters) · `roadmap-layout.ts` (shared layout, pdf-lib-free) · `roadmap-render.ts` (PDF+calibration) · `roadmap-rhythm.ts` (slash rule) · `roadmap-save.ts` (parity).
-- Routes: `/api/charts/roadmap/parse` · `/save` · `/[chartId]` (GET). UI: `components/RoadmapBuilder.tsx`, `components/ManageChartsModal.tsx`, `app/library/page.tsx`. Stub prototype: `app/mockup/roadmap-builder/page.tsx`.
+- Routes: `/api/charts/roadmap/parse` · `/save` · `/[chartId]` (GET). UI: `components/RoadmapBuilder.tsx`, `components/ManageChartsModal.tsx`, `app/library/page.tsx`.
 
 ### 5.3 Settled rulings
 

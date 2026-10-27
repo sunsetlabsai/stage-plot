@@ -39,6 +39,26 @@ export function countLinkedInputs(slotId: string | undefined, inputs: InputChann
   return inputs.reduce((n, i) => (i.slotId === slotId ? n + 1 : n), 0);
 }
 
+// Delete a stage slot by id (UAT S8). `links` decides what happens to the inputs
+// linked to it: 'keep' leaves their slotId dangling so the normalizer flags them
+// to relink (needsReview); 'clear' drops the link. By id, not row index, so a
+// dialog left open while the list changes can never delete a different row.
+// Inputs linked to OTHER slots are untouched either way.
+export function deleteStageSlot<C extends { stagePlot: StageSlot[]; inputs: InputChannel[] }>(
+  cfg: C,
+  slotId: string,
+  links: 'keep' | 'clear',
+): C {
+  return {
+    ...cfg,
+    stagePlot: cfg.stagePlot.filter((s) => s.id !== slotId),
+    inputs:
+      links === 'keep'
+        ? cfg.inputs
+        : cfg.inputs.map((i) => (i.slotId === slotId ? { ...i, slotId: undefined, needsReview: false } : i)),
+  };
+}
+
 // Slot-owned display label: a blank name falls back to "Occupant {n}" (n = 1-based
 // index within its block), identical on every surface that shows this slot.
 export function slotLabel(slot: StageSlot, indexInBlock: number): string {

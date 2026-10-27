@@ -50,19 +50,19 @@ Graham ruled the conductor out of v1. K1 and K2 are now listed under §2.4.
 
 | ID | Gap | Evidence | Size |
 |---|---|---|---|
-| S1 | A new or slow show first renders a stranger's band (the built-in Loosely Covered demo). A new show then lands on Perform with "No setlist yet." and no pointer to Config. | `P:313-330`, `:514`, `:1161` | S |
+| S1 | **FIXED.** No panel renders until this show has loaded (`showReady`, the same path check #197 added for deep links); until then the content area reads "Loading show…" and Print is disabled. The offline cache counts as loaded. An empty setlist on Perform links the owner to Config ("Add songs in Config"); a viewer reads "The band hasn't added any songs." | `P` `showReady` · `PerformTab` empty state | Done |
 | S2 | An owner who opens a show offline silently loses Config/AI, and no banner explains why. | `P:469-486`, `:794` | S–M |
 | S3 | Offline edits are retried only on the *next* edit. Nothing listens for `online`, and the next online load overwrites the local copy. | `lib/use-show.ts:110` · `P:540-549` | S |
 | S4 | Up to 2 s of edits can be lost when a tab closes or a phone locks. React unmount attempts a flush, but nothing flushes on `pagehide`/`visibilitychange`, which is what a phone lock or tab kill actually fires. | `lib/use-show.ts:150-175` | S |
 | S5 | The same owner on phone + laptop is last-write-wins on the whole show (no version check). | `lib/use-show.ts:123` · `rpc_save_show` | M |
 | S6 | **FIXED.** A chart link now carries the canonical `songId` (`&sid=`) alongside the position, and opens that song wherever it moved. Same song twice: the copy at the linked position wins, else the first. A song that left the setlist opens the setlist with "The song in that link isn't in this setlist anymore." Old position-only links and inline songs keep matching by position. Links are not resolved against the demo band while the show loads. | `lib/share.ts` `buildChartShareUrl`, `parseChartDeepLink` · `tests/share.test.ts` | Done |
-| S7 | Config → Import Show replaces the whole show with no confirm or undo. | `P:6987-7001` | S |
-| S8 | A slot delete can't be cancelled: both dialog buttons delete. | `P:6531-6556` | S |
+| S7 | **FIXED.** Import Show confirms first, with counts of what it discards (none on an empty show), then arms the same one-level undo as the setlist import, restoring the WHOLE show. Undo lasts until the next edit, a tab change, or a reload (§7). | `lib/import-undo.ts` · `tests/import-undo.test.ts` | Done |
+| S8 | **FIXED.** Deleting a slot with linked inputs opens a three-way dialog: delete and keep the inputs flagged to relink, delete and unlink them, or Cancel (also backdrop and Escape), which changes nothing. An unlinked slot still deletes on one click, like every other row. Delete is by slot id. | `components/SlotDeleteDialog.tsx` · `deleteStageSlot` (`lib/setlist.ts`) · `tests/slot-delete*.test.ts*` | Done |
 | S9 | **FIXED.** Signed out: no warning, only a small "Sign in" link. Signed-in non-owner: "Viewing {owner}'s show (read-only)." | `P` auth status line | Done |
 | S10 | **FIXED.** The return path survives the whole chain: show → `/sign-in?redirect=` → middleware → `/claim?redirect=` → back to the show (checked by `lib/safe-redirect`). The show page's Sign in link carries the current path and query. | `middleware.ts` profile check · `app/claim/page.tsx` · `P` | Done |
 | S11 | **FIXED for one person with several accounts (#134).** The device key is stored per account and re-checked against the live session at every send; the old remembered (localStorage) entry migrates to the first account that reads it; a session-only one is deleted. **A browser shared between people is not designed for** (ruled 2026-10-26): the key survives sign-out. `design-ai-key-availability.md` §15. | `lib/byoa-key-storage.ts` (`byoaKeyName`, `keyForSend`) · `tests/byoa-key-storage.test.ts` | Done |
 | S12 | **FIXED.** The device copy now says the key is for this account only and passes through our servers without being stored. The account-deletion claim is removed. | `components/ByoaKeySettings.tsx` | Done |
-| S13 | A fake builder ships at `/mockup/roadmap-builder` (hard-coded sample, "(mock) Saved"). Testers who find it will file bogus bugs. | `app/mockup/roadmap-builder/page.tsx` | S (delete) |
+| S13 | **FIXED by deletion.** `/mockup/roadmap-builder` is gone; nothing imported it. | — | Done |
 | S14 | The chart builder misreads a leading time signature as a chord: `4/4 in G, 4 bars G…` gains a bogus first bar (`C/C`). Reproduced with `parseGrammarDraft`. | `lib/roadmap-authoring.ts:511-543` | S |
 | S15 | The chart builder's parse refuses with 503 when the platform key is missing, even for text the no-AI grammar could handle. Convert and parse never use the owner's own key (`design-ai-key-availability` §13 unbuilt). | `app/api/charts/roadmap/parse/route.ts:49-52` | S (reorder) / M (§13) |
 | S16 | Chord entry in the builder has no cue on touch screens (hover only, plus an 11 px tip far from the chart). Issue #173 is partly stale: hover cues on desktop exist. | `components/RoadmapBuilder.tsx:516-519`, `:988`, `:994` | S |
@@ -202,7 +202,7 @@ noted) · **Laptop** (Chrome).
 - [SH-31] Print a long set — 30-song setlist · Print run order only · Songs flow across columns/pages in order, nothing cut off · Any · Laptop
 - [SH-32] Name validation — New Show with "!!!" then a 150-char name · Create disabled for "!!!"; the name field stops accepting text at 100 characters · Owner · Laptop
 - [SH-33] Library on a phone — /library with 10 songs · Scroll rows · Check whether the 6-column grid forces sideways scrolling (suspected; fixed column widths ~580 px) · Owner · Phone
-- [SH-34] Import Show replaces everything — Config → Import Show with a different .yaml · Whole show replaced immediately with no confirm — confirm this is acceptable · Owner · Laptop
+- [SH-34] Import Show replaces everything — Config → Import Show with a different .yaml on a show with content · A confirm names the file and counts what is discarded; Cancel changes nothing; OK replaces the show and offers Undo import, which restores it until the next edit or tab change (re-clicking Config keeps it) · Owner · Laptop
 - [SH-35] Try-it quota — No API key, signed in · Send messages until exhausted · "Free messages used up. Enter your own Claude API key…" · Owner · Laptop
 - [SH-36] Tab-bar copy-link icon — Owner · Click upload icon in tab bar · Link copied; icon briefly shows a tick · Owner · Laptop
 
