@@ -1,6 +1,6 @@
 # Version-checked show save (UAT S5, and S3 rebuilt on it)
 
-**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1 + R2 + R3 folded (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R4. Nothing here is built.
+**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1–R4 folded (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R5. Nothing here is built.
 **Supersedes:** the client-side reconcile in PR #200 (`lib/offline-sync.ts` `reconcileOnLoad`,
 the set-aside store and its Restore/Discard banner, the page's reconnect effect). #200's S2 (offline owner editing) and S4 (flush on page hide)
 stand; its S3 is rebuilt on §3–§5 once this merges.
@@ -196,16 +196,23 @@ refuse either write (quota, private mode, blocked site data), and #200 swallowed
 3. A failed marker write never lets the next load treat the cache as clean: the load
    reads the marker, and a missing marker over a cache that holds the owner's edit is
    exactly the case step 2 has already told the owner about.
-4. **Adopting a new base refreshes the cache first** (Codex R3 on #201). Whenever the
-   client takes a new base — a save's success, §4.3's equal-content adopt, *Use the saved
-   one* — it writes the confirmed show to the cache with that base; if that write fails,
-   it deletes the cache entry. Only then does it clear the marker and store the base.
-   Otherwise, after an earlier failed cache write, the cache could hold the previous show
-   beside the new base, and an offline open would edit that stale copy and overwrite the
-   good save without a 409. No cache is safe (the next load fetches); a stale one is not.
-   Show and base are written as ONE storage entry (§4.1), so they never disagree: if the
-   delete also throws, what remains is the previous show with its previous base, whose
-   next send 409s and the owner is asked (§5) — never a silent overwrite.
+4. **Adopting a new base rewrites the cache entry before the marker moves** (Codex R3 + R4
+   on #201). Show and base are ONE storage entry (§4.1), so they never disagree. The entry
+   written is the **latest local copy** with the new base: the pending copy if an edit is
+   newer than the one confirmed (§4.2's sequence), else the confirmed show. Never the
+   confirmed show over a newer pending edit.
+   - **Nothing pending:** write {confirmed show, new base}, then clear the marker and store
+     the base. If the write throws, delete the entry (no cache is safe: the next load
+     fetches; a stale one beside a fresh base is not). If the delete also throws, what
+     remains is the previous show with its previous base, whose next send 409s and the
+     owner is asked (§5).
+   - **An edit is pending:** write {pending copy, new base}; the marker stays (§4.2) and
+     the pending copy goes next with that base. If the write throws, leave the entry
+     untouched: it holds the pending copy cached at edit time with its OLDER base (or, if
+     that write failed too, step 2 has already warned), so a reload sends it, gets a 409,
+     and the owner is asked. **An entry holding an unconfirmed edit is never deleted.**
+   - *Use the saved one* (§5) is the only path that replaces the owner's copy with the
+     server's, because the owner chose to discard it.
 
 ### 4.3 A 409
 
@@ -313,6 +320,12 @@ for them, and their screen must not change under them mid-gig.
 | 1 | after a failed cache write, a later success leaves a stale cache beside the new base | §4.2a step 4: refresh (or delete) the cache before clearing the marker / storing the base |
 | 2 | derived `setlist_songs` drops `sceneNote` | §3.6: `sceneNote` derived per row |
 
+**Codex R4 on #201:**
+
+| # | Finding | Closed by |
+|---|---|---|
+| 1 | R3's cache refresh overwrites a newer pending edit with the confirmed show; a reload loses it silently | §4.2a step 4: the entry is always the LATEST local copy; an entry holding an unconfirmed edit is never deleted |
+
 ## 8. Tests (written with the build)
 
 - **SQL** (run against a scratch DB through psql, recorded in the PR): matching base
@@ -332,6 +345,9 @@ for them, and their screen must not change under them mid-gig.
   changes on this device" pill; the marker is written before the cache. On a save's
   success (and the other base-adopting paths) with a cache write that throws, the cache
   entry is gone — never the previous show beside the new base — before the marker clears.
+  Edit A in flight, edit B made, A succeeds: the entry holds {B, A's base} and the marker
+  stays; with that cache write throwing, the entry still holds B (older base) and a reload
+  409s and asks. A reload before B's request completes never loses B.
 - **Lock order (SQL):** concurrent `rpc_save_show` and `rpc_delete_song` on the same show
   both complete (no deadlock), one after the other.
 - **Hook:** one save in flight (a second edit waits, then goes with the new base); 409 →
