@@ -120,7 +120,7 @@ import {
   buildCandidates,
   countReadiness,
   matchMeasuredSystem,
-  proposeFromCount,
+  proposeCountForSystem,
   reviewSheetKey,
   splitToPageBars,
   type Candidate,
@@ -4749,7 +4749,8 @@ function ChartNavigator({
                 if (!reviewSheet.measured || !reviewSheet.page) {
                   return { kind: 'refused', reason: 'unreadable', available: 0 };
                 }
-                return proposeFromCount(
+                return proposeCountForSystem(
+                  system,
                   reviewSheet.measured,
                   reviewSheet.page.pageWidth,
                   reviewSheet.page.modalWidth,

@@ -11,10 +11,11 @@ import {
   splitToPageBars,
   surplusWarning,
   countReadiness,
+  proposeCountForSystem,
   REFUSAL_REASONS,
   CANDIDATE_DEDUPE_TOL,
 } from '../lib/chart-review-sheet';
-import { confirmSystemSplit, isValidCalibration } from '../lib/chart-calibration';
+import { confirmSystemSplit, isValidCalibration, splitFitsSystem } from '../lib/chart-calibration';
 import { attributeMultirestsToBars } from '../lib/chart-measured';
 import type { Bar, ChartCalibration, System } from '../lib/types';
 import type { MeasuredCluster, MeasuredSystem } from '../lib/chart-measure';
@@ -430,5 +431,63 @@ describe('whether the count can be answered yet', () => {
       expect.arrayContaining(['insufficient-evidence', 'out-of-staff', 'degenerate-span', 'invalid-count', 'unreadable']),
     );
     for (const r of REFUSAL_REASONS) expect(refusalMessage(r, 2).length).toBeGreaterThan(10);
+  });
+});
+
+describe('the sheet never offers what the commit will refuse', () => {
+  // A stored band narrower than what the page read sees — every VLM-path chart, and any
+  // hand-drawn band — used to get the measured candidate anyway. `confirmSystemSplit`
+  // rejects an edge past the band (reject, never repair), the sheet closed regardless, and
+  // the owner's answer was dropped with no word. Offer and commit now share ONE predicate.
+  const measured = msys({
+    x0: 30, x1: 570, clusters: [cl(165), cl(300), cl(435), cl(570)],
+    bars: [
+      { xStart: 30, xEnd: 165 }, { xStart: 165, xEnd: 300 },
+      { xStart: 300, xEnd: 435 }, { xStart: 435, xEnd: 570 },
+    ],
+  });
+  // Measured right edge 570/600 = 0.95; this band stops at 0.94.
+  const narrow: System = { id: 'sysA', page: 1, yTop: 0.1, yBottom: 0.2, xStart: 0.06, xEnd: 0.94, verdict: 'validated' };
+  const stored = (() => {
+    let left = 0.06;
+    return [0.3, 0.55, 0.75, 0.94].map((x, i): Bar => {
+      const b: Bar = { id: `b${i + 1}`, systemId: 'sysA', xStart: left, xEnd: x, absNumber: i + 1, sectionId: null };
+      left = x;
+      return b;
+    });
+  })();
+  const cal = (): ChartCalibration =>
+    ({ schemaVersion: 2, status: 'draft', sections: [], systems: [narrow], bars: stored, roadmap: [] }) as unknown as ChartCalibration;
+
+  it('★ every candidate offered is one the commit accepts', () => {
+    const cands = buildCandidates(stored, narrow, measured, PAGE);
+    expect(cands.length).toBeGreaterThan(0);
+    const before = cal();
+    for (const c of cands) {
+      expect(confirmSystemSplit(before, 'sysA', c.xs), `${c.sources} would write nothing`).not.toBe(before);
+      expect(splitFitsSystem(narrow, c.xs)).toBe(true);
+    }
+    expect(cands.some((c) => c.sources.includes('measured'))).toBe(false);
+  });
+
+  it('a count the band cannot hold refuses as not lining up, rather than previewing a dead answer', () => {
+    const out = proposeCountForSystem(narrow, measured, W, 0.8, 4);
+    expect(out).toEqual({ kind: 'refused', reason: 'out-of-staff', available: 4 });
+  });
+
+  it('a count that fits is untouched', () => {
+    const wide: System = { ...narrow, xEnd: 0.96 };
+    const out = proposeCountForSystem(wide, measured, W, 0.8, 4);
+    expect(out.kind).toBe('ok');
+    const before = { ...cal(), systems: [wide] } as ChartCalibration;
+    if (out.kind === 'ok') expect(confirmSystemSplit(before, 'sysA', out.xs)).not.toBe(before);
+  });
+
+  it('the predicate IS the commit rule — they cannot disagree', () => {
+    const before = cal();
+    for (const xs of [[0.3, 0.94], [0.3, 0.95], [0.06, 0.5], [0.5, 0.4], []]) {
+      const wrote = confirmSystemSplit(before, 'sysA', xs) !== before;
+      expect(splitFitsSystem(narrow, xs), JSON.stringify(xs)).toBe(wrote);
+    }
   });
 });

@@ -314,6 +314,12 @@ system at a time, per §The interaction.
   the SAME wrong picture and the printed count is the only disagreeing evidence there is.
   Where `resegment` cannot support that count the option is simply not offered — a
   disagreement does not entitle us to a picture.
+  ⚠ **An option the commit would refuse is never offered** *(found in the 2026-10-27
+  self-review)*. `confirmSystemSplit` rejects any edge outside the stored band, and on a
+  band narrower than the fresh read (every VLM-path chart, any hand-drawn band) the
+  measured edges can fall past `xEnd`. The sheet used to offer that option anyway, close on
+  "Keep", and write nothing. Offer and commit now share `splitFitsSystem`, and a count the
+  band cannot hold refuses as `out-of-staff`.
 - **"None of these" → "How many bars do you count in this line?"** N is visible
   barline-delimited spans, per §The interaction.
 - **The count waits for the page read.** Opening the sheet re-reads one page, and the sheet

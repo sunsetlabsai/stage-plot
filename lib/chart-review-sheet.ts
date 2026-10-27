@@ -9,6 +9,7 @@
 import type { Bar, System } from './types';
 import type { MeasuredSystem, PageMeasurement } from './chart-measure';
 import { resegment, type ResegmentFailure } from './chart-resegment';
+import { splitFitsSystem } from './chart-calibration';
 
 /**
  * Two splits are the same picture when every edge agrees to within this fraction of the
@@ -169,7 +170,8 @@ export function buildCandidates(
     const xs = measured.bars.map((b) => b.xEnd / page.pageWidth);
     if (xs.length) cands.push({ xs, sources: ['measured'] });
   }
-  return dedupeCandidates(cands);
+  // Never offer what the commit will refuse (see `splitFitsSystem`).
+  return dedupeCandidates(cands.filter((c) => splitFitsSystem(system, c.xs)));
 }
 
 /**
@@ -309,6 +311,25 @@ export function surplusWarning(surplus: number, n: number): string | null {
   if (surplus <= 0) return null;
   const seen = n + surplus;
   return `We can see ${seen} barlines in this line, not ${n}. That's fine if one of them isn't a real bar — check the picture matches what you meant.`;
+}
+
+/**
+ * `proposeFromCount` for a STORED line. A proposal whose edges the band cannot hold is
+ * refused as `out-of-staff` — "the barlines we found here don't line up with this line",
+ * which is exactly the situation — instead of previewing an answer the commit would drop.
+ */
+export function proposeCountForSystem(
+  system: System,
+  measured: MeasuredSystem,
+  pageWidth: number,
+  modalWidth: number,
+  n: number,
+): CountOutcome {
+  const out = proposeFromCount(measured, pageWidth, modalWidth, n);
+  if (out.kind === 'ok' && !splitFitsSystem(system, out.xs)) {
+    return { kind: 'refused', reason: 'out-of-staff', available: out.xs.length + out.surplus };
+  }
+  return out;
 }
 
 /** Why a refusal happened, in the owner's terms. Never blames their count. */

@@ -509,6 +509,26 @@ function renumberBars(bars: Bar[], systems: System[]): Bar[] {
  * that span's RIGHT edge, with the system's own `xStart` (or the previous edge) as the
  * left. `measures[i]` is the musical measure count for span i, defaulting to 1.
  */
+/**
+ * Whether `confirmSystemSplit` will accept `xs` for this system: non-empty, strictly
+ * increasing, every edge inside `(xStart, xEnd]`.
+ *
+ * Exported because the review sheet must never OFFER an answer the commit will refuse.
+ * On a stored band narrower than what a fresh page read sees (every VLM-path chart, any
+ * hand-drawn band) the measured edges can fall past `xEnd`; the commit rejects them, the
+ * sheet closes anyway, and the owner's answer is dropped without a word. One predicate,
+ * used by both, means the offer and the commit cannot disagree.
+ */
+export function splitFitsSystem(system: Pick<System, 'xStart' | 'xEnd'>, xs: number[]): boolean {
+  if (xs.length === 0) return false;
+  let prev = system.xStart;
+  for (const x of xs) {
+    if (!(x > prev) || x > system.xEnd) return false;
+    prev = x;
+  }
+  return true;
+}
+
 export function confirmSystemSplit(
   cal: ChartCalibration,
   systemId: string,
@@ -517,16 +537,10 @@ export function confirmSystemSplit(
 ): ChartCalibration {
   const systems = cal.systems ?? [];
   const system = systems.find((s) => s.id === systemId);
-  if (!system || xs.length === 0) return cal;
-
-  // Reject rather than repair: these coordinates came from the re-segmenter, which
-  // already enforces the staff bound and strict ordering. Anything violating them here
-  // means the caller bypassed it, and a silent clamp would hide that.
-  let prev = system.xStart;
-  for (const x of xs) {
-    if (!(x > prev) || x > system.xEnd) return cal;
-    prev = x;
-  }
+  // Reject rather than repair: a silent clamp would commit a picture the owner never saw.
+  // The sheet filters its offers through the same predicate, so reaching this with a
+  // misfit means a caller bypassed it.
+  if (!system || !splitFitsSystem(system, xs)) return cal;
 
   const otherBars = (cal.bars ?? []).filter((b) => b.systemId !== systemId);
   const newBars: Bar[] = [];
