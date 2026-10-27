@@ -6,7 +6,6 @@ import {
   chordHitsToCells,
   specToView,
   viewToSpec,
-  fitBars,
   renderCell,
   degreeLetter,
   parseLetterChord,
@@ -181,15 +180,6 @@ describe('chordHitsToCells — inverse', () => {
     expect(
       chordHitsToCells([{ degree: 1, beats: 2 }, { degree: 4, beats: 1 }, { degree: 5, beats: 1 }], 4),
     ).toEqual([cell(1, 2), cell(4, 1), cell(5, 1)]);
-  });
-});
-
-describe('fitBars', () => {
-  it('pads short arrays with null', () => {
-    expect(fitBars([[cell(1, 4)]], 3)).toEqual([[cell(1, 4)], null, null]);
-  });
-  it('truncates long arrays', () => {
-    expect(fitBars([null, null, null], 2)).toEqual([null, null]);
   });
 });
 

@@ -56,7 +56,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | `design-roadmap-line-measure-numbers.md` | SHIPPED-RECORD | Both surfaces (`roadmap-render.ts:260`, `RoadmapBuilder.tsx:906`). |
 | `design-roadmap-notation-toggle.md` | SHIPPED-RECORD | Migration `017` + builder toggle. |
 | `design-roadmap-prompt-persistence.md` | SHIPPED-RECORD | Migration `016`, read+write doors both wired. |
-| `design-roadmap-structure-editing.md` | PARTIAL | **PR A shipped**: §4 merge-on-parse (`lib/roadmap-merge.ts`, wired in `foldAndValidateDraft`) + read-back from the final spec (`tallySpec`). **B–D (§3 op layer, §5 editor repeat / endings / marker / bar ops) unbuilt.** |
+| `design-roadmap-structure-editing.md` | PARTIAL | **PR A shipped**: §4 merge-on-parse (`lib/roadmap-merge.ts`, wired in `foldAndValidateDraft`) + read-back from the final spec (`tallySpec`). **PR B shipped**: §3 op layer + §5.3 bar ops (`splitBar` / `insertBar` / `deleteBar` / `setBarCount` / `removeSection` in `lib/roadmap-view.ts`; bar action row + bar-count field + section remove in `RoadmapBuilder.tsx`). **C (§5.1 repeat control + unroll) and D (§5.2 endings, §5.4 markers, §3 `navLive` gate) unbuilt.** |
 | `design-song-form-from-lyrics.md` | UNBUILT-DESIGN | No lyrics parser, no second proposer. Feeds `lib/song-structure.ts`, which does exist. |
 
 ## Conductor — authority, clock, transport

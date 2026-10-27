@@ -270,14 +270,6 @@ export function chordHitsToCells(chords: ChordHit[], barBeats: number): ViewCell
 
 // ── Spec ↔ view ──────────────────────────────────────────────────────────────
 
-// Keep a section's per-bar chord array the same length as its bar count (bars are
-// authoritative). Growing pads with null (inherit); shrinking truncates.
-export function fitBars(chords: ViewBar[], bars: number): ViewBar[] {
-  const out = chords.slice(0, bars);
-  while (out.length < bars) out.push(null);
-  return out;
-}
-
 // Spec BarRef (section INDEX) → view ViewBarRef (section ID). A validated spec's
 // index always resolves; an out-of-range one yields null so the ref is dropped.
 function liftRef(ref: BarRef, sections: RoadmapSection[]): ViewBarRef | null {
@@ -379,6 +371,292 @@ export function viewToSpec(view: ViewModel): RoadmapSpec {
     if (nav) spec.navigation = nav;
   }
   return spec;
+}
+
+// ── Structure edits (design-roadmap-structure-editing.md §3, §5.3) ───────────
+// Every edit that changes a section's bars goes through these pure ViewModel →
+// ViewModel operations. A section's chords, its repeat (plain needs ≥ 2 bars;
+// volta endings are {start,count} ranges) and every nav ref into it point at bar
+// POSITIONS, so each op is written as a plan — one entry per NEW bar naming the OLD
+// bar it came from — and `applyPlan` moves every reference with its bar in the same
+// step. The UI never edits bars / chords / repeat / navigation itself.
+//
+// Result: refused with a reason, or applied. An applied op that took something
+// with it lists it in `removes` (the UI confirms before keeping the result);
+// `edit` is the op's bar map (new bar → old 0-based bar, null = new blank bar),
+// which the property test uses to carry synthetic bar ids through the op.
+export type OpResult =
+  | { ok: true; view: ViewModel; removes: string[]; edit?: { sectionId: string; src: (number | null)[] } }
+  | { ok: false; reason: string };
+
+// A bar's place in its section's repeat: the volta BODY (every bar before the
+// earliest ending — endings[] order is not position order), one ending (its index
+// in endings[]), or neither (a gap between endings, or a tail after them).
+// Sections without a volta repeat are all 'body'.
+type BarGroup = 'body' | 'none' | number;
+
+interface PlannedBar {
+  src: number | null; // old 0-based bar, or null for a new (blank) bar
+  chords: ViewBar;
+  group: BarGroup;
+}
+
+type MarkerKey = 'segno' | 'coda' | 'toCoda' | 'fine' | 'jump';
+const MARKER_KEYS: MarkerKey[] = ['segno', 'coda', 'toCoda', 'fine', 'jump'];
+
+// Which barline the renderer draws each marker on (roadmap-render.ts: segno/coda
+// are edge 'start', To Coda / Fine / the D.S.–D.C. departure are edge 'end'). A
+// split sends a start-edge marker to the FIRST new bar and an end-edge one to the
+// LAST, so the musical bar still begins / ends where it did.
+const MARKER_EDGE: Record<MarkerKey, 'start' | 'end'> = {
+  segno: 'start',
+  coda: 'start',
+  toCoda: 'end',
+  fine: 'end',
+  jump: 'end',
+};
+
+function markerRef(nav: ViewNavigation, key: MarkerKey): ViewBarRef | undefined {
+  return key === 'jump' ? nav.jump?.at : nav[key];
+}
+
+// The marker's printed name, for confirms ("removes the D.C. al Fine").
+function markerName(nav: ViewNavigation, key: MarkerKey): string {
+  if (key === 'segno') return 'Segno';
+  if (key === 'coda') return 'Coda';
+  if (key === 'toCoda') return 'To Coda';
+  if (key === 'fine') return 'Fine';
+  const j = nav.jump;
+  const from = j?.from === 'segno' ? 'D.S.' : 'D.C.';
+  const until = j?.until === 'coda' ? ' al Coda' : j?.until === 'fine' ? ' al Fine' : '';
+  return `${from}${until}`;
+}
+
+// Close a set of removed markers over validateNavigation's preconditions: a To
+// Coda needs its Coda; a D.S. needs the Segno, al Fine the Fine, al Coda the Coda
+// and To Coda. Removing a marker removes what can't stand without it — never
+// leaves a nav block the validator would reject (or the old "drop the whole block").
+function withDependents(nav: ViewNavigation, removed: Set<MarkerKey>): Set<MarkerKey> {
+  const out = new Set(removed);
+  if (out.has('coda') && nav.toCoda) out.add('toCoda');
+  const j = nav.jump;
+  if (
+    j &&
+    ((out.has('segno') && j.from === 'segno') ||
+      (out.has('fine') && j.until === 'fine') ||
+      ((out.has('coda') || out.has('toCoda')) && j.until === 'coda'))
+  ) {
+    out.add('jump');
+  }
+  return out;
+}
+
+function dropMarkers(nav: ViewNavigation, keys: Set<MarkerKey>): ViewNavigation | undefined {
+  const out: ViewNavigation = { ...nav };
+  for (const k of keys) delete out[k];
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function repeatName(repeat: NonNullable<ViewSection['repeat']>): string {
+  return repeat.kind === 'plain' ? `the ×${repeat.times} repeat` : `the ${repeat.endings.length} endings`;
+}
+
+function barGroups(sec: ViewSection): BarGroup[] {
+  const r = sec.repeat;
+  if (r?.kind !== 'volta') return Array.from({ length: sec.bars }, () => 'body' as const);
+  const earliest = Math.min(...r.endings.map((e) => e.bars.start));
+  return Array.from({ length: sec.bars }, (_, i) => {
+    const bar = i + 1;
+    if (bar < earliest) return 'body' as const;
+    const e = r.endings.findIndex((x) => bar >= x.bars.start && bar < x.bars.start + x.bars.count);
+    return e === -1 ? ('none' as const) : e;
+  });
+}
+
+// The identity plan for a section — each op edits a copy of it.
+function identityPlan(sec: ViewSection): PlannedBar[] {
+  const groups = barGroups(sec);
+  return sec.chords.map((chords, i) => ({ src: i, chords, group: groups[i] }));
+}
+
+function findSection(view: ViewModel, sectionId: string): ViewSection | null {
+  return view.sections.find((s) => s.id === sectionId) ?? null;
+}
+
+function badBar(sec: ViewSection, bar: number): boolean {
+  return !Number.isInteger(bar) || bar < 1 || bar > sec.bars;
+}
+
+// Apply a plan to one section: rebuild its chords, recompute its repeat from the
+// bars' groups, and move every nav ref with its bar. A ref whose bar was deleted is
+// removed (with its dependents) and named in `removes`; it is never shifted onto a
+// neighbour.
+function applyPlan(view: ViewModel, sectionId: string, plan: PlannedBar[]): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  if (plan.length === 0) return { ok: false, reason: 'a section needs at least one bar' };
+  const removes: string[] = [];
+
+  // Where did each old bar go? first/last new 0-based index (they differ after a split).
+  const first = new Map<number, number>();
+  const last = new Map<number, number>();
+  plan.forEach((b, i) => {
+    if (b.src == null) return;
+    if (!first.has(b.src)) first.set(b.src, i);
+    last.set(b.src, i);
+  });
+
+  let repeat = sec.repeat;
+  if (repeat?.kind === 'plain' && plan.length < 2) {
+    removes.push(repeatName(repeat));
+    repeat = undefined;
+  } else if (repeat?.kind === 'volta') {
+    const r = repeat;
+    const spans = r.endings.map((_, ei) => {
+      const at = plan.flatMap((b, i) => (b.group === ei ? [i] : []));
+      return at.length === 0 ? null : { start: at[0] + 1, count: at.length, contiguous: at[at.length - 1] - at[0] + 1 === at.length };
+    });
+    if (spans.some((s) => s === null)) {
+      removes.push(repeatName(r));
+      repeat = undefined;
+    } else {
+      if (spans.some((s) => !s!.contiguous)) return { ok: false, reason: 'that edit would split an ending in two' };
+      if (Math.min(...spans.map((s) => s!.start)) <= 1) {
+        return { ok: false, reason: 'the repeat needs a bar before its endings — remove the endings first' };
+      }
+      repeat = {
+        kind: 'volta',
+        endings: r.endings.map((e, ei) => ({ ...e, bars: { start: spans[ei]!.start, count: spans[ei]!.count } })),
+      };
+    }
+  }
+
+  let navigation = view.navigation;
+  if (navigation) {
+    const nav = navigation;
+    const gone = new Set<MarkerKey>();
+    const moved: Partial<Record<MarkerKey, ViewBarRef>> = {};
+    for (const k of MARKER_KEYS) {
+      const ref = markerRef(nav, k);
+      if (!ref || ref.sectionId !== sectionId) continue;
+      const to = (MARKER_EDGE[k] === 'start' ? first : last).get(ref.bar - 1);
+      if (to === undefined) gone.add(k);
+      else moved[k] = { sectionId, bar: to + 1 };
+    }
+    const next: ViewNavigation = { ...nav };
+    for (const k of MARKER_KEYS) {
+      const to = moved[k];
+      if (!to) continue;
+      if (k === 'jump') next.jump = { ...nav.jump!, at: to };
+      else next[k] = to;
+    }
+    if (gone.size > 0) {
+      const all = withDependents(nav, gone);
+      for (const k of MARKER_KEYS) if (all.has(k)) removes.push(`the ${markerName(nav, k)}`);
+      navigation = dropMarkers(next, all);
+    } else {
+      navigation = next;
+    }
+  }
+
+  const nextSec: ViewSection = {
+    id: sec.id,
+    label: sec.label,
+    bars: plan.length,
+    chords: plan.map((b) => b.chords),
+  };
+  if (repeat) nextSec.repeat = repeat;
+  const nextView: ViewModel = {
+    ...view,
+    sections: view.sections.map((s) => (s.id === sectionId ? nextSec : s)),
+  };
+  if (navigation) nextView.navigation = navigation;
+  else delete nextView.navigation;
+  return { ok: true, view: nextView, removes, edit: { sectionId, src: plan.map((b) => b.src) } };
+}
+
+// A bar of k ≥ 2 chords → k bars, one chord each, whole bar (`D E` → `D | E`).
+export function splitBar(view: ViewModel, sectionId: string, bar: number): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  if (badBar(sec, bar)) return { ok: false, reason: `bar ${bar} is not in ${sec.label}` };
+  const cells = sec.chords[bar - 1] ?? [];
+  if (cells.length < 2) return { ok: false, reason: 'only a bar with two or more chords can be split' };
+  const plan = identityPlan(sec);
+  const at = plan[bar - 1];
+  const beats = view.timeSig.beats;
+  plan.splice(bar - 1, 1, ...cells.map((c) => ({ src: at.src, chords: [{ ...c, beats }], group: at.group })));
+  return applyPlan(view, sectionId, plan);
+}
+
+// A new BLANK bar before or after `bar`. It joins that bar's repeat group; the
+// existing bar keeps its markers wherever it moves.
+export function insertBar(view: ViewModel, sectionId: string, bar: number, side: 'before' | 'after'): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  if (badBar(sec, bar)) return { ok: false, reason: `bar ${bar} is not in ${sec.label}` };
+  const plan = identityPlan(sec);
+  plan.splice(side === 'before' ? bar - 1 : bar, 0, { src: null, chords: null, group: plan[bar - 1].group });
+  return applyPlan(view, sectionId, plan);
+}
+
+// Delete one bar. Refused on the only bar, and on the last body bar of a volta
+// section; otherwise anything that can't survive it (a marker on it, an ending it
+// was the only bar of, a plain repeat left at 1 bar) comes back in `removes`.
+export function deleteBar(view: ViewModel, sectionId: string, bar: number): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  if (badBar(sec, bar)) return { ok: false, reason: `bar ${bar} is not in ${sec.label}` };
+  if (sec.bars === 1) return { ok: false, reason: 'a section needs at least one bar — remove the section instead' };
+  const plan = identityPlan(sec);
+  if (plan[bar - 1].group === 'body' && sec.repeat?.kind === 'volta' && plan.filter((b) => b.group === 'body').length === 1) {
+    return { ok: false, reason: 'the repeat needs a bar before its endings — remove the endings first' };
+  }
+  plan.splice(bar - 1, 1);
+  return applyPlan(view, sectionId, plan);
+}
+
+// The section's bar-count field: insert or delete at the END, one bar at a time
+// through the ops above, so a shrink moves / removes markers and endings exactly
+// as deleting those bars by hand would (and refuses where that would).
+export function setBarCount(view: ViewModel, sectionId: string, bars: number): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  if (!Number.isInteger(bars) || bars < 1) return { ok: false, reason: 'a section needs at least one bar' };
+  let cur: ViewModel = view;
+  const removes: string[] = [];
+  let n = sec.bars;
+  while (n !== bars) {
+    const r = n < bars ? insertBar(cur, sectionId, n, 'after') : deleteBar(cur, sectionId, n);
+    if (!r.ok) return r;
+    cur = r.view;
+    for (const x of r.removes) if (!removes.includes(x)) removes.push(x);
+    n += n < bars ? 1 : -1;
+  }
+  // The composite's bar map: the first min(old, new) bars stay; the rest are new.
+  const src = Array.from({ length: bars }, (_, i) => (i < sec.bars ? i : null));
+  return { ok: true, view: cur, removes, edit: { sectionId, src } };
+}
+
+// Remove a whole section. Markers inside it are removed with their dependents and
+// named — replacing viewToSpec's silent drop of the entire navigation block.
+export function removeSection(view: ViewModel, sectionId: string): OpResult {
+  if (!findSection(view, sectionId)) return { ok: false, reason: 'that section no longer exists' };
+  const removes: string[] = [];
+  let navigation = view.navigation;
+  if (navigation) {
+    const nav = navigation;
+    const gone = new Set(MARKER_KEYS.filter((k) => markerRef(nav, k)?.sectionId === sectionId));
+    if (gone.size > 0) {
+      const all = withDependents(nav, gone);
+      for (const k of MARKER_KEYS) if (all.has(k)) removes.push(`the ${markerName(nav, k)}`);
+      navigation = dropMarkers(nav, all);
+    }
+  }
+  const next: ViewModel = { ...view, sections: view.sections.filter((s) => s.id !== sectionId) };
+  if (navigation) next.navigation = navigation;
+  else delete next.navigation;
+  return { ok: true, view: next, removes };
 }
 
 // ── Nashville degree → letter, in a key (for the Letters display toggle) ─────
