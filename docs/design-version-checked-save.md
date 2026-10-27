@@ -1,6 +1,6 @@
 # Version-checked show save (UAT S5, and S3 rebuilt on it)
 
-**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1–R4 folded (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R5. Nothing here is built.
+**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1–R4 folded, R5 answered by §4.0 (PROPOSED, awaiting Graham's ruling Q5) (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R5. Nothing here is built.
 **Supersedes:** the client-side reconcile in PR #200 (`lib/offline-sync.ts` `reconcileOnLoad`,
 the set-aside store and its Restore/Discard banner, the page's reconnect effect). #200's S2 (offline owner editing) and S4 (flush on page hide)
 stand; its S3 is rebuilt on §3–§5 once this merges.
@@ -159,6 +159,42 @@ because that is the setlist the owner chose to keep.
   So no new legacy show can appear, and §4.4's migration-timing change (Q2) affects none.
 
 ## 4. Client (`lib/use-show.ts`)
+
+### 4.0 One editing tab per show (Codex R5 on #201 — PROPOSED, needs Graham's ruling Q5)
+
+Everything in §4 reasons about one tab, but the cache entry and marker are per browser:
+every tab of a show shares `showrunr-cache-{id}` while each keeps its own pending copy
+and sequence (`lib/use-show.ts:33`, `:154`). With two tabs, any per-tab rule writes over
+the other tab's unsynced copy — a success clearing it (R5), an ordinary edit replacing it
+(`:154`), or a page load caching the server copy over it (`app/[owner]/[show]/page.tsx:583`).
+Rather than a rule per path, remove the second writer:
+
+1. **The show's storage entry is written only by the tab holding that show's lock**
+   (`navigator.locks`, name `showrunr-edit-{id}`, held for the life of the page). This
+   covers every write: edit cache, marker, base, step 4's refresh, and the load-time cache.
+2. **Owner tabs request the lock on open, before the load writes anything** (`ifAvailable`
+   for an immediate answer; a tab that misses queues a waiting request). The holder edits as §4.1–§4.5 describe. A tab
+   that doesn't get it is **view-only** and writes nothing: banner "This show is open for
+   editing in another tab." with **Edit here**.
+3. **When the holder closes**, the browser releases the lock and a waiting tab takes it,
+   then runs the normal on-load path (§4.5: marker set → show the cached copy, send it).
+4. **Edit here** takes the lock (`steal: true`) after a confirm. The old tab drops to
+   view-only at once: it cancels its debounce timer and held retries, sends nothing
+   further, and never writes storage again — including when its in-flight save returns. Its latest edit is already in the entry (edits cache immediately), so the new
+   tab sends it; if the old tab's save lands first, the new send either matches it
+   (adopted silently) or 409s and the owner is asked. Nothing is lost silently. Needed
+   because on a phone the other tab may be frozen in the background, not findable.
+5. **Non-owner tabs** never take the lock and never write a show entry that carries a
+   marker.
+6. **No `navigator.locks`** (Safari < 15.4, Firefox < 96, non-HTTPS): edit as today.
+   Documented limit — two tabs of one show on such a browser can lose an unsynced edit.
+
+With one writer per browser, §4.2's per-tab "nothing pending" IS the browser's state, so
+§4.2a step 4 holds as written. Cross-DEVICE remains the server's job (§3, 409).
+
+**Known wart, not loss:** a tab closed while edit A is in flight and B is pending leaves
+{B, old base}; the next open sends it, 409s against A, and asks "changed on another
+device" about the owner's own work. *Keep mine* is the right answer and is offered.
 
 ### 4.1 The base
 
@@ -326,6 +362,12 @@ for them, and their screen must not change under them mid-gig.
 |---|---|---|
 | 1 | R3's cache refresh overwrites a newer pending edit with the confirmed show; a reload loses it silently | §4.2a step 4: the entry is always the LATEST local copy; an entry holding an unconfirmed edit is never deleted |
 
+**Codex R5 on #201:**
+
+| # | Finding | Closed by |
+|---|---|---|
+| 1 | a tab's success clears another tab's unsynced copy (shared entry, per-tab state) | §4.0: one lock-holding writer per show per browser — also closes two paths found in self-review: another tab's edit (`use-show.ts:154`) or page load (`page.tsx:583`) overwriting an unsynced copy |
+
 ## 8. Tests (written with the build)
 
 - **SQL** (run against a scratch DB through psql, recorded in the PR): matching base
@@ -357,6 +399,12 @@ for them, and their screen must not change under them mid-gig.
   the saved one* adopts the server copy and clears the marker; unchanged content is never
   sent; a held-for-network save retries on `online` / visible / next edit.
 - **Reload while held:** the marker survives; the load's send 409s; the owner is asked again.
+- **Tabs (§4.0):** a second owner tab of the same show is view-only and writes nothing to
+  storage (edit cache, marker, base, load-time cache); closing the first hands the lock to
+  the second, which sends the marked copy; *Edit here* drops the first to view-only and
+  its in-flight save's response writes nothing; R5's scenario (A saving, B cached then
+  closed) ends with B sent or asked about, never cleared; no `navigator.locks` → today's
+  behaviour.
 
 ## 9. Rollout
 
@@ -377,3 +425,6 @@ for them, and their screen must not change under them mid-gig.
   are held, Keep mine / Use the saved one. Not a server-wins default with a restore list.
 - **Q4 — apply `018` before the deploy and accept a few minutes of loud save failures**
   in between, rather than keeping the unchecked function for a release.
+- **Q5 — OPEN: one editing tab per show per browser** (§4.0): a second owner tab is
+  view-only with *Edit here*; browsers without `navigator.locks` keep today's behaviour as
+  a documented limit.
