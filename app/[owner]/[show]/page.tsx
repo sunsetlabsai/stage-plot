@@ -3287,7 +3287,7 @@ function ChartNavigator({
     setCalMode('perform');
     // The sheet is a calibrate-mode surface but renders outside the calibrate block, so
     // leaving the editor with it open would leave it mounted over the perform view — and
-    // in reach of "Build overlay", which can swap the document under it (`:3711`).
+    // in reach of "Build overlay", which can swap the document under it (`buildOverlay`'s `built.reloaded` recovery).
     setReviewSheet(null);
   };
   // ── Review queue (converter chunk 3) ──
@@ -3337,7 +3337,7 @@ function ChartNavigator({
   // And the same for the hash, because it is half of the sheet's identity check and the
   // check has to compare against the CURRENT bytes, not the ones a closure captured.
   // `buildOverlay` can replace `sourceHash` and `docRef.current` mid-life without bumping
-  // `calGenRef` (`:3711-3714`, the stale-cache recovery), so the generation alone would
+  // `calGenRef` (`buildOverlay`'s `built.reloaded` branch, the stale-cache recovery), so the generation alone would
   // not see those new bytes arrive.
   const sourceHashRef = useRef(sourceHash);
   useEffect(() => {
@@ -4711,7 +4711,7 @@ function ChartNavigator({
             <ChartReviewSheet
               // ★ THE SHEET'S LOCAL STATE IS ABOUT ONE LINE, SO IT DIES WITH THAT LINE
               // (Codex R2, #184). `stepReview` hands the sheet the NEXT flagged system by
-              // calling `openReviewSheet` (`:3430`) — `reviewSheet` stays non-null, so
+              // calling `openReviewSheet` (from `stepReview`) — `reviewSheet` stays non-null, so
               // React reuses the instance and the new line inherits the old line's step,
               // pick and count. Worst case it commits `confirmed` — permanent — on
               // geometry the owner never selected.
