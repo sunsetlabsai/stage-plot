@@ -1,6 +1,6 @@
 # Version-checked show save (UAT S5, and S3 rebuilt on it)
 
-**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1 + R2 folded (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R3. Nothing here is built.
+**Status:** DESIGN — Q1–Q4 ruled by Graham 2026-10-27 (§10); Codex R1 + R2 + R3 folded (§3.1, §3.3–§3.6, §4.2, §4.2a, §7); awaiting Codex R4. Nothing here is built.
 **Supersedes:** the client-side reconcile in PR #200 (`lib/offline-sync.ts` `reconcileOnLoad`,
 the set-aside store and its Restore/Discard banner, the page's reconnect effect). #200's S2 (offline owner editing) and S4 (flush on page hide)
 stand; its S3 is rebuilt on §3–§5 once this merges.
@@ -151,7 +151,9 @@ because that is the setlist the owner chose to keep.
   (`app/api/shows/route.ts:117`), leaving a show with no entries for §3.5 to track — the
   dashboard always sends `setlist_songs`, but the API and an older cached client need not.
   After: a non-empty `config.setlist` with no `setlist_songs` has `setlist_songs` derived
-  from it server-side (title/key/lead/notes per row) and takes the RPC path, with the same
+  from it server-side (title/key/lead/notes/sceneNote per row — `sceneNote` too, since the
+  RPC stores `scene_note` and rebuilds `config.setlist` from entries (`007`), so an omitted
+  field would drop an old client's scene notes; Codex R3 on #201) and takes the RPC path, with the same
   400 for an unnormalizable title that an explicit `setlist_songs` gets. An empty setlist
   still takes the plain insert, now with `setlist_migrated = true` (nothing to migrate).
   So no new legacy show can appear, and §4.4's migration-timing change (Q2) affects none.
@@ -194,6 +196,16 @@ refuse either write (quota, private mode, blocked site data), and #200 swallowed
 3. A failed marker write never lets the next load treat the cache as clean: the load
    reads the marker, and a missing marker over a cache that holds the owner's edit is
    exactly the case step 2 has already told the owner about.
+4. **Adopting a new base refreshes the cache first** (Codex R3 on #201). Whenever the
+   client takes a new base — a save's success, §4.3's equal-content adopt, *Use the saved
+   one* — it writes the confirmed show to the cache with that base; if that write fails,
+   it deletes the cache entry. Only then does it clear the marker and store the base.
+   Otherwise, after an earlier failed cache write, the cache could hold the previous show
+   beside the new base, and an offline open would edit that stale copy and overwrite the
+   good save without a 409. No cache is safe (the next load fetches); a stale one is not.
+   Show and base are written as ONE storage entry (§4.1), so they never disagree: if the
+   delete also throws, what remains is the previous show with its previous base, whose
+   next send 409s and the owner is asked (§5) — never a silent overwrite.
 
 ### 4.3 A 409
 
@@ -294,6 +306,13 @@ for them, and their screen must not change under them mid-gig.
 | — | `rpc_delete_song` vs `rpc_save_show` lock order (non-blocking) | §3.5: delete locks shows first |
 | — | collaborator at the matching version | §3.3: explicit owner check before either path |
 
+**Codex R3 on #201:**
+
+| # | Finding | Closed by |
+|---|---|---|
+| 1 | after a failed cache write, a later success leaves a stale cache beside the new base | §4.2a step 4: refresh (or delete) the cache before clearing the marker / storing the base |
+| 2 | derived `setlist_songs` drops `sceneNote` | §3.6: `sceneNote` derived per row |
+
 ## 8. Tests (written with the build)
 
 - **SQL** (run against a scratch DB through psql, recorded in the PR): matching base
@@ -307,9 +326,12 @@ for them, and their screen must not change under them mid-gig.
   bumps the affected shows; inside `rpc_save_show` the returned `updated_at` equals the
   row's final value.
 - **Create:** an empty-setlist show is created `setlist_migrated = true`; a non-empty
-  `config.setlist` without `setlist_songs` goes through the RPC with derived songs.
+  `config.setlist` without `setlist_songs` goes through the RPC with derived songs, and a
+  row's `sceneNote` survives into the stored entry and the rebuilt `config.setlist`.
 - **Persistence:** a throwing marker write or cache write sets the "Couldn't keep your
-  changes on this device" pill; the marker is written before the cache.
+  changes on this device" pill; the marker is written before the cache. On a save's
+  success (and the other base-adopting paths) with a cache write that throws, the cache
+  entry is gone — never the previous show beside the new base — before the marker clears.
 - **Lock order (SQL):** concurrent `rpc_save_show` and `rpc_delete_song` on the same show
   both complete (no deadlock), one after the other.
 - **Hook:** one save in flight (a second edit waits, then goes with the new base); 409 →
