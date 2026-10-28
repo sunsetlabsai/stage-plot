@@ -264,21 +264,28 @@ describe('PerformReadinessStrip — key states (UAT S15)', () => {
   });
 });
 
-// ── A placeholder PDF is not a chart (backlog #204, Graham 2026-10-27) ────────
-describe('PerformReadinessStrip — placeholder PDF', () => {
-  it('★ says there is no chart yet, and offers neither Build overlay nor Calibrate', () => {
+// ── A placeholder PDF: advise, never remove (Graham 2026-10-27, "when in doubt, ask") ──
+// Codex R4 (#207): a one-bar notation chart ("Song / Verse / Am", one 5-line staff) matched
+// the placeholder rule, and hiding Build overlay hid an overlay the engine CAN build. The
+// match is a guess; the human decides. So the line advises and the action stays.
+describe('PerformReadinessStrip — suspected placeholder PDF', () => {
+  it('★ says it looks like a title page AND keeps Build overlay', () => {
     render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: true })} />);
-    expect(screen.getByText(/title page/i)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Build overlay/ })).toBeNull();
-    expect(screen.queryByRole('button', { name: /Calibrate/ })).toBeNull();
+    expect(screen.getByText(/looks like a title page/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Build overlay' })).toBeTruthy();
   });
-  it('outranks a row-level gate and a gated build', () => {
-    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: true, skipReason: 'lyrics', convertState: 'gated' })} />);
-    expect(screen.getByText(/title page/i)).toBeTruthy();
-    expect(screen.queryByRole('button')).toBeNull();
+  it('a row-level gate still wins (its own line and Calibrate)', () => {
+    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: true, skipReason: 'lyrics' })} />);
+    expect(screen.queryByText(/looks like a title page/i)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Calibrate' })).toBeTruthy();
   });
-  it('a real chart without an overlay still offers Build overlay', () => {
+  it('after a build attempt, the build outcome speaks, not the guess', () => {
+    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: true, convertState: 'gated' })} />);
+    expect(screen.queryByText(/looks like a title page/i)).toBeNull();
+  });
+  it('a real chart without an overlay is unchanged', () => {
     render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: false })} />);
+    expect(screen.getByText('No overlay for these bytes.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Build overlay' })).toBeTruthy();
   });
 });

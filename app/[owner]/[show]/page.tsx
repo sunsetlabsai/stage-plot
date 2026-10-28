@@ -3390,7 +3390,7 @@ function ChartNavigator({
   // The Calibrate affordance (edit mode) is owner-only — the v1 source-scope
   // boundary. Drive / static charts and non-owners never see it.
   const calibratable = isOwner && !!calibrationChartId;
-  // These bytes look like a title-page placeholder: no overlay offered (advisory match).
+  // These bytes look like a title-page placeholder: advisory wording only, no action removed.
   const isPlaceholder = placeholderHash !== null && placeholderHash === sourceHash;
   // WHY we may not offer to build an overlay for this chart, or null if we may —
   // decided by the same predicate the convert route enforces, so the CTA and the
