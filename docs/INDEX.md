@@ -69,7 +69,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | `design-conductor-chunk4.md` | SHIPPED-RECORD | `lib/conductor-session.ts` + `conductor-targets.ts`. |
 | `design-conductor-chunk4-ui.md` | SHIPPED-RECORD | `ConductorCluster`, mounted `page.tsx:3370`. |
 | `design-conductor-chunk5.md` | SHIPPED-RECORD | `shouldAutoFire` returns real verdicts (`conductor-session.ts:166`). |
-| `design-conductor-chunk5b-clock.md` | PARTIAL | Reckoning/align/motion/confidence shipped. The `live`/`coasting` audio rung and the deferred `seek` re-seat are not. |
+| `design-conductor-chunk5b-clock.md` | PARTIAL | Reckoning/align/motion/confidence shipped. The `live`/`coasting` audio rung, the deferred `seek` re-seat, and the §5.7 open-section hold (precondition for conductor UAT) are not. |
 | `design-conductor-chunk5b-c1-align.md` | SHIPPED-RECORD | `initReckoning`/`alignReckoning`. |
 | `design-conductor-chunk5b-c2-motion.md` | SHIPPED-RECORD | `computeStaticRung`/`rebaselineMotion`. |
 | `design-conductor-chunk5b-c3-confidence.md` | SHIPPED-RECORD | `CLOCK_CONFIDENCE_BOUND_BARS = 8` (`conductor-clock.ts:149`). |

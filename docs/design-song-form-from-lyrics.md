@@ -338,23 +338,19 @@ export interface RoadmapSection {
     until the owner gives a length (§2.1's rule, same reason: a minimum isn't a duration).
   - **Corroboration** (§9 Q5): a spec with an open section gives a lower bound
     (`Σ bars ≥`). It is reported as such and never compared as equal.
-  - **Conductor clock: it holds at the end of an open section.** *(Corrected after Codex
-    R1. The first draft said the playhead moves only on manual advance; that's true of the
-    §3.5 gate, but the clock driver advances by itself when a bar is owed,
-    `lib/use-conductor-session.ts:874`. So `SOLO 8X+` then `CHORUS 8X` would have rolled
-    into the chorus after eight bars with no cue.)* The fix uses the plumbing that's already
-    there: `buildCalibration` (`lib/roadmap-calibration.ts:25`), which already projects
-    repeats and navigation onto `RoadmapMarker`, projects `open` as a **`hold` marker on the
-    open section's last drawn bar**. `isValidCalibration` accepts the new kind;
-    `resolveRoadmap` ignores it (it changes timing, not order). In the clock driver, when one
-    bar is owed and the current bar carries `hold`, it **freezes** instead of advancing,
-    using the existing suspend state (`stalled`, `:876-880`). Only the MD's **manual
-    advance** leaves the hold: every manual seam that moves the position clears a stall
-    through `writeDriver` (`:373-382`), while a clock advance deliberately doesn't. An align
-    tap on the hold bar re-zeros onto it, and the clock freezes there again on the next owed
-    bar, which is correct: aligning says "we're here", not "go on". **Test:** clock-on playback of
-    `SOLO 8X+` → `CHORUS 8X` stays on solo bar 8 indefinitely and enters the chorus only on
-    a manual advance. Uploaded (non-builder) charts never carry `hold`.
+  - **Conductor clock: a documented limit, not built here (Graham, 2026-10-28).** The clock
+    driver advances by itself when a bar is owed (`lib/use-conductor-session.ts:874`), so
+    with Clock on, `SOLO 8X+` → `CHORUS 8X` enters the chorus after eight bars. **That is
+    exactly today's behaviour** for a vamp written as 8 bars, so `open` makes nothing worse.
+    The Clock is opt-in (default off, `conductor-clock.ts:141`), the conductor is out of v1
+    UAT, and the chart prints **OPEN** so the MD can see it. A clock hold was drafted in R1
+    and taken out after Codex R2: done properly it needs the hold in the conductor's program
+    identity (`lib/conductor-state.ts:116`, so the relay's chart-match gate tells an open
+    chart from a stale closed one) and it needs to survive calibration edits
+    (`app/api/charts/calibration/route.ts:143` doesn't check `source_spec`; the parity check
+    in `lib/roadmap-save.ts:100` would need to cover it). That's conductor work. It is
+    recorded as a **precondition** in `design-conductor-chunk5b-clock.md` §5.7: the
+    conductor doesn't return to UAT until the clock honours `open`.
 
 #### 2.4.4 Where it shows
 
@@ -690,13 +686,13 @@ Gated commits, Codex per chunk.
 
 **Chunk D — directions on the roadmap (own PR, FIRST; needs no lyrics sheet).** §2.4.3–2.4.5:
 `note` + `open` on `RoadmapSection`, `validateRoadmapSpec` rules (`NOTE_MAX` = 52, `open`
-is `true`, `open` + repeat rejected), the note line in layout + render, the `hold` marker
-projected by `buildCalibration` + the clock-driver freeze, `sameContent`'s two merge rules,
+is `true`, `open` + repeat rejected), the note line in layout + render, `sameContent`'s two
+merge rules,
 the builder row's Direction field and Open toggle, `tallySpec`'s `8+`. **Tests:** validator
 accept/reject per rule; the §2.4.5 property test over every `ViewModel` op; spec → view →
 spec round-trip keeps both fields; a spec with no note/open lays out byte-identically to
-today, and with one, PDF positions equal calibration coordinates; clock-on `SOLO 8X+` →
-`CHORUS 8X` holds until a manual advance; the merge pairs in §2.4.5 stay separate. Browser drive before Codex (canvas work is invisible to jsdom). This is the
+today, and with one, PDF positions equal calibration coordinates; the merge pairs in §2.4.5
+stay separate. **No conductor change** (§2.4.3, documented limit). Browser drive before Codex (canvas work is invisible to jsdom). This is the
 "write the audible down" feature, it's useful on every builder chart, and it ships on
 its own.
 
