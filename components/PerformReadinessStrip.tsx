@@ -57,8 +57,8 @@ export interface PerformReadinessStripProps {
   skipReason: OverlaySkipReason | null;
   convertState: ConvertState; // only meaningful under readiness `none`
   onBuildOverlay: () => void;
-  // The PDF looks like a title page and nothing else (lib/chart-placeholder.ts). No
-  // overlay is offered. The header's Calibrate stays: the match is advisory (known limit).
+  // The PDF looks like a title page and nothing else (lib/chart-placeholder.ts). ADVISORY:
+  // it changes the idle line's words; Build overlay and Calibrate are never removed.
   // Optional so callers that never check (and older tests) read as "not a placeholder".
   placeholder?: boolean;
 }
@@ -132,11 +132,6 @@ function readyLine(
         : { text: 'Tap a section to seek.' };
     case 'none':
       if (!calibratable) return null;
-      // Not a chart at all: nothing to build or calibrate, so no CTA. Checked before
-      // every gate because it is the stronger statement.
-      if (placeholder) {
-        return { text: "This PDF looks like a title page — there's no chart on it. Replace it with the chart in Manage charts." };
-      }
       // Gated charts (lyrics sheets, builder charts) keep the hand-calibrate
       // route — we decline to spend AI, not to let the owner set it up. The line
       // states WHICH gate fired; the CTA is the same either way.
@@ -166,7 +161,15 @@ function readyLine(
         case 'key_rejected':
           return { text: CHART_KEY_COPY.convert[convertState], cta: { kind: 'settings', label: 'Open Settings' } };
         case 'idle':
-          return { text: 'No overlay for these bytes.', cta: { kind: 'build', label: 'Build overlay' } };
+          // A suspected placeholder only changes the WORDS. The detector guesses and a
+          // human tells a non-chart at a glance, so the action stays (Graham 2026-10-27,
+          // "when in doubt, ask"; Codex R4 #207: a one-bar notation chart matched).
+          return placeholder
+            ? {
+                text: "This PDF looks like a title page — there's no chart on it. If it is a chart, build its overlay.",
+                cta: { kind: 'build', label: 'Build overlay' },
+              }
+            : { text: 'No overlay for these bytes.', cta: { kind: 'build', label: 'Build overlay' } };
       }
     case 'verifiable':
       return calibratable

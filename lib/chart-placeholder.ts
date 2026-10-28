@@ -15,9 +15,9 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 // chord-like word ("A Day in the Life", "9 to 5") only pushes toward "chart" — the safe way.
 //
 // KNOWN LIMIT (Codex R3; accepted by Graham 2026-10-27): no content rule can tell a one-chord
-// vamp chart ("A7sus4 vamp / Repeat until cue") from a title + key. So a match is ADVISORY:
-// it hides Build overlay — which the server already refuses for staff-less text — and says
-// so, but never hides Calibrate. A wrong match costs a misleading line, not a stuck chart.
+// vamp chart ("A7sus4 vamp / Repeat until cue") from a title + key, and a one-bar notation
+// chart can fall under the segment limit too (Codex R4). So a match is ADVISORY ONLY: it
+// changes the words on the Perform line and removes no action — the human decides.
 //
 // Segments, never path OPERATIONS: pdf.js packs a whole drawing into one `constructPath`,
 // so counting ops called a real one-staff chart a placeholder. Any path data this module
