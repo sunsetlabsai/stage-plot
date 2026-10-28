@@ -139,19 +139,20 @@ for any track above.
 
 1. **#207** placeholder PDFs — in review.
 2. **Track A** grids — one PR. Small.
-3. **Track C** scans — spike PR (scan set + scoring harness, no product change), then build PR.
-4. **Track B** — anchors PR, then proposer PR.
-5. **Later** — spike only.
+3. **Track B anchors** — one PR. Moved ahead of scans: Graham confirmed section-only seek is
+   worth shipping alone, and Track C is blocked on the scan set.
+4. **Track C** scans — spike PR (scan set + scoring harness, no product change) once the set
+   arrives, then build PR.
+5. **Track B proposer** — folds into `design-song-form-from-lyrics.md`.
+6. **Later** — spike only.
 
 Each PR: browser drive before Codex (canvas work is invisible to jsdom — #184's blank strip).
 
-## 7. Open questions for Graham
+## 7. Graham's answers (2026-10-27)
 
-1. **Scan set:** can you supply 10–20 real scans (your band's or a friend's), and is
-   hand-calibrating them once as ground truth acceptable, or should the harness score against
-   barlines you mark on a printout?
-2. **Grid row minimum:** accept a 2-barline row (finds Shine On's held last bar, more false-pair
-   risk) or require 3 (misses one-bar rows; the owner adds them)? Recommendation: 2, gated on
-   the build's measurement.
-3. **Track B anchors without bars:** is `section-only` (seek by section, no bar cursor) useful
-   enough on stage to ship on its own?
+1. **Scan set:** Graham will ask friends to share real scans. Not available yet, so Track C's
+   spike waits on it; nothing in Track C starts until the set exists.
+2. **Grid row minimum:** accept a 2-barline row, confirmed by the build's measurement on the
+   three grids and the notation corpus.
+3. **Section anchors without bars:** yes, worth shipping on their own. "It certainly is for
+   me — a non-reader." Seeking by section is the non-reader's way around a chart.
