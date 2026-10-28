@@ -58,7 +58,7 @@ Every state below was verified against code on 2026-09-04, not read off the doc.
 | `design-roadmap-notation-toggle.md` | SHIPPED-RECORD | Migration `017` + builder toggle. |
 | `design-roadmap-prompt-persistence.md` | SHIPPED-RECORD | Migration `016`, read+write doors both wired. |
 | `design-roadmap-structure-editing.md` | SHIPPED-RECORD | All four PRs: **A** §4 merge-on-parse (`lib/roadmap-merge.ts`) + read-back from the final spec (`tallySpec`). **B** §3 op layer + `navLive` gate (`lib/roadmap-view.ts`, `lib/roadmap-calibration.ts` over `walkRoadmap`) + §5.3 bar ops. **C** §5.1 `setPlainRepeat` / `unrollRepeat` (gated by `playsTheSame`). **D** §5.2 `addEndings` / `removeEndings` + §5.4 `setMarker` / `setJump` / `removeMarker` (menu from `markerOptions`). Builder: bar action row + Marker menu, section repeat control, per-bar ending/marker tags in the preview. |
-| `design-song-form-from-lyrics.md` | UNBUILT-DESIGN | No lyrics parser, no second proposer. Feeds `lib/song-structure.ts`, which does exist. |
+| `design-song-form-from-lyrics.md` | UNBUILT-DESIGN | No lyrics parser, no second proposer, no `note`/`open` on `RoadmapSection` (§2.4, amended 2026-10-28; chunk D ships first). Feeds `lib/song-structure.ts`, which does exist. |
 
 ## Conductor — authority, clock, transport
 
