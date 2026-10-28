@@ -9,22 +9,52 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 // images. A chart inks its staff, barlines or grid: the smallest — one staff, four bars —
 // is 10 segments (Codex R1, #207).
 //
+// What a placeholder lacks is CHORDS: a title and one key, never a progression. Word counts
+// alone could not tell "Love Shack / C" from "Blues / Verse: A D E A / Chorus: F#m D E A",
+// a real text-only chart with no ink (Codex R2, #207). A title that happens to hold a
+// chord-like word ("A Day in the Life", "9 to 5") only pushes toward "chart" — the safe way.
+//
 // Segments, never path OPERATIONS: pdf.js packs a whole drawing into one `constructPath`,
 // so counting ops called a real one-staff chart a placeholder. Any path data this module
 // cannot decode counts as ink, so an unrecognised encoding errs toward "chart".
 
 export const PLACEHOLDER_MAX_WORDS = 12;
 export const PLACEHOLDER_MAX_SEGMENTS = 6;
+/** The key printed under the title is the one chord-like token a placeholder carries. */
+export const PLACEHOLDER_MAX_CHORDS = 1;
 
 export interface PdfContentCounts {
   words: number;
   segments: number; // drawn (inked) path segments; clip-only paths excluded
   images: number;
+  chords: number; // chord-like text tokens (letter or Nashville), see chordTokens
 }
 
 /** True when a PDF is a title page and nothing else. Any image means a scan — a chart. */
 export function isPlaceholderCounts(c: PdfContentCounts): boolean {
-  return c.images === 0 && c.words <= PLACEHOLDER_MAX_WORDS && c.segments <= PLACEHOLDER_MAX_SEGMENTS;
+  return (
+    c.images === 0 &&
+    c.words <= PLACEHOLDER_MAX_WORDS &&
+    c.segments <= PLACEHOLDER_MAX_SEGMENTS &&
+    c.chords <= PLACEHOLDER_MAX_CHORDS
+  );
+}
+
+// A whole token that reads as a chord: letter root (A–G, accidental, quality, extension,
+// slash bass) or a Nashville degree (1–7, same tail). Anchored, so ordinary words that
+// merely start with A–G ("Dancing", "Each", "Add") never match.
+const QUAL = '(?:maj|min|m|dim|aug|sus|add|M|°|ø|△|Δ|\\+|-|–|\\d|b|#|♭|♯)*';
+const LETTER_CHORD = new RegExp(`^[A-G][#b♭♯]?${QUAL}(?:/[A-G][#b♭♯]?)?$`);
+const NNS_CHORD = new RegExp(`^[#b♭♯]?[1-7]${QUAL}(?:/[1-7])?$`);
+
+/** Count chord-like tokens across text runs (punctuation such as "Verse:" is dropped). */
+export function chordTokens(runs: string[]): number {
+  let n = 0;
+  for (const tok of runs.join(' ').split(/\s+/)) {
+    const t = tok.replace(/^[([{"']+|[)\]}"',.:;!?]+$/g, '');
+    if (t && (LETTER_CHORD.test(t) || NNS_CHORD.test(t))) n++;
+  }
+  return n;
 }
 
 type Ops = { constructPath: number; endPath: number } & Record<string, number>;
@@ -72,15 +102,13 @@ function inkedSegments(args: unknown, ops: Ops): number {
  */
 export async function countPdfContent(doc: PDFDocumentProxy, ops: Ops): Promise<PdfContentCounts> {
   const imageOps = new Set(IMAGE_OPS.map((k) => ops[k]).filter((v): v is number => typeof v === 'number'));
-  const counts: PdfContentCounts = { words: 0, segments: 0, images: 0 };
+  const counts: PdfContentCounts = { words: 0, segments: 0, images: 0, chords: 0 };
   for (let p = 1; p <= doc.numPages; p++) {
     const page = await doc.getPage(p);
     const text = await page.getTextContent();
-    counts.words += text.items
-      .map((i) => ('str' in i ? i.str : ''))
-      .join(' ')
-      .split(/\s+/)
-      .filter(Boolean).length;
+    const runs = text.items.map((i) => ('str' in i ? i.str : ''));
+    counts.words += runs.join(' ').split(/\s+/).filter(Boolean).length;
+    counts.chords += chordTokens(runs);
     const list = await page.getOperatorList();
     list.fnArray.forEach((fn, i) => {
       if (fn === ops.constructPath) counts.segments += inkedSegments(list.argsArray[i], ops);
