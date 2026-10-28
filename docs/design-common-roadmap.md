@@ -25,20 +25,25 @@ never a new downstream model.
 
 ## 1. What the library actually contains (measured 2026-10-27)
 
-The B1 engine on the 87-chart corpus (`~/chart-spike`, `measure-expected.json`), then a
-segment / operator survey of the 25 charts it cannot measure:
+The B1 engine on the 70-chart corpus (`~/chart-spike`, `measure-expected.json`), then a
+segment / operator survey of the 8 charts it cannot measure:
 
 | Kind | Count | Signal in the PDF | Reader today |
 |---|---:|---|---|
 | Engraved notation (5-line staves) | 62 | staves + barlines as vectors | **Measured** (B1/B2, 464/464 systems) |
-| Placeholder (title + key only) | 17 | ≤7 words, one filled box (≤4 inked segments), no images | **Not a chart** — #207/#208 say so; the owner decides |
 | Ruled chord grid | 3 | vertical barlines in boxed rows, 7–23 grid rows | VLM estimate (weak) |
-| Chords over lyrics, `[Verse]`-style tags | 3 | 150+ words, section tags, no lines | VLM estimate, then gated (`not_notation`) |
+| Chords over lyrics, `[Verse]`-style tags | 3 | 150+ words, section tags, no lines | Gated (`not_notation`) **before** any VLM call (`route.ts:167`); filed as `lyrics`, never offered at all |
 | Scan | 2 | images only, no text | VLM estimate (weak) |
+
+**The live library is a different population (prod, measured 2026-10-27):** 349 charts, of
+which **342 are filed `lyrics`. 321 of those carry section headers** (bare-line form —
+`INTRO 4X`, `VERSE 1 8X`, `CHORUS x2`, `PRE-CHORUS` — the grammar of
+`design-song-form-from-lyrics.md` §2; **none** use `[Verse]` brackets). 21 carry none. All 342
+have a text layer. This is what makes Track B's anchors worth building first.
 
 **Caveats, stated so they are not forgotten:**
 - The corpus is one library. Its lyric-sheet share came from a friend's library and is **not**
-  a market signal (Graham). Its scan share (2/87) is almost certainly **low** — Graham expects
+  a market signal (Graham). Its scan share (2/70) is almost certainly **low** — Graham expects
   a decent share of real uploads to be scans. Track C below needs its own scan set.
 - The three grids are one author's set (Pink Floyd). Grid detection must be tuned on more than
   one drawing style before it is trusted.
@@ -61,9 +66,15 @@ page `not-notation` and stops. Grids fail only that first step: the barlines are
    rows; Brain Damage 22.
 2. **System band** = the row's span (top/bottom of its barlines), x-extent = first to last
    barline. Bars = consecutive barline pairs.
-3. **Output** = the same `MeasuredSystem` shape B2 produces, with `staffCount: 0` and a new
-   page classification `'grid'`, so `measuredDisposition` treats a fully-grid page like
-   notation (`measured`) instead of `gated`.
+3. **Output** = the same `MeasuredSystem` shape B2 produces, on a page whose
+   `PageMeasurement` carries `staffCount: 0` (the count lives on the page, not the system) and
+   a new `PageClass` value `'grid'`. That is a **boundary change, in the same PR**, at three
+   sites: the `PageClass` type; `isValidMeasuredPayload` (`lib/chart-measured.ts:290`), which
+   today accepts only `notation | not-notation | raster` and would 400 a grid payload in the
+   convert route (`route.ts:86`) before disposition ever runs; and `measuredDisposition`, so a
+   fully-grid page is `measured` instead of `gated`.
+   The review sheet's re-measure (`openReviewSheet` → `measureOnePage` → `measurePage`) picks
+   grids up with no further change, because the finder lives inside `measurePage`.
 4. **No printed measure numbers** on grids, so `expectedSpans` is null: the review sheet shows
    one candidate ("Yes, N bars") and the count fallback ranks the measured barlines.
 
@@ -98,11 +109,16 @@ split, with pixels standing in for vectors:
 a manual calibration assist after the fact. This track runs it at **overlay-build time**, on a
 deskewed raster, so the draft calibration is born close to right.
 
-**The safety net is already built.** Every band where pixels and the model disagree, or
-detection is weak (`MIN_COVERAGE` / `MIN_STRENGTH` misses), is flagged
-`uncertain` — and the C3 review sheet takes it from there, with the detected barlines as its
-candidates and the count fallback ranking them. Scans get the same "is this right? → no → how
-many bars?" flow vector charts have.
+**The review sheet is NOT ready for scans — this track must build that half too.** Every
+band where pixels and the model disagree, or detection is weak (`MIN_COVERAGE` /
+`MIN_STRENGTH` misses), is flagged `uncertain`. But the C3 sheet cannot use pixel evidence
+today: `openReviewSheet` (`page.tsx:3495`) re-measures the PDF's **vector** geometry, finds no
+system on a scan, and `countReadiness` (`lib/chart-review-sheet.ts:258`) returns
+`unreadable` — the count fallback refuses. So the track includes a scan-aware candidate
+source: on open, a raster page re-runs the pixel detector for that band (re-derive, never
+persist — same rule as the vector re-measure) and hands its barline x positions to the count
+fallback in the shape `proposeFromCount` already ranks. Only then do scans get the "is this
+right? → no → how many bars?" flow vector charts have.
 
 **Needs before build:**
 1. **A scan set.** ~10–20 real scans (phone photos and flatbed), hand-calibrated once as ground
@@ -120,24 +136,70 @@ calibration (these sheets have no barlines); it removes the need for it on these
 seeking on sections instead.
 
 **What it can do.** Two things, both from text the PDF already carries:
-1. **Section anchors for free.** The y position of each `[Verse]` / `[Chorus]` tag is real page
-   geometry. Turning tags into `SectionAnchor`s gives `section-only` readiness — "tap a section
-   to seek" — with zero calibration. Small, and the highest-value part of this track.
+1. **Section anchors, one tap from Verify.** The position of each section header (`VERSE 8X`,
+   `[Chorus]`) is real page geometry. Turning headers into `SectionAnchor`s gives
+   `section-only` readiness — "tap a section to seek" — with no geometry calibration. Small,
+   and the highest-value part of this track: 321 of 342 live lyric sheets qualify (§1).
 2. **A seeded roadmap draft.** Tags + chord lines feed the existing lyrics proposer
    (`docs/design-song-form-from-lyrics.md`, designed, unbuilt) to propose a `RoadmapSpec`,
    which the owner refines in the builder. This is the bridge between "hacks" reading chord
    sheets and readers reading notation: both end on one roadmap.
 
+### 4.1 Anchors: the write path and who verifies
+
+Anchors alone do not reach `section-only`: `performReadiness` (`lib/chart-calibration.ts:193`)
+needs a **persisted, verified** calibration, and today a lyric sheet never gets one — role
+`lyrics` is refused before measurement, and a mislabeled one is refused at the `not_notation`
+gate (`route.ts:167`) before any row is written. So:
+
+1. **The gates block the AI call, not the tag read** (Graham, 2026-10-27; amends
+   `backlog-charting.md` §Ruled 2026-09-02 in this PR). Both never-gates exist to save VLM
+   spend and review debt. A header read spends nothing and produces no uncertain badges, so
+   neither gate applies to it. `overlaySkipReason` keeps its meaning — "never send to the
+   converter" — unchanged.
+2. **Reader (client, pure).** A shared header recognizer in `lib/` — bare-line form per
+   `design-song-form-from-lyrics.md` §2, plus `[Label]` brackets — over the pdf.js text
+   layer, grouped into lines by baseline. Each header → `{page, x, y, label}`, normalized to
+   0..1 from the text item's transform and the page size, `y` at the glyph top. `label` is the
+   header with its `Nx` / `xN` count stripped, as printed ("Verse 1"). The proposer (step 3)
+   reuses the same recognizer and adds the counts — one grammar, two consumers.
+   **Acceptance:** run on the 342 cached live lyric sheets — finds headers on ≥ 321, and a
+   hand-checked sample shows no lyric line misread as a header.
+3. **Entry point.** The Perform strip's `none` state, for a chart that will not get an
+   overlay (`overlaySkipReason === 'lyrics'`, or a client-side `measuredDisposition` of
+   `gated`) and whose text layer has ≥ 2 headers: "N sections found" + **Mark sections**.
+   Builder charts (`authored`) are excluded; they are born verified already.
+4. **Route — new, `POST /api/charts/sections`**, not a branch of `/api/charts/convert`. The
+   convert route's gate order is reasoned entirely around spend; threading a no-spend
+   exception through it is how a gate drifts. The new route reuses its boundaries:
+   owner-scoped (403), `source_hash` checked against the stored bytes (409), each anchor through
+   `isValidSectionAnchor`, and generate-once on `(chart_id, source_hash)` (`ON CONFLICT DO
+   NOTHING`). It writes a **draft** calibration: `sections` only, no systems or bars, no
+   roadmap. No key resolve, no VLM.
+5. **Who verifies: the owner, with the button that exists.** A sections-only draft with
+   labeled sections is `canVerify` → `verifiable`, and the strip already says "Draft — Verify
+   to perform" → Calibrate (sections tool) → Verify → `section-only`. Not born-verified: that
+   is reserved for charts whose structure the owner *authored*; this is a machine read of
+   their PDF, and the owner signs off on machine reads.
+
+### 4.2 Open-ended directions
+
 **Requirement — open-ended directions stay in place (Graham, 2026-10-27).** Charts carry
 lines like "A7sus4 vamp until signaled change" or "free-form solo over chorus until done",
 the same family as a `—— 8 bars ——` shorthand note. The proposer keeps them **verbatim,
 in place, inside their section**: not suppressed, not ignored, and not translated into a bar
-count. Whether that is a section note, an open-length span, or a cue on a bar is a question
-for the proposer's design against `RoadmapSpec` (which has no open-length span today); the
-rule is that the musician's words survive onto the roadmap.
+count.
 
-**Build order inside the track:** anchors first (own PR), proposer second (folds into the
-lyrics design rather than a parallel one).
+Today this **cannot be represented**: `RoadmapSection` (`lib/roadmap-spec.ts:28`) has no note
+field and requires a positive finite `bars`, and `design-song-form-from-lyrics.md` §8 decision 1
+discards all text except headers. So the proposer is **not** one build PR. It needs a design
+amendment first, to that doc, which (a) splits "lyrics" (discarded — §3's reasoning holds)
+from "performance directions" (kept, verbatim), and (b) picks the `RoadmapSpec`
+representation — a section note, an open-length section, or both — with its
+`validateRoadmapSpec` and renderer consequences. Only then a build PR.
+
+**Build order inside the track:** anchors (own PR) → proposer design amendment (docs PR) →
+proposer build (own PR).
 
 ## 5. Later — a clean chart *from* a scan (formerly "Track B" of 2026-08-27)
 
@@ -153,15 +215,17 @@ for any track above.
 data, and it is the track Graham can judge with an informed opinion; notation is the one he
 reads least. Scans drop to the end until better examples exist.
 
-1. **#207 + #208** placeholder PDFs — merged (`85d369b`, `8808b1e`). Advisory only: a suspected
-   placeholder changes the Perform line's words and removes no action ("when in doubt, ask").
-2. **Track B anchors** — one PR: `[Verse]`/`[Chorus]` tag positions → section anchors →
-   section-only seek with no calibration.
-3. **Track B proposer** — one PR: tags + chord lines → seeded `RoadmapSpec` the owner refines
-   in the builder. Builds on `design-song-form-from-lyrics.md` rather than a parallel design.
-4. **Track A** grids — one PR. Small and independent.
+1. **Remove the #207/#208 placeholder advisory** — one PR. The setlist is the placeholder:
+   a song with a title and key and no chart is already fully represented there (Graham,
+   2026-10-27). Prod held exactly one placeholder PDF; it was deleted 2026-10-27, and the 17
+   in the corpus were a bandmate's local swipe set, never uploaded.
+2. **Track B anchors** — one PR, §4.1: section headers → draft sections-only calibration →
+   owner Verify → section-only seek.
+3. **Track B proposer** — design amendment (docs PR), then build (own PR), §4.2.
+4. **Track A** grids — one PR, including the `'grid'` boundary change (§2).
 5. **Track C** scans — **demoted**: nothing starts until Graham has better real examples; then
-   a spike PR (scan set + scoring harness), then build.
+   a spike PR (scan set + scoring harness), then build, including the scan-aware review path
+   (§3).
 6. **Later** — spike only.
 
 Each PR: browser drive before Codex (canvas work is invisible to jsdom — #184's blank strip).
@@ -174,3 +238,7 @@ Each PR: browser drive before Codex (canvas work is invisible to jsdom — #184'
    three grids and the notation corpus.
 3. **Section anchors without bars:** yes, worth shipping on their own. "It certainly is for
    me — a non-reader." Seeking by section is the non-reader's way around a chart.
+4. **Anchors on charts filed `lyrics`:** yes. The never-gates block the AI call, not a
+   spend-free header read (§4.1).
+5. **Placeholder PDFs:** not a chart concept at all — the setlist already carries title and
+   key. Delete them, and remove the #207/#208 advisory (§6 step 1).
