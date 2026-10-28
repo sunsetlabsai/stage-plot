@@ -128,6 +128,14 @@ seeking on sections instead.
    which the owner refines in the builder. This is the bridge between "hacks" reading chord
    sheets and readers reading notation: both end on one roadmap.
 
+**Requirement — open-ended directions stay in place (Graham, 2026-10-27).** Charts carry
+lines like "A7sus4 vamp until signaled change" or "free-form solo over chorus until done",
+the same family as a `—— 8 bars ——` shorthand note. The proposer keeps them **verbatim,
+in place, inside their section**: not suppressed, not ignored, and not translated into a bar
+count. Whether that is a section note, an open-length span, or a cue on a bar is a question
+for the proposer's design against `RoadmapSpec` (which has no open-length span today); the
+rule is that the musician's words survive onto the roadmap.
+
 **Build order inside the track:** anchors first (own PR), proposer second (folds into the
 lyrics design rather than a parallel one).
 
