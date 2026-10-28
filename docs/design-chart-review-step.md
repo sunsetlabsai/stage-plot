@@ -328,6 +328,11 @@ system at a time, per §The interaction.
   line where this band is refuses with its own copy (`unreadable`, "We couldn't read the
   barlines on this line…"), never as "0 barlines", which was false while reading, and the
   refusal screen has no Back. *(Found by the 2026-10-27 mockup diff.)*
+  ⚠ **An unreadable line gets no pad** *(found by the 2026-10-27 browser drive)*. On a
+  `not-notation` page (a chord chart: no staves, so the engine finds zero lines) every count
+  refuses, so offering 2–6 only asked for a number to say no to. "No — let me count" goes
+  straight to that refusal, and a read that lands empty while the pad is showing replaces it.
+  The VLM-built overlay and "Yes, N bars" are unaffected.
 - **Built vs the approved interactive mockup** (artifact "ShowRunr — chunk C3 review sheet",
   2026-09-08). Everything else matches screen for screen.
   1. No per-option source tag ("measured" / "printed" / "current"). Only a printed-implied

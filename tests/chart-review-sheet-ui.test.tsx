@@ -269,6 +269,25 @@ describe('ChartReviewSheet — a stale pick can never index a list that moved', 
 });
 
 describe('ChartReviewSheet — the words the owner actually sees', () => {
+  // A one-bar line is real (a header row, a final hold). Found by the 2026-10-27 drive.
+  it('a single bar is "1 bar", on the ask and on the keep', () => {
+    render(
+      <ChartReviewSheet
+        {...props({
+          flagged: false, queueTotal: null, queueIndex: null,
+          candidates: [{ xs: [1], sources: ['current'] }],
+          onProposeCount: vi.fn(() => okCount([1])),
+          countChoices: [1, 2, 3],
+        })}
+      />,
+    );
+    expect(screen.getByText('Yes, 1 bar')).toBeTruthy();
+    fireEvent.click(screen.getByText('No — let me count'));
+    fireEvent.click(screen.getByText('1'));
+    expect(screen.getByText(/what 1 bar gives you/)).toBeTruthy();
+    expect(screen.queryByText(/1 bars/)).toBeNull();
+  });
+
   // ★ THE BAN IS ENFORCED ON THE COMPONENT, NOT JUST THE COPY HELPERS (Codex L2, #184).
   // The old vocabulary test covered `surplusWarning`/`refusalMessage` only, so the
   // component's own literals went unchecked — and the UI test above it asserted the wrong
@@ -419,22 +438,37 @@ describe('ChartReviewSheet — a count before the page has been read', () => {
     expect(onProposeCount).toHaveBeenCalledWith(4);
   });
 
-  it('a page that could not be read says so, rather than claiming it saw no barlines', () => {
+  // A page with no line where this band is (every `not-notation` chord chart — the engine
+  // finds zero staves there) can refuse EVERY count. Offering the pad anyway made the owner
+  // pick a number only to be told no, whatever they picked (found by the 2026-10-27 drive).
+  it('★ a page that could not be read skips the pad and hands off — no number to be refused', () => {
     const onOpenCalibrate = vi.fn();
+    const onProposeCount = vi.fn((): CountOutcome => ({ kind: 'refused', reason: 'unreadable', available: 0 }));
     render(
-      <ChartReviewSheet
-        {...props({
-          countReadiness: 'unreadable',
-          onOpenCalibrate,
-          onProposeCount: vi.fn((): CountOutcome => ({ kind: 'refused', reason: 'unreadable', available: 0 })),
-        })}
-      />,
+      <ChartReviewSheet {...props({ countReadiness: 'unreadable', onOpenCalibrate, onProposeCount })} />,
     );
     fireEvent.click(screen.getByText('None of these'));
-    fireEvent.click(screen.getByText('5'));
+    expect(screen.queryByText('How many bars?')).toBeNull();
     expect(screen.getByText(/couldn't read/)).toBeTruthy();
     expect(screen.queryByText(/0 barlines/)).toBeNull();
+    expect(onProposeCount).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText('Set them by hand'));
-    expect(onOpenCalibrate).toHaveBeenCalledWith(5); // the count is still carried over
+    expect(onOpenCalibrate).toHaveBeenCalledWith(null); // no count was ever chosen
+  });
+
+  it('a read that lands empty while the pad is showing replaces the pad with the hand-off', () => {
+    const onDismiss = vi.fn();
+    const onConfirm = vi.fn();
+    const { rerender } = render(
+      <ChartReviewSheet {...props({ countReadiness: 'reading', onDismiss, onConfirm })} />,
+    );
+    fireEvent.click(screen.getByText('None of these'));
+    expect(screen.getByText('How many bars?')).toBeTruthy();
+    rerender(<ChartReviewSheet {...props({ countReadiness: 'unreadable', onDismiss, onConfirm })} />);
+    expect(screen.queryByText('How many bars?')).toBeNull();
+    expect(screen.getByText(/couldn't read/)).toBeTruthy();
+    fireEvent.click(screen.getByText('Skip this line'));
+    expect(onDismiss).toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

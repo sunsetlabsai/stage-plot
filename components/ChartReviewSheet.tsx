@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import type { Candidate, CountOutcome, CountReadiness } from '@/lib/chart-review-sheet';
+import type { Candidate, CountOutcome, CountReadiness, RefusalReason } from '@/lib/chart-review-sheet';
 import { candidateNote, refusalMessage, surplusWarning } from '@/lib/chart-review-sheet';
 
 // ── The chart review sheet (docs/design-chart-review-step.md §C3) ────────────
@@ -164,7 +164,7 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
                 <span className="block flex-1 min-w-0">{renderStrip(c.xs, 'proposed', 'mini')}</span>
                 <span className="shrink-0 text-right">
                   <span className="block tabular-nums">
-                    {single ? `Yes, ${c.xs.length} bars` : `${c.xs.length} bars`}
+                    {single ? `Yes, ${bars(c.xs.length)}` : bars(c.xs.length)}
                   </span>
                   {note ? <span className="block text-[10px] text-zinc-400">{note}</span> : null}
                 </span>
@@ -214,8 +214,30 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
     );
   }
 
+  // ── refusal: hand off rather than invent ──
+  const refusal = (reason: RefusalReason, available: number) => (
+    <Shell heading={heading} counter="can't place it">
+      <div className="mb-1">{renderStrip(null)}</div>
+      <p className="mt-3 mb-3 rounded-lg border border-red-900 bg-red-950 px-3 py-2 text-xs text-red-300">
+        {refusalMessage(reason, available)}
+      </p>
+      <Actions>
+        <Btn onClick={onDismiss} kind="ghost">
+          Skip this line
+        </Btn>
+        <Btn kind="primary" onClick={() => onOpenCalibrate(count)}>
+          Set them by hand
+        </Btn>
+      </Actions>
+    </Shell>
+  );
+
   // ── the count ──
   if (step === 'count') {
+    // A read with no line here refuses EVERY count (a `not-notation` chord chart has no
+    // staves for the engine to find), so the pad would only ask for a number to say no to.
+    // Hand off straight away — including when the read lands empty with the pad showing.
+    if (countReadiness === 'unreadable') return refusal('unreadable', 0);
     return (
       <Shell heading={heading} counter="counting">
         <p className="text-sm text-zinc-400 mb-3">Count the bars you can see in this line.</p>
@@ -269,7 +291,7 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
             Back
           </Btn>
           <Btn kind="confirm" onClick={() => onConfirm(c.xs)}>
-            Keep {c.xs.length} bars
+            Keep {bars(c.xs.length)}
           </Btn>
         </Actions>
       </Shell>
@@ -281,7 +303,7 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
     const warn = surplusWarning(outcome.surplus, count);
     return (
       <Shell heading={heading} counter="check this">
-        <p className="text-sm text-zinc-400 mb-3">Here&apos;s what {count} bars gives you.</p>
+        <p className="text-sm text-zinc-400 mb-3">Here&apos;s what {bars(count)} gives you.</p>
         <div className="mb-1">{renderStrip(outcome.xs, 'proposed')}</div>
         {warn ? (
           <p className="mt-3 mb-3 rounded-lg border border-amber-900 bg-amber-950 px-3 py-2 text-xs text-amber-300">
@@ -304,28 +326,14 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
     );
   }
 
-  // ── refusal: hand off rather than invent ──
   if (step === 'refused' && outcome?.kind === 'refused') {
-    return (
-      <Shell heading={heading} counter="can't place it">
-        <div className="mb-1">{renderStrip(null)}</div>
-        <p className="mt-3 mb-3 rounded-lg border border-red-900 bg-red-950 px-3 py-2 text-xs text-red-300">
-          {refusalMessage(outcome.reason, outcome.available)}
-        </p>
-        <Actions>
-          <Btn onClick={onDismiss} kind="ghost">
-            Skip this line
-          </Btn>
-          <Btn kind="primary" onClick={() => onOpenCalibrate(count)}>
-            Set them by hand
-          </Btn>
-        </Actions>
-      </Shell>
-    );
+    return refusal(outcome.reason, outcome.available);
   }
 
   return null;
 }
+
+const bars = (n: number) => `${n} ${n === 1 ? 'bar' : 'bars'}`;
 
 // ── chrome ───────────────────────────────────────────────────────────────────
 

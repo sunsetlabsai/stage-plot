@@ -4743,7 +4743,8 @@ function ChartNavigator({
               )}
               onProposeCount={(n): CountOutcome => {
                 // The read came back without this line ⇒ refuse and hand off rather than
-                // divide the band evenly (an even split is the thing Graham ruled "worse
+                // divide the band evenly. The sheet shows no pad in that state, so this is
+                // the guard behind it (an even split is the thing Graham ruled "worse
                 // than none at all"). Still READING never reaches here: the sheet holds the
                 // pad until `countReadiness` says the read has landed.
                 if (!reviewSheet.measured || !reviewSheet.page) {
