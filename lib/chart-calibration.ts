@@ -490,6 +490,102 @@ function renumberBars(bars: Bar[], systems: System[]): Bar[] {
   return result;
 }
 
+/**
+ * Commit a split the HUMAN answered for, from the review sheet (chunk C3).
+ *
+ * The only writer of `verdict: 'confirmed'`, together with the count fallback that also
+ * lands here. Distinct from `autoDistributeBars` in three ways that all matter:
+ *
+ *  - the spans are EVIDENCED (each right edge is a barline the engine actually measured),
+ *    not an even division of the band;
+ *  - it carries `measures`, re-derived from the fresh engine output against these new
+ *    bars — this is the ONLY path by which a chart can regain multirest counts, since
+ *    the count stepper drops them and generate-once means no machine ever re-runs;
+ *  - it writes `confirmed`, not `edited`. Both are human-owned and neither is ever
+ *    flagged, but `confirmed` records that a person answered the specific question the
+ *    sheet asked, which is what makes it safe to never ask again.
+ *
+ * `xs` are normalized [0,1] page coordinates, in reading order, one per span: each is
+ * that span's RIGHT edge, with the system's own `xStart` (or the previous edge) as the
+ * left. `measures[i]` is the musical measure count for span i, defaulting to 1.
+ */
+/**
+ * Whether `confirmSystemSplit` will accept `xs` for this system: non-empty, strictly
+ * increasing, every edge inside `(xStart, xEnd]`.
+ *
+ * Exported because the review sheet must never OFFER an answer the commit will refuse.
+ * On a stored band narrower than what a fresh page read sees (every VLM-path chart, any
+ * hand-drawn band) the measured edges can fall past `xEnd`; the commit rejects them, the
+ * sheet closes anyway, and the owner's answer is dropped without a word. One predicate,
+ * used by both, means the offer and the commit cannot disagree.
+ */
+export function splitFitsSystem(system: Pick<System, 'xStart' | 'xEnd'>, xs: number[]): boolean {
+  if (xs.length === 0) return false;
+  let prev = system.xStart;
+  for (const x of xs) {
+    if (!(x > prev) || x > system.xEnd) return false;
+    prev = x;
+  }
+  return true;
+}
+
+/** Edges closer than this are the same edge. Stored and offered xs are copies, not re-reads. */
+const SAME_EDGE = 1e-6;
+
+export function confirmSystemSplit(
+  cal: ChartCalibration,
+  systemId: string,
+  xs: number[],
+  measures?: number[],
+): ChartCalibration {
+  const systems = cal.systems ?? [];
+  const system = systems.find((s) => s.id === systemId);
+  // Reject rather than repair: a silent clamp would commit a picture the owner never saw.
+  // The sheet filters its offers through the same predicate, so reaching this with a
+  // misfit means a caller bypassed it.
+  if (!system || !splitFitsSystem(system, xs)) return cal;
+
+  const otherBars = (cal.bars ?? []).filter((b) => b.systemId !== systemId);
+  const oldBars = (cal.bars ?? []).filter((b) => b.systemId === systemId);
+  const newBars: Bar[] = [];
+  let left = system.xStart;
+  for (let i = 0; i < xs.length; i++) {
+    const count = measures?.[i];
+    // ★ A bar whose edges did not move IS the same bar (Codex R3, #184). "Yes, 4 bars"
+    // changes no geometry, and minting fresh ids for it pruned every roadmap marker on the
+    // line and wiped its sections on the next Save. Keep the id and section; take a fresh
+    // multirest attribution when there is one, else keep the count it already had.
+    const same = oldBars.find(
+      (b) => Math.abs(b.xStart - left) < SAME_EDGE && Math.abs(b.xEnd - xs[i]) < SAME_EDGE,
+    );
+    const m = measures ? count : same?.measures;
+    newBars.push({
+      id: same?.id ?? crypto.randomUUID(),
+      systemId,
+      xStart: left,
+      xEnd: xs[i],
+      absNumber: 0, // placeholder — renumber below
+      sectionId: same?.sectionId ?? null,
+      ...(m !== undefined && m > 1 ? { measures: m } : {}),
+    });
+    left = xs[i];
+  }
+
+  const nextSystems = systems.map((s) =>
+    s.id === systemId ? withoutConfidence({ ...s, verdict: 'confirmed' as const }) : s,
+  );
+  const nextBars = renumberBars([...otherBars, ...newBars], nextSystems);
+  return {
+    ...cal,
+    status: 'draft',
+    systems: nextSystems,
+    bars: nextBars,
+    // Same cascade as autoDistributeBars: bars that moved are gone, so roadmap markers
+    // that referenced them can no longer bind. Kept bars keep theirs.
+    roadmap: pruneRoadmap(cal.roadmap, new Set(nextBars.map((b) => b.id))),
+  };
+}
+
 // Distribute `count` even bars across a system's width. Replaces any existing
 // bars for this system. Global renumber. sectionId left null (assignment
 // deferred). Resets to draft.

@@ -3,6 +3,7 @@ import type { Chart } from './types';
 import { getCachedChartBlob, versionedChartUrl, cacheChart } from './chart-cache';
 import { sniffPdf } from './chart-converter';
 import { hashPdfBytes } from './chart-calibration';
+import { sharedRender } from './render-lock';
 
 // Lazy-init pdf.js to avoid SSR issues
 let pdfjsLib: typeof import('pdfjs-dist') | null = null;
@@ -229,6 +230,9 @@ export async function loadPdfDoc(
 // Only one render per canvas at a time. Cancel previous if a new one starts.
 
 let activeRenderTask: RenderTask | null = null;
+/** Bumped per `renderPage` call: a call that waited on the render lock and has since been
+ *  superseded must not paint its (now stale) page over the newer one. */
+let renderGen = 0;
 
 export async function renderPage(
   doc: PDFDocumentProxy,
@@ -236,6 +240,7 @@ export async function renderPage(
   canvas: HTMLCanvasElement,
 ): Promise<void> {
   if (pageNum < 1 || pageNum > doc.numPages) return;
+  const gen = ++renderGen;
 
   // Cancel any in-flight render on this canvas
   if (activeRenderTask) {
@@ -244,6 +249,7 @@ export async function renderPage(
   }
 
   const page = await doc.getPage(pageNum);
+  if (gen !== renderGen) return;
   const dpr = window.devicePixelRatio || 1;
 
   const container = canvas.parentElement;
@@ -258,21 +264,25 @@ export async function renderPage(
 
   const scaledViewport = page.getViewport({ scale });
 
-  canvas.width = scaledViewport.width;
-  canvas.height = scaledViewport.height;
-  canvas.style.width = `${scaledViewport.width / dpr}px`;
-  canvas.style.height = `${scaledViewport.height / dpr}px`;
+  await sharedRender(async () => {
+    // Superseded while waiting out a measurement — the newer call owns the canvas.
+    if (gen !== renderGen) return;
+    canvas.width = scaledViewport.width;
+    canvas.height = scaledViewport.height;
+    canvas.style.width = `${scaledViewport.width / dpr}px`;
+    canvas.style.height = `${scaledViewport.height / dpr}px`;
 
-  const task = page.render({ canvas, viewport: scaledViewport });
-  activeRenderTask = task;
+    const task = page.render({ canvas, viewport: scaledViewport });
+    activeRenderTask = task;
 
-  try {
-    await task.promise;
-  } catch {
-    // Render was cancelled — expected during fast navigation
-  } finally {
-    if (activeRenderTask === task) activeRenderTask = null;
-  }
+    try {
+      await task.promise;
+    } catch {
+      // Render was cancelled — expected during fast navigation
+    } finally {
+      if (activeRenderTask === task) activeRenderTask = null;
+    }
+  });
 }
 
 // Render a page to a fresh, detached canvas at an EXPLICIT scale. Unlike
@@ -286,18 +296,22 @@ export async function renderPageOffscreen(
   scale: number,
 ): Promise<HTMLCanvasElement | null> {
   if (pageNum < 1 || pageNum > doc.numPages) return null;
-  const page = await doc.getPage(pageNum);
-  const viewport = page.getViewport({ scale });
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.ceil(viewport.width));
-  canvas.height = Math.max(1, Math.ceil(viewport.height));
-  const task: RenderTask = page.render({ canvas, viewport });
+  // ⚠ `doc.getPage` used to sit OUTSIDE the try (Codex L1, #184), so a rejection from it —
+  // a destroyed worker during teardown is the ordinary way to get one — escaped as an
+  // unhandled promise rejection instead of the documented `null`. Every caller already
+  // treats null as "no raster"; nothing wanted the throw.
   try {
-    await task.promise;
+    const page = await doc.getPage(pageNum);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.ceil(viewport.width));
+    canvas.height = Math.max(1, Math.ceil(viewport.height));
+    // Shared render lock: never across a measurement's Path2D swap (lib/render-lock.ts).
+    await sharedRender(() => page.render({ canvas, viewport }).promise);
+    return canvas;
   } catch {
     return null;
   }
-  return canvas;
 }
 
 export function destroyAllDocs() {

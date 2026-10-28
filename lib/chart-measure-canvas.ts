@@ -25,6 +25,7 @@
 
 import type { PDFPageProxy } from 'pdfjs-dist';
 import type { MeasuredSegment } from './chart-measure';
+import { exclusiveRender } from './render-lock';
 
 /**
  * ★ LOAD-BEARING, and not a rendering-quality knob.
@@ -418,15 +419,14 @@ function makeRecordingContext(
  * Render one page through the recording shim and return its page-space geometry.
  *
  * Swaps `globalThis.Path2D` for the duration of the render and restores it afterwards,
- * so this must not run concurrently with another render on the same page — callers
- * measure pages in sequence.
+ * so no other pdf.js render may run across it. The swap holds `exclusiveRender`; every
+ * other render site holds `sharedRender` (lib/render-lock.ts) — the review sheet's strip
+ * rasterized during a measurement and painted blank paper until it did.
  */
 export async function extractPageGeometry(
   page: PDFPageProxy,
   scale: number = RENDER_SCALE,
 ): Promise<PageGeometry> {
-  const Native = globalThis.Path2D;
-  const Recording = createRecordingPath2D(Native);
   const viewport = page.getViewport({ scale });
   const state: RecordState = {
     segments: [],
@@ -442,24 +442,30 @@ export async function extractPageGeometry(
   const raw = canvas.getContext('2d', { alpha: false });
   if (!raw) return { segments: [], opaque: {}, warnings: ['no-2d-context'] };
 
-  globalThis.Path2D = Recording as unknown as typeof Path2D;
-  try {
-    // ★ `canvas` MUST be null. It defaults to `canvasContext.canvas`, and a truthy
-    // canvas makes pdf.js re-derive the context from it — silently discarding the proxy
-    // and recording nothing at all. pdf.js's own types spell this out: "If the context
-    // must absolutely be used to render the page, the canvas must be null."
-    await page.render({
-      canvasContext: makeRecordingContext(raw, Native, state),
-      canvas: null,
-      viewport,
-    }).promise;
-  } finally {
-    globalThis.Path2D = Native;
-    // Release the backing store rather than waiting for GC — at RENDER_SCALE a US
-    // Letter page is ~4.4M pixels and a library sweep measures many pages in a row.
-    canvas.width = 0;
-    canvas.height = 0;
-  }
+  return exclusiveRender(async () => {
+    // Read the native class INSIDE the lock: outside it, a measurement queued behind
+    // another would capture that one's recording class and "restore" it for good.
+    const Native = globalThis.Path2D;
+    const Recording = createRecordingPath2D(Native);
+    globalThis.Path2D = Recording as unknown as typeof Path2D;
+    try {
+      // ★ `canvas` MUST be null. It defaults to `canvasContext.canvas`, and a truthy
+      // canvas makes pdf.js re-derive the context from it — silently discarding the proxy
+      // and recording nothing at all. pdf.js's own types spell this out: "If the context
+      // must absolutely be used to render the page, the canvas must be null."
+      await page.render({
+        canvasContext: makeRecordingContext(raw, Native, state),
+        canvas: null,
+        viewport,
+      }).promise;
+    } finally {
+      globalThis.Path2D = Native;
+      // Release the backing store rather than waiting for GC — at RENDER_SCALE a US
+      // Letter page is ~4.4M pixels and a library sweep measures many pages in a row.
+      canvas.width = 0;
+      canvas.height = 0;
+    }
 
-  return { segments: state.segments, opaque: state.opaque, warnings: [...state.warnings] };
+    return { segments: state.segments, opaque: state.opaque, warnings: [...state.warnings] };
+  });
 }

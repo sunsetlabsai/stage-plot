@@ -125,16 +125,31 @@ Line 7 of 12 — this line didn't check out
 ┌──────────────────────────────────┐
 │  [rendered system strip]         │
 └──────────────────────────────────┘
-Which split looks right?
+Which one looks right?
   (•) ┃····┃····┃····┃····┃   4 bars
   ( ) ┃···┃···┃···┃···┃···┃  5 bars
   ( ) None of these
 ```
 
+*(Wording amended during the C3 build: this asked "Which **split** looks right?" until Codex
+L1/L2 on #184. `split` is what the code calls it; the principle here is pick the PICTURE, and
+a person who cannot read notation cannot be asked which implementation noun looks right. The
+question is the only thing that changed — the shape of the screen is as drawn.)*
+
 - The strip is a pdf.js raster crop of the system's band (geometry already known from
   staff detection). Candidates: **measured**, **VLM**, and **printed-number-implied**
   splits, deduplicated — two agreeing sources show as one option. Never more than three.
-- Tap one → that split is applied and the system becomes `confirmed`.
+  ⚠ **The VLM candidate turned out not to be constructible** *(measured during the C3
+  build)*: the converter persists exactly ONE split per system, so on a VLM-path chart the
+  stored split **is** the VLM's and arrives as the `current` candidate. There is no second
+  opinion written down anywhere to offer beside it. The real set is therefore stored /
+  printed-implied / measured, and `CandidateSource` carries no `'vlm'` member —
+  see `lib/chart-review-sheet.ts`.
+- Tap one → that split is applied and the system becomes `confirmed`. ⚠ Amended during the
+  C3 build: where there is more than one candidate, tapping SELECTS and the split is shown
+  back at full size before it writes. An option-sized picture is enough to tell two
+  candidates apart and not enough to commit a permanent, never-machine-overwritten answer
+  on. A single candidate is already on screen full size, so it commits directly.
 - "None of these" → **"How many bars do you count in this line?"** N is defined as
   **visible barline-delimited spans** — exactly what a non-reader counts by eye — and
   never played or written measures: a multirest is one span, a pickup bar changes
@@ -194,7 +209,7 @@ unopenable. So the sheet gains the owner-initiated entry point above and is buil
 **Why this is the non-punting shape.** The failure mode that actually reaches a band is
 not the engine flagging itself — it is the engine being **confident and wrong**, which the
 owner discovers at rehearsal. Today their only recourse is calibrate mode plus per-barline
-dragging, which this doc itself calls the deep fallback. "Which split looks right? / none
+dragging, which this doc itself calls the deep fallback. "Which one looks right? / none
 of these → how many bars do you count?" is strictly better for a non-reader, and routing
 the owner to it makes every path here exercisable on all 87 charts today rather than on a
 case we have never seen.
@@ -287,10 +302,62 @@ system at a time, per §The interaction.
   `yTop`/`yBottom` clips ledger lines and chord symbols. The strip needs vertical padding
   outward — the opposite of what snap does when it crops inward.
 - **Candidates**, deduplicated, never more than three: the stored split; the
-  printed-number-implied split where `expectedSpans` exists and disagrees; the VLM split
-  where the chart took the VLM path. Identical splits collapse to one option.
+  printed-number-implied split where `expectedSpans` exists and disagrees; the freshly
+  measured split. Identical splits collapse to one option. **Every option carries a
+  picture of itself** — a count alone cannot distinguish two different 4-bar geometries,
+  which is exactly the disagreement the picker exists to resolve.
+  ⚠ The **VLM** candidate this section originally listed third is not constructible; see
+  §The interaction for why the stored split subsumes it.
+  ★ The printed-implied one is the load-bearing member: `verdict: 'uncertain'` is assigned
+  precisely when `expectedSpans` disagrees with the measured span count
+  (`chart-measure.ts:612`), so on the system the sheet exists for, stored and measured are
+  the SAME wrong picture and the printed count is the only disagreeing evidence there is.
+  Where `resegment` cannot support that count the option is simply not offered — a
+  disagreement does not entitle us to a picture.
+  ⚠ **An option the commit would refuse is never offered** *(found in the 2026-10-27
+  self-review)*. `confirmSystemSplit` rejects any edge outside the stored band, and on a
+  band narrower than the fresh read (every VLM-path chart, any hand-drawn band) the
+  measured edges can fall past `xEnd`. The sheet used to offer that option anyway, close on
+  "Keep", and write nothing. Offer and commit now share `splitFitsSystem`, and a count the
+  band cannot hold refuses as `out-of-staff`.
 - **"None of these" → "How many bars do you count in this line?"** N is visible
   barline-delimited spans, per §The interaction.
+- **The count waits for the page read.** Opening the sheet re-reads one page, and the sheet
+  shows before that read lands (picking a candidate works off the stored bars). Until it
+  lands the count pad is disabled with "Reading this page…". A read that fails or finds no
+  line where this band is refuses with its own copy (`unreadable`, "We couldn't read the
+  barlines on this line…"), never as "0 barlines", which was false while reading, and the
+  refusal screen has no Back. *(Found by the 2026-10-27 mockup diff.)*
+  ⚠ **An unreadable line gets no pad** *(found by the 2026-10-27 browser drive)*. On a
+  `not-notation` page (a chord chart: no staves, so the engine finds zero lines) every count
+  refuses, so offering 2–6 only asked for a number to say no to. "No — let me count" goes
+  straight to that refusal, and a read that lands empty while the pad is showing replaces it.
+  The VLM-built overlay and "Yes, N bars" are unaffected.
+  ⚠ **Nothing commits before its picture is on screen** *(Codex R3)*. The strip paints from
+  an async raster and can fail to blank, so "Use this" (single option) and "Keep" are
+  disabled until that screen's own strip reports it drew that split; a strip that cannot
+  draw says so and leaves only the way out. Each screen mounts its own strip, so a paint
+  from a screen the owner has left cannot unlock the one now showing.
+  ⚠ **Confirming keeps bars that did not move** *(Codex R3)*. A bar whose edges match the
+  answer keeps its id, section and roadmap markers; only bars that moved are new (and
+  their markers pruned, as before). "Yes, N bars" used to mint fresh ids for an unchanged
+  line and silently drop its markers and sections on the next Save.
+- **Built vs the approved interactive mockup** (artifact "ShowRunr — chunk C3 review sheet",
+  2026-09-08). Everything else matches screen for screen.
+  1. No per-option source tag ("measured" / "printed" / "current"). Only a printed-implied
+     option gets a line, in plain words ("Matches the numbers printed on your chart"),
+     because that is the only source a non-reader can check against the paper. *(Flagged to
+     Graham 2026-09-09.)*
+  2. Confirm-before-write is for multi-candidate picks only. See §The interaction. *(Flagged
+     2026-09-09.)*
+  3. No post-confirm "Saved / N lines still need a look / Next line" screen: confirm closes
+     the sheet. "Saved" would be false, because the answer joins the calibrate draft and
+     persists only on Save draft / Verify & save, like every calibrate edit. The flag queue
+     is walked with the existing review controls. *(Accepted as built, Graham 2026-10-27.)*
+  4. Tapping a count goes straight to its preview; there is no separate "Show me". The
+     preview already offers "Change count". *(Accepted as built, Graham 2026-10-27.)*
+  5. No caption row under the strip ("page 2 · tap a picture"). The sheet sits over the
+     calibrate canvas, which already shows the page.
 
 ### C4 — what an answer writes
 
