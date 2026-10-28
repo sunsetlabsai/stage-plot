@@ -62,7 +62,9 @@ mode or a uniform band roadmap — so conversion becomes a capability, not a ref
   call, not clean up after it): `role = 'lyrics'` (measured 2026-09-02: 342/342 lyrics
   PDFs in the live library have zero detectable staves), `source_spec IS NOT NULL`
   (builder-generated charts — the spec already is ground truth), and a zero-staves
-  classifier as automatic backstop for mislabeled uploads.
+  classifier as automatic backstop for mislabeled uploads. *(Amended 2026-10-27, Graham: these
+  gates block the AI call only. A spend-free read of section headers from the text layer is
+  not gated — `design-common-roadmap.md` §4.1.)*
 - Eager conversion also creates **review debt** — uncertain-badges on charts nobody will
   conduct — which is the second reason to gate, independent of cost.
 - `design-chart-review-step.md`'s entry point is amended in the same PR (offer follows
