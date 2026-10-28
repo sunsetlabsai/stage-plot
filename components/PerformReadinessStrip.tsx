@@ -57,10 +57,6 @@ export interface PerformReadinessStripProps {
   skipReason: OverlaySkipReason | null;
   convertState: ConvertState; // only meaningful under readiness `none`
   onBuildOverlay: () => void;
-  // The PDF looks like a title page and nothing else (lib/chart-placeholder.ts). ADVISORY:
-  // it changes the idle line's words; Build overlay and Calibrate are never removed.
-  // Optional so callers that never check (and older tests) read as "not a placeholder".
-  placeholder?: boolean;
 }
 
 // One CTA per line, always. A second button here would compete with the header's
@@ -91,7 +87,6 @@ function lineFor(
   calibratable: boolean,
   skipReason: OverlaySkipReason | null,
   convertState: ConvertState,
-  placeholder: boolean,
 ): Line | null {
   switch (view.phase) {
     case 'loading':
@@ -110,7 +105,7 @@ function lineFor(
             : "This chart's stored overlay is corrupt.",
       };
     case 'ready':
-      return readyLine(view.readiness, calibratable, skipReason, convertState, placeholder);
+      return readyLine(view.readiness, calibratable, skipReason, convertState);
   }
 }
 
@@ -119,7 +114,6 @@ function readyLine(
   calibratable: boolean,
   skipReason: OverlaySkipReason | null,
   convertState: ConvertState,
-  placeholder: boolean,
 ): Line | null {
   switch (readiness.state) {
     case 'bar-ready':
@@ -161,15 +155,7 @@ function readyLine(
         case 'key_rejected':
           return { text: CHART_KEY_COPY.convert[convertState], cta: { kind: 'settings', label: 'Open Settings' } };
         case 'idle':
-          // A suspected placeholder only changes the WORDS. The detector guesses and a
-          // human tells a non-chart at a glance, so the action stays (Graham 2026-10-27,
-          // "when in doubt, ask"; Codex R4 #207: a one-bar notation chart matched).
-          return placeholder
-            ? {
-                text: "This PDF looks like a title page — there's no chart on it. If it is a chart, build its overlay.",
-                cta: { kind: 'build', label: 'Build overlay' },
-              }
-            : { text: 'No overlay for these bytes.', cta: { kind: 'build', label: 'Build overlay' } };
+          return { text: 'No overlay for these bytes.', cta: { kind: 'build', label: 'Build overlay' } };
       }
     case 'verifiable':
       return calibratable
@@ -195,9 +181,8 @@ export default function PerformReadinessStrip({
   skipReason,
   convertState,
   onBuildOverlay,
-  placeholder = false,
 }: PerformReadinessStripProps) {
-  const line = lineFor(view, calibratable, skipReason, convertState, placeholder);
+  const line = lineFor(view, calibratable, skipReason, convertState);
   if (!line) return null;
   const cta = line.cta;
 

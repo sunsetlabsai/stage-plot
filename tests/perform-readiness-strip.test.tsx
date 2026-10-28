@@ -263,29 +263,3 @@ describe('PerformReadinessStrip — key states (UAT S15)', () => {
     expect(screen.queryByRole('button', { name: /try again|build overlay/i })).toBeNull();
   });
 });
-
-// ── A placeholder PDF: advise, never remove (Graham 2026-10-27, "when in doubt, ask") ──
-// Codex R4 (#207): a one-bar notation chart ("Song / Verse / Am", one 5-line staff) matched
-// the placeholder rule, and hiding Build overlay hid an overlay the engine CAN build. The
-// match is a guess; the human decides. So the line advises and the action stays.
-describe('PerformReadinessStrip — suspected placeholder PDF', () => {
-  it('★ says it looks like a title page AND keeps Build overlay', () => {
-    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: true })} />);
-    expect(screen.getByText(/looks like a title page/i)).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Build overlay' })).toBeTruthy();
-  });
-  it('a row-level gate still wins (its own line and Calibrate)', () => {
-    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: true, skipReason: 'lyrics' })} />);
-    expect(screen.queryByText(/looks like a title page/i)).toBeNull();
-    expect(screen.getByRole('button', { name: 'Calibrate' })).toBeTruthy();
-  });
-  it('after a build attempt, the build outcome speaks, not the guess', () => {
-    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: true, convertState: 'gated' })} />);
-    expect(screen.queryByText(/looks like a title page/i)).toBeNull();
-  });
-  it('a real chart without an overlay is unchanged', () => {
-    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: false })} />);
-    expect(screen.getByText('No overlay for these bytes.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Build overlay' })).toBeTruthy();
-  });
-});
