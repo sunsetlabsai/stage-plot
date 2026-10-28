@@ -45,7 +45,7 @@ segment / operator survey of the 25 charts it cannot measure:
 
 ## 2. Track A — ruled chord grids: measure them like staves
 
-**Why first:** smallest change, reuses the whole measured pipeline (systems → bars →
+**Why (third in order):** smallest change, reuses the whole measured pipeline (systems → bars →
 calibration → review sheet), and it makes the C3 count fallback work on exactly the chart the
 2026-10-27 drive used (Shine On).
 
@@ -77,8 +77,10 @@ never runs when staves exist).
 
 ## 3. Track C — scans: pixels for geometry, the model for meaning
 
-**Why second:** Graham expects scans to be a real share of uploads, and they are where
-calibration labour is worst today. (Track letters follow the doc's history; order is A, C, B.)
+**Demoted (2026-10-27):** nothing here starts until Graham has better real scan examples.
+Scans are still expected to be a real share of uploads and are where calibration labour is
+worst, so the design stays; only its place in line moves. (Track letters follow the doc's
+history; order is B, A, C — §6.)
 
 **The lever.** For vector charts, overlays got good when measurement took GEOMETRY away from
 the vision model and left it SEMANTICS (section names, roadmap marks). Scans get the same
@@ -112,8 +114,10 @@ many bars?" flow vector charts have.
 
 ## 4. Track B — chords over lyrics: structure, plus section anchors
 
-**Why last:** lowest weight (the corpus share is not representative), and it does not reduce
-calibration on bar geometry — these sheets have no barlines.
+**Why first (revised 2026-10-27):** the data exists, and it is the format Graham reads and can
+judge — the feedback loop on a proposed roadmap is his own. It does not reduce bar-geometry
+calibration (these sheets have no barlines); it removes the need for it on these charts by
+seeking on sections instead.
 
 **What it can do.** Two things, both from text the PDF already carries:
 1. **Section anchors for free.** The y position of each `[Verse]` / `[Chorus]` tag is real page
@@ -137,21 +141,26 @@ for any track above.
 
 ## 6. Sequencing and PRs
 
+**Revised by Graham after reading the spec (2026-10-27):** lyrics → roadmap first. We have the
+data, and it is the track Graham can judge with an informed opinion; notation is the one he
+reads least. Scans drop to the end until better examples exist.
+
 1. **#207** placeholder PDFs — in review.
-2. **Track A** grids — one PR. Small.
-3. **Track B anchors** — one PR. Moved ahead of scans: Graham confirmed section-only seek is
-   worth shipping alone, and Track C is blocked on the scan set.
-4. **Track C** scans — spike PR (scan set + scoring harness, no product change) once the set
-   arrives, then build PR.
-5. **Track B proposer** — folds into `design-song-form-from-lyrics.md`.
+2. **Track B anchors** — one PR: `[Verse]`/`[Chorus]` tag positions → section anchors →
+   section-only seek with no calibration.
+3. **Track B proposer** — one PR: tags + chord lines → seeded `RoadmapSpec` the owner refines
+   in the builder. Builds on `design-song-form-from-lyrics.md` rather than a parallel design.
+4. **Track A** grids — one PR. Small and independent.
+5. **Track C** scans — **demoted**: nothing starts until Graham has better real examples; then
+   a spike PR (scan set + scoring harness), then build.
 6. **Later** — spike only.
 
 Each PR: browser drive before Codex (canvas work is invisible to jsdom — #184's blank strip).
 
 ## 7. Graham's answers (2026-10-27)
 
-1. **Scan set:** Graham will ask friends to share real scans. Not available yet, so Track C's
-   spike waits on it; nothing in Track C starts until the set exists.
+1. **Scan set:** Graham will ask friends to share real scans. Track C is demoted to last and
+   waits on better examples.
 2. **Grid row minimum:** accept a 2-barline row, confirmed by the build's measurement on the
    three grids and the notation corpus.
 3. **Section anchors without bars:** yes, worth shipping on their own. "It certainly is for
