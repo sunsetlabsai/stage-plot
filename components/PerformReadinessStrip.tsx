@@ -3,6 +3,7 @@
 import type { PerformReadiness, PerformReadinessView } from '@/lib/chart-calibration';
 import type { OverlaySkipReason } from '@/lib/chart-converter';
 import { CHART_KEY_COPY, SETTINGS_HREF } from '@/lib/chart-key-copy';
+import { MIN_HEADERS_TO_OFFER } from '@/lib/chart-section-headers';
 
 // ── Perform readiness: the can't-Perform/Conduct strip (presentational) ───────
 //
@@ -34,6 +35,12 @@ export type CalTool = 'sections' | 'bars' | 'roadmap'; // matches page.tsx calTo
 // Not 'error': "Try again" cannot help, and Settings can.
 export type ConvertState = 'idle' | 'running' | 'error' | 'gated' | 'no_key' | 'key_rejected';
 
+// Track B anchors (docs/design-common-roadmap.md §4.1 step 3): a chart that will never get
+// an overlay — a lyrics sheet, or one the measurement gated — but whose text layer carries
+// printed section headers is offered "Mark sections" instead of a bare Calibrate. The
+// write is a DRAFT; the owner still checks it and taps Verify (the `verifiable` line).
+export type MarkSectionsState = 'idle' | 'running' | 'error';
+
 export interface PerformReadinessStripProps {
   view: PerformReadinessView;
   // NOT isOwner: calibratable = isOwner && has a calibrationChartId. A Drive-chart
@@ -57,6 +64,11 @@ export interface PerformReadinessStripProps {
   skipReason: OverlaySkipReason | null;
   convertState: ConvertState; // only meaningful under readiness `none`
   onBuildOverlay: () => void;
+  // How many section headers the chart's text layer carries (0 when not read). Below
+  // MIN_HEADERS_TO_OFFER the strip keeps the plain hand-calibrate line.
+  headerCount: number;
+  markState: MarkSectionsState;
+  onMarkSections: () => void;
 }
 
 // One CTA per line, always. A second button here would compete with the header's
@@ -64,6 +76,7 @@ export interface PerformReadinessStripProps {
 type Action =
   | { kind: 'calibrate'; label: string; tool: CalTool }
   | { kind: 'build'; label: string }
+  | { kind: 'mark'; label: string }
   | { kind: 'settings'; label: string };
 
 interface Line {
@@ -82,11 +95,41 @@ const SKIP_COPY: Record<OverlaySkipReason, string> = {
   lyrics: 'Lyrics sheet — no bars to detect. Calibrate to set up Perform.',
 };
 
+// The same two no-overlay reasons when the chart DOES carry headers: still names the gate,
+// then what was found instead. Builder charts never get here (born verified).
+const MARK_COPY: Record<'lyrics' | 'gated', (n: number) => string> = {
+  lyrics: (n) => `Lyrics sheet — no bars to detect, but ${n} sections found.`,
+  gated: (n) => `No staves found — but ${n} sections found.`,
+};
+
+// Offer Mark sections, or null to fall through to the gate's plain line.
+function markLine(
+  gate: 'lyrics' | 'gated',
+  headerCount: number,
+  markState: MarkSectionsState,
+): Line | null {
+  if (headerCount < MIN_HEADERS_TO_OFFER) return null;
+  switch (markState) {
+    case 'running':
+      return { text: 'Marking sections…' };
+    case 'error':
+      return { text: "Couldn't mark the sections.", cta: { kind: 'mark', label: 'Try again' } };
+    case 'idle':
+      return { text: MARK_COPY[gate](headerCount), cta: { kind: 'mark', label: 'Mark sections' } };
+  }
+}
+
+interface MarkProps {
+  headerCount: number;
+  markState: MarkSectionsState;
+}
+
 function lineFor(
   view: PerformReadinessView,
   calibratable: boolean,
   skipReason: OverlaySkipReason | null,
   convertState: ConvertState,
+  mark: MarkProps,
 ): Line | null {
   switch (view.phase) {
     case 'loading':
@@ -105,7 +148,7 @@ function lineFor(
             : "This chart's stored overlay is corrupt.",
       };
     case 'ready':
-      return readyLine(view.readiness, calibratable, skipReason, convertState);
+      return readyLine(view.readiness, calibratable, skipReason, convertState, mark);
   }
 }
 
@@ -114,6 +157,7 @@ function readyLine(
   calibratable: boolean,
   skipReason: OverlaySkipReason | null,
   convertState: ConvertState,
+  mark: MarkProps,
 ): Line | null {
   switch (readiness.state) {
     case 'bar-ready':
@@ -130,6 +174,10 @@ function readyLine(
       // route — we decline to spend AI, not to let the owner set it up. The line
       // states WHICH gate fired; the CTA is the same either way.
       if (skipReason) {
+        if (skipReason === 'lyrics') {
+          const m = markLine('lyrics', mark.headerCount, mark.markState);
+          if (m) return m;
+        }
         return { text: SKIP_COPY[skipReason], cta: { kind: 'calibrate', label: 'Calibrate', tool: 'sections' } };
       }
       switch (convertState) {
@@ -142,7 +190,9 @@ function readyLine(
           // Never a dead end — retry is one tap, Calibrate is one tap in the
           // header. A failed build leaves the chart exactly as it was.
           return { text: "Couldn't build an overlay for this chart.", cta: { kind: 'build', label: 'Try again' } };
-        case 'gated':
+        case 'gated': {
+          const m = markLine('gated', mark.headerCount, mark.markState);
+          if (m) return m;
           // We looked inside the PDF and found no staves anywhere, in geometry we could
           // fully observe. Names the property of THIS chart that decided it, like the
           // other two gates — and keeps the hand-calibrate route, because gated means
@@ -151,6 +201,7 @@ function readyLine(
             text: 'No staves found on any page — nothing to detect. Calibrate to set up Perform.',
             cta: { kind: 'calibrate', label: 'Calibrate', tool: 'sections' },
           };
+        }
         case 'no_key':
         case 'key_rejected':
           return { text: CHART_KEY_COPY.convert[convertState], cta: { kind: 'settings', label: 'Open Settings' } };
@@ -181,8 +232,11 @@ export default function PerformReadinessStrip({
   skipReason,
   convertState,
   onBuildOverlay,
+  headerCount,
+  markState,
+  onMarkSections,
 }: PerformReadinessStripProps) {
-  const line = lineFor(view, calibratable, skipReason, convertState);
+  const line = lineFor(view, calibratable, skipReason, convertState, { headerCount, markState });
   if (!line) return null;
   const cta = line.cta;
 
@@ -203,7 +257,9 @@ export default function PerformReadinessStrip({
         )}
         {cta && cta.kind !== 'settings' && (
           <button
-            onClick={() => (cta.kind === 'build' ? onBuildOverlay() : onCalibrate(cta.tool))}
+            onClick={() =>
+              cta.kind === 'build' ? onBuildOverlay() : cta.kind === 'mark' ? onMarkSections() : onCalibrate(cta.tool)
+            }
             className="px-3 py-1 rounded bg-zinc-800 text-zinc-200 font-bold hover:bg-zinc-700"
           >
             {cta.label}

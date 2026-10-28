@@ -20,6 +20,9 @@ function props(over: Partial<PerformReadinessStripProps> = {}): PerformReadiness
     skipReason: null,
     convertState: 'idle',
     onBuildOverlay: vi.fn(),
+    headerCount: 0,
+    markState: 'idle',
+    onMarkSections: vi.fn(),
     ...over,
   };
 }
@@ -261,5 +264,100 @@ describe('PerformReadinessStrip — key states (UAT S15)', () => {
     expect(link.getAttribute('href')).toBe('/dashboard/settings');
     expect(link.getAttribute('target')).toBe('_blank');
     expect(screen.queryByRole('button', { name: /try again|build overlay/i })).toBeNull();
+  });
+
+  // ── Track B anchors (docs/design-common-roadmap.md §4.1 step 3) ──
+  describe('Mark sections', () => {
+    const none = ready({ state: 'none' });
+
+    it('lyrics sheet with ≥2 headers → names the gate, the count, and offers Mark sections', () => {
+      const onMarkSections = vi.fn();
+      const onCalibrate = vi.fn();
+      render(
+        <PerformReadinessStrip
+          {...props({ view: none, skipReason: 'lyrics', headerCount: 7, onMarkSections, onCalibrate })}
+        />,
+      );
+      expect(screen.getByText('Lyrics sheet — no bars to detect, but 7 sections found.')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Mark sections' }));
+      expect(onMarkSections).toHaveBeenCalledTimes(1);
+      expect(onCalibrate).not.toHaveBeenCalled();
+    });
+
+    it('gated (no staves) with ≥2 headers → offers Mark sections, never Build overlay', () => {
+      const onMarkSections = vi.fn();
+      const onBuildOverlay = vi.fn();
+      render(
+        <PerformReadinessStrip
+          {...props({ view: none, convertState: 'gated', headerCount: 3, onMarkSections, onBuildOverlay })}
+        />,
+      );
+      expect(screen.getByText('No staves found — but 3 sections found.')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Mark sections' }));
+      expect(onMarkSections).toHaveBeenCalledTimes(1);
+      expect(onBuildOverlay).not.toHaveBeenCalled();
+    });
+
+    it('fewer than 2 headers → the plain gate line + Calibrate, exactly as before', () => {
+      for (const headerCount of [0, 1]) {
+        cleanup();
+        render(<PerformReadinessStrip {...props({ view: none, skipReason: 'lyrics', headerCount })} />);
+        expect(screen.getByText(/Lyrics sheet — no bars to detect. Calibrate/)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Calibrate' })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Mark sections' })).toBeNull();
+
+        cleanup();
+        render(<PerformReadinessStrip {...props({ view: none, convertState: 'gated', headerCount })} />);
+        expect(screen.getByText(/No staves found on any page/)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Mark sections' })).toBeNull();
+      }
+    });
+
+    it('a builder chart is never offered Mark sections, whatever its header count', () => {
+      render(<PerformReadinessStrip {...props({ view: none, skipReason: 'authored', headerCount: 9 })} />);
+      expect(screen.getByText(/Built in ShowRunr/)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Mark sections' })).toBeNull();
+    });
+
+    it('an ordinary chart (no gate) keeps Build overlay even with headers', () => {
+      render(<PerformReadinessStrip {...props({ view: none, headerCount: 5 })} />);
+      expect(screen.getByRole('button', { name: 'Build overlay' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Mark sections' })).toBeNull();
+    });
+
+    it('running → a progress line with no CTA', () => {
+      render(
+        <PerformReadinessStrip {...props({ view: none, skipReason: 'lyrics', headerCount: 4, markState: 'running' })} />,
+      );
+      expect(screen.getByText('Marking sections…')).toBeInTheDocument();
+      expect(screen.queryByRole('button')).toBeNull();
+    });
+
+    it('error → Try again re-fires Mark sections (not Build overlay)', () => {
+      const onMarkSections = vi.fn();
+      const onBuildOverlay = vi.fn();
+      render(
+        <PerformReadinessStrip
+          {...props({ view: none, skipReason: 'lyrics', headerCount: 4, markState: 'error', onMarkSections, onBuildOverlay })}
+        />,
+      );
+      expect(screen.getByText("Couldn't mark the sections.")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+      expect(onMarkSections).toHaveBeenCalledTimes(1);
+      expect(onBuildOverlay).not.toHaveBeenCalled();
+    });
+
+    it('a non-owner never sees it', () => {
+      const { container } = render(
+        <PerformReadinessStrip {...props({ view: none, skipReason: 'lyrics', headerCount: 7, calibratable: false })} />,
+      );
+      expect(container).toBeEmptyDOMElement();
+    });
+
+    it('after the write: the draft reads "Verify to perform" (the owner signs off)', () => {
+      render(<PerformReadinessStrip {...props({ view: ready({ state: 'verifiable' }), skipReason: 'lyrics', headerCount: 7 })} />);
+      expect(screen.getByText('Draft — Verify to perform.')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Mark sections' })).toBeNull();
+    });
   });
 });

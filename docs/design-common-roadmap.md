@@ -1,6 +1,6 @@
 # Every chart reaches a common roadmap (design)
 
-**Status:** design only. Nothing built. Build gated on Graham's explicit GO, one track per PR.
+**Status:** Track B anchors (§4.1) built — `lib/chart-section-headers.ts`, `POST /api/charts/sections`, the strip's Mark sections. Everything else is design only; build gated on Graham's explicit GO, one track per PR.
 **Tracks:** backlog #204 ("chord charts get a usable count / structure path"), widened on
 2026-10-27 to cover every kind of uploaded chart.
 

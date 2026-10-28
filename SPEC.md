@@ -392,6 +392,10 @@ its setlist and charts keep working on that device with no signal.
     - If the PDF has no staves on any page and the drawing was fully readable, the strip shows "No staves found on any page…" with no retry (`convert/route.ts:167`).
     - The server always calls the AI for section labels. It keeps the measured bars only when the AI found no roadmap; otherwise it keeps the AI's estimated bars (`convert/route.ts:223-227`).
     - The insert never overwrites (`ON CONFLICT DO NOTHING`, `:238-260`). `exists` is not treated as a failure: the client refetches the overlay for its own hash (`lib/chart-upload.ts:81-85`).
+24. **Mark sections** (`docs/design-common-roadmap.md` §4.1). A chart that will never get an overlay — role `lyrics`, or a PDF the measurement found no staves in — whose text layer prints ≥ 2 section headers on lines of their own (`INTRO 4X`, `VERSE 1 8X`, `CHORUS x2`, `[Verse 1]`; grammar in `lib/chart-section-headers.ts`) shows "Lyrics sheet — no bars to detect, but N sections found." (or "No staves found — but N sections found.") with **Mark sections** in place of Calibrate. Builder charts are never offered it.
+    - The headers are read in the browser from the PDF already on screen. No AI call and no key: the never-gates block AI spend, not this read.
+    - Mark sections POSTs them to `/api/charts/sections`, which is owner-scoped (403), checks the hash against the stored file (409; the client clears both caches and retries once, as for Build overlay), validates every anchor (all or nothing, 400), and inserts a **draft**, sections-only calibration with `ON CONFLICT DO NOTHING`.
+    - The strip then reads "Draft — Verify to perform." The owner checks the marks in Calibrate and verifies; after that the chart is `section-only` (tap a section to seek).
 24. Convert limits: 15 MB, PDF-only, 50 s AI timeout inside a 60 s route. Any failure returns a typed reason and writes nothing (`chart-converter.ts:17`, `chart-vision.ts:7`, `convert/route.ts:25,126-204`).
 25. Review queue (calibrate toolbar): "⚑ N to review ‹ ›" steps through flagged items. "✓ Reviewed" appears only once a flagged draft has been cleared (`P:4205-4231`). It never blocks Verify.
     - A section or roadmap marker is flagged when its AI confidence is below 0.8, or the marker is in a resolve error.
@@ -525,7 +529,7 @@ The saved chart can be re-opened and edited later.
 - Orphaned-PDF garbage collection (no GC job exists; failed/replaced objects linger). — builder §Save
 - Bundled embedded font (renderer uses StandardFonts Helvetica instead). — builder Open Q1
 - Pickup/anacrusis measure numbering. — line-measure §1
-- Entire song-form-from-lyrics pipeline (no lyrics parser, no `timeSigSource`, no proposal record). — song-form
+- Song-form-from-lyrics proposer (the header recognizer exists, for Mark sections only; no form proposer, no `timeSigSource`, no proposal record). — song-form
 - Issue #173 chord-entry discoverability on touch/empty charts (see Discrepancies).
 
 ## 6. Conductor (one device leads, everyone follows) + the cloud relay
