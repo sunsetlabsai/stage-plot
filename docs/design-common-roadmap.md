@@ -44,7 +44,7 @@ the count under one rule: a text line that is exactly a section word — intro, 
 pre-chorus, chorus, bridge, solo, outro, out, tag, ending, interlude, break, breakdown, vamp,
 refrain, hook, instrumental, coda, turnaround — with an optional number, `Nx`/`xN`, and
 colon; ≥ 2 such lines per PDF. A broader matcher finds more (Codex: 330).)* **Re-measured by
-the anchors build (2026-10-27), with the shipped rule in `lib/chart-section-headers.ts`: 330 of
+the anchors build (2026-10-27), with the shipped rule in `lib/chart-section-headers.ts`: 332 of
 342** — see §4.1 step 2.
 
 **Caveats, stated so they are not forgotten:**
@@ -184,16 +184,25 @@ gate (`route.ts:167`) before any row is written. So:
    reuses the same recognizer and adds the counts — one grammar, two consumers.
    **Acceptance:** run on the 342 cached live lyric sheets — finds headers on ≥ 321, and a
    hand-checked sample shows no lyric line misread as a header.
-   **Result (2026-10-27, `scripts/chart-section-headers-acceptance.ts`): 330/342, 2,407
-   headers, all 56 distinct labels section names.** The run forced three rules: (a) split a
-   line at column gutters (two-column sheets put a left header on a right lyric's baseline;
-   without this it was 142/342); (b) a bare header starts with a capital (all 3 lowercase hits
-   were a lyric's last word wrapped onto its own line, "…shake it / out"); (c) skip text at
-   ≥ 1.5× the page's median size (the song "Breakdown" read its own title as a section).
-   The 12 misses: 6 medley index sheets with no headers, and 6 whose headers carry notes the
-   strict grammar refuses — mashup prefixes (`JUICE VERSE 8X`), unknown counts (`INTRO ?X`,
-   `VERSE 1 X`), annotations (`VERSE 2 9X (8THS)`, `CHORUS 24X ?`). Those 6 still get the
-   plain Calibrate line.
+   **Result (2026-10-27, `scripts/chart-section-headers-acceptance.ts`): 332/342, 2,626
+   headers, all 32 distinct labels section names; every header line round-trips to its
+   printed text (label + count), except the deliberate blank-count case (`VERSE 1 X`,
+   `INTRO ?X` → count unknown).** The run and the browser drive forced these rules:
+   (a) a baseline groups runs within 0.15 glyph-heights, and a line splits at gutters wider
+   than 6 — two-column sheets put a header on the other column's lyric baseline (without
+   this, 142/342); (b) a bare header starts with a capital (all 3 lowercase hits were a
+   lyric's last word wrapped onto its own line, "…shake it / out"); (c) skip text at ≥ 1.5×
+   the page's median size (the song "Breakdown" read its own title as a section); (d) a
+   two-digit count is a count — `VERSE 16X` is a 16-bar verse, not verse 1 × 6 (caught by
+   the drive, invisible in a label survey); (e) two section words make one label
+   (`CHORUS INSTRUMENTAL`, `INTRO VAMP`). The 10 misses: 6 medley index sheets with no
+   headers, and 4 whose headers carry what the strict grammar refuses — mashup prefixes
+   (`JUICE VERSE 8X`), annotations (`VERSE 2 9X (8THS)`, `VERSE 16X + 4 ?`). Those 4 still
+   get the plain Calibrate line. Instrument-led labels (`GUITAR VAMP 4X`) are not headers
+   under this grammar.
+   **Known, not new:** sections play in `sectionsInOrder` order (page → top → left), the
+   app's rule for every section, hand-placed included. On a two-column sheet that
+   interleaves the columns, so "next section" jumps across. Tapping a mark seeks correctly.
 3. **Entry point.** The Perform strip's `none` state, for a chart that will not get an
    overlay (`overlaySkipReason === 'lyrics'`, or a client-side `measuredDisposition` of
    `gated`) and whose text layer has ≥ 2 headers: "N sections found" + **Mark sections**.

@@ -15,6 +15,16 @@ describe('parseHeaderLine — matches', () => {
   it.each([
     ['INTRO 4X', 'INTRO', { bars: 4 }],
     ['VERSE 1 8X', 'VERSE 1', { bars: 8 }],
+    // Measured on a live sheet: a two-digit count is a count, never ordinal + count.
+    ['VERSE 16X', 'VERSE', { bars: 16 }],
+    ['CHORUS 12X', 'CHORUS', { bars: 12 }],
+    ['VERSE 2 16X', 'VERSE 2', { bars: 16 }],
+    ['VERSE 12', 'VERSE 12', null],
+    ['VERSE 1 X', 'VERSE 1', null],
+    ['INTRO ?X', 'INTRO', null],
+    ['CHORUS X', 'CHORUS', null],
+    ['CHORUS INSTRUMENTAL 8X', 'CHORUS INSTRUMENTAL', { bars: 8 }],
+    ['Intro Vamp', 'Intro Vamp', null],
     ['Verse 8x', 'Verse', { bars: 8 }],
     ['CHORUS x2', 'CHORUS', { plays: 2 }],
     ['Chorus X 2', 'Chorus', { plays: 2 }],
@@ -52,6 +62,8 @@ describe('parseHeaderLine — refusals (a lyric line is never a header)', () => 
     'the chorus of the night',
     'Verse of my heart',
     'Chorus G C D',
+    'Chorus girl',
+    'VERSE 1X2',
     'INTRO 4X G C D G',
     'Outside',
     'Breaking down',
@@ -125,6 +137,12 @@ describe('findSectionHeaders', () => {
     // Measured on the live library: "VERSE 1" at x=36 next to a lyric at x=320, baselines 2pt apart.
     const items = [item('VERSE 1', 36, 689.25, 11.5, 50.5), item('Like thoughts inside a dream', 320, 687, 14, 180)];
     expect(findSectionHeaders([page(items)]).map((h) => h.label)).toEqual(['VERSE 1']);
+  });
+
+  it('two columns, narrow gutter: a header 2.7pt off a lyric baseline, 34pt to its right', () => {
+    // Measured on a live sheet ("1979"): too narrow for the gutter split; the baseline decides.
+    const items = [item('.. Double cross the vacant and the bored', 36, 275, 14, 250), item('OUTRO VERSE 8X', 320, 272.3, 11.5, 106)];
+    expect(findSectionHeaders([page(items)]).map((h) => h.label)).toEqual(['OUTRO VERSE']);
   });
 
   it('two columns: a right-column header beside a left-column lyric', () => {

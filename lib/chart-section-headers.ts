@@ -49,10 +49,16 @@ const SECTION_WORDS = [
   'turnaround',
 ];
 const WORD = `(?:(?:pre|post)[- ]?)?(?:${SECTION_WORDS.join('|')})`;
-// Label = section word + optional ordinal number ("Verse 2"). Count = `8x` (bars) or
-// `x2` (plays), optionally parenthesised. ×  is accepted for x.
-const LABEL = `(${WORD}(?:\\s+\\d{1,2})?)`;
-const COUNT = `\\(?\\s*(?:(\\d{1,2})\\s*[x×]|[x×]\\s*(\\d{1,2}))\\s*\\)?`;
+// Label = one or two section words ("Chorus Instrumental", "Intro Vamp") + optional ordinal
+// number ("Verse 2"). Count = `8x` (bars) or `x2` (plays), optionally parenthesised; × is
+// accepted for x.
+// ⚠ The ordinal may not run into an x or another digit: "VERSE 16X" is a 16-bar verse, not
+// verse 1 with a count of 6 — the browser drive caught that reading on a live sheet.
+const LABEL = `(${WORD}(?:\\s+${WORD})?(?:\\s+\\d{1,2}(?![\\dx×]))?)`;
+// Bars are written tight ("8X" — every one of the 1,000+ on the live library); a lone "X" or
+// "?X" is a count the author left blank, so "VERSE 1 X" is verse 1, count unknown — not a
+// one-bar verse.
+const COUNT = `\\(?\\s*(?:(\\d{1,2})[x×]|[x×]\\s*(\\d{1,2})|\\??[x×])\\s*\\)?`;
 const BARE_RE = new RegExp(`^${LABEL}\\s*:?\\s*(?:${COUNT})?\\s*:?$`, 'i');
 // Bracketed: the content must OPEN with a section word; trailing words are part of the
 // label as printed ("[Outro (Fade out)]"). A bracketed lyric aside ("[Spoken]") is not one.
@@ -89,12 +95,14 @@ function fontHeight(it: HeaderTextItem): number {
   return Math.hypot(c, d) || 1;
 }
 
-// Group items into lines by baseline. Two items share a line when their baselines sit
-// within half a glyph height — tight enough that a lyric line and the chord line printed
-// just above it stay separate (they are a full line apart), loose enough to absorb the
-// sub-point jitter between runs of one line.
+// Group items into lines by baseline. Runs of one printed line share a baseline to within
+// a fraction of a point; a two-column sheet puts a header and the OTHER column's lyric a
+// couple of points apart (measured: 2.25pt and 2.7pt on live sheets, the second with only
+// a 34pt gutter, too narrow for the gutter split below). So: within BASELINE_EMS of the
+// smaller glyph height.
 // Wider than any run of spaces between chords on one line; narrower than a column gutter.
 const COLUMN_GAP_EMS = 6;
+const BASELINE_EMS = 0.15;
 
 function linesOf(items: HeaderTextItem[]): Line[] {
   const runs = items
@@ -104,7 +112,7 @@ function linesOf(items: HeaderTextItem[]): Line[] {
 
   const groups: (typeof runs)[] = [];
   for (const r of runs) {
-    const g = groups.find((grp) => Math.abs(grp[0].base - r.base) <= 0.5 * Math.max(grp[0].h, r.h));
+    const g = groups.find((grp) => Math.abs(grp[0].base - r.base) <= BASELINE_EMS * Math.min(grp[0].h, r.h));
     if (g) g.push(r);
     else groups.push([r]);
   }
