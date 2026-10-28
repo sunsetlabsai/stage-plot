@@ -43,8 +43,9 @@ have a text layer. This is what makes Track B's anchors worth building first. *(
 the count under one rule: a text line that is exactly a section word — intro, verse,
 pre-chorus, chorus, bridge, solo, outro, out, tag, ending, interlude, break, breakdown, vamp,
 refrain, hook, instrumental, coda, turnaround — with an optional number, `Nx`/`xN`, and
-colon; ≥ 2 such lines per PDF. A broader matcher finds more (Codex: 330). The anchors PR
-fixes the rule and re-measures.)*
+colon; ≥ 2 such lines per PDF. A broader matcher finds more (Codex: 330).)* **Re-measured by
+the anchors build (2026-10-27), with the shipped rule in `lib/chart-section-headers.ts`: 330 of
+342** — see §4.1 step 2.
 
 **Caveats, stated so they are not forgotten:**
 - The corpus is one library. Its lyric-sheet share came from a friend's library and is **not**
@@ -183,6 +184,16 @@ gate (`route.ts:167`) before any row is written. So:
    reuses the same recognizer and adds the counts — one grammar, two consumers.
    **Acceptance:** run on the 342 cached live lyric sheets — finds headers on ≥ 321, and a
    hand-checked sample shows no lyric line misread as a header.
+   **Result (2026-10-27, `scripts/chart-section-headers-acceptance.ts`): 330/342, 2,407
+   headers, all 56 distinct labels section names.** The run forced three rules: (a) split a
+   line at column gutters (two-column sheets put a left header on a right lyric's baseline;
+   without this it was 142/342); (b) a bare header starts with a capital (all 3 lowercase hits
+   were a lyric's last word wrapped onto its own line, "…shake it / out"); (c) skip text at
+   ≥ 1.5× the page's median size (the song "Breakdown" read its own title as a section).
+   The 12 misses: 6 medley index sheets with no headers, and 6 whose headers carry notes the
+   strict grammar refuses — mashup prefixes (`JUICE VERSE 8X`), unknown counts (`INTRO ?X`,
+   `VERSE 1 X`), annotations (`VERSE 2 9X (8THS)`, `CHORUS 24X ?`). Those 6 still get the
+   plain Calibrate line.
 3. **Entry point.** The Perform strip's `none` state, for a chart that will not get an
    overlay (`overlaySkipReason === 'lyrics'`, or a client-side `measuredDisposition` of
    `gated`) and whose text layer has ≥ 2 headers: "N sections found" + **Mark sections**.

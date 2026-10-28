@@ -40,7 +40,9 @@ describe('parseHeaderLine — matches', () => {
       'ending', 'interlude', 'break', 'breakdown', 'vamp', 'refrain', 'hook',
       'instrumental', 'coda', 'turnaround',
     ]) {
-      expect(parseHeaderLine(w)?.label).toBe(w);
+      const cap = w[0].toUpperCase() + w.slice(1);
+      expect(parseHeaderLine(cap)?.label).toBe(cap);
+      expect(parseHeaderLine(w.toUpperCase())?.label).toBe(w.toUpperCase());
     }
   });
 });
@@ -57,6 +59,10 @@ describe('parseHeaderLine — refusals (a lyric line is never a header)', () => 
     'Introduction',
     '[Spoken]',
     '[x2]',
+    // A lyric's last word wrapped onto its own line (measured on the live library).
+    'out',
+    'break',
+    'chorus',
     'Key: G',
     'G  C  D',
     '',
@@ -110,8 +116,34 @@ describe('findSectionHeaders', () => {
   });
 
   it('a section word sharing its baseline with chords is NOT a header', () => {
-    const items = [item('INTRO 4X', 40, 500, 12, 48), item('G  C  D', 200, 500)];
+    // Chords a few spaces after the label — one line, not two columns.
+    const items = [item('INTRO 4X', 40, 500, 12, 48), item('G  C  D', 112, 500)];
     expect(findSectionHeaders([page(items)])).toEqual([]);
+  });
+
+  it('two columns: a left-column header beside a right-column lyric on (nearly) one baseline', () => {
+    // Measured on the live library: "VERSE 1" at x=36 next to a lyric at x=320, baselines 2pt apart.
+    const items = [item('VERSE 1', 36, 689.25, 11.5, 50.5), item('Like thoughts inside a dream', 320, 687, 14, 180)];
+    expect(findSectionHeaders([page(items)]).map((h) => h.label)).toEqual(['VERSE 1']);
+  });
+
+  it('two columns: a right-column header beside a left-column lyric', () => {
+    const items = [item('Oh, let the sun beat down', 36, 500, 14, 170), item('CHORUS', 320, 500)];
+    const [h] = findSectionHeaders([page(items)]);
+    expect(h.label).toBe('CHORUS');
+    expect(h.x).toBeCloseTo(320 / 600);
+  });
+
+  it('a song TITLED like a section ("Breakdown") is not a header', () => {
+    const items = [
+      item('Breakdown', 36, 739, 21, 95),
+      item('Tom Petty · Key A', 36, 720, 11.5, 90),
+      item('INTRO 8X', 36, 689, 11.5, 48),
+      item('Breakdown, honey, take me through the night', 36, 670, 14, 250),
+      item('VERSE 1', 36, 640, 11.5, 45),
+      item('It is alright if you love me', 36, 620, 14, 200),
+    ];
+    expect(findSectionHeaders([page(items)]).map((h) => h.label)).toEqual(['INTRO', 'VERSE 1']);
   });
 
   it('returns reading order across pages', () => {

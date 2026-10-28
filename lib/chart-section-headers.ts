@@ -62,7 +62,12 @@ const BRACKET_RE = new RegExp(`^\\[\\s*(${WORD}\\b[^\\]]*?)\\s*(?:${COUNT})?\\s*
 export function parseHeaderLine(text: string): Pick<SectionHeader, 'label' | 'count'> | null {
   const line = text.replace(/\s+/g, ' ').trim();
   if (line === '') return null;
-  const m = BARE_RE.exec(line) ?? BRACKET_RE.exec(line);
+  // A bare header must start with a capital. A lyric's last word wrapped onto a line of
+  // its own ("…shake it / out", "…take a / break") is otherwise a perfect bare header:
+  // measured on the 342 live lyric sheets, all 3 lowercase hits were wrapped lyrics and all
+  // 2,408 real headers were capitalised. Brackets are a deliberate tag; no rule needed.
+  const bare = /^[A-Z]/.test(line) ? BARE_RE.exec(line) : null;
+  const m = bare ?? BRACKET_RE.exec(line);
   if (!m) return null;
   const label = m[1].replace(/\s*:\s*$/, '').trim();
   const bars = m[2] !== undefined ? Number(m[2]) : null;
@@ -73,6 +78,7 @@ export function parseHeaderLine(text: string): Pick<SectionHeader, 'label' | 'co
 
 interface Line {
   text: string;
+  size: number; // tallest glyph height in the line, user space
   x: number; // user space, left of first item
   top: number; // user space (PDF y-up), top of the tallest glyph
 }
@@ -87,6 +93,9 @@ function fontHeight(it: HeaderTextItem): number {
 // within half a glyph height — tight enough that a lyric line and the chord line printed
 // just above it stay separate (they are a full line apart), loose enough to absorb the
 // sub-point jitter between runs of one line.
+// Wider than any run of spaces between chords on one line; narrower than a column gutter.
+const COLUMN_GAP_EMS = 6;
+
 function linesOf(items: HeaderTextItem[]): Line[] {
   const runs = items
     .filter((it) => typeof it.str === 'string' && it.str.trim() !== '' && it.transform?.length >= 6)
@@ -100,8 +109,29 @@ function linesOf(items: HeaderTextItem[]): Line[] {
     else groups.push([r]);
   }
 
-  return groups.map((g) => {
+  // Split each baseline group at column gutters. A two-column sheet prints a left-column
+  // header on the same baseline as a right-column lyric (measured on the live library:
+  // "VERSE 1" at x=36 beside "Like thoughts inside a dream" at x=320), and joining them
+  // made the header unreadable. A gutter is a horizontal gap of more than
+  // COLUMN_GAP_EMS glyph heights — far wider than the spaces between chords on a line.
+  const segments: (typeof runs)[] = [];
+  for (const g of groups) {
     g.sort((a, b) => a.x - b.x);
+    let cur: typeof runs = [];
+    let prevEnd: number | null = null;
+    for (const r of g) {
+      if (cur.length && prevEnd !== null && r.x - prevEnd > COLUMN_GAP_EMS * r.h) {
+        segments.push(cur);
+        cur = [];
+      }
+      cur.push(r);
+      const end = typeof r.it.width === 'number' ? r.x + r.it.width : r.x;
+      prevEnd = prevEnd === null ? end : Math.max(prevEnd, end);
+    }
+    if (cur.length) segments.push(cur);
+  }
+
+  return segments.map((g) => {
     let text = '';
     let prevEnd: number | null = null;
     for (const r of g) {
@@ -117,8 +147,17 @@ function linesOf(items: HeaderTextItem[]): Line[] {
       text,
       x: Math.min(...g.map((r) => r.x)),
       top: Math.max(...g.map((r) => r.base + r.h)),
+      size: Math.max(...g.map((r) => r.h)),
     };
   });
+}
+
+const TITLE_SIZE_RATIO = 1.5;
+
+function medianSize(lines: Line[]): number {
+  if (lines.length === 0) return Infinity;
+  const sizes = lines.map((l) => l.size).sort((a, b) => a - b);
+  return sizes[Math.floor(sizes.length / 2)];
 }
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
@@ -131,7 +170,13 @@ export function findSectionHeaders(pages: HeaderPage[]): SectionHeader[] {
     const w = x1 - x0;
     const h = y1 - y0;
     if (!(w > 0 && h > 0)) continue;
-    for (const line of linesOf(p.items)) {
+    const lines = linesOf(p.items);
+    const body = medianSize(lines);
+    for (const line of lines) {
+      // A title is never a header. Measured on the live library: Tom Petty's "Breakdown"
+      // prints its title at 21pt over 11.5pt headers and 14pt lyrics, and was read as a
+      // section. Headers print at or below body size; titles well above it.
+      if (line.size >= TITLE_SIZE_RATIO * body) continue;
       const parsed = parseHeaderLine(line.text);
       if (!parsed) continue;
       out.push({
