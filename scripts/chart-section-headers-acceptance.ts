@@ -41,7 +41,7 @@ async function pagesOf(file: string): Promise<HeaderPage[]> {
     const text = await page.getTextContent();
     pages.push({
       page: p,
-      view: page.view as [number, number, number, number],
+      viewport: (({ transform, width, height }) => ({ transform: [...transform], width, height }))(page.getViewport({ scale: 1 })),
       items: text.items.filter((it): it is HeaderTextItem & typeof it => 'str' in it),
     });
   }

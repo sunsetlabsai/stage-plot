@@ -40,6 +40,9 @@ describe('parseHeaderLine — matches', () => {
     ['[Pre-Verse]', 'Pre-Verse', null],
     ['[Outro (Fade out)]', 'Outro (Fade out)', null],
     ['[Chorus x2]', 'Chorus', { plays: 2 }],
+    ['[Chorus (x2)]', 'Chorus', { plays: 2 }],
+    ['[Verse 2 (soft)]', 'Verse 2 (soft)', null],
+    ['[Chorus Instrumental]', 'Chorus Instrumental', null],
   ])('%j → %j', (line, label, count) => {
     expect(parseHeaderLine(line)).toEqual({ label, count });
   });
@@ -70,6 +73,11 @@ describe('parseHeaderLine — refusals (a lyric line is never a header)', () => 
     'Hooked on a feeling',
     'Introduction',
     '[Spoken]',
+    // Codex R1: a bracketed backing vocal that merely OPENS with a section word.
+    '[Break my heart]',
+    '[Out of my mind]',
+    '[Hook me up]',
+    '[Verse of the night]',
     '[x2]',
     // A lyric's last word wrapped onto its own line (measured on the live library).
     'out',
@@ -91,9 +99,11 @@ const item = (str: string, x: number, base: number, size = 12, width?: number): 
   width: width ?? str.length * size * 0.5,
   height: size,
 });
-const page = (items: HeaderTextItem[], n = 1, view: HeaderPage['view'] = [0, 0, 600, 800]): HeaderPage => ({
+// An upright page with box `view` = [x0, y0, x1, y1]: pdf.js's scale-1 viewport for it.
+type Box = [number, number, number, number];
+const page = (items: HeaderTextItem[], n = 1, view: Box = [0, 0, 600, 800]): HeaderPage => ({
   page: n,
-  view,
+  viewport: { transform: [1, 0, 0, -1, -view[0], view[3]], width: view[2] - view[0], height: view[3] - view[1] },
   items,
 });
 
@@ -162,6 +172,82 @@ describe('findSectionHeaders', () => {
       item('It is alright if you love me', 36, 620, 14, 200),
     ];
     expect(findSectionHeaders([page(items)]).map((h) => h.label)).toEqual(['INTRO', 'VERSE 1']);
+  });
+
+  // Matrices measured from pdf.js `getViewport({ scale: 1 })` on a generated 600×800 page
+  // with each /Rotate (pdf-lib setRotation); the page box is [0, 0, 600, 800].
+  const ROTATED: Record<number, HeaderPage['viewport']> = {
+    0: { transform: [1, 0, 0, -1, 0, 800], width: 600, height: 800 },
+    90: { transform: [0, 1, 1, 0, 0, 0], width: 800, height: 600 },
+    180: { transform: [-1, 0, 0, 1, 600, 0], width: 600, height: 800 },
+    270: { transform: [0, -1, -1, 0, 800, 600], width: 800, height: 600 },
+  };
+  const rotPage = (rot: number): HeaderPage => ({
+    page: 1,
+    viewport: ROTATED[rot],
+    items: [item('INTRO 4X', 60, 700, 12, 50), item('VERSE 1', 60, 500, 12, 45)],
+  });
+
+  it.each([
+    // [rotation, INTRO drawn at, VERSE drawn at] — measured through real pdf.js rendering.
+    [0, [0.1, 0.11], [0.1, 0.36]],
+    [90, [0.875, 0.1], [0.625, 0.1]],
+    [180, [0.817, 0.875], [0.825, 0.625]],
+    [270, [0.11, 0.817], [0.36, 0.825]],
+  ])('rotation %i: marks are placed where the text is DRAWN (Codex R1)', (rot, intro, verse) => {
+    const hs = findSectionHeaders([rotPage(rot as number)]);
+    const at = (label: string) => hs.find((h) => h.label === label)!;
+    expect(at('INTRO').x).toBeCloseTo((intro as number[])[0], 2);
+    expect(at('INTRO').y).toBeCloseTo((intro as number[])[1], 2);
+    expect(at('VERSE 1').x).toBeCloseTo((verse as number[])[0], 2);
+    expect(at('VERSE 1').y).toBeCloseTo((verse as number[])[1], 2);
+  });
+
+  it.each([0, 90, 180, 270])('rotation %i never changes the READING order', (rot) => {
+    expect(findSectionHeaders([rotPage(rot)]).map((h) => h.label)).toEqual(['INTRO', 'VERSE 1']);
+  });
+
+  // A two-column page: body lines down both columns (gutter ~0.45–0.53), headers in each.
+  const twoCol = (extra: HeaderTextItem[] = []): HeaderPage =>
+    page([
+      item('Title', 36, 760, 21, 60),
+      ...Array.from({ length: 8 }, (_, i) => item('a left lyric line', 36, 690 - i * 60, 14, 220)),
+      ...Array.from({ length: 8 }, (_, i) => item('a right lyric line', 320, 700 - i * 60, 14, 220)),
+      ...extra,
+    ]);
+
+  it('two columns: reads the LEFT column top→bottom, then the right', () => {
+    const hs = findSectionHeaders([
+      twoCol([
+        item('VERSE 1', 36, 712, 11.5, 50),
+        item('CHORUS 2', 320, 690, 11.5, 60), // right column, ABOVE the left column's next header
+        item('VERSE 2', 36, 400, 11.5, 50),
+        item('BRIDGE', 320, 300, 11.5, 50),
+      ]),
+    ]);
+    expect(hs.map((h) => h.label)).toEqual(['VERSE 1', 'VERSE 2', 'CHORUS 2', 'BRIDGE']);
+  });
+
+  it('one column: plain top→bottom (no gutter, nothing reordered)', () => {
+    const items = [
+      ...Array.from({ length: 10 }, (_, i) => item('a long lyric line that spans the whole page width', 36, 690 - i * 50, 14, 520)),
+      item('VERSE 1', 36, 712, 11.5, 50),
+      item('CHORUS', 300, 560, 11.5, 50),
+      item('VERSE 2', 36, 400, 11.5, 50),
+    ];
+    expect(findSectionHeaders([page(items)]).map((h) => h.label)).toEqual(['VERSE 1', 'CHORUS', 'VERSE 2']);
+  });
+
+  it('a long artist line in the title band does not hide the gutter', () => {
+    const hs = findSectionHeaders([
+      twoCol([
+        item('Calvin Harris feat. Pharrell Williams, Katy Perry & Big Sean / Bob Marley', 36, 745, 11.5, 520),
+        item('VERSE 1', 36, 712, 11.5, 50),
+        item('CHORUS', 320, 690, 11.5, 50),
+        item('VERSE 2', 36, 400, 11.5, 50),
+      ]),
+    ]);
+    expect(hs.map((h) => h.label)).toEqual(['VERSE 1', 'VERSE 2', 'CHORUS']);
   });
 
   it('returns reading order across pages', () => {

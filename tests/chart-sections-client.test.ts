@@ -10,7 +10,7 @@ const calls: string[] = [];
 const freshDoc = {
   numPages: 1,
   getPage: async () => ({
-    view: [0, 0, 600, 800],
+    getViewport: () => ({ transform: [1, 0, 0, -1, 0, 800], width: 600, height: 800 }),
     getTextContent: async () => ({
       items: [
         { str: 'INTRO', transform: [12, 0, 0, 12, 40, 700], width: 30, height: 12 },

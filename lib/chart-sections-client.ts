@@ -17,9 +17,11 @@ export async function readSectionHeaders(doc: PDFDocumentProxy): Promise<Section
     for (let p = 1; p <= doc.numPages; p++) {
       const page = await doc.getPage(p);
       const text = await page.getTextContent();
+      // The viewport the viewer renders through (rotation included), so marks land on text.
+      const vp = page.getViewport({ scale: 1 });
       pages.push({
         page: p,
-        view: page.view as HeaderPage['view'],
+        viewport: { transform: [...vp.transform], width: vp.width, height: vp.height },
         items: text.items.filter((it): it is typeof it & HeaderTextItem => 'str' in it),
       });
     }

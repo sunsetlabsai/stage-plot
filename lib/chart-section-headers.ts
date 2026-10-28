@@ -25,10 +25,16 @@ export interface HeaderTextItem {
   height?: number; // font height in user space, when pdf.js supplies it
 }
 
-/** One page's text, with the page box (pdf.js `page.view`). */
+/**
+ * One page's text, with the viewport the page is RENDERED through (pdf.js
+ * `page.getViewport({ scale: 1 })`). Positions are normalized through that viewport, not the
+ * raw page box: the viewer renders through it (`pdf-viewer.ts`), so it is the only frame in
+ * which a mark lands on its text — including on a page with a /Rotate (Codex R1: a 90°
+ * page put a header drawn at x≈0.88 at x=0.10).
+ */
 export interface HeaderPage {
   page: number; // 1-based
-  view: [number, number, number, number]; // [x0, y0, x1, y1]
+  viewport: { transform: number[]; width: number; height: number };
   items: HeaderTextItem[];
 }
 
@@ -54,15 +60,19 @@ const WORD = `(?:(?:pre|post)[- ]?)?(?:${SECTION_WORDS.join('|')})`;
 // accepted for x.
 // ⚠ The ordinal may not run into an x or another digit: "VERSE 16X" is a 16-bar verse, not
 // verse 1 with a count of 6 — the browser drive caught that reading on a live sheet.
-const LABEL = `(${WORD}(?:\\s+${WORD})?(?:\\s+\\d{1,2}(?![\\dx×]))?)`;
+const CORE = `${WORD}(?:\\s+${WORD})?(?:\\s+\\d{1,2}(?![\\dx×]))?`;
+const LABEL = `(${CORE})`;
 // Bars are written tight ("8X" — every one of the 1,000+ on the live library); a lone "X" or
 // "?X" is a count the author left blank, so "VERSE 1 X" is verse 1, count unknown — not a
 // one-bar verse.
 const COUNT = `\\(?\\s*(?:(\\d{1,2})[x×]|[x×]\\s*(\\d{1,2})|\\??[x×])\\s*\\)?`;
 const BARE_RE = new RegExp(`^${LABEL}\\s*:?\\s*(?:${COUNT})?\\s*:?$`, 'i');
-// Bracketed: the content must OPEN with a section word; trailing words are part of the
-// label as printed ("[Outro (Fade out)]"). A bracketed lyric aside ("[Spoken]") is not one.
-const BRACKET_RE = new RegExp(`^\\[\\s*(${WORD}\\b[^\\]]*?)\\s*(?:${COUNT})?\\s*:?\\s*\\]$`, 'i');
+// Bracketed: the SAME label grammar as a bare line, plus an optional note in parentheses
+// kept as printed ("[Outro (Fade out)]"). Nothing else: a bracketed backing vocal that merely
+// opens with a section word ("[Break my heart]", Codex R1) is a lyric. A parenthesised count
+// ("(x2)") is a count, not a note.
+const NOTE = `\\((?!\\s*(?:\\d{1,2}[x×]|[x×]\\s*\\d{1,2}|\\??[x×])\\s*\\))[^)]*\\)`;
+const BRACKET_RE = new RegExp(`^\\[\\s*(${CORE}(?:\\s*${NOTE})?)\\s*(?:${COUNT})?\\s*:?\\s*\\]$`, 'i');
 
 /** Recognize one line of text. Pure; exported for the tests and the proposer. */
 export function parseHeaderLine(text: string): Pick<SectionHeader, 'label' | 'count'> | null {
@@ -86,6 +96,8 @@ interface Line {
   text: string;
   size: number; // tallest glyph height in the line, user space
   x: number; // user space, left of first item
+  xEnd: number; // user space, right of last item
+  base: number; // user space (PDF y-up), baseline
   top: number; // user space (PDF y-up), top of the tallest glyph
 }
 
@@ -104,7 +116,7 @@ function fontHeight(it: HeaderTextItem): number {
 const COLUMN_GAP_EMS = 6;
 const BASELINE_EMS = 0.15;
 
-function linesOf(items: HeaderTextItem[]): Line[] {
+function linesOf(items: HeaderTextItem[], gutterX: number | null): Line[] {
   const runs = items
     .filter((it) => typeof it.str === 'string' && it.str.trim() !== '' && it.transform?.length >= 6)
     .map((it) => ({ it, x: it.transform[4], base: it.transform[5], h: fontHeight(it) }))
@@ -128,7 +140,11 @@ function linesOf(items: HeaderTextItem[]): Line[] {
     let cur: typeof runs = [];
     let prevEnd: number | null = null;
     for (const r of g) {
-      if (cur.length && prevEnd !== null && r.x - prevEnd > COLUMN_GAP_EMS * r.h) {
+      // A detected page gutter is a hard split, however narrow the gap on this line (a
+      // header on exactly a lyric's baseline across a tight gutter); the em gap is the
+      // fallback for pages where no gutter was detected.
+      const crossesGutter = gutterX !== null && cur.length > 0 && cur[0].x < gutterX && r.x >= gutterX;
+      if (cur.length && (crossesGutter || (prevEnd !== null && r.x - prevEnd > COLUMN_GAP_EMS * r.h))) {
         segments.push(cur);
         cur = [];
       }
@@ -154,6 +170,8 @@ function linesOf(items: HeaderTextItem[]): Line[] {
     return {
       text,
       x: Math.min(...g.map((r) => r.x)),
+      xEnd: Math.max(...g.map((r) => r.x + (typeof r.it.width === 'number' ? r.it.width : 0))),
+      base: Math.min(...g.map((r) => r.base)),
       top: Math.max(...g.map((r) => r.base + r.h)),
       size: Math.max(...g.map((r) => r.h)),
     };
@@ -170,32 +188,133 @@ function medianSize(lines: Line[]): number {
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 
-/** Every header on every page, in reading order (page, then top→bottom, then left→right). */
+/** A user-space box → its rendered box, normalized 0..1 (top-left origin), any rotation. */
+function toRendered(
+  vp: HeaderPage['viewport'],
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): { left: number; top: number; right: number; bottom: number } {
+  const [a, b, c, d, e, f] = vp.transform;
+  const pts = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]].map(([x, y]) => [
+    (a * x + c * y + e) / vp.width,
+    (b * x + d * y + f) / vp.height,
+  ]);
+  return {
+    left: Math.min(...pts.map((p) => p[0])),
+    right: Math.max(...pts.map((p) => p[0])),
+    top: Math.min(...pts.map((p) => p[1])),
+    bottom: Math.max(...pts.map((p) => p[1])),
+  };
+}
+
+// The page box in user space, recovered from the viewport (its inverse maps the rendered
+// rectangle back onto the box). Reading order and columns are judged HERE — in the frame the
+// author laid the text out in — so a /Rotate changes where marks are drawn, never the order
+// the sections are read in.
+function userBox(vp: HeaderPage['viewport']): { x0: number; y0: number; w: number; h: number } | null {
+  const [a, b, c, d, e, f] = vp.transform;
+  const det = a * d - b * c;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+  const inv = ([X, Y]: number[]) => [(d * (X - e) - c * (Y - f)) / det, (-b * (X - e) + a * (Y - f)) / det];
+  const pts = [[0, 0], [vp.width, 0], [0, vp.height], [vp.width, vp.height]].map(inv);
+  const x0 = Math.min(...pts.map((q) => q[0]));
+  const y0 = Math.min(...pts.map((q) => q[1]));
+  const w = Math.max(...pts.map((q) => q[0])) - x0;
+  const h = Math.max(...pts.map((q) => q[1])) - y0;
+  return w > 0 && h > 0 ? { x0, y0, w, h } : null;
+}
+
+// Column detection (Graham, 2026-10-27: "if we can reliably detect and parse two columns, we
+// should"). Two columns keep a song to one legible phone page; the FORM still reads left
+// column top→bottom, then right — and the order headers come out in is the order the proposer
+// builds a roadmap from and the order Mark sections writes. Measured: 339 of 347 live lyric
+// pages are two-column with a clean empty gutter (right column at ~0.52); 102 of 106 notation
+// pages are not.
+//
+// A gutter is a vertical strip in the middle half of the page, at least GUTTER_MIN wide, that
+// no text run crosses, with at least GUTTER_MIN_LINES runs wholly on each side. The top
+// TITLE_BAND is ignored: a long artist line under the title can span both columns.
+const GUTTER_MIN = 0.03;
+const GUTTER_MIN_LINES = 5;
+const TITLE_BAND = 0.1;
+
+interface Span {
+  left: number; // 0..1, user space, left→right
+  right: number;
+  top: number; // 0..1, user space, top→bottom
+}
+
+function columnGutter(spans: Span[]): number | null {
+  const body = spans.filter((s) => s.top >= TITLE_BAND);
+  let best: { from: number; to: number } | null = null;
+  let run: { from: number; to: number } | null = null;
+  for (let g = 0.25; g <= 0.75 + 1e-9; g += 0.005) {
+    const clear =
+      !body.some((s) => s.left < g && s.right > g) &&
+      body.filter((s) => s.right <= g).length >= GUTTER_MIN_LINES &&
+      body.filter((s) => s.left >= g).length >= GUTTER_MIN_LINES;
+    if (clear) {
+      run = run ? { from: run.from, to: g } : { from: g, to: g };
+      if (!best || run.to - run.from > best.to - best.from) best = { ...run };
+    } else {
+      run = null;
+    }
+  }
+  return best && best.to - best.from >= GUTTER_MIN ? (best.from + best.to) / 2 : null;
+}
+
+/**
+ * Every header on every page, in READING order: page, then column (left before right, on a
+ * page with a detected gutter), then top→bottom, then left→right — all judged in the page's
+ * own layout. Positions are where the header is DRAWN (through the viewport).
+ */
 export function findSectionHeaders(pages: HeaderPage[]): SectionHeader[] {
-  const out: SectionHeader[] = [];
+  const out: (SectionHeader & { column: number; readTop: number; readLeft: number })[] = [];
   for (const p of pages) {
-    const [x0, y0, x1, y1] = p.view;
-    const w = x1 - x0;
-    const h = y1 - y0;
-    if (!(w > 0 && h > 0)) continue;
-    const lines = linesOf(p.items);
+    const vp = p.viewport;
+    if (!(vp && vp.width > 0 && vp.height > 0 && vp.transform?.length === 6)) continue;
+    const ub = userBox(vp);
+    if (!ub) continue;
+    // The gutter is judged on the raw text runs (pdf.js never emits a run across a column
+    // gutter), then lines are split at it.
+    const norm = (x: number) => (x - ub.x0) / ub.w;
+    const normTop = (y: number) => (ub.y0 + ub.h - y) / ub.h;
+    const gutter = columnGutter(
+      p.items
+        .filter((it) => typeof it.str === 'string' && it.str.trim() !== '' && it.transform?.length >= 6)
+        .map((it) => ({
+          left: norm(it.transform[4]),
+          right: norm(it.transform[4] + (typeof it.width === 'number' ? it.width : 0)),
+          top: normTop(it.transform[5] + fontHeight(it)),
+        })),
+    );
+    const lines = linesOf(p.items, gutter === null ? null : ub.x0 + gutter * ub.w);
     const body = medianSize(lines);
-    for (const line of lines) {
+    const spans: Span[] = lines.map((l) => ({ left: norm(l.x), right: norm(Math.max(l.xEnd, l.x)), top: normTop(l.top) }));
+    lines.forEach((line, i) => {
       // A title is never a header. Measured on the live library: Tom Petty's "Breakdown"
       // prints its title at 21pt over 11.5pt headers and 14pt lyrics, and was read as a
       // section. Headers print at or below body size; titles well above it.
-      if (line.size >= TITLE_SIZE_RATIO * body) continue;
+      if (line.size >= TITLE_SIZE_RATIO * body) return;
       const parsed = parseHeaderLine(line.text);
-      if (!parsed) continue;
+      if (!parsed) return;
+      const drawn = toRendered(vp, line.x, line.base, Math.max(line.xEnd, line.x), line.top);
       out.push({
         page: p.page,
-        x: clamp01((line.x - x0) / w),
-        y: clamp01((y1 - line.top) / h),
+        x: clamp01(drawn.left),
+        y: clamp01(drawn.top),
         ...parsed,
+        column: gutter !== null && spans[i].left >= gutter ? 1 : 0,
+        readTop: spans[i].top,
+        readLeft: spans[i].left,
       });
-    }
+    });
   }
-  return out.sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
+  return out
+    .sort((a, b) => a.page - b.page || a.column - b.column || a.readTop - b.readTop || a.readLeft - b.readLeft)
+    .map((h): SectionHeader => ({ page: h.page, x: h.x, y: h.y, label: h.label, count: h.count }));
 }
 
 /**
