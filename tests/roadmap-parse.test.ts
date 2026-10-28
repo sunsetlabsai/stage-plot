@@ -238,3 +238,17 @@ describe('parseGrammarDraft — L1 deterministic path (skips the model)', () => 
     });
   });
 });
+
+// ── The model is offered exactly the validator's vocabulary (#204) ───────────
+describe('SYSTEM_PROMPT quality vocabulary', () => {
+  it('★ lists every whitelisted quality, including 7sus2 / 7sus4', async () => {
+    const { SYSTEM_PROMPT } = await import('../lib/roadmap-parse');
+    const { QUALITY_WHITELIST } = await import('../lib/roadmap-spec');
+    const m = SYSTEM_PROMPT.match(/"quality"\?: <one of ([^>]*)>/);
+    expect(m).not.toBeNull();
+    const offered = JSON.parse(`[${m![1]}]`) as string[];
+    expect(new Set(offered)).toEqual(new Set(QUALITY_WHITELIST));
+    expect(offered).toContain('7sus2');
+    expect(offered).toContain('7sus4');
+  });
+});

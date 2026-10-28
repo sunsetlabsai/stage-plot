@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { validateRoadmapSpec, TIME_SIG_UNITS, type RoadmapSpec } from './roadmap-spec';
+import { validateRoadmapSpec, TIME_SIG_UNITS, QUALITY_WHITELIST, type RoadmapSpec } from './roadmap-spec';
 import {
   foldDraft,
   tallyDraft,
@@ -43,7 +43,12 @@ const MODEL = resolveAgentModel(ROADMAP_MODEL_ENV);
 // always returns a clean result rather than a platform 504 (mirrors chart-vision).
 export const PARSE_TIMEOUT_MS = 50_000;
 
-const SYSTEM_PROMPT = `You TRANSCRIBE a natural-language description of a song's structure into an AuthoringDraft JSON object. You do NOT compress, summarize, or "tidy" it — you list every bar the author described, in order. We do the compression deterministically afterward.
+// Built FROM the whitelist so the model is never offered a different vocabulary than the
+// validator accepts. A hand-copied list drifted: it lacked 7sus2, so the model had to pick
+// "sus2" and A7sus2 silently became Asus2 (#204).
+const QUALITY_ENUM = [...QUALITY_WHITELIST].map((q) => JSON.stringify(q)).join(',');
+
+export const SYSTEM_PROMPT = `You TRANSCRIBE a natural-language description of a song's structure into an AuthoringDraft JSON object. You do NOT compress, summarize, or "tidy" it — you list every bar the author described, in order. We do the compression deterministically afterward.
 
 The user message begins with a line "Song key: <KEY>". Convert EVERY chord to its Nashville scale DEGREE (an integer 1..7) relative to that key. (In key D: D=1, E=2, G=4, A=5, Bm=6m. In a minor key the tonic chord is degree 1.) Never output letter names; "degree" is always 1..7.
 
@@ -64,7 +69,7 @@ AuthoringDraft:
 
 A SPAN is a run of CONTIGUOUS bars that all share ONE identical bar pattern. "bars" is how many bars long that run is. "2 bars of D, then 2 bars of G7" → two spans: { bar:[{degree:1}], bars:2 }, { bar:[{degree:4,quality:"7"}], bars:2 }.
 
-ChordHit: { "degree": <int 1..7>, "alter"?: <-1 | 0 | 1 chromatic root shift>, "quality"?: <one of "","m","dim","aug","sus","sus2","sus4","7","maj7","m7","m7b5","dim7","6","m6">, "bass"?: <int 1..7 slash bass>, "beats"?: <int split-bar weight>, "held"?: <bool diamond/whole-note hold> }
+ChordHit: { "degree": <int 1..7>, "alter"?: <-1 | 0 | 1 chromatic root shift>, "quality"?: <one of ${QUALITY_ENUM}>, "bass"?: <int 1..7 slash bass>, "beats"?: <int split-bar weight>, "held"?: <bool diamond/whole-note hold> }
 - "bar" is ONE bar's content. One chord = whole bar → [{degree:..}]. Multiple chords in a bar = a split bar: list each ChordHit. Even division → omit "beats". Uneven split → give EVERY chord an explicit "beats" that sum to timeSig.beats.
 - ACCEPT roman numerals and chord letters in the description and EMIT numeric degrees: IV→{degree:4}, V7→{degree:5,quality:"7"}, vi→{degree:6,quality:"m"} (a lowercase roman with no other quality is minor).
 - A CHROMATIC root (a chord whose root is NOT in the key, e.g. C in key D, or written ♭VII/bVII) becomes the upper diatonic neighbor degree with "alter":-1: C in D → {degree:7,alter:-1} (♭VII); ♭III → {degree:3,alter:-1}. Honor an explicit ♯/♭ in a roman/number as written. NEVER round a chromatic root to the nearest diatonic degree without "alter". A chromatic SLASH BASS is not supported — re-voice or omit the bass.

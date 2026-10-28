@@ -403,6 +403,21 @@ describe('parseLetterChord — letter chord → degree in a key (inverse of degr
     expect(parseLetterChord('D', 'D')).toEqual({ degree: 1 });
   });
 
+  // backlog #204: A7sus2 used to degrade to Asus2 — a real chord silently becoming another.
+  it('★ keeps a 7sus chord whole (A7sus2, A7sus4 — never Asus2/Asus4)', () => {
+    expect(parseLetterChord('A7sus2', 'D')).toEqual({ degree: 5, quality: '7sus2' });
+    expect(parseLetterChord('A7sus4', 'D')).toEqual({ degree: 5, quality: '7sus4' });
+  });
+
+  it('★ a typed degree keeps its 7sus quality too (57sus4, V7sus2)', () => {
+    const q = (raw: string) => {
+      const r = parseBarInput(raw, 4);
+      return r.ok ? r.cells.map((c) => c.quality) : r;
+    };
+    expect(q('57sus4')).toEqual(['7sus4']);
+    expect(q('V7sus2')).toEqual(['7sus2']);
+  });
+
   it('carries quality (G7 → 4/7, Bm7 → 6/m7)', () => {
     expect(parseLetterChord('G7', 'D')).toEqual({ degree: 4, quality: '7' });
     expect(parseLetterChord('Bm7', 'D')).toEqual({ degree: 6, quality: 'm7' });
