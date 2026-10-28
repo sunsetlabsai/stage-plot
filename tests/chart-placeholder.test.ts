@@ -43,6 +43,16 @@ describe('chordTokens — what a placeholder lacks', () => {
     expect(chordTokens(['Blues', 'Verse: A D E A', 'Chorus: F#m D E A'])).toBe(8);
     expect(isPlaceholderCounts({ words: 11, segments: 0, images: 0, chords: 8 })).toBe(false);
   });
+  // Codex R3 (#207): bar-delimited charts write chords between pipes.
+  it('★ reads chords between barline pipes (|A|D|E|A|)', () => {
+    expect(chordTokens(['Blues', 'Verse: |A|D|E|A|', 'Chorus: |F#m|D|E|A|'])).toBe(8);
+  });
+  // Also Codex R3, and ACCEPTED as a known limit (Graham, 2026-10-27): a one-chord vamp
+  // chart reads exactly like a title + key, so it matches. That is why a match only hides
+  // Build overlay (which the server refuses for staff-less text anyway) and never Calibrate.
+  it('a one-chord vamp chart is indistinguishable from title + key (known limit)', () => {
+    expect(chordTokens(['A7sus4 vamp', 'Repeat until cue'])).toBe(1);
+  });
   it('reads Nashville numbers and slash chords too', () => {
     expect(chordTokens(['1 4 5- 1', '2m7 5/7 1△7'])).toBe(7);
     expect(chordTokens(['Bb7 Ebmaj7 F/A G#dim C#ø'])).toBe(5);

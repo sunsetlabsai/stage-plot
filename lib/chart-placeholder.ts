@@ -14,6 +14,11 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 // a real text-only chart with no ink (Codex R2, #207). A title that happens to hold a
 // chord-like word ("A Day in the Life", "9 to 5") only pushes toward "chart" — the safe way.
 //
+// KNOWN LIMIT (Codex R3; accepted by Graham 2026-10-27): no content rule can tell a one-chord
+// vamp chart ("A7sus4 vamp / Repeat until cue") from a title + key. So a match is ADVISORY:
+// it hides Build overlay — which the server already refuses for staff-less text — and says
+// so, but never hides Calibrate. A wrong match costs a misleading line, not a stuck chart.
+//
 // Segments, never path OPERATIONS: pdf.js packs a whole drawing into one `constructPath`,
 // so counting ops called a real one-staff chart a placeholder. Any path data this module
 // cannot decode counts as ink, so an unrecognised encoding errs toward "chart".
@@ -50,7 +55,8 @@ const NNS_CHORD = new RegExp(`^[#b♭♯]?[1-7]${QUAL}(?:/[1-7])?$`);
 /** Count chord-like tokens across text runs (punctuation such as "Verse:" is dropped). */
 export function chordTokens(runs: string[]): number {
   let n = 0;
-  for (const tok of runs.join(' ').split(/\s+/)) {
+  // Barline pipes separate chords too: "|A|D|E|A|" is four (Codex R3, #207).
+  for (const tok of runs.join(' ').split(/[\s|]+/)) {
     const t = tok.replace(/^[([{"']+|[)\]}"',.:;!?]+$/g, '');
     if (t && (LETTER_CHORD.test(t) || NNS_CHORD.test(t))) n++;
   }

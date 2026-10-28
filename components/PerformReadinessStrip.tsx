@@ -57,8 +57,8 @@ export interface PerformReadinessStripProps {
   skipReason: OverlaySkipReason | null;
   convertState: ConvertState; // only meaningful under readiness `none`
   onBuildOverlay: () => void;
-  // The PDF is a title page and nothing else (lib/chart-placeholder.ts). It is not a
-  // chart, so it is offered neither an overlay nor a calibration (Graham, 2026-10-27).
+  // The PDF looks like a title page and nothing else (lib/chart-placeholder.ts). No
+  // overlay is offered. The header's Calibrate stays: the match is advisory (known limit).
   // Optional so callers that never check (and older tests) read as "not a placeholder".
   placeholder?: boolean;
 }
@@ -135,7 +135,7 @@ function readyLine(
       // Not a chart at all: nothing to build or calibrate, so no CTA. Checked before
       // every gate because it is the stronger statement.
       if (placeholder) {
-        return { text: "This PDF is just a title page — there's no chart on it yet. Replace it with the chart in Manage charts." };
+        return { text: "This PDF looks like a title page — there's no chart on it. Replace it with the chart in Manage charts." };
       }
       // Gated charts (lyrics sheets, builder charts) keep the hand-calibrate
       // route — we decline to spend AI, not to let the owner set it up. The line

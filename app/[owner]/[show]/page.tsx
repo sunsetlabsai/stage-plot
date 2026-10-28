@@ -3390,7 +3390,7 @@ function ChartNavigator({
   // The Calibrate affordance (edit mode) is owner-only — the v1 source-scope
   // boundary. Drive / static charts and non-owners never see it.
   const calibratable = isOwner && !!calibrationChartId;
-  // These bytes are a title-page placeholder, not a chart: no overlay, no calibration.
+  // These bytes look like a title-page placeholder: no overlay offered (advisory match).
   const isPlaceholder = placeholderHash !== null && placeholderHash === sourceHash;
   // WHY we may not offer to build an overlay for this chart, or null if we may —
   // decided by the same predicate the convert route enforces, so the CTA and the
@@ -4371,9 +4371,9 @@ function ChartNavigator({
               for the whole load window (load start already reset to perform) makes
               "in Calibrate when a signal lands" unreachable. Conditioned on perform
               so the in-calibrate "Done" exit is never trapped. */}
-          {/* A placeholder is not a chart (Graham, 2026-10-27; Codex R1 #207): no way in
-              from the header either. The in-calibrate "Done" exit is never hidden. */}
-          {calibratable && !(calMode === 'perform' && (loading || loadError || !!calUnreadable || isPlaceholder)) && (
+          {/* Not hidden for a placeholder: that match is advisory (a one-chord vamp chart
+              reads the same), so Calibrate stays as the way through (#207 R3). */}
+          {calibratable && !(calMode === 'perform' && (loading || loadError || !!calUnreadable)) && (
             <button
               onClick={() => (calMode === 'calibrate' ? exitCalibrate() : enterCalibrate(calTool))}
               className={`px-2 py-1 rounded text-xs font-bold transition-colors ${
