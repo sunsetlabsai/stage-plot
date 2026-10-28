@@ -31,7 +31,7 @@ segment / operator survey of the 25 charts it cannot measure:
 | Kind | Count | Signal in the PDF | Reader today |
 |---|---:|---|---|
 | Engraved notation (5-line staves) | 62 | staves + barlines as vectors | **Measured** (B1/B2, 464/464 systems) |
-| Placeholder (title + key only) | 17 | ≤7 words, one filled box (≤4 inked segments), no images | **Not a chart** — #207 says so, offers nothing |
+| Placeholder (title + key only) | 17 | ≤7 words, one filled box (≤4 inked segments), no images | **Not a chart** — #207/#208 say so; the owner decides |
 | Ruled chord grid | 3 | vertical barlines in boxed rows, 7–23 grid rows | VLM estimate (weak) |
 | Chords over lyrics, `[Verse]`-style tags | 3 | 150+ words, section tags, no lines | VLM estimate, then gated (`not_notation`) |
 | Scan | 2 | images only, no text | VLM estimate (weak) |
@@ -153,7 +153,8 @@ for any track above.
 data, and it is the track Graham can judge with an informed opinion; notation is the one he
 reads least. Scans drop to the end until better examples exist.
 
-1. **#207** placeholder PDFs — in review.
+1. **#207 + #208** placeholder PDFs — merged (`85d369b`, `8808b1e`). Advisory only: a suspected
+   placeholder changes the Perform line's words and removes no action ("when in doubt, ask").
 2. **Track B anchors** — one PR: `[Verse]`/`[Chorus]` tag positions → section anchors →
    section-only seek with no calibration.
 3. **Track B proposer** — one PR: tags + chord lines → seeded `RoadmapSpec` the owner refines
