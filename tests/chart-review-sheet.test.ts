@@ -320,8 +320,45 @@ describe('confirmSystemSplit', () => {
       bars: bars([0.5, 1]),
       roadmap: [{ id: 'm1', kind: 'segno', barId: 'b1', edge: 'start' }],
     });
-    const out = confirmSystemSplit(c, 'sysA', [0.5, 1]);
+    const out = confirmSystemSplit(c, 'sysA', [0.4, 1]);
     expect(out.roadmap).toEqual([]);
+  });
+
+  // ★ "Yes, 4 bars" is the commonest answer and it changes no geometry (Codex R3, #184).
+  // Minting fresh ids for it pruned every roadmap marker on the line and wiped its
+  // section assignments, silently, on the next Save.
+  it('★ a bar whose edges did not move keeps its id, its section and its markers', () => {
+    const c = cal({
+      bars: bars([0.5, 1]).map((b) => ({ ...b, sectionId: 'secV', measures: 2 })),
+      roadmap: [{ id: 'm1', kind: 'segno', barId: 'b1', edge: 'start' }],
+    });
+    const out = confirmSystemSplit(c, 'sysA', [0.5, 1]);
+    expect(out.bars?.map((b) => b.id)).toEqual(['b1', 'b2']);
+    expect(out.bars?.map((b) => b.sectionId)).toEqual(['secV', 'secV']);
+    expect(out.bars?.map((b) => b.measures)).toEqual([2, 2]); // no fresh attribution ⇒ kept
+    expect(out.roadmap).toEqual(c.roadmap);
+    expect(out.systems?.[0].verdict).toBe('confirmed');
+  });
+
+  it('keeps only the bars that did not move; a moved bar is a new bar', () => {
+    const c = cal({
+      bars: bars([0.25, 0.5, 1]),
+      roadmap: [
+        { id: 'm1', kind: 'segno', barId: 'b1', edge: 'start' },
+        { id: 'm3', kind: 'coda', barId: 'b3', edge: 'start' },
+      ],
+    });
+    const out = confirmSystemSplit(c, 'sysA', [0.25, 0.6, 1]);
+    expect(out.bars?.[0].id).toBe('b1');
+    expect(out.bars?.slice(1).map((b) => b.id)).not.toContain('b2');
+    expect(out.bars?.slice(1).map((b) => b.id)).not.toContain('b3');
+    expect(out.roadmap?.map((m) => m.id)).toEqual(['m1']);
+  });
+
+  it('a fresh attribution overrides a kept bar\'s old count', () => {
+    const c = cal({ bars: bars([0.5, 1]).map((b) => ({ ...b, measures: 3 })) });
+    const out = confirmSystemSplit(c, 'sysA', [0.5, 1], [1, 4]);
+    expect(out.bars?.map((b) => b.measures)).toEqual([undefined, 4]);
   });
 });
 

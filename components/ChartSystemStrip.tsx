@@ -62,7 +62,15 @@ export interface ChartSystemStripProps {
   tone?: 'proposed' | 'confirmed';
   /** `mini` is the in-option preview: same crop, lighter frame, thinner marks. */
   variant?: 'full' | 'mini';
+  /**
+   * Whether the picture is actually on screen: `pending` from the moment the inputs change
+   * (the old picture is wiped), `painted` once this split is drawn, `failed` if it never
+   * will be. The sheet gates every commit on `painted` (Codex R3, #184).
+   */
+  onPaint?: (status: PaintStatus) => void;
 }
+
+export type PaintStatus = 'pending' | 'painted' | 'failed';
 
 export function ChartSystemStrip({
   doc,
@@ -70,8 +78,15 @@ export function ChartSystemStrip({
   xs,
   tone = 'proposed',
   variant = 'full',
+  onPaint,
 }: ChartSystemStripProps) {
   const ref = useRef<HTMLCanvasElement | null>(null);
+  // Held in a ref so a caller's inline callback does not re-run the draw every render.
+  // Synced in an effect declared BEFORE the draw, so the draw always reports to the latest.
+  const onPaintRef = useRef(onPaint);
+  useEffect(() => {
+    onPaintRef.current = onPaint;
+  });
 
   useEffect(() => {
     // ⚠ Teardown SUPPRESSES the paint; it does not cancel the render (Codex L1, #184
@@ -81,13 +96,22 @@ export function ChartSystemStrip({
     // render its siblings are still awaiting. The work is bounded — one page — and it is
     // already in flight before any of them mount.
     let cancelled = false;
+    const report = (st: PaintStatus) => {
+      if (!cancelled) onPaintRef.current?.(st);
+    };
     (async () => {
       const canvas = ref.current;
-      if (!canvas || !doc) return;
+      if (!canvas) return;
+      // Wipe first. A reused canvas still holds the PREVIOUS split until the new one is
+      // drawn, and a commit button beside it would be confirming the wrong picture.
+      canvas.width = 0;
+      report('pending');
+      if (!doc) return report('failed');
       // The SYSTEM's own page, not whatever the viewer is showing — the band rect is
       // normalized to that page (same reason the snap path renders it this way).
       const src = await sharedPageRaster(doc, system.page);
-      if (cancelled || !src) return;
+      if (cancelled) return;
+      if (!src) return report('failed');
 
       // ⚠ The stored band is the STAFF'S OWN EXTENT, with no padding — it is the top and
       // bottom staff lines and nothing else. Cropping at exactly yTop/yBottom slices off
@@ -102,12 +126,15 @@ export function ChartSystemStrip({
       const x1 = Math.min(src.width, Math.ceil(system.xEnd * src.width));
       const w = x1 - x0;
       const h = y1 - y0;
-      if (w <= 0 || h <= 0) return;
+      if (w <= 0 || h <= 0) return report('failed');
 
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext('2d');
-      if (!ctx) return;
+      if (!ctx) {
+        canvas.width = 0;
+        return report('failed');
+      }
 
       // ⚠ pdf.js paints onto a TRANSPARENT canvas. Blitting the crop straight onto an
       // unpainted destination gives dark ink floating on nothing, which reads as a
@@ -142,6 +169,7 @@ export function ChartSystemStrip({
           ctx.stroke();
         }
       }
+      report('painted');
     })();
     return () => {
       cancelled = true;

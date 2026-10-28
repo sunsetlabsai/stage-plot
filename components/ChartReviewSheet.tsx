@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import type { Candidate, CountOutcome, CountReadiness, RefusalReason } from '@/lib/chart-review-sheet';
 import { candidateNote, refusalMessage, surplusWarning } from '@/lib/chart-review-sheet';
+import type { PaintStatus } from '@/components/ChartSystemStrip';
 
 // ── The chart review sheet (docs/design-chart-review-step.md §C3) ────────────
 //
@@ -50,6 +51,8 @@ export interface ChartReviewSheetProps {
     xs: number[] | null,
     tone?: 'proposed' | 'confirmed',
     variant?: 'full' | 'mini',
+    /** The full strip reports whether its picture is on screen; commits wait for it. */
+    onPaint?: (status: PaintStatus) => void,
   ) => React.ReactNode;
   /** Counts offered on the pad. The page picks the range around what it measured. */
   countChoices: number[];
@@ -88,6 +91,8 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
   const [picked, setPicked] = useState<number | null>(null);
   const [count, setCount] = useState<number | null>(null);
   const [outcome, setOutcome] = useState<CountOutcome | null>(null);
+  const [screen, setScreen] = useState(0);
+  const [paint, setPaint] = useState<{ token: string; status: PaintStatus } | null>(null);
 
   // ★ `picked` IS AN INDEX INTO A LIST THIS COMPONENT DOES NOT OWN (Codex R2, #184).
   // The parent rebuilds `candidates` every render — the async measurement lands and adds
@@ -107,6 +112,34 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
   const step: SheetStep =
     rawStep === 'preview' && count === null && !pickedCandidate ? 'choose' : rawStep;
 
+  // ★ NOTHING COMMITS BEFORE ITS PICTURE IS ON SCREEN (Codex R3, #184). The strip paints
+  // from an async raster, and fails to blank; until it reports `painted` the owner may be
+  // looking at nothing, or at the previous screen's split on a reused canvas, while a
+  // "N bars" label invites the tap. So every commit waits for THIS screen's strip to say
+  // it drew THIS split. `screen` advances on every step change, which makes a paint from a
+  // strip that has since been left or remounted unable to unlock the one now showing.
+  function go(next: SheetStep) {
+    setScreen((n) => n + 1);
+    setStep(next);
+  }
+  const token = (xs: number[] | null) => `${screen}:${step}:${xs ? xs.join(',') : 'none'}`;
+  const isPainted = (xs: number[] | null) => paint?.token === token(xs) && paint.status === 'painted';
+  // Keyed on the token, so each screen mounts its OWN strip: a reused one with an
+  // unchanged split would never re-report, and would leave its commit locked for good.
+  const fullStrip = (xs: number[] | null, tone?: 'proposed' | 'confirmed') => {
+    const t = token(xs);
+    return (
+      <Fragment key={t}>{renderStrip(xs, tone, 'full', (status) => setPaint({ token: t, status }))}</Fragment>
+    );
+  };
+  const drawFailed = (xs: number[] | null) =>
+    paint?.token === token(xs) && paint.status === 'failed' ? (
+      <p className="mt-3 rounded-lg border border-red-900 bg-red-950 px-3 py-2 text-xs text-red-300">
+        We couldn&apos;t draw this line, so we won&apos;t ask you to confirm it. Setting the bars by
+        hand still works.
+      </p>
+    ) : null;
+
   const heading = `Line ${lineNumber}`;
   const counter =
     queueTotal !== null && queueIndex !== null
@@ -121,7 +154,7 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
     setCount(n);
     const res = onProposeCount(n);
     setOutcome(res);
-    setStep(res.kind === 'ok' ? 'preview' : 'refused');
+    go(res.kind === 'ok' ? 'preview' : 'refused');
   }
 
   // ── the ask ──
@@ -140,7 +173,8 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
         <p className={`text-sm mb-3 ${flagged ? 'text-amber-400' : 'text-zinc-400'}`}>
           {flagged ? "This line didn't check out." : 'Nothing flagged this line — you did.'}
         </p>
-        <div className="mb-1">{renderStrip(shown)}</div>
+        <div className="mb-1">{fullStrip(shown)}</div>
+        {drawFailed(shown)}
         <p className="text-sm font-semibold mt-3 mb-2">
           {single ? 'Does this look right?' : 'Which one looks right?'}
         </p>
@@ -176,7 +210,7 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
             aria-pressed={picked === -1}
             onClick={() => {
               setPicked(-1);
-              setStep('count');
+              go('count');
             }}
             className="flex items-center gap-3 w-full text-left rounded-lg px-3 py-2 text-sm border border-zinc-700 bg-zinc-800 hover:bg-zinc-700"
           >
@@ -190,7 +224,7 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
           </Btn>
           <Btn
             kind="primary"
-            disabled={!pickedCandidate}
+            disabled={!pickedCandidate || (single && !isPainted(shown))}
             onClick={() => {
               if (!pickedCandidate) return;
               // ★ One candidate ⇒ the big strip above IS that candidate, already at full
@@ -198,13 +232,13 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
               // ⇒ go through the preview anyway. The whole finding was that the owner
               // could commit a picture they had only seen as a label; a mini beside a
               // radio narrows that gap but does not close it at option size.
-              if (single) return onConfirm(pickedCandidate.xs);
+              if (single) return isPainted(shown) ? onConfirm(pickedCandidate.xs) : undefined;
               // Drop any count answered earlier in this sheet, so the preview below
               // routes on `picked` and cannot read a stale `outcome` from a count the
               // owner has since backed out of.
               setCount(null);
               setOutcome(null);
-              setStep('preview');
+              go('preview');
             }}
           >
             Use this
@@ -268,7 +302,7 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
           ))}
         </div>
         <Actions>
-          <Btn onClick={() => setStep('choose')} kind="ghost">
+          <Btn onClick={() => go('choose')} kind="ghost">
             Back
           </Btn>
         </Actions>
@@ -282,15 +316,20 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
     return (
       <Shell heading={heading} counter="check this">
         <p className="text-sm text-zinc-400 mb-3">Here&apos;s what you picked.</p>
-        <div className="mb-1">{renderStrip(c.xs, 'proposed')}</div>
+        <div className="mb-1">{fullStrip(c.xs, 'proposed')}</div>
+        {drawFailed(c.xs)}
         <p className="mt-3 mb-3 text-xs text-zinc-500">
           Nothing re-checks this afterwards — your answer is kept exactly as given.
         </p>
         <Actions>
-          <Btn onClick={() => setStep('choose')} kind="ghost">
+          <Btn onClick={() => go('choose')} kind="ghost">
             Back
           </Btn>
-          <Btn kind="confirm" onClick={() => onConfirm(c.xs)}>
+          <Btn
+            kind="confirm"
+            disabled={!isPainted(c.xs)}
+            onClick={() => isPainted(c.xs) && onConfirm(c.xs)}
+          >
             Keep {bars(c.xs.length)}
           </Btn>
         </Actions>
@@ -304,7 +343,8 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
     return (
       <Shell heading={heading} counter="check this">
         <p className="text-sm text-zinc-400 mb-3">Here&apos;s what {bars(count)} gives you.</p>
-        <div className="mb-1">{renderStrip(outcome.xs, 'proposed')}</div>
+        <div className="mb-1">{fullStrip(outcome.xs, 'proposed')}</div>
+        {drawFailed(outcome.xs)}
         {warn ? (
           <p className="mt-3 mb-3 rounded-lg border border-amber-900 bg-amber-950 px-3 py-2 text-xs text-amber-300">
             {warn}
@@ -315,10 +355,14 @@ export function ChartReviewSheet(props: ChartReviewSheetProps) {
           </p>
         )}
         <Actions>
-          <Btn onClick={() => setStep('count')} kind="ghost">
+          <Btn onClick={() => go('count')} kind="ghost">
             Change count
           </Btn>
-          <Btn kind="confirm" onClick={() => onConfirm(outcome.xs)}>
+          <Btn
+            kind="confirm"
+            disabled={!isPainted(outcome.xs)}
+            onClick={() => isPainted(outcome.xs) && onConfirm(outcome.xs)}
+          >
             Keep {count}
           </Btn>
         </Actions>

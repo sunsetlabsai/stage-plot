@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
+import { useEffect } from 'react';
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
 import { ChartReviewSheet, type ChartReviewSheetProps } from '../components/ChartReviewSheet';
 import { REFUSAL_REASONS, type CountOutcome } from '../lib/chart-review-sheet';
 
@@ -13,6 +14,21 @@ afterEach(cleanup);
 
 const okCount = (xs: number[], surplus = 0): CountOutcome => ({ kind: 'ok', xs, surplus });
 
+// Paints immediately, like a strip whose raster was already cached. Tests about the paint
+// gate override `renderStrip` and drive `onPaint` by hand.
+function FakeStrip(p: {
+  xs: number[] | null;
+  variant?: 'full' | 'mini';
+  onPaint?: (s: 'pending' | 'painted' | 'failed') => void;
+}) {
+  const key = p.xs ? p.xs.join(',') : 'none';
+  useEffect(() => {
+    p.onPaint?.('painted');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return <div data-testid={p.variant === 'mini' ? 'mini' : 'strip'} data-xs={key} />;
+}
+
 function props(over: Partial<ChartReviewSheetProps> = {}): ChartReviewSheetProps {
   return {
     lineNumber: 7,
@@ -23,11 +39,8 @@ function props(over: Partial<ChartReviewSheetProps> = {}): ChartReviewSheetProps
       { xs: [0.25, 0.5, 0.75, 1], sources: ['measured'] },
       { xs: [0.33, 0.66, 1], sources: ['current'] },
     ],
-    renderStrip: (xs, _tone, variant) => (
-      <div
-        data-testid={variant === 'mini' ? 'mini' : 'strip'}
-        data-xs={xs ? xs.join(',') : 'none'}
-      />
+    renderStrip: (xs, _tone, variant, onPaint) => (
+      <FakeStrip xs={xs} variant={variant} onPaint={onPaint} />
     ),
     countChoices: [3, 4, 5, 6, 7],
     countReadiness: 'ready',
@@ -468,6 +481,95 @@ describe('ChartReviewSheet — a count before the page has been read', () => {
     expect(screen.queryByText('How many bars?')).toBeNull();
     expect(screen.getByText(/couldn't read/)).toBeTruthy();
     fireEvent.click(screen.getByText('Skip this line'));
+    expect(onDismiss).toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChartReviewSheet — nothing commits before its picture is on screen (Codex R3, #184)', () => {
+  type Paint = (s: 'pending' | 'painted' | 'failed') => void;
+  // Captures the FULL strip's paint callback; never paints on its own.
+  function held() {
+    const last: { xs: string; paint: Paint | undefined } = { xs: '', paint: undefined };
+    const renderStrip: ChartReviewSheetProps['renderStrip'] = (xs, _t, variant, onPaint) => {
+      if (variant !== 'mini') {
+        last.xs = xs ? xs.join(',') : 'none';
+        last.paint = onPaint;
+      }
+      return <div data-testid={variant === 'mini' ? 'mini' : 'strip'} />;
+    };
+    return { last, renderStrip };
+  }
+  const btn = (name: string | RegExp) => screen.getByRole('button', { name }) as HTMLButtonElement;
+
+  it('★ "Use this" on a single option waits for the strip to paint', () => {
+    const onConfirm = vi.fn();
+    const h = held();
+    render(
+      <ChartReviewSheet
+        {...props({
+          flagged: false, queueTotal: null, queueIndex: null, onConfirm,
+          candidates: [{ xs: [0.25, 0.5, 0.75, 1], sources: ['current'] }],
+          renderStrip: h.renderStrip,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByText('Yes, 4 bars'));
+    expect(btn('Use this').disabled).toBe(true);
+    fireEvent.click(btn('Use this'));
+    expect(onConfirm).not.toHaveBeenCalled();
+    act(() => h.last.paint?.('painted'));
+    expect(btn('Use this').disabled).toBe(false);
+    fireEvent.click(btn('Use this'));
+    expect(onConfirm).toHaveBeenCalledWith([0.25, 0.5, 0.75, 1]);
+  });
+
+  it('★ "Keep N" on a counted split waits for the strip to paint', () => {
+    const onConfirm = vi.fn();
+    const h = held();
+    render(<ChartReviewSheet {...props({ onConfirm, renderStrip: h.renderStrip })} />);
+    fireEvent.click(screen.getByText('None of these'));
+    fireEvent.click(screen.getByText('4'));
+    expect(btn(/^Keep/).disabled).toBe(true);
+    act(() => h.last.paint?.('painted'));
+    expect(btn(/^Keep/).disabled).toBe(false);
+    fireEvent.click(btn(/^Keep/));
+    expect(onConfirm).toHaveBeenCalled();
+  });
+
+  it('★ a paint reported for a DIFFERENT picture does not unlock this one', () => {
+    const onConfirm = vi.fn();
+    const h = held();
+    render(<ChartReviewSheet {...props({ onConfirm, renderStrip: h.renderStrip })} />);
+    // The ask's full strip paints the measured option…
+    fireEvent.click(screen.getByText('4 bars'));
+    const stale = h.last.paint;
+    act(() => stale?.('painted'));
+    // …then the owner previews the count, whose strip has not painted yet.
+    fireEvent.click(screen.getByText('None of these'));
+    fireEvent.click(screen.getByText('5'));
+    act(() => stale?.('painted'));
+    expect(btn(/^Keep/).disabled).toBe(true);
+  });
+
+  it('a strip that cannot be drawn says so and offers only the way out', () => {
+    const onConfirm = vi.fn();
+    const onDismiss = vi.fn();
+    const h = held();
+    render(
+      <ChartReviewSheet
+        {...props({
+          flagged: false, queueTotal: null, queueIndex: null, onConfirm, onDismiss,
+          candidates: [{ xs: [0.5, 1], sources: ['current'] }],
+          renderStrip: h.renderStrip,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByText('Yes, 2 bars'));
+    act(() => h.last.paint?.('failed'));
+    expect(screen.getByText(/couldn't draw this line/i)).toBeTruthy();
+    expect(btn('Use this').disabled).toBe(true);
+    fireEvent.click(btn('Cancel'));
     expect(onDismiss).toHaveBeenCalled();
     expect(onConfirm).not.toHaveBeenCalled();
   });

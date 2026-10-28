@@ -92,3 +92,68 @@ describe('ChartSystemStrip — the shared page raster', () => {
     await new Promise((r) => setTimeout(r, 0));
   });
 });
+
+// ── The strip says when its picture is actually on screen (Codex R3, #184) ───
+//
+// The sheet's commit buttons are gated on this. Before it, "Use this" / "Keep" were live
+// while the raster was still in flight — or forever, if it failed — so an owner could
+// confirm by the "N bars" label alone and stamp `confirmed` on geometry never drawn.
+
+function fakeCtx() {
+  return {
+    fillStyle: '', strokeStyle: '', lineWidth: 0, lineCap: '',
+    fillRect: vi.fn(), clearRect: vi.fn(), drawImage: vi.fn(),
+    beginPath: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), stroke: vi.fn(),
+  };
+}
+
+describe('ChartSystemStrip — paint readiness', () => {
+  beforeEach(() => {
+    HTMLCanvasElement.prototype.getContext = (() => fakeCtx()) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  });
+
+  it('★ reports pending first, and painted only once the split is drawn', async () => {
+    let resolve!: (c: HTMLCanvasElement) => void;
+    renderPageOffscreen.mockReturnValue(new Promise((r) => { resolve = r; }));
+    const onPaint = vi.fn();
+    render(<ChartSystemStrip doc={doc()} system={system()} xs={[0.5, 0.95]} onPaint={onPaint} />);
+    await waitFor(() => expect(onPaint).toHaveBeenCalledWith('pending'));
+    expect(onPaint).not.toHaveBeenCalledWith('painted');
+    resolve(fakeRaster());
+    await waitFor(() => expect(onPaint).toHaveBeenLastCalledWith('painted'));
+  });
+
+  it('★ a render that fails says so — never painted', async () => {
+    renderPageOffscreen.mockResolvedValue(null);
+    const onPaint = vi.fn();
+    render(<ChartSystemStrip doc={doc()} system={system({ page: 3 })} xs={[0.5, 0.95]} onPaint={onPaint} />);
+    await waitFor(() => expect(onPaint).toHaveBeenLastCalledWith('failed'));
+    expect(onPaint).not.toHaveBeenCalledWith('painted');
+  });
+
+  it('no 2D context is a failure, not a silent blank', async () => {
+    HTMLCanvasElement.prototype.getContext = () => null;
+    const onPaint = vi.fn();
+    render(<ChartSystemStrip doc={doc()} system={system()} xs={[0.5, 0.95]} onPaint={onPaint} />);
+    await waitFor(() => expect(onPaint).toHaveBeenLastCalledWith('failed'));
+  });
+
+  it('★ a new split drops back to pending and wipes the old picture before redrawing', async () => {
+    const onPaint = vi.fn();
+    const d = doc();
+    const s = system({ page: 1 });
+    const { rerender, container } = render(<ChartSystemStrip doc={d} system={s} xs={[0.5, 0.95]} onPaint={onPaint} />);
+    await waitFor(() => expect(onPaint).toHaveBeenLastCalledWith('painted'));
+    const canvas = container.querySelector('canvas') as HTMLCanvasElement;
+    expect(canvas.width).toBeGreaterThan(0);
+    let resolve!: (c: HTMLCanvasElement) => void;
+    renderPageOffscreen.mockReturnValue(new Promise((r) => { resolve = r; }));
+    onPaint.mockClear();
+    // A different page forces a fresh (held) raster, so the gap is observable.
+    rerender(<ChartSystemStrip doc={d} system={{ ...s, page: 2 }} xs={[0.3, 0.6, 0.95]} onPaint={onPaint} />);
+    await waitFor(() => expect(onPaint).toHaveBeenCalledWith('pending'));
+    expect(canvas.width).toBe(0); // the previous split is not left on screen
+    resolve(fakeRaster());
+    await waitFor(() => expect(onPaint).toHaveBeenLastCalledWith('painted'));
+  });
+});

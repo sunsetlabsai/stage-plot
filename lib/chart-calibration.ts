@@ -529,6 +529,9 @@ export function splitFitsSystem(system: Pick<System, 'xStart' | 'xEnd'>, xs: num
   return true;
 }
 
+/** Edges closer than this are the same edge. Stored and offered xs are copies, not re-reads. */
+const SAME_EDGE = 1e-6;
+
 export function confirmSystemSplit(
   cal: ChartCalibration,
   systemId: string,
@@ -543,18 +546,27 @@ export function confirmSystemSplit(
   if (!system || !splitFitsSystem(system, xs)) return cal;
 
   const otherBars = (cal.bars ?? []).filter((b) => b.systemId !== systemId);
+  const oldBars = (cal.bars ?? []).filter((b) => b.systemId === systemId);
   const newBars: Bar[] = [];
   let left = system.xStart;
   for (let i = 0; i < xs.length; i++) {
     const count = measures?.[i];
+    // ★ A bar whose edges did not move IS the same bar (Codex R3, #184). "Yes, 4 bars"
+    // changes no geometry, and minting fresh ids for it pruned every roadmap marker on the
+    // line and wiped its sections on the next Save. Keep the id and section; take a fresh
+    // multirest attribution when there is one, else keep the count it already had.
+    const same = oldBars.find(
+      (b) => Math.abs(b.xStart - left) < SAME_EDGE && Math.abs(b.xEnd - xs[i]) < SAME_EDGE,
+    );
+    const m = measures ? count : same?.measures;
     newBars.push({
-      id: crypto.randomUUID(),
+      id: same?.id ?? crypto.randomUUID(),
       systemId,
       xStart: left,
       xEnd: xs[i],
       absNumber: 0, // placeholder — renumber below
-      sectionId: null,
-      ...(count !== undefined && count > 1 ? { measures: count } : {}),
+      sectionId: same?.sectionId ?? null,
+      ...(m !== undefined && m > 1 ? { measures: m } : {}),
     });
     left = xs[i];
   }
@@ -568,8 +580,8 @@ export function confirmSystemSplit(
     status: 'draft',
     systems: nextSystems,
     bars: nextBars,
-    // Same cascade as autoDistributeBars: this system's old bars are gone, so roadmap
-    // markers that referenced them can no longer bind.
+    // Same cascade as autoDistributeBars: bars that moved are gone, so roadmap markers
+    // that referenced them can no longer bind. Kept bars keep theirs.
     roadmap: pruneRoadmap(cal.roadmap, new Set(nextBars.map((b) => b.id))),
   };
 }

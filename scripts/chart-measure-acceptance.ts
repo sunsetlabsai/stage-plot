@@ -170,6 +170,14 @@ function startServer(): Promise<{ server: http.Server; port: number }> {
       res.end(transpile('lib/chart-measure-canvas.ts'));
       return;
     }
+    // The shim's one runtime import. Transpiled specifiers keep no extension, so the
+    // browser asks for `/engine/render-lock`; without this route the module fails to
+    // load and the run waits forever.
+    if (url === '/engine/render-lock' || url === '/engine/render-lock.js') {
+      res.writeHead(200, { 'content-type': 'text/javascript' });
+      res.end(transpile('lib/render-lock.ts'));
+      return;
+    }
     const file = url.startsWith('/pdfjs/')
       ? path.join(PDFJS_BUILD, path.basename(url))
       : url.startsWith('/corpus/')

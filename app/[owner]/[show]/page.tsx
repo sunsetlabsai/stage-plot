@@ -4732,13 +4732,14 @@ function ChartNavigator({
               candidates={candidates}
               countChoices={countChoices}
               countReadiness={countReadiness(reviewSheet)}
-              renderStrip={(xs, tone, variant) => (
+              renderStrip={(xs, tone, variant, onPaint) => (
                 <ChartSystemStrip
                   doc={docRef.current}
                   system={system}
                   xs={xs}
                   tone={tone}
                   variant={variant}
+                  onPaint={onPaint}
                 />
               )}
               onProposeCount={(n): CountOutcome => {

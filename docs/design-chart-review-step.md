@@ -333,6 +333,15 @@ system at a time, per §The interaction.
   refuses, so offering 2–6 only asked for a number to say no to. "No — let me count" goes
   straight to that refusal, and a read that lands empty while the pad is showing replaces it.
   The VLM-built overlay and "Yes, N bars" are unaffected.
+  ⚠ **Nothing commits before its picture is on screen** *(Codex R3)*. The strip paints from
+  an async raster and can fail to blank, so "Use this" (single option) and "Keep" are
+  disabled until that screen's own strip reports it drew that split; a strip that cannot
+  draw says so and leaves only the way out. Each screen mounts its own strip, so a paint
+  from a screen the owner has left cannot unlock the one now showing.
+  ⚠ **Confirming keeps bars that did not move** *(Codex R3)*. A bar whose edges match the
+  answer keeps its id, section and roadmap markers; only bars that moved are new (and
+  their markers pruned, as before). "Yes, N bars" used to mint fresh ids for an unchanged
+  line and silently drop its markers and sections on the next Save.
 - **Built vs the approved interactive mockup** (artifact "ShowRunr — chunk C3 review sheet",
   2026-09-08). Everything else matches screen for screen.
   1. No per-option source tag ("measured" / "printed" / "current"). Only a printed-implied
