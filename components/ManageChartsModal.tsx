@@ -81,7 +81,8 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
   // Which charts have an overlay on their CURRENT file, looked up in the background so
   // Replace can ask synchronously — an await before the file picker would lose the tap
   // gesture and the browser would refuse to open it.
-  const [overlayById, setOverlayById] = useState<Record<string, boolean>>({});
+  // true / false / null (couldn't tell); a missing key means still checking.
+  const [overlayById, setOverlayById] = useState<Record<string, boolean | null>>({});
   useEffect(() => {
     if (!isOwner) return;
     let live = true;
@@ -89,7 +90,7 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
       if (!c.fileId) continue;
       const id = c.fileId;
       void chartHasOverlay(c).then((has) => {
-        if (live && has !== null) setOverlayById((m) => ({ ...m, [id]: has }));
+        if (live) setOverlayById((m) => ({ ...m, [id]: has }));
       });
     }
     return () => {
@@ -188,13 +189,16 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
     if (file && role) doUpload(file, role);
   }
 
+  // FAIL CLOSED (Codex R1, #203): while the check runs, Replace is held; a check that
+  // could not answer still warns. Only a definite "no overlay" replaces without asking.
+  const overlayPending = (fileId?: string) => isOwner && !!fileId && !(fileId in overlayById);
   function startReplace(role: string, fileId?: string) {
-    // The overlay is keyed to the old file's bytes; a new file orphans it. Say so first.
-    if (
-      fileId &&
-      overlayById[fileId] &&
-      !confirm("Replacing the file removes this chart's bar overlay. You can build a new one afterwards.")
-    ) {
+    if (overlayPending(fileId)) return;
+    const has = fileId ? overlayById[fileId] : false;
+    if (has === true && !confirm("Replacing the file removes this chart's bar overlay. You can build a new one afterwards.")) {
+      return;
+    }
+    if (has === null && !confirm("This chart may have a bar overlay, and replacing the file would remove it. Replace anyway?")) {
       return;
     }
     replaceRoleRef.current = role;
@@ -285,12 +289,12 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
                     )}
                     <button
                       onClick={() => startReplace(c.role, c.fileId)}
-                      disabled={busy}
+                      disabled={busy || overlayPending(c.fileId)}
                       className="text-xs text-zinc-400 hover:text-blue-400 disabled:opacity-40"
                     >
                       {/* Reworded on builder rows so "Edit" (spec) vs file-replace
                           reads unambiguously (§4.1). */}
-                      {c.is_builder ? 'Replace with file' : 'Replace'}
+                      {overlayPending(c.fileId) ? 'Checking…' : c.is_builder ? 'Replace with file' : 'Replace'}
                     </button>
                     <button
                       onClick={() => c.fileId && handleDelete(c.fileId)}
@@ -421,7 +425,8 @@ function ChartPreview({ chart }: { chart: Chart }) {
   }, [chart, isPdf]);
 
   useEffect(() => {
-    if (doc && canvasRef.current) renderPage(doc, pageNum, canvasRef.current);
+    // A document evicted from the cache mid-preview rejects here; show it, don't throw.
+    if (doc && canvasRef.current) renderPage(doc, pageNum, canvasRef.current).catch(() => setFailed(true));
   }, [doc, pageNum]);
 
   if (!isPdf) {

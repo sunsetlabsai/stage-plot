@@ -9,11 +9,15 @@ import type { Chart } from '../lib/types';
 // actually HAS an overlay for its current file, so a chart without one is not nagged.
 
 const loadPdfDoc = vi.fn();
+const fetchChartBytes = vi.fn();
+const renderPage = vi.fn();
 vi.mock('../lib/pdf-viewer', () => ({
   loadPdfDoc: (...a: unknown[]) => loadPdfDoc(...a),
-  renderPage: vi.fn(),
-  fetchChartBytes: vi.fn(async () => null),
+  renderPage: (...a: unknown[]) => renderPage(...a),
+  fetchChartBytes: (...a: unknown[]) => fetchChartBytes(...a),
 }));
+const BYTES = new Uint8Array([37, 80, 68, 70]).buffer; // "%PDF"
+const { hashPdfBytes } = await import('../lib/chart-calibration');
 const { default: ManageChartsModal } = await import('../components/ManageChartsModal');
 const { chartHasOverlay } = await import('../lib/chart-overlay-status');
 
@@ -21,12 +25,16 @@ const CHART: Chart = {
   role: 'Guitar', url: 'https://x/storage/v1/object/public/charts/u/s/g.pdf',
   fileId: '11111111-1111-4111-8111-111111111111', mimeType: 'application/pdf', label: 'g.pdf',
 };
-const HASH = 'a'.repeat(64);
+const HASH = await hashPdfBytes(BYTES);
 
 let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   loadPdfDoc.mockReset();
-  loadPdfDoc.mockResolvedValue({ doc: {}, sourceHash: HASH });
+  loadPdfDoc.mockResolvedValue({ doc: { numPages: 1 }, sourceHash: HASH });
+  fetchChartBytes.mockReset();
+  fetchChartBytes.mockResolvedValue(BYTES);
+  renderPage.mockReset();
+  renderPage.mockResolvedValue(undefined);
   fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
   vi.stubGlobal('fetch', fetchMock);
 });
@@ -41,10 +49,15 @@ describe('chartHasOverlay', () => {
     fetchMock.mockResolvedValue(new Response('{}', { status: 404 }));
     expect(await chartHasOverlay(CHART)).toBe(false);
   });
+  it('★ hashes the BYTES — never opens a PDF document (Codex R1: that filled the doc cache)', async () => {
+    await chartHasOverlay(CHART);
+    expect(fetchChartBytes).toHaveBeenCalled();
+    expect(loadPdfDoc).not.toHaveBeenCalled();
+  });
   it('unknown (unreadable file, failed request) is null, never a guess', async () => {
-    loadPdfDoc.mockResolvedValue(null);
+    fetchChartBytes.mockResolvedValue(null);
     expect(await chartHasOverlay(CHART)).toBe(null);
-    loadPdfDoc.mockResolvedValue({ doc: {}, sourceHash: HASH });
+    fetchChartBytes.mockResolvedValue(BYTES);
     fetchMock.mockRejectedValue(new Error('offline'));
     expect(await chartHasOverlay(CHART)).toBe(null);
     fetchMock.mockResolvedValue(new Response('{}', { status: 500 }));
@@ -95,5 +108,38 @@ describe('ManageChartsModal — Replace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
     expect(confirm).not.toHaveBeenCalled();
     expect(picker).toHaveBeenCalled();
+  });
+
+  it('★ while the check is still running, Replace is held — it cannot skip the warning', async () => {
+    let resolve!: (r: Response) => void;
+    fetchMock.mockReturnValue(new Promise<Response>((r) => { resolve = r; }));
+    const picker = filePickerClicks();
+    renderModal();
+    const btn = await screen.findByRole('button', { name: /Checking/ });
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(btn);
+    expect(picker).not.toHaveBeenCalled();
+    resolve(new Response('{}', { status: 404 }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Replace' })).toBeTruthy());
+  });
+
+  it('★ a check that FAILED still warns — unknown is treated as "may have one"', async () => {
+    fetchMock.mockRejectedValue(new Error('offline'));
+    const picker = filePickerClicks();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderModal();
+    const btn = await screen.findByRole('button', { name: 'Replace' });
+    fireEvent.click(btn);
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/may have/i));
+    expect(picker).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChartPreview — a page that fails to render', () => {
+  it('★ says it could not load, rather than leaving an unhandled rejection', async () => {
+    renderPage.mockRejectedValue(new Error('Transport destroyed'));
+    renderModal();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    await screen.findByText('Could not load preview.');
   });
 });
