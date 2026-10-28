@@ -3,37 +3,68 @@ import { isPlaceholderCounts, countPdfContent } from '../lib/chart-placeholder';
 
 // ── Placeholder PDFs are not charts (backlog #204, Graham 2026-10-27) ────────
 // A title-and-key page ("Love Shack / C") is a stand-in for a chart that was never
-// uploaded. Measured on the 87-chart corpus: the 17 placeholders have 2–7 words, exactly
-// 2 drawing paths and no images; the nearest real chart has 92 words and 91 paths.
+// uploaded. Measured on the 87-chart corpus: each of the 17 placeholders inks exactly one
+// filled box (4 segments) beside 2–7 words; no real chart comes close.
 
 describe('isPlaceholderCounts', () => {
   it('★ a title + key page is a placeholder', () => {
-    expect(isPlaceholderCounts({ words: 3, paths: 2, images: 0 })).toBe(true);
-    expect(isPlaceholderCounts({ words: 7, paths: 2, images: 0 })).toBe(true);
+    expect(isPlaceholderCounts({ words: 3, segments: 4, images: 0 })).toBe(true);
+    expect(isPlaceholderCounts({ words: 7, segments: 4, images: 0 })).toBe(true);
   });
   it('★ the smallest real chart in the corpus is not', () => {
-    expect(isPlaceholderCounts({ words: 92, paths: 91, images: 0 })).toBe(false);
+    expect(isPlaceholderCounts({ words: 92, segments: 91, images: 0 })).toBe(false);
   });
   it('a scan is not a placeholder — it is a chart we cannot read as vectors', () => {
-    expect(isPlaceholderCounts({ words: 0, paths: 0, images: 1 })).toBe(false);
+    expect(isPlaceholderCounts({ words: 0, segments: 0, images: 1 })).toBe(false);
+  });
+  // Codex R1 (#207): a one-page chart — title, one four-bar staff, chords A D E A — had 6
+  // words and ONE constructPath op, because pdf.js packs a whole drawing into one op. It
+  // inks 5 staff lines + 5 barlines = 10 segments.
+  it('★ a tiny real chart (one staff, four bars, six words) is NOT a placeholder', () => {
+    expect(isPlaceholderCounts({ words: 6, segments: 10, images: 0 })).toBe(false);
   });
   it('drawn content alone disqualifies it (a chart with its text as outlines)', () => {
-    expect(isPlaceholderCounts({ words: 2, paths: 40, images: 0 })).toBe(false);
+    expect(isPlaceholderCounts({ words: 2, segments: 40, images: 0 })).toBe(false);
   });
   it('a chords-over-lyrics sheet is not', () => {
-    expect(isPlaceholderCounts({ words: 154, paths: 0, images: 0 })).toBe(false);
+    expect(isPlaceholderCounts({ words: 154, segments: 0, images: 0 })).toBe(false);
   });
 });
 
 describe('countPdfContent', () => {
-  const OPS = { constructPath: 1, paintImageXObject: 2, paintInlineImageXObject: 3 };
-  const page = (text: string[], fns: number[]) => ({
+  // pdf.js 5 shape: constructPath args = [paintOp, [Float32Array path data], bbox], where the
+  // data interleaves draw codes (0 moveTo·2, 1 lineTo·2, 2 curveTo·6, 3 quadTo·4, 4 close).
+  const OPS = { constructPath: 91, endPath: 28, fill: 22, stroke: 20, paintImageXObject: 85 };
+  const path = (paint: number, data: number[]) => [paint, [Float32Array.from(data)], Float32Array.from([0, 0, 1, 1])];
+  const rect = [0, 72, 505, 1, 540, 505, 1, 540, 720, 1, 72, 720, 4];
+  const page = (text: string[], fns: number[], args: unknown[]) => ({
     getTextContent: async () => ({ items: text.map((str) => ({ str })) }),
-    getOperatorList: async () => ({ fnArray: fns }),
+    getOperatorList: async () => ({ fnArray: fns, argsArray: args }),
   });
-  it('sums words, paths and images across every page', async () => {
-    const pages = [page(['Love Shack', 'C'], [1, 1, 9]), page(['x'], [2, 3, 1])];
-    const doc = { numPages: 2, getPage: async (n: number) => pages[n - 1] };
-    expect(await countPdfContent(doc as never, OPS as never)).toEqual({ words: 4, paths: 3, images: 2 });
+  const doc = (...pages: ReturnType<typeof page>[]) => ({ numPages: pages.length, getPage: async (n: number) => pages[n - 1] });
+
+  it('★ the corpus placeholder: a clip (inks nothing) + one filled box = 4 segments', async () => {
+    const d = doc(page(['Love Shack', 'C'], [91, 91], [path(28, rect), path(22, rect)]));
+    expect(await countPdfContent(d as never, OPS as never)).toEqual({ words: 3, segments: 4, images: 0 });
+  });
+
+  it('★ ONE path op carrying a whole staff counts every segment (Codex R1)', async () => {
+    const lines: number[] = [];
+    for (let i = 0; i < 10; i++) lines.push(0, 10, 100 + i, 1, 500, 100 + i);
+    const d = doc(page(['Song', 'A', 'D', 'E', 'A', 'x'], [91], [path(20, lines)]));
+    const c = await countPdfContent(d as never, OPS as never);
+    expect(c.segments).toBe(10);
+    expect(isPlaceholderCounts(c)).toBe(false);
+  });
+
+  it('sums across pages and counts images', async () => {
+    const d = doc(page(['a'], [91], [path(22, rect)]), page(['b'], [85], [[]]));
+    expect(await countPdfContent(d as never, OPS as never)).toEqual({ words: 2, segments: 4, images: 1 });
+  });
+
+  it('★ an unrecognised path encoding fails toward "chart", never "placeholder"', async () => {
+    const d = doc(page(['Love Shack', 'C'], [91], [[22, 'not-the-v5-shape']]));
+    const c = await countPdfContent(d as never, OPS as never);
+    expect(isPlaceholderCounts(c)).toBe(false);
   });
 });
