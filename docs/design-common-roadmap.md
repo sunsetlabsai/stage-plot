@@ -39,7 +39,12 @@ segment / operator survey of the 8 charts it cannot measure:
 which **342 are filed `lyrics`. 321 of those carry section headers** (bare-line form —
 `INTRO 4X`, `VERSE 1 8X`, `CHORUS x2`, `PRE-CHORUS` — the grammar of
 `design-song-form-from-lyrics.md` §2; **none** use `[Verse]` brackets). 21 carry none. All 342
-have a text layer. This is what makes Track B's anchors worth building first.
+have a text layer. This is what makes Track B's anchors worth building first. *(The 321 is
+the count under one rule: a text line that is exactly a section word — intro, verse,
+pre-chorus, chorus, bridge, solo, outro, out, tag, ending, interlude, break, breakdown, vamp,
+refrain, hook, instrumental, coda, turnaround — with an optional number, `Nx`/`xN`, and
+colon; ≥ 2 such lines per PDF. A broader matcher finds more (Codex: 330). The anchors PR
+fixes the rule and re-measures.)*
 
 **Caveats, stated so they are not forgotten:**
 - The corpus is one library. Its lyric-sheet share came from a friend's library and is **not**
@@ -116,9 +121,22 @@ today: `openReviewSheet` (`page.tsx:3495`) re-measures the PDF's **vector** geom
 system on a scan, and `countReadiness` (`lib/chart-review-sheet.ts:258`) returns
 `unreadable` — the count fallback refuses. So the track includes a scan-aware candidate
 source: on open, a raster page re-runs the pixel detector for that band (re-derive, never
-persist — same rule as the vector re-measure) and hands its barline x positions to the count
-fallback in the shape `proposeFromCount` already ranks. Only then do scans get the "is this
-right? → no → how many bars?" flow vector charts have.
+persist — same rule as the vector re-measure). Its output is NOT the ranker's input, and is
+not adapted into it: `detectBarlines` (`lib/chart-snap.ts:35`) returns band-relative `x` (0 =
+band start, 1 = band end) plus a `strength`, while `proposeFromCount`
+(`lib/chart-review-sheet.ts:277`) takes page-space `MeasuredCluster`s and its ranker
+(`lib/chart-resegment.ts:77`) chooses on endpoint error and stroke width — evidence a scan does
+not have. So scans get their own count rule:
+
+- **Coordinates:** page-normalized `x = system.x0 + x_band × (system.x1 − system.x0)`.
+- **Exact match only.** N bars need N − 1 interior lines. Detected interior lines (after the
+  `MIN_STRENGTH` prefilter) == N − 1 → propose them. Any surplus or deficit → **refuse** with
+  the existing refusal path, and the owner drags barlines by hand. No drop-the-weakest rule:
+  whether `strength` separates real lines from stray ones is a question for the scan set's
+  measurement, not this design.
+
+Only then do scans get the "is this right? → no → how many bars?" flow vector charts have —
+answered when the evidence is unambiguous, refused when it is not.
 
 **Needs before build:**
 1. **A scan set.** ~10–20 real scans (phone photos and flatbed), hand-calibrated once as ground
