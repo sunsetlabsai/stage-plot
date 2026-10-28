@@ -1,6 +1,6 @@
 # Every chart reaches a common roadmap (design)
 
-**Status:** design only. Nothing built. Build gated on Graham's explicit GO, one track per PR.
+**Status:** Track B anchors (§4.1) built — `lib/chart-section-headers.ts`, `POST /api/charts/sections`, the strip's Mark sections. Everything else is design only; build gated on Graham's explicit GO, one track per PR.
 **Tracks:** backlog #204 ("chord charts get a usable count / structure path"), widened on
 2026-10-27 to cover every kind of uploaded chart.
 
@@ -43,8 +43,9 @@ have a text layer. This is what makes Track B's anchors worth building first. *(
 the count under one rule: a text line that is exactly a section word — intro, verse,
 pre-chorus, chorus, bridge, solo, outro, out, tag, ending, interlude, break, breakdown, vamp,
 refrain, hook, instrumental, coda, turnaround — with an optional number, `Nx`/`xN`, and
-colon; ≥ 2 such lines per PDF. A broader matcher finds more (Codex: 330). The anchors PR
-fixes the rule and re-measures.)*
+colon; ≥ 2 such lines per PDF. A broader matcher finds more (Codex: 330).)* **Re-measured by
+the anchors build (2026-10-27), with the shipped rule in `lib/chart-section-headers.ts`: 332 of
+342** — see §4.1 step 2.
 
 **Caveats, stated so they are not forgotten:**
 - The corpus is one library. Its lyric-sheet share came from a friend's library and is **not**
@@ -183,6 +184,35 @@ gate (`route.ts:167`) before any row is written. So:
    reuses the same recognizer and adds the counts — one grammar, two consumers.
    **Acceptance:** run on the 342 cached live lyric sheets — finds headers on ≥ 321, and a
    hand-checked sample shows no lyric line misread as a header.
+   **Result (2026-10-27, `scripts/chart-section-headers-acceptance.ts`): 332/342, 2,687
+   headers, all 32 distinct labels section names; every header line round-trips to its
+   printed text (label + count), except the deliberate blank-count case (`VERSE 1 X`,
+   `INTRO ?X` → count unknown).** The run, the browser drive and Codex R1 forced these rules:
+   (a) **columns** — 339 of 347 live lyric pages are two-column (a clean empty gutter, right
+   column at ~0.52; 102 of 106 notation pages are not). The gutter is detected from the text
+   runs; no line crosses it, and headers come out in reading order — left column top→bottom,
+   then right (Graham, 2026-10-27). That order is what Mark sections writes and what the
+   proposer will build a roadmap from; the roadmap itself stays a standard roadmap. Without
+   column handling the count was 142/342; (b) a bare header starts with a capital (all 3
+   lowercase hits were a lyric's last word wrapped onto its own line, "…shake it / out");
+   (c) skip text at ≥ 1.5× the page's median size (the song "Breakdown" read its own title as
+   a section); (d) a two-digit count is a count — `VERSE 16X` is a 16-bar verse, not verse
+   1 × 6 (caught by the drive, invisible in a label survey); (e) two section words make one
+   label (`CHORUS INSTRUMENTAL`, `INTRO VAMP`); (f) a bracketed line follows exactly the bare grammar,
+   no free text and no parenthesised note — `[Break my heart]` and `[Break (my heart)]` are
+   lyrics (Codex R1, R2), so `[Outro (Fade out)]` goes unmarked by design;
+   (g) positions go through the render viewport, so a /Rotate page's marks land on their
+   text, while reading order is judged in the page's own layout (Codex R1).
+   The 10 misses: 6 medley index sheets with no headers, and 4 whose headers carry what the
+   strict grammar refuses — mashup prefixes (`JUICE VERSE 8X`), annotations
+   (`VERSE 2 9X (8THS)`, `VERSE 16X + 4 ?`). Those 4 still get the plain Calibrate line.
+   Instrument-led labels (`GUITAR VAMP 4X`) are not headers under this grammar.
+   **Documented limit (Graham, 2026-10-27):** a page stored with a /Rotate whose text is
+   counter-rotated to read upright on screen (some landscape exporters) is grouped in the
+   wrong direction and yields no headers, so the owner gets the plain Calibrate line —
+   no offer, never a wrong write. 0 of 453 corpus pages (347 live lyric, 106 notation) carry
+   any /Rotate. Not designed around: re-exporting the PDF, or hand-calibrating, is easier
+   than reading each page in its text's own direction. Backlog #204.
 3. **Entry point.** The Perform strip's `none` state, for a chart that will not get an
    overlay (`overlaySkipReason === 'lyrics'`, or a client-side `measuredDisposition` of
    `gated`) and whose text layer has ≥ 2 headers: "N sections found" + **Mark sections**.

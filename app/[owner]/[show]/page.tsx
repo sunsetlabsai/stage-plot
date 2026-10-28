@@ -77,6 +77,8 @@ import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchCh
 import { isUnsupportedChartMime, overlaySkipReason } from '@/lib/chart-converter';
 import { buildOverlayStep } from '@/lib/chart-upload';
 import { buildOverlayWithMeasurement } from '@/lib/chart-measure-client';
+import { markSections, readSectionHeaders } from '@/lib/chart-sections-client';
+import type { SectionHeader } from '@/lib/chart-section-headers';
 import { parseChartDeepLink, buildChartShareUrl, buildShowShareUrl, chartShareFilename } from '@/lib/share';
 import ShareButton from '@/components/ShareButton';
 import ManageChartsModal from '@/components/ManageChartsModal';
@@ -113,7 +115,7 @@ import {
   performReadinessView,
 } from '@/lib/chart-calibration';
 import type { TraversalStep } from '@/lib/chart-calibration';
-import PerformReadinessStrip, { type CalTool, type ConvertState } from '@/components/PerformReadinessStrip';
+import PerformReadinessStrip, { type CalTool, type ConvertState, type MarkSectionsState } from '@/components/PerformReadinessStrip';
 import { ChartReviewSheet } from '@/components/ChartReviewSheet';
 import { ChartSystemStrip } from '@/components/ChartSystemStrip';
 import {
@@ -3308,6 +3310,11 @@ function ChartNavigator({
   // exactly as it was, so there is nothing to remember. Reset with the rest of
   // the calibration state when the chart changes.
   const [convertState, setConvertState] = useState<ConvertState>('idle');
+  // Track B anchors (docs/design-common-roadmap.md §4.1): the printed section headers of
+  // a chart that will never get an overlay, read once per chart load, and the state of
+  // the owner's "Mark sections" write. Transient like convertState; reset with it.
+  const [sectionHeaders, setSectionHeaders] = useState<SectionHeader[]>([]);
+  const [markState, setMarkState] = useState<MarkSectionsState>('idle');
   // Bumped by every calibration-state reset, i.e. once per chart load. A build
   // can outlive the chart that started it (the vision call runs for seconds and
   // the performer can page to the next chart meanwhile), so the handler captures
@@ -3991,6 +3998,50 @@ function ChartNavigator({
     if (reviewFlags(loadedCal).count > 0) setEverReviewed(true);
   }, []);
 
+  // A write recovered from a hash mismatch was made for the FRESH bytes, so the viewer has
+  // to adopt them too, or it would draw an overlay over bytes it does not describe.
+  // Shared by the overlay build and Mark sections. False ⇒ the chart changed under us.
+  const adoptReloadedDoc = useCallback(async (
+    reloaded: { doc: import('pdfjs-dist').PDFDocumentProxy; sourceHash: string },
+    gen: number,
+  ): Promise<boolean> => {
+    docRef.current = reloaded.doc;
+    setSourceHash(reloaded.sourceHash);
+    setNumPages(reloaded.doc.numPages);
+    if (canvasRef.current) {
+      await renderPage(reloaded.doc, 1, canvasRef.current);
+      if (calGenRef.current !== gen) return false;
+      setPageNum(1);
+      updateCanvasBox();
+    }
+    return true;
+  }, [updateCanvasBox]);
+
+  // Refetch at the hash of the bytes THIS client loaded rather than trusting a write's
+  // response: an overlay may only ever be drawn over the bytes it was built for, and this
+  // GET is the SINGLE authority on that — it is also what resolves an `exists` result
+  // (see buildOverlayStep), so a row built for other bytes 404s here and fails, while one
+  // built for these bytes is adopted no matter who inserted it.
+  const refetchCalibrationAt = useCallback(async (
+    chartId: string,
+    hash: string,
+    gen: number,
+  ): Promise<'ok' | 'failed' | 'stale'> => {
+    try {
+      const res = await fetch(
+        `/api/charts/calibration?chart_id=${encodeURIComponent(chartId)}&hash=${hash}`,
+      );
+      if (calGenRef.current !== gen) return 'stale';
+      if (!res.ok) return 'failed';
+      const json = await res.json();
+      if (calGenRef.current !== gen) return 'stale';
+      applyLoadedCalibration(json.calibration as ChartCalibration);
+      return 'ok';
+    } catch {
+      return calGenRef.current === gen ? 'failed' : 'stale';
+    }
+  }, [applyLoadedCalibration]);
+
   // Build an overlay for the open chart, on the owner's explicit ask (the strip's
   // "Build overlay"). This is the lazy-conversion trigger — the only convert call
   // site in the app now that upload stores bytes and stops.
@@ -4018,16 +4069,8 @@ function ChartNavigator({
     // would draw an overlay over bytes it does not describe.
     let hash = sourceHash;
     if (built.reloaded) {
-      docRef.current = built.reloaded.doc;
+      if (!(await adoptReloadedDoc(built.reloaded, gen))) return;
       hash = built.reloaded.sourceHash;
-      setSourceHash(hash);
-      setNumPages(built.reloaded.doc.numPages);
-      if (canvasRef.current) {
-        await renderPage(built.reloaded.doc, 1, canvasRef.current);
-        if (calGenRef.current !== gen) return;
-        setPageNum(1);
-        updateCanvasBox();
-      }
     }
     const result = built.result;
     // The measured never-gate: zero staves on every page, in geometry we could fully
@@ -4053,23 +4096,58 @@ function ChartNavigator({
     // it is also what resolves a `exists` result (see buildOverlayStep), so a
     // row built for other bytes 404s here and fails, while one built for these
     // bytes is adopted no matter who inserted it.
-    try {
-      const res = await fetch(
-        `/api/charts/calibration?chart_id=${encodeURIComponent(calibrationChartId)}&hash=${hash}`,
-      );
-      if (calGenRef.current !== gen) return;
-      if (!res.ok) {
-        setConvertState('error');
-        return;
-      }
-      const json = await res.json();
-      if (calGenRef.current !== gen) return;
-      applyLoadedCalibration(json.calibration as ChartCalibration);
-      setConvertState('idle');
-    } catch {
-      if (calGenRef.current === gen) setConvertState('error');
+    const refetched = await refetchCalibrationAt(calibrationChartId, hash, gen);
+    if (refetched === 'stale') return;
+    setConvertState(refetched === 'ok' ? 'idle' : 'error');
+  }, [calibrationChartId, activeChart, sourceHash, accessToken, adoptReloadedDoc, refetchCalibrationAt]);
+
+  // Read the printed section headers of a chart that will never get an overlay — a
+  // lyrics sheet, or one the measurement just gated — so the strip can offer "Mark
+  // sections" (§4.1 step 3). Owner-only and only from `none`: a chart with any
+  // calibration already has its sections. Spend-free: the text layer is already loaded.
+  const headerReadable =
+    calibratable && !loading && !loadError && !calUnreadable && calibration === null && !!sourceHash &&
+    (overlaySkip === 'lyrics' || convertState === 'gated');
+  useEffect(() => {
+    if (!headerReadable || !docRef.current) return;
+    const gen = calGenRef.current;
+    let cancelled = false;
+    readSectionHeaders(docRef.current).then((headers) => {
+      if (!cancelled && calGenRef.current === gen) setSectionHeaders(headers);
+    });
+    return () => { cancelled = true; };
+  }, [headerReadable, sourceHash]);
+
+  // "Mark sections": write the headers as a DRAFT sections-only calibration, then adopt it
+  // through the hash-addressed GET exactly as a built overlay is adopted. The strip then
+  // reads "Draft — Verify to perform": the owner checks the marks and verifies.
+  const markSectionsFromHeaders = useCallback(async () => {
+    if (!calibrationChartId || !activeChart || !sourceHash || sectionHeaders.length === 0) return;
+    const gen = calGenRef.current;
+    setMarkState('running');
+    const marked = await markSections({
+      chart: activeChart,
+      chartId: calibrationChartId,
+      sourceHash,
+      headers: sectionHeaders,
+      accessToken,
+    });
+    if (calGenRef.current !== gen) return;
+    let hash = sourceHash;
+    if (marked.reloaded) {
+      if (!(await adoptReloadedDoc(marked.reloaded, gen))) return;
+      hash = marked.reloaded.sourceHash;
     }
-  }, [calibrationChartId, activeChart, sourceHash, accessToken, applyLoadedCalibration, updateCanvasBox]);
+    // `exists` is not a failure — the GET decides whether that row is for these bytes.
+    const r = marked.result;
+    if (!r || (!r.generated && r.reason !== 'exists')) {
+      setMarkState('error');
+      return;
+    }
+    const refetched = await refetchCalibrationAt(calibrationChartId, hash, gen);
+    if (refetched === 'stale') return;
+    setMarkState(refetched === 'ok' ? 'idle' : 'error');
+  }, [calibrationChartId, activeChart, sourceHash, sectionHeaders, accessToken, adoptReloadedDoc, refetchCalibrationAt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4096,6 +4174,8 @@ function ChartNavigator({
       setReviewIdx(-1);
       setEverReviewed(false);
       setConvertState('idle');
+      setSectionHeaders([]);
+      setMarkState('idle');
       // The sheet holds a MEASUREMENT of the outgoing chart. Leaving it up across a chart
       // change is how chart A's clusters end up offered as chart B's answer (Codex H1) —
       // the identity checks make that unwritable, but the honest state is "closed".
@@ -4967,6 +5047,9 @@ function ChartNavigator({
           skipReason={overlaySkip}
           convertState={convertState}
           onBuildOverlay={buildOverlay}
+          headerCount={sectionHeaders.length}
+          markState={markState}
+          onMarkSections={markSectionsFromHeaders}
         />
       ) : null}
 
