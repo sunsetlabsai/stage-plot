@@ -63,6 +63,11 @@ interface Props {
 // Shared Manage-Charts surface, opened from the library row and the in-show "+"
 // chip. The library is the authority (charts key by owner+normalize(title)+role),
 // so both callers mutate the same chart_library rows through here.
+/** One answer per file version: the chart id alone outlives a re-upload. */
+function overlayVersionKey(c: Chart): string | null {
+  return c.fileId ? `${c.fileId}@${c.modifiedTime ?? ''}` : null;
+}
+
 export default function ManageChartsModal({ songTitle, charts, isOwner, onClose, onChartsChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -82,15 +87,17 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
   // Replace can ask synchronously — an await before the file picker would lose the tap
   // gesture and the browser would refuse to open it.
   // true / false / null (couldn't tell); a missing key means still checking.
-  const [overlayById, setOverlayById] = useState<Record<string, boolean | null>>({});
+  // Keyed by file VERSION, not chart id (Codex R2, #203): a re-upload changes the bytes,
+  // and overlays are kept per byte hash, so the old answer says nothing about the new file.
+  const [overlayByVersion, setOverlayByVersion] = useState<Record<string, boolean | null>>({});
   useEffect(() => {
     if (!isOwner) return;
     let live = true;
     for (const c of charts) {
-      if (!c.fileId) continue;
-      const id = c.fileId;
+      const v = overlayVersionKey(c);
+      if (!v) continue;
       void chartHasOverlay(c).then((has) => {
-        if (live) setOverlayById((m) => ({ ...m, [id]: has }));
+        if (live) setOverlayByVersion((m) => ({ ...m, [v]: has }));
       });
     }
     return () => {
@@ -191,17 +198,21 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
 
   // FAIL CLOSED (Codex R1, #203): while the check runs, Replace is held; a check that
   // could not answer still warns. Only a definite "no overlay" replaces without asking.
-  const overlayPending = (fileId?: string) => isOwner && !!fileId && !(fileId in overlayById);
-  function startReplace(role: string, fileId?: string) {
-    if (overlayPending(fileId)) return;
-    const has = fileId ? overlayById[fileId] : false;
+  const overlayPending = (c: Chart) => {
+    const v = overlayVersionKey(c);
+    return isOwner && v !== null && !(v in overlayByVersion);
+  };
+  function startReplace(c: Chart) {
+    if (overlayPending(c)) return;
+    const v = overlayVersionKey(c);
+    const has = v ? overlayByVersion[v] : false;
     if (has === true && !confirm("Replacing the file removes this chart's bar overlay. You can build a new one afterwards.")) {
       return;
     }
     if (has === null && !confirm("This chart may have a bar overlay, and replacing the file would remove it. Replace anyway?")) {
       return;
     }
-    replaceRoleRef.current = role;
+    replaceRoleRef.current = c.role;
     replaceFileRef.current?.click();
   }
 
@@ -288,13 +299,13 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
                       </button>
                     )}
                     <button
-                      onClick={() => startReplace(c.role, c.fileId)}
-                      disabled={busy || overlayPending(c.fileId)}
+                      onClick={() => startReplace(c)}
+                      disabled={busy || overlayPending(c)}
                       className="text-xs text-zinc-400 hover:text-blue-400 disabled:opacity-40"
                     >
                       {/* Reworded on builder rows so "Edit" (spec) vs file-replace
                           reads unambiguously (§4.1). */}
-                      {overlayPending(c.fileId) ? 'Checking…' : c.is_builder ? 'Replace with file' : 'Replace'}
+                      {overlayPending(c) ? 'Checking…' : c.is_builder ? 'Replace with file' : 'Replace'}
                     </button>
                     <button
                       onClick={() => c.fileId && handleDelete(c.fileId)}

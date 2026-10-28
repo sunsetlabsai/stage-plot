@@ -135,6 +135,30 @@ describe('ManageChartsModal — Replace', () => {
   });
 });
 
+describe('ManageChartsModal — a new version of a chart is unchecked (Codex R2, #203)', () => {
+  it('★ after the file changes, Replace is held again until THAT version is checked', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 404 })); // v1: no overlay
+    const picker = filePickerClicks();
+    const props = { songTitle: 'S', isOwner: true, onClose: vi.fn(), onChartsChanged: vi.fn() };
+    const v1 = { ...CHART, modifiedTime: '2026-10-27T10:00:00.000Z' };
+    const { rerender } = render(<ManageChartsModal {...props} charts={[v1]} />);
+    await screen.findByRole('button', { name: 'Replace' });
+    // The owner re-uploads the original file — its old overlay is live again by hash.
+    let resolve!: (r: Response) => void;
+    fetchMock.mockReturnValue(new Promise<Response>((r) => { resolve = r; }));
+    const v2 = { ...CHART, modifiedTime: '2026-10-27T10:05:00.000Z' };
+    rerender(<ManageChartsModal {...props} charts={[v2]} />);
+    const btn = await screen.findByRole('button', { name: /Checking/ });
+    fireEvent.click(btn);
+    expect(picker).not.toHaveBeenCalled();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    resolve(new Response('{}', { status: 200 }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Replace' }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/removes this chart's bar overlay/));
+    expect(picker).not.toHaveBeenCalled();
+  });
+});
+
 describe('ChartPreview — a page that fails to render', () => {
   it('★ says it could not load, rather than leaving an unhandled rejection', async () => {
     renderPage.mockRejectedValue(new Error('Transport destroyed'));
