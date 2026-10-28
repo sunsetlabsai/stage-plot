@@ -198,8 +198,9 @@ gate (`route.ts:167`) before any row is written. So:
    (c) skip text at ≥ 1.5× the page's median size (the song "Breakdown" read its own title as
    a section); (d) a two-digit count is a count — `VERSE 16X` is a 16-bar verse, not verse
    1 × 6 (caught by the drive, invisible in a label survey); (e) two section words make one
-   label (`CHORUS INSTRUMENTAL`, `INTRO VAMP`); (f) a bracketed line follows the same grammar
-   plus an optional parenthesised note — `[Break my heart]` is a lyric (Codex R1);
+   label (`CHORUS INSTRUMENTAL`, `INTRO VAMP`); (f) a bracketed line follows exactly the bare grammar,
+   no free text and no parenthesised note — `[Break my heart]` and `[Break (my heart)]` are
+   lyrics (Codex R1, R2), so `[Outro (Fade out)]` goes unmarked by design;
    (g) positions go through the render viewport, so a /Rotate page's marks land on their
    text, while reading order is judged in the page's own layout (Codex R1).
    The 10 misses: 6 medley index sheets with no headers, and 4 whose headers carry what the

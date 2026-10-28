@@ -38,10 +38,9 @@ describe('parseHeaderLine — matches', () => {
     ['  Outro  ', 'Outro', null],
     ['[Verse 1]', 'Verse 1', null],
     ['[Pre-Verse]', 'Pre-Verse', null],
-    ['[Outro (Fade out)]', 'Outro (Fade out)', null],
     ['[Chorus x2]', 'Chorus', { plays: 2 }],
     ['[Chorus (x2)]', 'Chorus', { plays: 2 }],
-    ['[Verse 2 (soft)]', 'Verse 2 (soft)', null],
+    ['[Verse 2:]', 'Verse 2', null],
     ['[Chorus Instrumental]', 'Chorus Instrumental', null],
   ])('%j → %j', (line, label, count) => {
     expect(parseHeaderLine(line)).toEqual({ label, count });
@@ -78,6 +77,10 @@ describe('parseHeaderLine — refusals (a lyric line is never a header)', () => 
     '[Out of my mind]',
     '[Hook me up]',
     '[Verse of the night]',
+    // Codex R2: a parenthesised lyric inside the brackets — no free note is accepted.
+    '[Break (my heart)]',
+    '[Out (of my mind)]',
+    '[Outro (Fade out)]',
     '[x2]',
     // A lyric's last word wrapped onto its own line (measured on the live library).
     'out',

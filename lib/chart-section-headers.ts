@@ -42,7 +42,7 @@ export interface SectionHeader {
   page: number;
   x: number; // 0..1, left edge of the line's first glyph
   y: number; // 0..1, top→bottom, at the glyph top
-  label: string; // as printed, count and trailing colon stripped ("VERSE 1", "Outro (Fade out)")
+  label: string; // as printed, count and trailing colon stripped ("VERSE 1", "Chorus Instrumental")
   /** The printed count, kept for the proposer: `8x` = bars in the section, `x2` = plays. */
   count: { bars: number } | { plays: number } | null;
 }
@@ -67,12 +67,14 @@ const LABEL = `(${CORE})`;
 // one-bar verse.
 const COUNT = `\\(?\\s*(?:(\\d{1,2})[x×]|[x×]\\s*(\\d{1,2})|\\??[x×])\\s*\\)?`;
 const BARE_RE = new RegExp(`^${LABEL}\\s*:?\\s*(?:${COUNT})?\\s*:?$`, 'i');
-// Bracketed: the SAME label grammar as a bare line, plus an optional note in parentheses
-// kept as printed ("[Outro (Fade out)]"). Nothing else: a bracketed backing vocal that merely
-// opens with a section word ("[Break my heart]", Codex R1) is a lyric. A parenthesised count
-// ("(x2)") is a count, not a note.
-const NOTE = `\\((?!\\s*(?:\\d{1,2}[x×]|[x×]\\s*\\d{1,2}|\\??[x×])\\s*\\))[^)]*\\)`;
-const BRACKET_RE = new RegExp(`^\\[\\s*(${CORE}(?:\\s*${NOTE})?)\\s*(?:${COUNT})?\\s*:?\\s*\\]$`, 'i');
+// Bracketed: exactly the bare-line grammar inside brackets — label and optional count,
+// nothing else. A bracketed backing vocal that merely opens with a section word is a lyric:
+// "[Break my heart]" (Codex R1), and "[Break (my heart)]" / "[Out (of my mind)]" once a
+// free parenthesised note was allowed (Codex R2). A note cannot be told from a lyric by its
+// shape, so none is accepted: "[Outro (Fade out)]" goes unmarked and the owner places that
+// one by hand — a missed mark costs a tap, a bogus one is a wrong seek target. (None of the
+// 342 live lyric sheets use brackets at all.)
+const BRACKET_RE = new RegExp(`^\\[\\s*${LABEL}\\s*:?\\s*(?:${COUNT})?\\s*:?\\s*\\]$`, 'i');
 
 /** Recognize one line of text. Pure; exported for the tests and the proposer. */
 export function parseHeaderLine(text: string): Pick<SectionHeader, 'label' | 'count'> | null {
