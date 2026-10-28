@@ -207,6 +207,12 @@ gate (`route.ts:167`) before any row is written. So:
    strict grammar refuses — mashup prefixes (`JUICE VERSE 8X`), annotations
    (`VERSE 2 9X (8THS)`, `VERSE 16X + 4 ?`). Those 4 still get the plain Calibrate line.
    Instrument-led labels (`GUITAR VAMP 4X`) are not headers under this grammar.
+   **Documented limit (Graham, 2026-10-27):** a page stored with a /Rotate whose text is
+   counter-rotated to read upright on screen (some landscape exporters) is grouped in the
+   wrong direction and yields no headers, so the owner gets the plain Calibrate line —
+   no offer, never a wrong write. 0 of 453 corpus pages (347 live lyric, 106 notation) carry
+   any /Rotate. Not designed around: re-exporting the PDF, or hand-calibrating, is easier
+   than reading each page in its text's own direction. Backlog #204.
 3. **Entry point.** The Perform strip's `none` state, for a chart that will not get an
    overlay (`overlaySkipReason === 'lyrics'`, or a client-side `measuredDisposition` of
    `gated`) and whose text layer has ≥ 2 headers: "N sections found" + **Mark sections**.
