@@ -106,6 +106,7 @@ export const QUALITY_WHITELIST: ReadonlySet<string> = new Set([
   'aug',     // augmented triad
   'sus', 'sus2', 'sus4',
   '7',       // dominant 7
+  '7sus2', '7sus4', // dominant 7 suspended — without these A7sus2 degraded to Asus2 (#204)
   'maj7',
   'm7',
   'm7b5',    // half-diminished
