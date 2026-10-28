@@ -57,6 +57,33 @@ const armed = (barId: string): Armed => ({ fireAt: 'fire', directive: { kind: 'j
 
 // ── programHash recipe (D10, R4 LOW) ─────────────────────────────────────────
 describe('serializeProgram / programHash', () => {
+  // Issue #100: ids went in unescaped, so an id containing a separator could make two
+  // DIFFERENT programs serialize to the same string (a false "same program" agreement).
+  it('★ an id containing a separator can no longer collide with a split id', () => {
+    const joined = serializeProgram([{ id: 'a\u001fb' }], []);
+    const split = serializeProgram([{ id: 'a' }, { id: 'b' }], []);
+    expect(joined).not.toBe(split);
+  });
+
+  it('★ a comma inside an ending bar id does not read as two bars', () => {
+    const bs = [{ id: 'x,y' }, { id: 'x' }, { id: 'y' }];
+    const one = serializeProgram(bs, [ending('E', 'R', ['x,y'], [1])]);
+    const two = serializeProgram(bs, [ending('E', 'R', ['x', 'y'], [1])]);
+    expect(one).not.toBe(two);
+  });
+
+  it('every reserved character is escaped, including the escape itself', () => {
+    const ids = ['%', '\u001e', '\u0000', '%25'];
+    const out = ids.map((id) => serializeProgram([{ id }], []));
+    expect(new Set(out).size).toBe(ids.length);
+  });
+
+  it('app-generated ids serialize exactly as before — existing hashes do not move', () => {
+    const id = '3f2b9c1e-8d4a-4b6f-9e2a-1c5d7f8a9b0c';
+    expect(serializeProgram([{ id }, { id: 'b2' }], [rstart('R1', id)]))
+      .toBe(['chunk3-v1', `${id}\u001fb2`, `repeatStart\u001fR1\u001f${id}\u001fstart`].join('\u0000'));
+  });
+
   const bars = ['b1', 'b2', 'b3', 'b4'];
   const markers: RoadmapMarker[] = [
     rstart('R1', 'b1'),

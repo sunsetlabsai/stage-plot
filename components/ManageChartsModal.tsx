@@ -7,6 +7,7 @@ import { canonicalizeRole, displayRole, type ChartRole } from '@/lib/normalize';
 import { uploadChart, ChartUploadError } from '@/lib/chart-upload';
 import { availableRoles, applyUploadedChart, removeChartById } from '@/lib/chart-management';
 import { loadPdfDoc, renderPage, fetchChartBytes } from '@/lib/pdf-viewer';
+import { chartHasOverlay } from '@/lib/chart-overlay-status';
 import { chartShareFilename } from '@/lib/share';
 import ShareButton from '@/components/ShareButton';
 import RoadmapBuilder, { type EditChart } from '@/components/RoadmapBuilder';
@@ -77,6 +78,24 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
   const addFileRef = useRef<HTMLInputElement>(null);
   const replaceRoleRef = useRef<string | null>(null);
   const replaceFileRef = useRef<HTMLInputElement>(null);
+  // Which charts have an overlay on their CURRENT file, looked up in the background so
+  // Replace can ask synchronously — an await before the file picker would lose the tap
+  // gesture and the browser would refuse to open it.
+  const [overlayById, setOverlayById] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    if (!isOwner) return;
+    let live = true;
+    for (const c of charts) {
+      if (!c.fileId) continue;
+      const id = c.fileId;
+      void chartHasOverlay(c).then((has) => {
+        if (live && has !== null) setOverlayById((m) => ({ ...m, [id]: has }));
+      });
+    }
+    return () => {
+      live = false;
+    };
+  }, [charts, isOwner]);
 
   const free = availableRoles(charts);
   const preview = charts.find((c) => c.fileId === previewId) ?? null;
@@ -169,7 +188,15 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
     if (file && role) doUpload(file, role);
   }
 
-  function startReplace(role: string) {
+  function startReplace(role: string, fileId?: string) {
+    // The overlay is keyed to the old file's bytes; a new file orphans it. Say so first.
+    if (
+      fileId &&
+      overlayById[fileId] &&
+      !confirm("Replacing the file removes this chart's bar overlay. You can build a new one afterwards.")
+    ) {
+      return;
+    }
     replaceRoleRef.current = role;
     replaceFileRef.current?.click();
   }
@@ -257,7 +284,7 @@ export default function ManageChartsModal({ songTitle, charts, isOwner, onClose,
                       </button>
                     )}
                     <button
-                      onClick={() => startReplace(c.role)}
+                      onClick={() => startReplace(c.role, c.fileId)}
                       disabled={busy}
                       className="text-xs text-zinc-400 hover:text-blue-400 disabled:opacity-40"
                     >

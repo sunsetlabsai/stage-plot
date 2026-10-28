@@ -45,20 +45,41 @@ export async function getCachedChartBlob(chart: Chart): Promise<Blob | null> {
 }
 
 /** Store a downloaded chart in the cache. */
-export async function cacheChart(chart: Chart, response: Response): Promise<void> {
+/** One write chain per fileId: a chart's evict-then-put must not interleave with itself. */
+const writeChains = new Map<string, Promise<void>>();
+
+export function cacheChart(chart: Chart, response: Response): Promise<void> {
   const key = chartCacheKey(chart);
-  if (!key) return;
+  if (!key || !chart.fileId) return Promise.resolve();
+  const fileId = chart.fileId;
+  const prev = writeChains.get(fileId) ?? Promise.resolve();
+  const next = prev.then(() => writeNewest(fileId, key, response));
+  const tail = next.catch(() => {});
+  writeChains.set(fileId, tail);
+  void tail.then(() => {
+    if (writeChains.get(fileId) === tail) writeChains.delete(fileId);
+  });
+  return next;
+}
+
+/**
+ * Keep the NEWEST version of a chart, never just the latest to arrive (uat-plan-v1 §2.4).
+ * Evicting "every other version" let a slow download of the OLD file — still in flight
+ * when a replace landed — delete the new copy and store itself, so the replaced chart was
+ * missing offline. Only strictly older versions are evicted, and a write older than what
+ * is cached is dropped.
+ */
+async function writeNewest(fileId: string, key: string, response: Response): Promise<void> {
   const cache = await caches.open(CACHE_NAME);
-
-  // Evict any old version of this fileId (different modifiedTime)
-  const keys = await cache.keys();
-  const prefix = `/api/chart-cache/${chart.fileId}/`;
-  for (const req of keys) {
-    if (new URL(req.url).pathname.startsWith(prefix) && new URL(req.url).pathname !== key) {
-      await cache.delete(req);
-    }
+  const prefix = `/api/chart-cache/${fileId}/`;
+  const version = Number(key.slice(prefix.length));
+  for (const req of await cache.keys()) {
+    const path = new URL(req.url).pathname;
+    if (!path.startsWith(prefix) || path === key) continue;
+    const cached = Number(path.slice(prefix.length));
+    if (cached > version) return; // a newer copy is already here — keep it
+    await cache.delete(req);
   }
-
   await cache.put(new Request(key), response);
 }
 
