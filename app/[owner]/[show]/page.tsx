@@ -5333,10 +5333,10 @@ export function SetupSetlistTable({
                   <th className="w-8"></th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-10">#</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[160px]">Title</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-16">Key</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-16 min-w-[80px]">Key</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]">Lead</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500">Notes</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500" title="Shown under the song on Perform and in the run order">Scene</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[120px]">Notes</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]" title="Shown under the song on Perform and in the run order">Scene</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[120px]">Charts</th>
                   <th className="w-16"></th>
                   <th className="w-10"></th>
@@ -5421,7 +5421,7 @@ function SetupSortableRow({
             genuinely resolves (or auto-creates) that row BY its title, so making
             it read-only would break CSV import. */}
         {!isTitleEditableInSetlist(song) ? (
-          <div className="flex items-center gap-1.5 group">
+          <div className="flex items-center gap-1.5 group max-w-[200px]">
             <span className="text-sm text-gray-700 truncate" title={song.title}>{song.title}</span>
             <a
               href="/library"
