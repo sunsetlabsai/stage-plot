@@ -230,17 +230,54 @@ Three conclusions, each one a rule below:
 #### 2.4.2 The proposer's form-line grammar
 
 A **form line** is either a line `parseHeaderLine` accepts, or an all-caps line (≥ 80% of its
-letters uppercase, starts with a capital) that carries at least one count token. The line
-splits on `;` into **parts**, in order; each part is one section.
+letters uppercase, starts with a capital) that carries at least one **count token**: `NX`,
+`?X`, `X?`, or a standalone `X` or `?` word. The line splits on `;` into **parts**, in order; each part is one section.
 
-| # | Part shape | Result |
-| --- | --- | --- |
-| 1 | `<LABEL> NX` | section `label` = LABEL verbatim (e.g. `GUITAR SOLO`, `PRECHORUS (DRUMS ONLY)`), `bars` = N |
-| 2 | `<LABEL> NX <anything after>` with no `+` and no `?` | as 1; the trailing text (e.g. `(CLAPS)`, `(ACAPELLA)`) becomes the section **note**, verbatim |
-| 3 | `<LABEL> NX+` (bare trailing `+`) | `bars` = N, **`open: true`**. The note gets the source text only if there is any beyond the count |
-| 4 | any `+` followed by more (`8X + 4`, `4X+1X`, `(+2 BEATS)`, `20X (12X + 8X)`) | `bars` = the first N; everything from the `+` (or its bracket) on becomes the **note**, verbatim; the count is **proposed and needs per-section owner confirmation** (Graham, 2026-10-28: `+4` might be bars or beats, so we don't add it) |
-| 5 | `?` anywhere, or `?X` / `X?` / bare `X` | count **uncertain**, never `open`. With a stated number (`CHORUS 24X ?`), propose that number; with none (`VERSE 1 ?X`), propose from a same-label antecedent per §2.2, else fail the section. Either way the **owner confirms** before it persists. Rule 5 wins when it appears with rules 2–4; any other trailing text is still kept as the note |
-| 6 | a part whose LABEL itself contains a count token, or that fits none of the above (`GUITAR 1X, ALL 4X`, `CHORUS 9+X`, `CHORUS 6 TIMES ?`) | not parsed. The whole line goes on the read-back's **"Lines we didn't use"** list (§6.4) |
+Each part is read by **one ordered procedure**. The first step that decides, decides; no
+part can match two outcomes. *(Rewritten after Codex R1: the first draft was a table of
+overlapping rules, so `SOLO 8X+ UNTIL KEYBOARD CUE` could be open or not, and
+`GUITAR 1X, ALL 4X` matched both "note" and "reject".)*
+
+1. **Split.** LABEL = the text before the **first** count token; COUNT = that token;
+   TAIL = everything after it, trimmed.
+   **Not used** if there is no count token, LABEL is empty, or LABEL contains a digit or
+   `+` anywhere except one trailing ordinal (`VERSE 1`, `LONG VERSE 4`, `ORGAN VERSE 1` are
+   fine; `CHORUS 9+` is not).
+2. **Uncertain.** If the part contains `?` anywhere, or COUNT is `?X` / `X?` / bare `X` →
+   **uncertain**, never `open`. With a stated `NX` anywhere in the part (`CHORUS 24X ?`,
+   `INTRO VAMP ? 4X`), propose that number;
+   with none (`VERSE 1 ?X`), propose from a same-label antecedent per §2.2, else fail the
+   section. The owner confirms before it persists. TAIL minus the `?` continues to step 3
+   for its note only; step 3 cannot make an uncertain section open.
+3. **Read TAIL**, first match wins:
+   | TAIL | Result |
+   | --- | --- |
+   | empty | `bars` = N |
+   | starts with `+` and the next non-space character is a digit (`+ 4`, `+1X`, `+2`) | **extra count**: `bars` = N, TAIL verbatim → note, **owner confirms the count** (Graham, 2026-10-28: `+4` might be bars or beats, so it is never added) |
+   | starts with `+` otherwise (end of part, or words: `8X+`, `8X+ UNTIL KEYBOARD CUE`) | **open**: `bars` = N, `open: true`; TAIL after the `+`, if any, → note |
+   | a single bracketed group containing `+` (`(+2 BEATS)`, `(12X + 8X)`) | **extra count**, as above |
+   | contains a count token anywhere else (`, ALL 4X`, `/ALL 12X`) | **not used**: a second count outside `;` is a structure we can't read safely |
+   | anything else (`(CLAPS)`, `(ACAPELLA)`, `WITH IMPROV`) | `bars` = N, TAIL verbatim → note |
+4. **Note too long.** A note longer than `NOTE_MAX` (§2.4.3) is never truncated: the
+   section keeps its bars, the note is left off, and the full line goes on "Lines we didn't
+   use" so the owner can shorten it.
+
+**Not used** means the whole line goes on the read-back's **"Lines we didn't use"** list
+(§6.4); the proposer never emits a partial part. Worked through the procedure:
+
+| Part | Outcome |
+| --- | --- |
+| `GUITAR SOLO 8X` | step 3 row 1: 8 bars |
+| `CHORUS 8X (CLAPS)` | row 6: 8 bars, note `(CLAPS)` |
+| `SOLO 8X+` | row 3: 8 bars, open |
+| `SOLO 8X+ UNTIL KEYBOARD CUE` | row 3: 8 bars, open, note `UNTIL KEYBOARD CUE` |
+| `CHORUS 8X + 4` | row 2: 8 bars, note `+ 4`, owner confirms |
+| `CHORUS 4X (+2 BEATS)` | row 4: 4 bars, note `(+2 BEATS)`, owner confirms |
+| `CHORUS 24X ?` / `BREAKDOWN ?` | step 2: uncertain, propose 24 / inherit or fail |
+| `VAMP 4X; SOLO 12X` | two parts: 4 bars, then 12 bars |
+| `GUITAR 1X, ALL 4X` | row 5: not used |
+| `CHORUS 9+X` | step 1, `+` in LABEL: not used |
+| `CHORUS 6 TIMES ?` | step 2 by `?`, no `NX`, no antecedent → fails; shown with reason |
 
 Two more rules:
 
@@ -272,13 +309,16 @@ export interface RoadmapSection {
 - **`bars` stays required.** For an open section it is the length **drawn**: the stated
   minimum (`8X+` → 8). An authored open section with no stated minimum gets the owner's
   choice (default 4). That leaves `BarRef`, `validateRoadmapSpec`'s form math, navigation
-  targets, the layout, and seek all unchanged. No sentinel `bars`, no null.
+  targets and seek unchanged. (The layout gains one line for a noted section, §2.4.4.) No sentinel `bars`, no null.
 - **No version bump, no migration.** Both fields are optional, the same forward-compat
   argument as `timeSigSource` (§2.1) and `Bar.measures` (#172). Every existing spec keeps its
   meaning.
 - **`validateRoadmapSpec` additions.** `note`: a string, trimmed, non-empty, at most
-  `NOTE_MAX` (60) characters, so it fits on the label line at the render size. Measured
-  longest direction: 31 characters. `open`: exactly `true` if present. **`open` with any
+  `NOTE_MAX` = **52** characters. That is set by the worst case, not the typical one: the note
+  line is `OPEN · ` + note at 9 pt Helvetica, and Helvetica's widest glyph (`W`, 944/1000 em)
+  gives (7 + 52) × 0.944 × 9 ≈ 501 pt, inside the 516 pt content width
+  (`PAGE_W − 2·MARGIN_X`, `lib/roadmap-layout.ts:23-25`). So no note can clip, whatever the
+  label or the letters. Measured longest direction in the corpus: 31 characters. `open`: exactly `true` if present. **`open` with any
   `repeat` (plain or volta) is rejected**: "play N times" and "until the cue" contradict
   each other, and the renderer would have to invent which one wins.
 - **What `open` changes downstream, and nothing more:**
@@ -287,16 +327,39 @@ export interface RoadmapSection {
     until the owner gives a length (§2.1's rule, same reason: a minimum isn't a duration).
   - **Corroboration** (§9 Q5): a spec with an open section gives a lower bound
     (`Σ bars ≥`). It is reported as such and never compared as equal.
-  - **Conductor position** is unaffected. The playhead moves only on the MD's manual
-    advance (`lib/conductor-session.ts:157`), which is what "until signaled" means.
+  - **Conductor clock: it holds at the end of an open section.** *(Corrected after Codex
+    R1. The first draft said the playhead moves only on manual advance; that's true of the
+    §3.5 gate, but the clock driver advances by itself when a bar is owed,
+    `lib/use-conductor-session.ts:874`. So `SOLO 8X+` then `CHORUS 8X` would have rolled
+    into the chorus after eight bars with no cue.)* The fix uses the plumbing that's already
+    there: `buildCalibration` (`lib/roadmap-calibration.ts:25`), which already projects
+    repeats and navigation onto `RoadmapMarker`, projects `open` as a **`hold` marker on the
+    open section's last drawn bar**. `isValidCalibration` accepts the new kind;
+    `resolveRoadmap` ignores it (it changes timing, not order). In the clock driver, when one
+    bar is owed and the current bar carries `hold`, it **freezes** instead of advancing,
+    using the existing suspend state (`stalled`, `:876-880`). Only the MD's **manual
+    advance** leaves the hold: every manual seam that moves the position clears a stall
+    through `writeDriver` (`:373-382`), while a clock advance deliberately doesn't. An align
+    tap on the hold bar re-zeros onto it, and the clock freezes there again on the next owed
+    bar, which is correct: aligning says "we're here", not "go on". **Test:** clock-on playback of
+    `SOLO 8X+` → `CHORUS 8X` stays on solo bar 8 indefinitely and enters the chorus only on
+    a manual advance. Uploaded (non-builder) charts never carry `hold`.
 
 #### 2.4.4 Where it shows
 
-- **Rendered chart** (`lib/roadmap-render.ts:134`, the section label): the note is drawn
-  on the label's own line, right of the bold label, in the regular face at a smaller size.
-  An open section adds an `open` tag between the two: `GUITAR SOLO · open · until keys
-  signal`. It goes on the label line only, so the layout's geometry (`lib/roadmap-layout.ts`,
-  `labelYTop`) doesn't move and no calibration coordinate changes.
+- **Rendered chart.** A section with a `note` or `open` gets a **note line** under its bold
+  label (`lib/roadmap-render.ts:134`), regular face, 9 pt: `OPEN · until keys signal`,
+  `until keys signal`, or just `OPEN`. It gets its own line, not space on the label's line,
+  because the label's length is unbounded, so the space left beside it can't be known in
+  advance. *(Codex R1: a long label plus a 58-character note at 8 pt ran to ~626 pt, past
+  the 612 pt page edge.)* With a line of its own, `NOTE_MAX` alone guarantees the fit.
+  **Geometry:** `layoutRoadmap` gives that section's first system a label strip of
+  `SYSTEM_LABEL_H + NOTE_LINE_H` instead of `SYSTEM_LABEL_H` (`lib/roadmap-layout.ts:30`).
+  The PDF and the calibration both read the one layout ("change these and BOTH move
+  together", `:19-21`), so they stay in step. A builder save already re-derives both, and
+  bar ids don't depend on y. **Test:** a spec with no note or open lays out
+  byte-identically to today (every existing chart unchanged); with a note, every PDF label
+  and bar position equals its calibration coordinate.
 - **Builder**: each section row (`components/RoadmapBuilder.tsx`, the row beside rename)
   gets a one-line **Direction** text field and an **Open** toggle. Nothing else — this is
   the "clean and easy" bar. The toggle is disabled with the reason shown while the section
@@ -310,8 +373,16 @@ export interface RoadmapSection {
 The view model rebuilds sections **field by field** in at least six places, so it would
 silently drop both new fields on the next edit: `specToView` (`lib/roadmap-view.ts:342`),
 `viewToSpec` (`:359`), the bar-plan rebuild (`:567`), `setPlainRepeat` (`:679`),
-`unrollRepeat`'s copies (`:704`), `addEndings` (`:745`). `roadmap-merge.ts:91` merges
-sections and must not merge two whose notes differ. **Fix it as a property on output, not
+`unrollRepeat`'s copies (`:704`), `addEndings` (`:745`).
+
+**Merge.** `roadmap-merge.ts` folds adjacent same-content sections into a `×N` repeat, and
+its equality check `sameContent` (`:38`) compares only `bars`, label and `changes`. Built
+as-is, a closed `Chorus 8` followed by an open `Chorus 8` would collapse into one closed `×2`
+and the cue would be lost (Codex R1, reproduced). Rule: **an open section never merges**
+(a merge produces a repeat, and `open` + repeat is invalid), and **two sections merge only
+if their notes are equal** (both absent counts as equal). `sameContent` gains both checks.
+**Test:** closed+open, open+open, and same-label-different-note pairs each stay separate;
+the existing merge cases are unchanged. **Fix it as a property on output, not
 site by site:** a test that runs every `ViewModel` op on a section carrying `note` and
 `open` and asserts both survive (or, for `open` + a repeat op, that the op is refused).
 Patching six call sites by hand would miss the seventh.
@@ -595,7 +666,10 @@ Every one of these degrades to review, never to a silent result.
      so post-chunk-C the remainder is reducible by owner action rather than only by
      new bytes. The sweep should still report it, not assume it.
    When it runs it compares `Σ section.bars` (lyrics) against `Σ Bar.measures`
-   (calibration) — never `max(absNumber)`.
+   (calibration) — never `max(absNumber)`. **If the lyrics spec has any `open` section, the
+   lyrics sum is a lower bound** (§2.4.3): agreement is `Σ bars ≤ Σ measures`, and only a
+   calibration *shorter* than the lyrics minimum is a disagreement. `SOLO 8X+` against a
+   12-measure solo agrees. *(Codex R1: equality here contradicted §2.4.3.)*
 
 ---
 
@@ -604,12 +678,14 @@ Every one of these degrades to review, never to a silent result.
 Gated commits, Codex per chunk.
 
 **Chunk D — directions on the roadmap (own PR, FIRST; needs no lyrics sheet).** §2.4.3–2.4.5:
-`note` + `open` on `RoadmapSection`, `validateRoadmapSpec` rules (`NOTE_MAX`, `open` is
-`true`, `open` + repeat rejected), the label-line render, the builder row's Direction field
-and Open toggle, `tallySpec`'s `8+`. **Tests:** validator accept/reject per rule; the
-§2.4.5 property test over every `ViewModel` op; spec → view → spec round-trip keeps both
-fields; render keeps `labelYTop` and every bar coordinate identical with and without a
-note. Browser drive before Codex (canvas work is invisible to jsdom). This is the
+`note` + `open` on `RoadmapSection`, `validateRoadmapSpec` rules (`NOTE_MAX` = 52, `open`
+is `true`, `open` + repeat rejected), the note line in layout + render, the `hold` marker
+projected by `buildCalibration` + the clock-driver freeze, `sameContent`'s two merge rules,
+the builder row's Direction field and Open toggle, `tallySpec`'s `8+`. **Tests:** validator
+accept/reject per rule; the §2.4.5 property test over every `ViewModel` op; spec → view →
+spec round-trip keeps both fields; a spec with no note/open lays out byte-identically to
+today, and with one, PDF positions equal calibration coordinates; clock-on `SOLO 8X+` →
+`CHORUS 8X` holds until a manual advance; the merge pairs in §2.4.5 stay separate. Browser drive before Codex (canvas work is invisible to jsdom). This is the
 "write the audible down" feature, it's useful on every builder chart, and it ships on
 its own.
 
