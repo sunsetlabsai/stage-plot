@@ -5333,9 +5333,10 @@ export function SetupSetlistTable({
                   <th className="w-8"></th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-10">#</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[160px]">Title</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-16">Key</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 w-16 min-w-[80px]">Key</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]">Lead</th>
-                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500">Notes</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[120px]">Notes</th>
+                  <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[100px]" title="Shown under the song on Perform and in the run order">Scene</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[120px]">Charts</th>
                   <th className="w-16"></th>
                   <th className="w-10"></th>
@@ -5420,7 +5421,7 @@ function SetupSortableRow({
             genuinely resolves (or auto-creates) that row BY its title, so making
             it read-only would break CSV import. */}
         {!isTitleEditableInSetlist(song) ? (
-          <div className="flex items-center gap-1.5 group">
+          <div className="flex items-center gap-1.5 group max-w-[200px]">
             <span className="text-sm text-gray-700 truncate" title={song.title}>{song.title}</span>
             <a
               href="/library"
@@ -5444,6 +5445,15 @@ function SetupSortableRow({
       </td>
       <td className="px-2 py-1">
         <input className={inputCls} value={song.notes ?? ''} onChange={(e) => onUpdate(idx, 'notes', e.target.value)} />
+      </td>
+      <td className="px-2 py-1">
+        <input
+          className={inputCls}
+          aria-label="Scene note"
+          placeholder="Lights down"
+          value={song.sceneNote ?? ''}
+          onChange={(e) => onUpdate(idx, 'sceneNote', e.target.value)}
+        />
       </td>
       <td className="px-2 py-1">
         <div className="flex flex-wrap items-center gap-1">
@@ -5474,7 +5484,7 @@ function SetupSortableRow({
     {showBpm && (
       <tr style={style} className="border-b border-gray-100">
         <td></td>
-        <td colSpan={8} className="px-2 pb-2">
+        <td colSpan={9} className="px-2 pb-2">
           <div className="flex flex-wrap items-center gap-3">
             <TapTempo bpm={song.bpm ?? null} onChange={(bpm) => onBpmChange(song.songId!, bpm)} />
             {/* The write is genuinely global (canonical song row) — say so (Q2). */}
@@ -6978,6 +6988,7 @@ function ConfigTab({
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[60px]">Mix</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[78px]">Position</th>
                   <th className="text-center px-2 py-2 text-xs font-bold text-gray-500 w-14">Power</th>
+                  <th className="text-center px-2 py-2 text-xs font-bold text-gray-500 w-16" title="Highlighted on the stage plot (e.g. lead vocal)">Featured</th>
                   <th className="text-left px-2 py-2 text-xs font-bold text-gray-500 min-w-[120px]">Name</th>
                   <th className="w-10"></th>
                 </tr>
@@ -7057,6 +7068,20 @@ function ConfigTab({
                           updateConfig((p) => {
                             const arr = [...p.stagePlot];
                             arr[idx] = { ...arr[idx], power: e.target.checked };
+                            return { ...p, stagePlot: arr };
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="px-2 py-1 text-center">
+                      <input
+                        type="checkbox"
+                        aria-label={`Featured: ${slot.name || slot.role || 'slot'}`}
+                        checked={slot.featured ?? false}
+                        onChange={(e) =>
+                          updateConfig((p) => {
+                            const arr = [...p.stagePlot];
+                            arr[idx] = { ...arr[idx], featured: e.target.checked };
                             return { ...p, stagePlot: arr };
                           })
                         }
