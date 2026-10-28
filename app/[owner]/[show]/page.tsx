@@ -75,6 +75,7 @@ import {
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart, fetchChartBytes } from '@/lib/pdf-viewer';
 import { isUnsupportedChartMime, overlaySkipReason } from '@/lib/chart-converter';
+import { countPdfContent, isPlaceholderCounts } from '@/lib/chart-placeholder';
 import { buildOverlayStep } from '@/lib/chart-upload';
 import { buildOverlayWithMeasurement } from '@/lib/chart-measure-client';
 import { parseChartDeepLink, buildChartShareUrl, buildShowShareUrl, chartShareFilename } from '@/lib/share';
@@ -3308,6 +3309,9 @@ function ChartNavigator({
   // exactly as it was, so there is nothing to remember. Reset with the rest of
   // the calibration state when the chart changes.
   const [convertState, setConvertState] = useState<ConvertState>('idle');
+  // The hash of the loaded bytes when they are a title-page placeholder, not a chart
+  // (lib/chart-placeholder.ts). Keyed by hash, so replaced bytes are re-checked.
+  const [placeholderHash, setPlaceholderHash] = useState<string | null>(null);
   // Bumped by every calibration-state reset, i.e. once per chart load. A build
   // can outlive the chart that started it (the vision call runs for seconds and
   // the performer can page to the next chart meanwhile), so the handler captures
@@ -4131,6 +4135,16 @@ function ChartNavigator({
         }
         const { doc, sourceHash: loadedHash } = loaded;
         docRef.current = doc;
+        // Placeholder check: text layer + operator list only (no render). Library
+        // charts only — they are the ones an owner could build or calibrate.
+        if (calibrationChartId) {
+          void import('pdfjs-dist')
+            .then(({ OPS }) => countPdfContent(doc, OPS as unknown as Parameters<typeof countPdfContent>[1]))
+            .then((counts) => {
+              if (!cancelled) setPlaceholderHash(isPlaceholderCounts(counts) ? loadedHash : null);
+            })
+            .catch(() => {});
+        }
         setNumPages(doc.numPages);
         setPageNum(1);
         if (canvasRef.current) {
@@ -4965,6 +4979,7 @@ function ChartNavigator({
           calibratable={calibratable}
           onCalibrate={enterCalibrate}
           skipReason={overlaySkip}
+          placeholder={placeholderHash !== null && placeholderHash === sourceHash}
           convertState={convertState}
           onBuildOverlay={buildOverlay}
         />

@@ -263,3 +263,22 @@ describe('PerformReadinessStrip — key states (UAT S15)', () => {
     expect(screen.queryByRole('button', { name: /try again|build overlay/i })).toBeNull();
   });
 });
+
+// ── A placeholder PDF is not a chart (backlog #204, Graham 2026-10-27) ────────
+describe('PerformReadinessStrip — placeholder PDF', () => {
+  it('★ says there is no chart yet, and offers neither Build overlay nor Calibrate', () => {
+    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: true })} />);
+    expect(screen.getByText(/title page/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Build overlay/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Calibrate/ })).toBeNull();
+  });
+  it('outranks a row-level gate and a gated build', () => {
+    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: true, skipReason: 'lyrics', convertState: 'gated' })} />);
+    expect(screen.getByText(/title page/i)).toBeTruthy();
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+  it('a real chart without an overlay still offers Build overlay', () => {
+    render(<PerformReadinessStrip {...props({ view: ready({ state: 'none' }), placeholder: false })} />);
+    expect(screen.getByRole('button', { name: 'Build overlay' })).toBeTruthy();
+  });
+});
