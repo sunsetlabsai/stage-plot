@@ -33,6 +33,7 @@ saying so precisely is the point.
 | **A proposer that does not require PDF geometry** | **← this doc** |
 | **Lyrics-sheet section grammar as a parseable source** | **← this doc** |
 | **A form-only (chord-free) path into `RoadmapSpec`** | **← this doc** (§6.2) |
+| **Performance directions on a section (`note`, `open`)** | **← this doc** (§2.4) |
 
 Everything else below is composition, not invention. Where this doc and an existing
 doc disagree, the existing doc wins and this one is wrong.
@@ -178,11 +179,227 @@ model cannot express today and which nothing in this design proposes to add.
 `RoadmapSection.bars` and to `SongStructure` bars, and is **not** comparable to
 `max(absNumber)`. See §9 Q5.
 
+### 2.4 Performance directions — kept verbatim, in place
+
+*(Amendment, 2026-10-28, per `design-common-roadmap.md` §4.2.)*
+
+**Requirement (Graham, 2026-10-27).** Lines like "vamp until signaled change" or "solo over
+the chorus until done" stay **verbatim, in place, inside their section**: not suppressed,
+not ignored, not translated into a bar count.
+
+**Why it matters more than the corpus shows (Graham, 2026-10-28).** Directions are rare in
+the sheets because notation apps give us no clean way to write them, so the band does them
+as audibles on stage and as pencil marks on the readers' charts. A place to write them down
+makes them part of the chart. That makes this **an authoring feature first and a parsing
+feature second**: an owner must be able to type a direction on any roadmap section, whether
+or not a lyrics sheet ever proposed it (§2.4.3).
+
+#### 2.4.1 What the live sheets actually say (measured)
+
+A read-only scan of the 342 live lyric sheets (`~/x/lyrics-corpus`, every page, text layer,
+all-caps lines only; scratch line-grouper — the build's acceptance arm re-measures with the
+shipped `linesOf`, see §10):
+
+| Kind of line | Lines | Sheets | Example |
+| --- | --- | --- | --- |
+| Header the #211 recognizer accepts | 2,673 | 332 | `VERSE 1 8X`, `VAMP 4X`, `INTRO VAMP` |
+| **All-caps line with a count that it rejects** | **458** | **146** | `GUITAR SOLO 8X`, `QUIET CHORUS 8X`, `ADD DRUMS 4X` |
+| … of which several sections on one line (`;`) | 72 | | `VAMP 4X; SOLO 12X`, `DRUMS 4X; ADD KEYS 6X` |
+| … of which an extra count (`+`) | 80 | | `CHORUS 8X + 4`, `PRE-CHORUS 4X+1X`, `CHORUS 4X (+2 BEATS)` |
+| **Open length** ("at least N") | 6 | | `SOLO 8X+`, `OUTRO 8X+`, `CHORUS 14X+` |
+| **Uncertain count** (author unsure: `?`, `?X`, bare `X`) | 68 | 20 | `CHORUS 24X ?`, `VERSE 1 ?X`, `INTRO X; CHORUS X` |
+| Cued or free direction, no count | 2 | | `KEYS SIGNAL CHANGE TO GET LUCKY`, `REPEAT SONG` |
+| All-caps line, no count, not a header | 67 | 51 | `AC/DC · Key G · 127 BPM`, `ARRANGEMENT NOTE`, `(BUH BUH BUH BUM)` |
+
+Three conclusions, each one a rule below:
+
+1. **The real gap is coverage, not "until signaled".** One sheet in three (146/342) has
+   count-bearing section lines the #211 recognizer rejects: instrument and qualifier labels,
+   `+` counts, several sections on one line. #211 was right to reject them. For section
+   *marks*, a missed line costs the owner one tap and a false one is a wrong seek target.
+   **For the proposer, a missed line is a wrong form.** So the proposer gets a wider grammar
+   (§2.4.2) and the #211 recognizer stays exactly as it is. Hand check: 30 of 30 randomly
+   sampled rejected count-bearing lines were real sections, none were lyrics.
+2. **Open and uncertain are different things.** `8X+` is the author saying "at least 8, then
+   on a cue": a fact about the performance. `24X ?` is the author not knowing: a gap in the
+   sheet. They must never share a representation.
+3. **Count-less lines can't be told apart by shape.** In that row, a direction
+   (`KEYS SIGNAL CHANGE…`) sits beside band/BPM title lines and sung syllables. The proposer
+   does not guess about them (§2.4.2, "Two more rules").
+
+#### 2.4.2 The proposer's form-line grammar
+
+**Step 0 — the existing grammar first.** A line `parseHeaderLine` accepts is read by §2,
+unchanged (`Verse 8x` bars, `Chorus x2` plays + inherit, bare label inherit). The procedure
+below runs **only on lines it rejects**. *(Codex R2: without this step, `Chorus x2` after
+`Chorus 8x` was "not used".)*
+
+A rejected line is a **form line** if it is all-caps (≥ 80% of its letters uppercase, starts
+with a capital) and carries at least one **count token**: `NX`, `?X`, `X?`, or a standalone
+`X` or `?` word. It splits on `;` into **parts**, in order; each part is one section.
+
+Each part is read by **one ordered procedure**. The first step that decides, decides.
+*(Rewritten after Codex R1 and R2. R1: overlapping rules gave `SOLO 8X+ UNTIL KEYBOARD CUE`
+two readings. R2: the open-tail row ran before the second-count check, so `VAMP 4X+ SOLO 8X`
+became one open Vamp with the note `SOLO 8X`, and the Solo was lost.)*
+
+1. **Split.** COUNT = the first `NX` token if the part has one, else the first `?X` / `X?` /
+   `X` / `?` token. LABEL = the text before COUNT with any `?` removed; TAIL = the text after
+   COUNT with any `?` removed, trimmed.
+   **Not used** if there is no count token, LABEL is empty, or LABEL contains a digit or `+`
+   anywhere except one trailing ordinal (`VERSE 1`, `LONG VERSE 4` pass; `CHORUS 9+`,
+   `CHORUS 6 TIMES` don't).
+2. **Uncertain.** If the part contains `?` anywhere, or COUNT is not an `NX` → **uncertain**,
+   never `open`. If COUNT is `NX`, propose N; otherwise propose from a same-label antecedent
+   per §2.2, else fail the section. The owner confirms before it persists. Step 3 still runs
+   for the note and for "not used", but its open row cannot apply.
+3. **Read TAIL**, first match wins:
+   | # | TAIL | Result |
+   | --- | --- | --- |
+   | 1 | empty | `bars` = N |
+   | 2 | starts with `+` and the next non-space character is a digit (`+ 4`, `+1X`, `+2`) | **extra count**: `bars` = N, TAIL verbatim → note, **owner confirms the count** (Graham, 2026-10-28: `+4` might be bars or beats, so it is never added) |
+   | 3 | exactly one bracketed group that contains `+` (`(+2 BEATS)`, `(12X + 8X)`) | **extra count**, as row 2 |
+   | 4 | contains a count token anywhere (`+ SOLO 8X`, `, ALL 4X`, `/ALL 12X`) | **not used**: a second section outside `;` is a structure we can't split safely |
+   | 5 | starts with `+` (`+`, `+ UNTIL KEYBOARD CUE`) | **open**: `bars` = N, `open: true`; text after the `+`, if any, → note |
+   | 6 | anything else (`(CLAPS)`, `(ACAPELLA)`, `WITH IMPROV`) | `bars` = N, TAIL verbatim → note |
+4. **Note too long.** A note longer than `NOTE_MAX` (§2.4.3) is never truncated: the
+   section keeps its bars, the note is left off, and the full line goes on "Lines we didn't
+   use" so the owner can shorten it.
+
+**Not used** means the whole line goes on the read-back's **"Lines we didn't use"** list
+(§6.4); the proposer never emits a partial line. That list holds **every line, in any case,
+that contains a count token and produced no section**, plus the all-caps count-less lines
+below. A count-bearing line can't drop out without showing up there.
+
+Worked through the procedure:
+
+| Line | Outcome |
+| --- | --- |
+| `Chorus x2` (after `Chorus 8x`) | step 0, §2: plays 2, inherits 8, owner confirms |
+| `GUITAR SOLO 8X` | row 1: 8 bars |
+| `CHORUS 8X (CLAPS)` | row 6: 8 bars, note `(CLAPS)` |
+| `SOLO 8X+` | row 5: 8 bars, open |
+| `SOLO 8X+ UNTIL KEYBOARD CUE` | row 5: 8 bars, open, note `UNTIL KEYBOARD CUE` |
+| `VAMP 4X+ SOLO 8X` | row 4: not used |
+| `CHORUS 8X + 4` | row 2: 8 bars, note `+ 4`, owner confirms |
+| `CHORUS 4X (+2 BEATS)` | row 3: 4 bars, note `(+2 BEATS)`, owner confirms |
+| `CHORUS 24X ?` | step 2: uncertain, propose 24 |
+| `INTRO VAMP ? 4X` | COUNT `4X`, LABEL `INTRO VAMP`; step 2: uncertain, propose 4 |
+| `BREAKDOWN ?` | step 2: uncertain, inherit or fail |
+| `VAMP 4X; SOLO 12X` | two parts: 4 bars, then 12 bars |
+| `GUITAR 1X, ALL 4X` | row 4: not used |
+| `CHORUS 9+X` / `CHORUS 6 TIMES ?` | step 1, LABEL: not used |
+
+Two more rules:
+
+- **Count-less lines are never sections and never notes on their own.** An all-caps line with
+  no count that `parseHeaderLine` rejects goes on the "Lines we didn't use" list, where the
+  owner can tap it to attach it as a note to the section above. Measured: 67 such lines,
+  most of them titles and BPM lines, so attaching them automatically would put noise on the chart.
+- **Directions are never interpreted into structure.** `REPEAT SONG` and `REPEAT VERSE 3,
+  CHORUS` imply sections, but the proposer doesn't add those sections. It keeps the words for
+  the owner. Same principle as "blank bars are never interpreted"
+  (`design-roadmap-structure-editing.md` §8).
+
+Lyrics are still discarded (§3). A direction is not a lyric: it is written **to the
+players**, not sung, and it is stated per section, so where it goes is known. That is the
+exact property §3 says lyrics lack.
+
+#### 2.4.3 The representation: `note` + `open` on `RoadmapSection`
+
+Two optional fields, decided together (Graham, 2026-10-28: "both"):
+
+```ts
+export interface RoadmapSection {
+  // …existing fields unchanged…
+  note?: string;   // performance direction, verbatim, shown on the section's label line
+  open?: true;     // length is set on stage: `bars` is the length DRAWN, a minimum, not the length played
+}
+```
+
+- **`bars` stays required.** For an open section it is the length **drawn**: the stated
+  minimum (`8X+` → 8). An authored open section with no stated minimum gets the owner's
+  choice (default 4). That leaves `BarRef`, `validateRoadmapSpec`'s form math, navigation
+  targets and seek unchanged. (The layout gains one line for a noted section, §2.4.4.) No sentinel `bars`, no null.
+- **No version bump, no migration.** Both fields are optional, the same forward-compat
+  argument as `timeSigSource` (§2.1) and `Bar.measures` (#172). Every existing spec keeps its
+  meaning.
+- **`validateRoadmapSpec` additions.** `note`: a string, trimmed, non-empty, at most
+  `NOTE_MAX` = **52** characters. That is set by the worst case, not the typical one: the note
+  line is `OPEN · ` + note at 9 pt Helvetica, and Helvetica's widest glyph (`W`, 944/1000 em)
+  gives (7 + 52) × 0.944 × 9 ≈ 501 pt, inside the 516 pt content width
+  (`PAGE_W − 2·MARGIN_X`, `lib/roadmap-layout.ts:23-25`). So no note can clip, whatever the
+  label or the letters. Measured longest direction in the corpus: 31 characters. `open`: exactly `true` if present. **`open` with any
+  `repeat` (plain or volta) is rejected**: "play N times" and "until the cue" contradict
+  each other, and the renderer would have to invent which one wins.
+- **What `open` changes downstream, and nothing more:**
+  - The **read-back tally** (`tallySpec`) prints `8+ bars` for an open section.
+  - **Duration math** treats an open section like `timeSigSource: 'assumed'`: it refuses
+    until the owner gives a length (§2.1's rule, same reason: a minimum isn't a duration).
+  - **Corroboration** (§9 Q5): a spec with an open section gives a lower bound
+    (`Σ bars ≥`). It is reported as such and never compared as equal.
+  - **Conductor clock: a documented limit, not built here (Graham, 2026-10-28).** The clock
+    driver advances by itself when a bar is owed (`lib/use-conductor-session.ts:874`), so
+    with Clock on, `SOLO 8X+` → `CHORUS 8X` enters the chorus after eight bars. **That is
+    exactly today's behaviour** for a vamp written as 8 bars, so `open` makes nothing worse.
+    The Clock is opt-in (default off, `conductor-clock.ts:141`), the conductor is out of v1
+    UAT, and the chart prints **OPEN** so the MD can see it. A clock hold was drafted in R1
+    and taken out after Codex R2: done properly it needs the hold in the conductor's program
+    identity (`lib/conductor-state.ts:116`, so the relay's chart-match gate tells an open
+    chart from a stale closed one) and it needs to survive calibration edits
+    (`app/api/charts/calibration/route.ts:143` doesn't check `source_spec`; the parity check
+    in `lib/roadmap-save.ts:100` would need to cover it). That's conductor work. It is
+    recorded as a **precondition** in `design-conductor-chunk5b-clock.md` §5.7: the
+    conductor doesn't return to UAT until the clock honours `open`.
+
+#### 2.4.4 Where it shows
+
+- **Rendered chart.** A section with a `note` or `open` gets a **note line** under its bold
+  label (`lib/roadmap-render.ts:134`), regular face, 9 pt: `OPEN · until keys signal`,
+  `until keys signal`, or just `OPEN`. It gets its own line, not space on the label's line,
+  because the label's length is unbounded, so the space left beside it can't be known in
+  advance. *(Codex R1: a long label plus a 58-character note at 8 pt ran to ~626 pt, past
+  the 612 pt page edge.)* With a line of its own, `NOTE_MAX` alone guarantees the fit.
+  **Geometry:** `layoutRoadmap` gives that section's first system a label strip of
+  `SYSTEM_LABEL_H + NOTE_LINE_H` instead of `SYSTEM_LABEL_H` (`lib/roadmap-layout.ts:30`).
+  The PDF and the calibration both read the one layout ("change these and BOTH move
+  together", `:19-21`), so they stay in step. A builder save already re-derives both, and
+  bar ids don't depend on y. **Test:** a spec with no note or open lays out
+  byte-identically to today (every existing chart unchanged); with a note, every PDF label
+  and bar position equals its calibration coordinate.
+- **Builder**: each section row (`components/RoadmapBuilder.tsx`, the row beside rename)
+  gets a one-line **Direction** text field and an **Open** toggle. Nothing else — this is
+  the "clean and easy" bar. The toggle is disabled with the reason shown while the section
+  has a repeat, matching the validator.
+- **Out of scope for the first build:** directions typed into the "describe it" box (the
+  AI parse path). The row field covers authoring. Teaching `parseDescription` and the op
+  layer a note op is a follow-up once the field has been used.
+
+#### 2.4.5 A trap the build must close (verified in source)
+
+The view model rebuilds sections **field by field** in at least six places, so it would
+silently drop both new fields on the next edit: `specToView` (`lib/roadmap-view.ts:342`),
+`viewToSpec` (`:359`), the bar-plan rebuild (`:567`), `setPlainRepeat` (`:679`),
+`unrollRepeat`'s copies (`:704`), `addEndings` (`:745`).
+
+**Merge.** `roadmap-merge.ts` folds adjacent same-content sections into a `×N` repeat, and
+its equality check `sameContent` (`:38`) compares only `bars`, label and `changes`. Built
+as-is, a closed `Chorus 8` followed by an open `Chorus 8` would collapse into one closed `×2`
+and the cue would be lost (Codex R1, reproduced). Rule: **an open section never merges**
+(a merge produces a repeat, and `open` + repeat is invalid), and **two sections merge only
+if their notes are equal** (both absent counts as equal). `sameContent` gains both checks.
+**Test:** closed+open, open+open, and same-label-different-note pairs each stay separate;
+the existing merge cases are unchanged. **Fix it as a property on output, not
+site by site:** a test that runs every `ViewModel` op on a section carrying `note` and
+`open` and asserts both survive (or, for `open` + a repeat op, that the op is refused).
+Patching six call sites by hand would miss the seventh.
+
 ---
 
 ## 3. Lyrics do not go on the roadmap
 
-**Decision. The lyric text is discarded after the structural headers are parsed.**
+**Decision. The lyric text is discarded after the form lines are parsed.** Performance
+directions are not lyrics and are kept (§2.4.2); this section is about sung text only.
 
 The reason generalizes past this feature:
 
@@ -311,8 +528,9 @@ being solely overlay quality and starts being cross-instrument sync.
 
 Reuse the existing discipline; do not build a second one.
 
-1. **Extract the header lines** from the lyrics PDF's text layer. Section headers are
-   short, line-initial, and match the §2 grammar; lyric body text does not. Scanned
+1. **Extract the form lines** from the lyrics PDF's text layer, with the #211 line
+   grouping and reading order (`lib/chart-section-headers.ts`: two-column sheets are the
+   norm). A form line matches §2 or the wider §2.4.2 grammar; lyric body text does not. Scanned
    sheets with no text layer are **out of scope for v1** — they fail closed with
    "no text layer," they do not fall back to vision.
 2. **Emit a `RoadmapSpec` directly — do NOT route through `parseDescription`.**
@@ -337,7 +555,11 @@ Reuse the existing discipline; do not build a second one.
    plausible. `tallyDraft` is **op-blind**: it sums `sec.spans` and ignores ops, and
    this grammar emits repeats as a matter of course (`Chorus x2`). **The tally for this
    path must be derived from the validated spec** — `tallySpec` (`lib/roadmap-authoring.ts`,
-   built for `design-roadmap-structure-editing.md` §4) does that, showing repeats as `×N`.
+   built for `design-roadmap-structure-editing.md` §4) does that, showing repeats as `×N`
+   and open sections as `8+ bars`. Under the tally, the read-back lists **"Lines we didn't
+   use"**: every count-bearing line, in any case, that produced no section, plus the
+   all-caps count-less lines (§2.4.2), each tappable to attach as a note to the section above. A dropped
+   line shows up there instead of silently disappearing.
 
 **Determinism first.** The grammar in §2 is regular. An AI parse is a *fallback* for
 sheets that deviate, subject to the same transcribe-then-fold split already used in
@@ -359,12 +581,17 @@ Every one of these degrades to review, never to a silent result.
 | Bar count total disagrees with a converter read of the same song | Surface both; owner decides. **Never auto-reconcile** |
 | No text layer (scanned sheet) | Out of scope v1; fail closed |
 | Adjacent multipliers suggesting group repeat | Parse per-section, flag (§2.2) |
+| `+` after a count (`8X + 4`, `(+2 BEATS)`) | `bars` = first count, the rest kept as the note; **propose, owner confirms** (§2.4.2 step 3 rows 2–3) |
+| `?` / `?X` / bare `X` (author unsure) | Same as an inheriting section (§2.2); never `open` |
+| `NX+` (at least N) | `bars` = N, `open: true` (§2.4.2 step 3 row 5) |
+| All-caps line that fits no part shape, or has no count | Listed under "Lines we didn't use"; never guessed (§2.4.2) |
 
 ---
 
 ## 8. Decisions locked
 
 1. Lyrics text is **not** placed on the roadmap; position is not recoverable from text (§3).
+   Performance directions **are** kept, verbatim, in their section (§2.4).
 2. L0 (form only) is a **complete artifact**, not a degraded chart (§4).
 3. L0 → L1 is **typed NNS**, never AI-inferred harmony (§4.1).
 4. The output is a `RoadmapSpec`; **no new spec type** (§0.1).
@@ -374,6 +601,14 @@ Every one of these degrades to review, never to a silent result.
 7. Disagreement between a chart and confirmed structure goes to the **existing review
    queue**; no silent sync (§5).
 8. `validateRoadmapSpec` remains the DB boundary for this path (§6).
+9. A direction is `RoadmapSection.note` (verbatim); an on-cue length is `open: true` with
+   `bars` = the drawn minimum. Optional fields, no version bump; `open` + repeat is
+   invalid (§2.4.3).
+10. Open (`8X+`) and uncertain (`?`) never share a representation (§2.4.1).
+11. The proposer's grammar is wider than the #211 mark recognizer, and the recognizer does
+    not change: a missed line costs a mark there and a wrong form here (§2.4.1).
+12. Directions are authorable on any roadmap, from the builder row, independent of any
+    lyrics sheet (§2.4.4).
 
 ---
 
@@ -438,7 +673,10 @@ Every one of these degrades to review, never to a silent result.
      so post-chunk-C the remainder is reducible by owner action rather than only by
      new bytes. The sweep should still report it, not assume it.
    When it runs it compares `Σ section.bars` (lyrics) against `Σ Bar.measures`
-   (calibration) — never `max(absNumber)`.
+   (calibration) — never `max(absNumber)`. **If the lyrics spec has any `open` section, the
+   lyrics sum is a lower bound** (§2.4.3): agreement is `Σ bars ≤ Σ measures`, and only a
+   calibration *shorter* than the lyrics minimum is a disagreement. `SOLO 8X+` against a
+   12-measure solo agrees. *(Codex R1: equality here contradicted §2.4.3.)*
 
 ---
 
@@ -446,11 +684,24 @@ Every one of these degrades to review, never to a silent result.
 
 Gated commits, Codex per chunk.
 
-1. **Grammar parser (pure, tested).** Header extraction + §2 grammar → `RoadmapSpec`
+**Chunk D — directions on the roadmap (own PR, FIRST; needs no lyrics sheet).** §2.4.3–2.4.5:
+`note` + `open` on `RoadmapSection`, `validateRoadmapSpec` rules (`NOTE_MAX` = 52, `open`
+is `true`, `open` + repeat rejected), the note line in layout + render, `sameContent`'s two
+merge rules,
+the builder row's Direction field and Open toggle, `tallySpec`'s `8+`. **Tests:** validator
+accept/reject per rule; the §2.4.5 property test over every `ViewModel` op; spec → view →
+spec round-trip keeps both fields; a spec with no note/open lays out byte-identically to
+today, and with one, PDF positions equal calibration coordinates; the merge pairs in §2.4.5
+stay separate. **No conductor change** (§2.4.3, documented limit). Browser drive before Codex (canvas work is invisible to jsdom). This is the
+"write the audible down" feature, it's useful on every builder chart, and it ships on
+its own.
+
+1. **Grammar parser (pure, tested).** Form-line extraction + §2 and §2.4.2 grammar → `RoadmapSpec`
    **directly**, per §6.2 — a form-only adapter emitting `RoadmapSection[]` with
    `changes` omitted. It does **not** route through `AuthoringDraft`, `parseDescription`
    or `foldDraft`; that path rejects chord-free input (`lib/roadmap-authoring.ts:559`).
-   **Tests:** each grammar row in §2; every §7 failure mode; the §2 worked example
+   **Tests:** each grammar row in §2 and each part shape in §2.4.2; every §7 failure mode;
+   the "Lines we didn't use" list is exactly the unparsed all-caps lines; the §2 worked example
    end-to-end; a bare section with no antecedent fails; a multiplier-only section with
    no antecedent fails (§2.2).
 2. **Ingest path.** Text-layer extraction from a lyrics PDF → parser →
@@ -473,9 +724,12 @@ Gated commits, Codex per chunk.
 6. **Upload-time `lyrics` role tagging.** Only gates the *ongoing* path (new uploads);
    the backfill over the already-tagged corpus does not wait on it (§9 Q1).
 
-**Chunk 0 — measure the corpus first.** Before any of the above: a read-only pass over
-`role='lyrics'` rows reporting text-layer presence and §2 grammar-match rates (§9 Q2).
-It is small, it sizes chunks 1-2, and it produces the annotation backlog. Nothing here
+**Chunk 0 — measure the corpus first.** A read-only pass over `role='lyrics'` rows that
+sizes chunks 1–2 and produces the annotation backlog (§9 Q2). *Partly answered 2026-10-28*
+(§2.4.1): 332 of 342 live lyric sheets carry #211-recognized headers, so the text layer is
+present on at least those. What's left becomes an acceptance arm next to
+`scripts/chart-section-headers-acceptance.ts` (same `--dir`/`--show` shape) reporting per
+sheet: sections parsed, open, uncertain, needs-confirm, and lines not used. Nothing here
 should be built against an assumed coverage number.
 
 **Sequencing note.** Chunks 1–2 are self-contained and depend on nothing unbuilt —
