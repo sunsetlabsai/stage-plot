@@ -75,6 +75,7 @@ import {
 } from '@/lib/chart-cache';
 import { loadPdfDoc, renderPage, renderPageOffscreen, destroyAllDocs, prefetchChart, fetchChartBytes } from '@/lib/pdf-viewer';
 import { isUnsupportedChartMime, overlaySkipReason } from '@/lib/chart-converter';
+import { countPdfContent, isPlaceholderCounts } from '@/lib/chart-placeholder';
 import { buildOverlayStep } from '@/lib/chart-upload';
 import { buildOverlayWithMeasurement } from '@/lib/chart-measure-client';
 import { parseChartDeepLink, buildChartShareUrl, buildShowShareUrl, chartShareFilename } from '@/lib/share';
@@ -3308,6 +3309,9 @@ function ChartNavigator({
   // exactly as it was, so there is nothing to remember. Reset with the rest of
   // the calibration state when the chart changes.
   const [convertState, setConvertState] = useState<ConvertState>('idle');
+  // The hash of the loaded bytes when they are a title-page placeholder, not a chart
+  // (lib/chart-placeholder.ts). Keyed by hash, so replaced bytes are re-checked.
+  const [placeholderHash, setPlaceholderHash] = useState<string | null>(null);
   // Bumped by every calibration-state reset, i.e. once per chart load. A build
   // can outlive the chart that started it (the vision call runs for seconds and
   // the performer can page to the next chart meanwhile), so the handler captures
@@ -3386,6 +3390,8 @@ function ChartNavigator({
   // The Calibrate affordance (edit mode) is owner-only — the v1 source-scope
   // boundary. Drive / static charts and non-owners never see it.
   const calibratable = isOwner && !!calibrationChartId;
+  // These bytes look like a title-page placeholder: no overlay offered (advisory match).
+  const isPlaceholder = placeholderHash !== null && placeholderHash === sourceHash;
   // WHY we may not offer to build an overlay for this chart, or null if we may —
   // decided by the same predicate the convert route enforces, so the CTA and the
   // server can never disagree. `is_builder` is the client's view of
@@ -4131,6 +4137,16 @@ function ChartNavigator({
         }
         const { doc, sourceHash: loadedHash } = loaded;
         docRef.current = doc;
+        // Placeholder check: text layer + operator list only (no render). Library
+        // charts only — they are the ones an owner could build or calibrate.
+        if (calibrationChartId) {
+          void import('pdfjs-dist')
+            .then(({ OPS }) => countPdfContent(doc, OPS as unknown as Parameters<typeof countPdfContent>[1]))
+            .then((counts) => {
+              if (!cancelled) setPlaceholderHash(isPlaceholderCounts(counts) ? loadedHash : null);
+            })
+            .catch(() => {});
+        }
         setNumPages(doc.numPages);
         setPageNum(1);
         if (canvasRef.current) {
@@ -4355,6 +4371,8 @@ function ChartNavigator({
               for the whole load window (load start already reset to perform) makes
               "in Calibrate when a signal lands" unreachable. Conditioned on perform
               so the in-calibrate "Done" exit is never trapped. */}
+          {/* Not hidden for a placeholder: that match is advisory (a one-chord vamp chart
+              reads the same), so Calibrate stays as the way through (#207 R3). */}
           {calibratable && !(calMode === 'perform' && (loading || loadError || !!calUnreadable)) && (
             <button
               onClick={() => (calMode === 'calibrate' ? exitCalibrate() : enterCalibrate(calTool))}
@@ -4965,6 +4983,7 @@ function ChartNavigator({
           calibratable={calibratable}
           onCalibrate={enterCalibrate}
           skipReason={overlaySkip}
+          placeholder={isPlaceholder}
           convertState={convertState}
           onBuildOverlay={buildOverlay}
         />
