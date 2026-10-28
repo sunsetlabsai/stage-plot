@@ -22,6 +22,7 @@ import {
 } from './roadmap-spec';
 import { navLive } from './roadmap-calibration';
 import { playsTheSame } from './roadmap-merge';
+import { normalizeQualityInput } from './nns-quality';
 
 // A chord occupying `beats` beats of its measure (the real span — cells in a bar
 // sum to timeSig.beats). degree/quality/bass mirror ChordHit; held is carried
@@ -108,7 +109,7 @@ function parsePart(s: string, allowQuality: boolean): ParsedPart | { error: stri
     minorByCase = numRaw === lower; // all-lowercase roman = minor
   }
 
-  let quality = qualRaw;
+  let quality = normalizeQualityInput(qualRaw);
   if (!allowQuality && quality !== '') return { error: `bass "${s}" cannot carry a quality` };
   if (minorByCase && quality === '') quality = 'm';
   if (allowQuality && !QUALITY_WHITELIST.has(quality)) return { error: `quality "${quality}" is not supported` };
@@ -1010,7 +1011,8 @@ function letterPartToDegree(
 ): { degree: number; quality: string; alter: -1 | 0 | 1 } | null {
   const m = s.match(/^([A-G])([b#♭♯]?)(.*)$/);
   if (!m) return null;
-  const [, letter, acc, qualRaw] = m;
+  const [, letter, acc, typed] = m;
+  const qualRaw = normalizeQualityInput(typed);
   const pc = noteLetterPc(letter, acc);
   if (pc === null) return null;
   if (!allowQuality && qualRaw !== '') return null;

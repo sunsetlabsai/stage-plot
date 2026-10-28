@@ -36,6 +36,7 @@ import {
 } from './roadmap-layout';
 import { slashBeats } from './roadmap-rhythm';
 import { renderCell } from './roadmap-view';
+import { nnsSegments, type NnsSegment } from './nns-quality';
 import { barIndex, buildCalibration } from './roadmap-calibration';
 
 // Stage 2 lives in roadmap-calibration (pure, no pdf-lib) so the browser-side
@@ -229,14 +230,17 @@ function drawBarContent(
     const letters = notation === 'letters';
     const accW = !letters && c.alter ? 6 : 0;
     if (!letters && c.alter) drawAccidental(page, c.alter, cx, textY, 12);
-    const label = letters
-      ? renderCell({ degree: c.degree, alter: c.alter, quality: c.quality ?? '', bass: c.bass, beats: 1 }, 'letters', key)
-      : `${c.degree}${c.quality ?? ''}${c.bass ? `/${c.bass}` : ''}`;
-    drawText(page, font, label, cx + accW, textY, 12);
-    if (c.held) {
-      const dx = cx + accW + font.widthOfTextAtSize(label, 12) + 5;
-      drawDiamond(page, dx, textY + 4, 3.5);
+    // Numbers draw the NNS way (5⁷, 1△⁷, 2–, 7°) from the SAME segments the builder
+    // preview renders (lib/nns-quality.ts), so the two agree by construction.
+    let endX: number;
+    if (letters) {
+      const label = renderCell({ degree: c.degree, alter: c.alter, quality: c.quality ?? '', bass: c.bass, beats: 1 }, 'letters', key);
+      drawText(page, font, label, cx + accW, textY, 12);
+      endX = cx + accW + font.widthOfTextAtSize(label, 12);
+    } else {
+      endX = drawNnsChord(page, font, nnsSegments({ degree: c.degree, quality: c.quality ?? '', bass: c.bass }), cx + accW, textY, 12);
     }
+    if (c.held) drawDiamond(page, endX + 5, textY + 4, 3.5);
     cumBeats += c.beats ?? (beats > 0 ? beats / n : 0);
   });
 }
@@ -468,6 +472,31 @@ export function headerBaselinesPt(opts: { hasArtist: boolean }): { title: number
     artist: denormYTopPt(artistOffset),
     key: denormYTopPt(keyOffset),
   };
+}
+
+// Draw NNS segments left to right; returns the x where the chord ends. A superscript is
+// ~2/3 size and raised; the triangle (not WinAnsi-encodable) is a vector outline.
+function drawNnsChord(page: PDFPage, font: PDFFont, segs: NnsSegment[], x: number, y: number, size: number): number {
+  const supSize = size * 0.66;
+  let at = x;
+  for (const seg of segs) {
+    if (seg.kind === 'triangle') {
+      const w = size * 0.55;
+      const h = size * 0.62;
+      const b = y + size * 0.04;
+      drawLine(page, at + 0.5, b, at + w, b, 0.8);
+      drawLine(page, at + w, b, at + w / 2 + 0.25, b + h, 0.8);
+      drawLine(page, at + w / 2 + 0.25, b + h, at + 0.5, b, 0.8);
+      at += w + 1.5;
+    } else if (seg.size === 'sup') {
+      drawText(page, font, seg.text, at, y + size * 0.42, supSize);
+      at += font.widthOfTextAtSize(seg.text, supSize);
+    } else {
+      drawText(page, font, seg.text, at, y, size);
+      at += font.widthOfTextAtSize(seg.text, size);
+    }
+  }
+  return at;
 }
 
 function drawText(page: PDFPage, font: PDFFont, text: string, x: number, y: number, size: number): void {

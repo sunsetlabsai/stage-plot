@@ -743,3 +743,28 @@ describe('roadmap-layout module boundary (client-bundle safety)', () => {
     expect(offenders).toEqual([]);
   });
 });
+
+// ── NNS display (backlog #204) ───────────────────────────────────────────────
+// pdf-lib's standard Helvetica throws on any glyph WinAnsi cannot encode, so rendering
+// every quality in both notations is the guard that the NNS segments are drawable.
+describe('every chord quality renders in both notations', () => {
+  it('★ no quality makes the PDF throw (numbers draws the NNS symbols)', async () => {
+    const { QUALITY_WHITELIST } = await import('../lib/roadmap-spec');
+    const qs = [...QUALITY_WHITELIST];
+    const spec: RoadmapSpec = {
+      version: 1,
+      timeSig: { beats: 4, unit: 4 },
+      renderKey: 'G',
+      barsPerLine: 4,
+      sections: [{
+        id: 'all', label: 'All', bars: qs.length,
+        changes: qs.map((quality, i) => ({ bar: i + 1, chords: [{ degree: (i % 7) + 1, ...(quality ? { quality } : {}), ...(i === 0 ? { bass: 5 } : {}) }] })),
+      }],
+    };
+    expect(validateRoadmapSpec(spec).ok).toBe(true);
+    for (const notation of ['numbers', 'letters'] as const) {
+      const { pdfBytes } = await renderRoadmap(spec, { notation });
+      expect(pdfBytes.length).toBeGreaterThan(0);
+    }
+  });
+});

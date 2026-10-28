@@ -22,7 +22,6 @@ import { availableRoles } from '@/lib/chart-management';
 import {
   parseBarInput,
   cellsToRaw,
-  renderCell,
   specToView,
   viewToSpec,
   splitBar,
@@ -48,6 +47,7 @@ import {
   type ViewBar,
   type ViewNavigation,
 } from '@/lib/roadmap-view';
+import { ChordLabel } from '@/components/ChordLabel';
 import {
   RENDER_KEYS_MAJOR,
   RENDER_KEYS_MINOR,
@@ -1391,7 +1391,7 @@ function Measure({
                 i > 0 ? 'border-l border-dashed border-zinc-300' : ''
               }`}
             >
-              {renderCell(c, mode, renderKey)}
+              <ChordLabel cell={c} mode={mode} renderKey={renderKey} />
             </span>
           ))
         )}
@@ -1586,7 +1586,7 @@ function SplitPreview({
               style={{ flexGrow: c.beats, flexBasis: 0 }}
               className="flex flex-col items-center justify-center bg-blue-600/25 border-x border-blue-500/40"
             >
-              <span className="text-[11px] font-bold leading-none text-white">{renderCell(c, mode, renderKey)}</span>
+              <span className="text-[11px] font-bold leading-none text-white"><ChordLabel cell={c} mode={mode} renderKey={renderKey} /></span>
               <span className="text-[8px] leading-none text-blue-300/80">{c.beats}b</span>
             </div>
           ))
