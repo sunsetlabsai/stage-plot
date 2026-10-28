@@ -225,59 +225,70 @@ Three conclusions, each one a rule below:
    sheet. They must never share a representation.
 3. **Count-less lines can't be told apart by shape.** In that row, a direction
    (`KEYS SIGNAL CHANGE…`) sits beside band/BPM title lines and sung syllables. The proposer
-   does not guess about them (§2.4.2 rule 6).
+   does not guess about them (§2.4.2, "Two more rules").
 
 #### 2.4.2 The proposer's form-line grammar
 
-A **form line** is either a line `parseHeaderLine` accepts, or an all-caps line (≥ 80% of its
-letters uppercase, starts with a capital) that carries at least one **count token**: `NX`,
-`?X`, `X?`, or a standalone `X` or `?` word. The line splits on `;` into **parts**, in order; each part is one section.
+**Step 0 — the existing grammar first.** A line `parseHeaderLine` accepts is read by §2,
+unchanged (`Verse 8x` bars, `Chorus x2` plays + inherit, bare label inherit). The procedure
+below runs **only on lines it rejects**. *(Codex R2: without this step, `Chorus x2` after
+`Chorus 8x` was "not used".)*
 
-Each part is read by **one ordered procedure**. The first step that decides, decides; no
-part can match two outcomes. *(Rewritten after Codex R1: the first draft was a table of
-overlapping rules, so `SOLO 8X+ UNTIL KEYBOARD CUE` could be open or not, and
-`GUITAR 1X, ALL 4X` matched both "note" and "reject".)*
+A rejected line is a **form line** if it is all-caps (≥ 80% of its letters uppercase, starts
+with a capital) and carries at least one **count token**: `NX`, `?X`, `X?`, or a standalone
+`X` or `?` word. It splits on `;` into **parts**, in order; each part is one section.
 
-1. **Split.** LABEL = the text before the **first** count token; COUNT = that token;
-   TAIL = everything after it, trimmed.
-   **Not used** if there is no count token, LABEL is empty, or LABEL contains a digit or
-   `+` anywhere except one trailing ordinal (`VERSE 1`, `LONG VERSE 4`, `ORGAN VERSE 1` are
-   fine; `CHORUS 9+` is not).
-2. **Uncertain.** If the part contains `?` anywhere, or COUNT is `?X` / `X?` / bare `X` →
-   **uncertain**, never `open`. With a stated `NX` anywhere in the part (`CHORUS 24X ?`,
-   `INTRO VAMP ? 4X`), propose that number;
-   with none (`VERSE 1 ?X`), propose from a same-label antecedent per §2.2, else fail the
-   section. The owner confirms before it persists. TAIL minus the `?` continues to step 3
-   for its note only; step 3 cannot make an uncertain section open.
+Each part is read by **one ordered procedure**. The first step that decides, decides.
+*(Rewritten after Codex R1 and R2. R1: overlapping rules gave `SOLO 8X+ UNTIL KEYBOARD CUE`
+two readings. R2: the open-tail row ran before the second-count check, so `VAMP 4X+ SOLO 8X`
+became one open Vamp with the note `SOLO 8X`, and the Solo was lost.)*
+
+1. **Split.** COUNT = the first `NX` token if the part has one, else the first `?X` / `X?` /
+   `X` / `?` token. LABEL = the text before COUNT with any `?` removed; TAIL = the text after
+   COUNT with any `?` removed, trimmed.
+   **Not used** if there is no count token, LABEL is empty, or LABEL contains a digit or `+`
+   anywhere except one trailing ordinal (`VERSE 1`, `LONG VERSE 4` pass; `CHORUS 9+`,
+   `CHORUS 6 TIMES` don't).
+2. **Uncertain.** If the part contains `?` anywhere, or COUNT is not an `NX` → **uncertain**,
+   never `open`. If COUNT is `NX`, propose N; otherwise propose from a same-label antecedent
+   per §2.2, else fail the section. The owner confirms before it persists. Step 3 still runs
+   for the note and for "not used", but its open row cannot apply.
 3. **Read TAIL**, first match wins:
-   | TAIL | Result |
-   | --- | --- |
-   | empty | `bars` = N |
-   | starts with `+` and the next non-space character is a digit (`+ 4`, `+1X`, `+2`) | **extra count**: `bars` = N, TAIL verbatim → note, **owner confirms the count** (Graham, 2026-10-28: `+4` might be bars or beats, so it is never added) |
-   | starts with `+` otherwise (end of part, or words: `8X+`, `8X+ UNTIL KEYBOARD CUE`) | **open**: `bars` = N, `open: true`; TAIL after the `+`, if any, → note |
-   | a single bracketed group containing `+` (`(+2 BEATS)`, `(12X + 8X)`) | **extra count**, as above |
-   | contains a count token anywhere else (`, ALL 4X`, `/ALL 12X`) | **not used**: a second count outside `;` is a structure we can't read safely |
-   | anything else (`(CLAPS)`, `(ACAPELLA)`, `WITH IMPROV`) | `bars` = N, TAIL verbatim → note |
+   | # | TAIL | Result |
+   | --- | --- | --- |
+   | 1 | empty | `bars` = N |
+   | 2 | starts with `+` and the next non-space character is a digit (`+ 4`, `+1X`, `+2`) | **extra count**: `bars` = N, TAIL verbatim → note, **owner confirms the count** (Graham, 2026-10-28: `+4` might be bars or beats, so it is never added) |
+   | 3 | exactly one bracketed group that contains `+` (`(+2 BEATS)`, `(12X + 8X)`) | **extra count**, as row 2 |
+   | 4 | contains a count token anywhere (`+ SOLO 8X`, `, ALL 4X`, `/ALL 12X`) | **not used**: a second section outside `;` is a structure we can't split safely |
+   | 5 | starts with `+` (`+`, `+ UNTIL KEYBOARD CUE`) | **open**: `bars` = N, `open: true`; text after the `+`, if any, → note |
+   | 6 | anything else (`(CLAPS)`, `(ACAPELLA)`, `WITH IMPROV`) | `bars` = N, TAIL verbatim → note |
 4. **Note too long.** A note longer than `NOTE_MAX` (§2.4.3) is never truncated: the
    section keeps its bars, the note is left off, and the full line goes on "Lines we didn't
    use" so the owner can shorten it.
 
 **Not used** means the whole line goes on the read-back's **"Lines we didn't use"** list
-(§6.4); the proposer never emits a partial part. Worked through the procedure:
+(§6.4); the proposer never emits a partial line. That list holds **every line, in any case,
+that contains a count token and produced no section**, plus the all-caps count-less lines
+below. A count-bearing line can't drop out without showing up there.
 
-| Part | Outcome |
+Worked through the procedure:
+
+| Line | Outcome |
 | --- | --- |
-| `GUITAR SOLO 8X` | step 3 row 1: 8 bars |
+| `Chorus x2` (after `Chorus 8x`) | step 0, §2: plays 2, inherits 8, owner confirms |
+| `GUITAR SOLO 8X` | row 1: 8 bars |
 | `CHORUS 8X (CLAPS)` | row 6: 8 bars, note `(CLAPS)` |
-| `SOLO 8X+` | row 3: 8 bars, open |
-| `SOLO 8X+ UNTIL KEYBOARD CUE` | row 3: 8 bars, open, note `UNTIL KEYBOARD CUE` |
+| `SOLO 8X+` | row 5: 8 bars, open |
+| `SOLO 8X+ UNTIL KEYBOARD CUE` | row 5: 8 bars, open, note `UNTIL KEYBOARD CUE` |
+| `VAMP 4X+ SOLO 8X` | row 4: not used |
 | `CHORUS 8X + 4` | row 2: 8 bars, note `+ 4`, owner confirms |
-| `CHORUS 4X (+2 BEATS)` | row 4: 4 bars, note `(+2 BEATS)`, owner confirms |
-| `CHORUS 24X ?` / `BREAKDOWN ?` | step 2: uncertain, propose 24 / inherit or fail |
+| `CHORUS 4X (+2 BEATS)` | row 3: 4 bars, note `(+2 BEATS)`, owner confirms |
+| `CHORUS 24X ?` | step 2: uncertain, propose 24 |
+| `INTRO VAMP ? 4X` | COUNT `4X`, LABEL `INTRO VAMP`; step 2: uncertain, propose 4 |
+| `BREAKDOWN ?` | step 2: uncertain, inherit or fail |
 | `VAMP 4X; SOLO 12X` | two parts: 4 bars, then 12 bars |
-| `GUITAR 1X, ALL 4X` | row 5: not used |
-| `CHORUS 9+X` | step 1, `+` in LABEL: not used |
-| `CHORUS 6 TIMES ?` | step 2 by `?`, no `NX`, no antecedent → fails; shown with reason |
+| `GUITAR 1X, ALL 4X` | row 4: not used |
+| `CHORUS 9+X` / `CHORUS 6 TIMES ?` | step 1, LABEL: not used |
 
 Two more rules:
 
@@ -550,8 +561,8 @@ Reuse the existing discipline; do not build a second one.
    path must be derived from the validated spec** — `tallySpec` (`lib/roadmap-authoring.ts`,
    built for `design-roadmap-structure-editing.md` §4) does that, showing repeats as `×N`
    and open sections as `8+ bars`. Under the tally, the read-back lists **"Lines we didn't
-   use"**: every all-caps line the proposer saw and didn't parse (§2.4.2 rule 6 and the
-   count-less rule), each tappable to attach as a note to the section above. A dropped
+   use"**: every count-bearing line, in any case, that produced no section, plus the
+   all-caps count-less lines (§2.4.2), each tappable to attach as a note to the section above. A dropped
    line shows up there instead of silently disappearing.
 
 **Determinism first.** The grammar in §2 is regular. An AI parse is a *fallback* for
@@ -574,9 +585,9 @@ Every one of these degrades to review, never to a silent result.
 | Bar count total disagrees with a converter read of the same song | Surface both; owner decides. **Never auto-reconcile** |
 | No text layer (scanned sheet) | Out of scope v1; fail closed |
 | Adjacent multipliers suggesting group repeat | Parse per-section, flag (§2.2) |
-| `+` after a count (`8X + 4`, `(+2 BEATS)`) | `bars` = first count, the rest kept as the note; **propose, owner confirms** (§2.4.2 rule 4) |
+| `+` after a count (`8X + 4`, `(+2 BEATS)`) | `bars` = first count, the rest kept as the note; **propose, owner confirms** (§2.4.2 step 3 rows 2–3) |
 | `?` / `?X` / bare `X` (author unsure) | Same as an inheriting section (§2.2); never `open` |
-| `NX+` (at least N) | `bars` = N, `open: true` (§2.4.2 rule 3) |
+| `NX+` (at least N) | `bars` = N, `open: true` (§2.4.2 step 3 row 5) |
 | All-caps line that fits no part shape, or has no count | Listed under "Lines we didn't use"; never guessed (§2.4.2) |
 
 ---
