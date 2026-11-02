@@ -32,6 +32,8 @@ import {
   unrollRepeat,
   addEndings,
   removeEndings,
+  setNote,
+  setOpen,
   setMarker,
   setJump,
   removeMarker,
@@ -54,7 +56,8 @@ import {
   type RoadmapSpec,
   type SectionRepeat,
 } from '@/lib/roadmap-spec';
-import { pickBarsPerLine, chunkIntoLines, lineStartNumbers } from '@/lib/roadmap-layout';
+import { pickBarsPerLine, chunkIntoLines, lineStartNumbers, noteLineText } from '@/lib/roadmap-layout';
+import { NOTE_MAX } from '@/lib/roadmap-spec';
 import { slashBeats } from '@/lib/roadmap-rhythm';
 import { chartShareFilename } from '@/lib/share';
 import ShareButton from '@/components/ShareButton';
@@ -711,6 +714,8 @@ function Review({
                       }
                       onUnroll={() => unrollSection(s)}
                       onRemove={() => removeSection(s)}
+                      onNote={(note) => runOp(setNote(view, s.id, note), `Set the direction on ${s.label}`, 'sections')}
+                      onOpen={(open) => runOp(setOpen(view, s.id, open), `Make ${s.label} open`, 'sections')}
                     />
                   ))}
                 </div>
@@ -909,6 +914,8 @@ function SortableSectionRow({
   onRemoveEndings,
   onUnroll,
   onRemove,
+  onNote,
+  onOpen,
 }: {
   section: ViewSection;
   index: number;
@@ -919,6 +926,8 @@ function SortableSectionRow({
   onRemoveEndings: () => void;
   onUnroll: () => void;
   onRemove: () => void;
+  onNote: (note: string) => boolean;
+  onOpen: (open: boolean) => boolean;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: section.id,
@@ -966,7 +975,71 @@ function SortableSectionRow({
         onRemoveEndings={onRemoveEndings}
         onUnroll={onUnroll}
       />
+      <DirectionControl section={section} onNote={onNote} onOpen={onOpen} />
     </div>
+  );
+}
+
+// The section's performance direction (docs/design-song-form-from-lyrics.md
+// §2.4.4): a one-line Direction field, verbatim ("until keys signal"), and an Open
+// toggle for a section whose length is set on stage. Open is disabled while the
+// section repeats ("play N times" and "until the cue" contradict), matching the
+// validator; the repeat picker is disabled while Open is on, for the same reason.
+function DirectionControl({
+  section,
+  onNote,
+  onOpen,
+}: {
+  section: ViewSection;
+  onNote: (note: string) => boolean;
+  onOpen: (open: boolean) => boolean;
+}) {
+  const repeats = Boolean(section.repeat);
+  return (
+    <div className="flex items-center gap-2 pl-8">
+      <span className="text-[10px] uppercase tracking-wide text-zinc-500">Direction</span>
+      {/* Keyed by the stored note so an applied or refused edit re-seeds the draft. */}
+      <NoteField key={section.note ?? ''} note={section.note ?? ''} label={section.label} onCommit={onNote} />
+      <label
+        title={repeats ? "A repeating section can't be open — remove its repeat first" : 'Length is set on stage: the bars drawn are a minimum'}
+        className={`flex items-center gap-1 text-[11px] ${repeats ? 'text-zinc-600' : 'text-zinc-400'}`}
+      >
+        <input
+          type="checkbox"
+          checked={Boolean(section.open)}
+          disabled={repeats}
+          onChange={(e) => onOpen(e.target.checked)}
+          className="accent-blue-500 disabled:opacity-40"
+        />
+        Open
+      </label>
+    </div>
+  );
+}
+
+// Committed on blur / Enter like BarCountField; a refused note (too long, or a
+// character the PDF can't print) puts the old one back and the op says why.
+function NoteField({ note, label, onCommit }: { note: string; label: string; onCommit: (note: string) => boolean }) {
+  const [draft, setDraft] = useState(note);
+  const abandon = useRef(false);
+  function commit() {
+    if (abandon.current || (draft.trim() !== note && !onCommit(draft))) setDraft(note);
+    abandon.current = false;
+  }
+  return (
+    <input
+      value={draft}
+      aria-label={`Direction for ${label}`}
+      placeholder="e.g. until keys signal"
+      maxLength={NOTE_MAX}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') abandon.current = true;
+        if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur();
+      }}
+      className="flex-1 min-w-0 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-0.5 text-xs text-white outline-none focus:border-blue-500 placeholder:text-zinc-600"
+    />
   );
 }
 
@@ -996,14 +1069,15 @@ function RepeatControl({
   if (r?.kind === 'plain' && !counts.includes(r.times)) counts.push(r.times);
   const value = !r ? '' : r.kind === 'plain' ? String(r.times) : 'volta';
   const tooShort = section.bars < 2 && !r;
+  const open = Boolean(section.open) && !r;
   return (
     <div className="flex items-center gap-2 pl-8">
       <span className="text-[10px] uppercase tracking-wide text-zinc-500">Repeat</span>
       <select
         aria-label={`Repeat ${section.label}`}
         value={value}
-        disabled={tooShort}
-        title={tooShort ? "A 1-bar section can't repeat" : undefined}
+        disabled={tooShort || open}
+        title={tooShort ? "A 1-bar section can't repeat" : open ? 'An open section plays until the cue — turn Open off to repeat it' : undefined}
         onChange={(e) => {
           const v = e.target.value;
           if (v.startsWith('e:')) onEndings(Number(v.slice(2)));
@@ -1265,6 +1339,9 @@ function ChartSheet({
                 {s.label}
                 {repeatLabel(s.repeat) && <span className="text-[9px] text-blue-600">{repeatLabel(s.repeat)}</span>}
               </div>
+              {noteLineText(s) && (
+                <div className="pl-6 -mt-0.5 mb-1 text-[10px] text-zinc-600">{noteLineText(s)}</div>
+              )}
               {/* One system row per line of `barsPerLine` bars. A muted gutter cell
                   carries the line-start measure number; the grid keeps constant-width
                   columns (NOT flex-fill) so a partial last line keeps bar width and
