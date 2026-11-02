@@ -238,16 +238,16 @@ the same family as a `—— 8 bars ——` shorthand note. The proposer keeps t
 in place, inside their section**: not suppressed, not ignored, and not translated into a bar
 count.
 
-Today this **cannot be represented**: `RoadmapSection` (`lib/roadmap-spec.ts:28`) has no note
-field and requires a positive finite `bars`, and `design-song-form-from-lyrics.md` §8 decision 1
-discards all text except headers. So the proposer is **not** one build PR. It needs a design
-amendment first, to that doc, which (a) splits "lyrics" (discarded — §3's reasoning holds)
-from "performance directions" (kept, verbatim), and (b) picks the `RoadmapSpec`
-representation — a section note, an open-length section, or both — with its
-`validateRoadmapSpec` and renderer consequences. Only then a build PR.
+This could not be represented (`RoadmapSection` had no note field and requires a positive
+`bars`; the lyrics doc discarded all text except headers). **Amended 2026-10-28 in
+`design-song-form-from-lyrics.md` §2.4:** lyrics stay discarded, directions are kept;
+`RoadmapSection` gains `note?` (verbatim) and `open?: true` (`bars` = the drawn minimum);
+the proposer gets a wider form-line grammar than the #211 mark recognizer, which stays
+as it is. Directions are authorable from the builder on any roadmap, which ships first,
+as its own PR (that doc's §10 chunk D).
 
 **Build order inside the track:** anchors (own PR) → proposer design amendment (docs PR) →
-proposer build (own PR).
+directions on the roadmap (own PR) → proposer build (own PR).
 
 ## 5. Later — a clean chart *from* a scan (formerly "Track B" of 2026-08-27)
 
@@ -269,7 +269,8 @@ reads least. Scans drop to the end until better examples exist.
    in the corpus were a bandmate's local swipe set, never uploaded.
 2. **Track B anchors** — one PR, §4.1: section headers → draft sections-only calibration →
    owner Verify → section-only seek.
-3. **Track B proposer** — design amendment (docs PR), then build (own PR), §4.2.
+3. **Track B proposer** — design amendment (docs PR), then directions on the roadmap (own PR),
+   then the proposer build (own PR), §4.2.
 4. **Track A** grids — one PR, including the `'grid'` boundary change (§2).
 5. **Track C** scans — **demoted**: nothing starts until Graham has better real examples; then
    a spike PR (scan set + scoring harness), then build, including the scan-aware review path

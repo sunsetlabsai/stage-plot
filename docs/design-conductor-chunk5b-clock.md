@@ -696,6 +696,28 @@ here so no one mistakes the per-bar follower step for a defect. The broadcast cl
 
 ---
 
+### 5.7 Precondition: open sections (added 2026-10-28)
+
+`design-song-form-from-lyrics.md` §2.4.3 adds `open?: true` to `RoadmapSection`: the section's
+length is set on stage ("solo until keys signal"), and `bars` is only the drawn minimum. The
+clock doesn't know this. With Clock on it advances out of an open section after `bars`
+bars, the same as it does today for any vamp written as a fixed count.
+
+**Graham, 2026-10-28: documented limit for now; the conductor does not return to UAT until
+the clock honours `open`.** Doing it properly needs all three:
+
+1. **A hold the driver obeys.** On the open section's last drawn bar, the clock freezes
+   (the existing `stalled` path, `lib/use-conductor-session.ts:876-880`) and only a manual
+   advance leaves. Manual seams already clear a stall through `writeDriver` (`:373-382`).
+2. **The hold in program identity.** Marker serialization (`lib/conductor-state.ts:116`)
+   feeds the relay's chart-match gate (`lib/relay-binding.ts:23`). Without the hold in it,
+   an open chart and a stale closed copy look identical, and a device taking the MD role
+   could clock through (Codex R2 on #212, reproduced).
+3. **The hold survives calibration edits.** Owners can calibrate builder charts; calibration
+   PUT (`app/api/charts/calibration/route.ts:143`) doesn't check `source_spec`, and the
+   parity check (`lib/roadmap-save.ts:100`) doesn't cover it. Either derive the hold from
+   the spec at read time, or make the PUT keep spec-derived markers.
+
 ## 6. The on-switch: live source-quality validation (§5.1 precondition)
 
 Audio-tempo is **designed-in now, turned on only after live source-quality validation** —
