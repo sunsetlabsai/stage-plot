@@ -29,6 +29,7 @@ import {
   PAGE_W,
   PAGE_H,
   MARGIN_X,
+  NOTE_BASELINE,
   layoutRoadmap,
   lineStartNumbers,
   type LaidBar,
@@ -133,6 +134,9 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
     const pg = pages[sys.page - 1];
     if (sys.label) {
       drawText(pg, fontBold, sys.label, denormX(sys.xStart), denormYTop(sys.labelYTop) - 12, 11);
+    }
+    if (sys.noteLine) {
+      drawText(pg, font, sys.noteLine, denormX(sys.xStart), denormYTop(sys.labelYTop) - NOTE_BASELINE, 9);
     }
     const yTopPt = denormYTop(sys.yTop);
     const yBottomPt = denormYTop(sys.yBottom);

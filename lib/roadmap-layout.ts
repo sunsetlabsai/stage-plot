@@ -28,10 +28,26 @@ export const MARGIN_BOTTOM = 48;
 export const SYSTEM_LABEL_H = 16;     // section label strip above the bar row of its first system
 export const SYSTEM_BARS_H = 48;      // the bar row height
 export const SYSTEM_GAP = 18;         // vertical gap between systems
+// A noted/open section's first label strip grows by this much. The direction line
+// (9 pt, baseline NOTE_BASELINE below the strip top) sits under the label and
+// ABOVE the directive band the PDF draws over a bar row (Segno/To Coda/Fine/D.S.
+// and ending labels at yTop+8..+10, the coda sign up to yTop+17), so a full-width
+// direction never overprints them. 16 + 26 = 42 pt: note descender ends at ~24,
+// the coda sign tops out at 42 − 17 = 25.
+export const NOTE_LINE_H = 26;
+export const NOTE_BASELINE = 22;
 export const DEFAULT_BARS_PER_LINE = 4;
 
 export const CONTENT_W = PAGE_W - 2 * MARGIN_X;
 export const SYSTEM_TOTAL_H = SYSTEM_LABEL_H + SYSTEM_BARS_H;
+
+// The text of a section's direction line, or null when it has none: `OPEN · until
+// keys signal`, `until keys signal`, or `OPEN`. One source for the PDF and the
+// preview. Fits by NOTE_MAX alone (docs/design-song-form-from-lyrics.md §2.4.4).
+export function noteLineText(section: Pick<RoadmapSection, 'note' | 'open'>): string | null {
+  if (section.open) return section.note ? `OPEN · ${section.note}` : 'OPEN';
+  return section.note ?? null;
+}
 
 // ── Responsive bars/line — the musical set {2,4,8} (design §4.2) ──────────────
 // On-SCREEN preview picks bars/line from a musical set, never an arbitrary "cram
@@ -111,6 +127,7 @@ export interface LaidSystem {
   xEnd: number;          // normalized (tracks the LAST REAL bar — partial lines do NOT stretch)
   labelYTop: number;     // normalized top of the label strip (first system of a section only)
   label: string | null;  // section label on the section's first system; null otherwise
+  noteLine: string | null; // direction line under the label (first system of a noted/open section); null otherwise
   barsThisLine: number;  // grouping decision the preview reads (for partial-line logic)
   bars: LaidBar[];
 }
@@ -153,15 +170,20 @@ export function layoutRoadmap(spec: RoadmapSpec, opts: LayoutOptions = {}): Road
     let sectionAnchorEmitted = false;
 
     for (let line = 0; line < lineCount; line += 1) {
+      const isFirstSystemOfSection = line === 0;
+      // A noted/open section's first system grows its label strip by one line;
+      // every other system keeps today's geometry exactly.
+      const noteLine = isFirstSystemOfSection ? noteLineText(section) : null;
+      const labelH = SYSTEM_LABEL_H + (noteLine ? NOTE_LINE_H : 0);
+
       // Page break if this system (incl. its label strip) would overrun.
-      if (cursorY + SYSTEM_TOTAL_H > PAGE_H - MARGIN_BOTTOM) {
+      if (cursorY + labelH + SYSTEM_BARS_H > PAGE_H - MARGIN_BOTTOM) {
         page += 1;
         cursorY = MARGIN_TOP;
       }
 
-      const isFirstSystemOfSection = line === 0;
       const labelTopPt = cursorY;
-      const barsTopPt = cursorY + SYSTEM_LABEL_H;
+      const barsTopPt = cursorY + labelH;
       const barsBottomPt = barsTopPt + SYSTEM_BARS_H;
 
       const systemId = `sys-${sectionIndex}-${line}`;
@@ -207,6 +229,7 @@ export function layoutRoadmap(spec: RoadmapSpec, opts: LayoutOptions = {}): Road
         xEnd: systemRightPt / PAGE_W, // partial lines stop at the last real bar
         labelYTop: labelTopPt / PAGE_H,
         label: isFirstSystemOfSection ? section.label : null,
+        noteLine,
         barsThisLine,
         bars: laidBars,
       });
