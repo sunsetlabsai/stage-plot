@@ -236,7 +236,8 @@ below runs **only on lines it rejects**. *(Codex R2: without this step, `Chorus 
 
 A rejected line is a **form line** if it is all-caps (≥ 80% of its letters uppercase, starts
 with a capital) and carries at least one **count token**: `NX`, `?X`, `X?`, or a standalone
-`X` or `?` word. It splits on `;` into **parts**, in order; each part is one section.
+`X` or `?` word. Tokens are whole space-separated words (`8X+` reads as `8X` then `+`;
+`KEYS?` is not a token). It splits on `;` into **parts**, in order; each part is one section.
 
 Each part is read by **one ordered procedure**. The first step that decides, decides.
 *(Rewritten after Codex R1 and R2. R1: overlapping rules gave `SOLO 8X+ UNTIL KEYBOARD CUE`
@@ -245,9 +246,11 @@ became one open Vamp with the note `SOLO 8X`, and the Solo was lost.)*
 
 1. **Split.** COUNT = the first `NX` token if the part has one, else the first `?X` / `X?` /
    `X` / `?` token. LABEL = the text before COUNT with any `?` removed; TAIL = the text after
-   COUNT, trimmed, with **only standalone `?` words** removed. A `?` attached to a word stays,
-   so the note keeps it verbatim (`WITH KEYS?` stays a question). *(Codex R3: stripping every
-   `?` from TAIL turned `WITH KEYS?` into the instruction `WITH KEYS`.)*
+   COUNT, trimmed, **verbatim**. The one exception: a TAIL made only of `?` marks is empty
+   (the doubt is already carried by step 2). Nothing else is ever removed from TAIL; a line
+   whose TAIL can't be kept as-is goes to "not used" (row 4), never into an edited note.
+   *(Codex R3 + R4: removing `?` from TAIL turned `WITH KEYS?` and then `WITH KEYS ?` into
+   the instruction `WITH KEYS`.)*
    **Not used** if there is no count token, LABEL is empty, or LABEL contains a digit or `+`
    anywhere except one trailing ordinal (`VERSE 1`, `LONG VERSE 4` pass; `CHORUS 9+`,
    `CHORUS 6 TIMES` don't).
@@ -261,7 +264,7 @@ became one open Vamp with the note `SOLO 8X`, and the Solo was lost.)*
    | 1 | empty | `bars` = N |
    | 2 | starts with `+` and the next non-space character is a digit (`+ 4`, `+1X`, `+2`) | **extra count**: `bars` = N, TAIL verbatim → note, **owner confirms the count** (Graham, 2026-10-28: `+4` might be bars or beats, so it is never added) |
    | 3 | exactly one bracketed group that contains `+` (`(+2 BEATS)`, `(12X + 8X)`) | **extra count**, as row 2 |
-   | 4 | contains an `NX`, `?X` or `X?` token (`+ SOLO 8X`, `, ALL 4X`, `/ALL 12X`) | **not used**: a second section outside `;` is a structure we can't split safely |
+   | 4 | contains any count token (`+ SOLO 8X`, `, ALL 4X`, `/ALL 12X`, `+ SOLO X`, `WITH KEYS ?`) | **not used**: a second section outside `;` is a structure we can't split safely, and a spaced `?` can't be told from a count |
    | 5 | starts with `+` (`+`, `+ UNTIL KEYBOARD CUE`) | **open**: `bars` = N, `open: true`; text after the `+`, if any, → note |
    | 6 | anything else (`(CLAPS)`, `(ACAPELLA)`, `WITH IMPROV`) | `bars` = N, TAIL verbatim → note |
 4. **Note too long.** A note longer than `NOTE_MAX` (§2.4.3) is never truncated: the
@@ -285,8 +288,10 @@ Worked through the procedure:
 | `VAMP 4X+ SOLO 8X` | row 4: not used |
 | `CHORUS 8X + 4` | row 2: 8 bars, note `+ 4`, owner confirms |
 | `CHORUS 4X (+2 BEATS)` | row 3: 4 bars, note `(+2 BEATS)`, owner confirms |
-| `CHORUS 24X ?` | step 2: uncertain, propose 24 (standalone `?` removed, TAIL empty) |
-| `GUITAR SOLO 8X WITH KEYS?` | step 2: uncertain, propose 8; row 6: note `WITH KEYS?` verbatim |
+| `CHORUS 24X ?` | step 2: uncertain, propose 24 (TAIL is only `?`, so empty) |
+| `GUITAR SOLO 8X WITH KEYS?` | step 2: uncertain, propose 8; row 6: note `WITH KEYS?` verbatim (`KEYS?` is not a count token) |
+| `GUITAR SOLO 8X WITH KEYS ?` | row 4: not used |
+| `VAMP 4X+ SOLO X` | row 4: not used |
 | `INTRO VAMP ? 4X` | COUNT `4X`, LABEL `INTRO VAMP`; step 2: uncertain, propose 4 |
 | `BREAKDOWN ?` | step 2: uncertain, inherit or fail |
 | `VAMP 4X; SOLO 12X` | two parts: 4 bars, then 12 bars |
