@@ -236,8 +236,8 @@ below runs **only on lines it rejects**. *(Codex R2: without this step, `Chorus 
 
 A rejected line is a **form line** if it is all-caps (≥ 80% of its letters uppercase, starts
 with a capital) and carries at least one **count token**: `NX`, `?X`, `X?`, or a standalone
-`X` or `?` word. Tokens are whole space-separated words (`8X+` reads as `8X` then `+`;
-`KEYS?` is not a token). It splits on `;` into **parts**, in order; each part is one section.
+`X` or `?` word. A token never starts inside a word: `8X+` is the token `8X` followed by `+`, while
+`KEYS?` and `MAX` contain no token. It splits on `;` into **parts**, in order; each part is one section.
 
 Each part is read by **one ordered procedure**. The first step that decides, decides.
 *(Rewritten after Codex R1 and R2. R1: overlapping rules gave `SOLO 8X+ UNTIL KEYBOARD CUE`
