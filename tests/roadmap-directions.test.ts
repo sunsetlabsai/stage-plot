@@ -7,9 +7,8 @@ import { validateRoadmapSpec, unprintableChars, NOTE_MAX, type RoadmapSection, t
 import { mergeRepeatedSections } from '../lib/roadmap-merge';
 import { tallySpec } from '../lib/roadmap-authoring';
 import { renderRoadmap, buildCalibration } from '../lib/roadmap-render';
-import {
-  layoutRoadmap, noteLineText, directiveRows, CONTENT_W, NOTE_LINE_H, NOTE_BASELINE, SYSTEM_LABEL_H, PAGE_H, DIRECTIVE_ROW_DY,
-} from '../lib/roadmap-layout';
+import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { layoutRoadmap, noteLineText, noteStripH, CONTENT_W, SYSTEM_LABEL_H, PAGE_H } from '../lib/roadmap-layout';
 import { assertSpecCalibrationParity } from '../lib/roadmap-save';
 
 // docs/design-song-form-from-lyrics.md §2.4.3–2.4.5 — performance directions
@@ -288,7 +287,7 @@ describe('layout + render — the direction line', () => {
     expect(sha((await renderRoadmap(s, { songTitle: 'Song' })).pdfBytes)).not.toBe(GOLDEN[0][2]);
   });
 
-  it('only the noted section\'s first system grows, by NOTE_LINE_H', () => {
+  it('only the noted section\'s first system grows, to noteStripH', () => {
     const plain = spec([
       { id: 'a', label: 'Intro', bars: 4 },
       { id: 'b', label: 'Solo', bars: 8, open: true, note: 'until keys signal' },
@@ -299,10 +298,10 @@ describe('layout + render — the direction line', () => {
     delete bare.sections[1].open;
     const a = layoutRoadmap(plain);
     const b = layoutRoadmap(bare);
-    const dy = NOTE_LINE_H / PAGE_H;
+    const dy = (noteStripH(0) - SYSTEM_LABEL_H) / PAGE_H;
     expect(a.systems.map((s) => s.noteLine)).toEqual([null, 'OPEN · until keys signal', null, null]);
     expect(a.systems[0]).toEqual(b.systems[0]);
-    expect(a.systems[1].yTop - a.systems[1].labelYTop).toBeCloseTo((SYSTEM_LABEL_H + NOTE_LINE_H) / PAGE_H, 12);
+    expect(a.systems[1].yTop - a.systems[1].labelYTop).toBeCloseTo(noteStripH(0) / PAGE_H, 12);
     for (const i of [1, 2, 3]) expect(a.systems[i].yTop).toBeCloseTo(b.systems[i].yTop + dy, 12);
   });
 
@@ -322,43 +321,27 @@ describe('layout + render — the direction line', () => {
     expect(assertSpecCalibrationParity(s, calibration).ok).toBe(true);
   });
 
-  // Codex R1 (PR #213): a 1-bar Tag carrying To Coda and D.S. al Coda stacked the
-  // second label into a fixed-height direction line. The strip now grows by the
-  // deepest stack on the system, from the same rows the renderer lifts by.
-  it('a direction line clears every stacked directive on its system', () => {
-    const NOTE = 'Keep the groove going until keys signal the change';
-    const cases: RoadmapSpec[] = [
-      spec([
-        { id: 'v', label: 'Verse', bars: 4 },
-        { id: 't', label: 'Tag', bars: 1, note: NOTE },
-        { id: 'c', label: 'Coda', bars: 4 },
-      ], { navigation: { segno: { section: 0, bar: 1 }, toCoda: { section: 1, bar: 1 },
-        jump: { at: { section: 1, bar: 1 }, from: 'segno', until: 'coda' }, coda: { section: 2, bar: 1 } } }),
-      spec([
-        { id: 'v', label: 'Verse', bars: 4, note: NOTE, repeat: { kind: 'plain', times: 3 } },
-        { id: 'c', label: 'Coda', bars: 4 },
-      ], { navigation: { segno: { section: 0, bar: 1 }, toCoda: { section: 0, bar: 4 }, fine: { section: 0, bar: 4 },
-        jump: { at: { section: 0, bar: 4 }, from: 'segno', until: 'coda' }, coda: { section: 1, bar: 1 } } }),
-    ];
-    for (const s of cases) {
-      expect(validateRoadmapSpec(s).ok).toBe(true);
-      const layout = layoutRoadmap(s);
-      const rows = directiveRows(s);
-      for (const sys of layout.systems.filter((y) => y.noteLine)) {
-        const labelTop = sys.labelYTop * PAGE_H;
-        const barsTop = sys.yTop * PAGE_H;
-        const noteBottom = labelTop + NOTE_BASELINE + 2.2;                  // Helvetica descender at 9 pt
-        let depth = 0;
-        for (const b of sys.bars) for (const edge of ['start', 'end'] as const) {
-          depth = Math.max(depth, rows.get(`${b.sectionIndex}:${b.barInSection}:${edge}`)?.length ?? 0);
+  // Codex R1 + R2 (PR #213): stacked directives, then the coda sign's arm, reached
+  // a direction line whose clearance was hand-modelled. This MEASURES the rendered
+  // PDF instead: every glyph and path pdf.js reads back from the page must stay out
+  // of each direction's box (text boxes use Helvetica's full FontBBox, so the check
+  // holds for any letters).
+  it.each(DIRECTION_CASES)('no drawn element touches a direction line: %s', async (_n, s) => {
+    expect(validateRoadmapSpec(s).ok).toBe(true);
+    const notes = new Set(layoutRoadmap(s).systems.map((y) => y.noteLine).filter((t): t is string => !!t));
+    expect(notes.size).toBeGreaterThan(0);
+    const { pdfBytes } = await renderRoadmap(s, { songTitle: 'Song' });
+    for (const page of await drawnBoxes(pdfBytes)) {
+      const directions = page.filter((b) => b.text && notes.has(b.text));
+      const others = page.filter((b) => !(b.text && notes.has(b.text)));
+      for (const d of directions) {
+        for (const o of others) {
+          expect([d.text, o.what, overlaps(d, o)]).toEqual([d.text, o.what, false]);
         }
-        // The highest directive: baseline yTop − 8 − (depth−1)·row, cap height 6.5 pt;
-        // the coda sign reaches yTop − 17.
-        const highest = Math.max(17, 8 + (depth - 1) * DIRECTIVE_ROW_DY + 6.5);
-        expect(depth).toBeGreaterThanOrEqual(2);
-        expect(barsTop - highest).toBeGreaterThan(noteBottom);
+        expect(d.x1 - d.x0).toBeLessThanOrEqual(CONTENT_W);
       }
     }
+    expect([...notes].every((t) => t.length > 0)).toBe(true);
   });
 
   it('noteLineText: OPEN · note, note, OPEN, or nothing', () => {
@@ -368,3 +351,64 @@ describe('layout + render — the direction line', () => {
     expect(noteLineText({})).toBeNull();
   });
 });
+
+// ── PDF read-back for the direction-clearance test ───────────────────────────
+type Box = { what: string; text?: string; x0: number; y0: number; x1: number; y1: number };
+const overlaps = (a: Box, b: Box) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+
+async function drawnBoxes(pdf: Uint8Array): Promise<Box[][]> {
+  const doc = await getDocument({ data: new Uint8Array(pdf), verbosity: 0 }).promise;
+  const pages: Box[][] = [];
+  for (let n = 1; n <= doc.numPages; n += 1) {
+    const page = await doc.getPage(n);
+    const boxes: Box[] = [];
+    for (const it of (await page.getTextContent()).items) {
+      if (!('str' in it) || !it.str.trim()) continue;
+      const size = it.transform[0];
+      const [x, y] = [it.transform[4], it.transform[5]];
+      // Helvetica / Helvetica-Bold FontBBox: the worst case for any glyph.
+      boxes.push({ what: `text "${it.str}"`, text: it.str, x0: x, x1: x + it.width, y0: y - 0.228 * size, y1: y + 0.962 * size });
+    }
+    const ops = await page.getOperatorList();
+    let lineW = 1;
+    ops.fnArray.forEach((fn, i) => {
+      if (fn === OPS.setLineWidth) lineW = ops.argsArray[i][0];
+      if (fn === OPS.constructPath) {
+        const [x0, y0, x1, y1] = ops.argsArray[i][2] as number[];
+        const h = lineW / 2;
+        boxes.push({ what: `path ${[x0, y0, x1, y1].map((v) => v.toFixed(1)).join(',')}`, x0: x0 - h, y0: y0 - h, x1: x1 + h, y1: y1 + h });
+      }
+    });
+    pages.push(boxes);
+  }
+  return pages;
+}
+
+const NOTE = 'Keep the groove going until keys signal the change';
+const DIRECTION_CASES: [string, RoadmapSpec][] = [
+  ['Codex R1: 1-bar Tag with To Coda + D.S. al Coda', spec([
+    { id: 'v', label: 'Verse', bars: 4 },
+    { id: 't', label: 'Tag', bars: 1, note: NOTE },
+    { id: 'c', label: 'Coda', bars: 4 },
+  ], { navigation: { segno: { section: 0, bar: 1 }, toCoda: { section: 1, bar: 1 },
+    jump: { at: { section: 1, bar: 1 }, from: 'segno', until: 'coda' }, coda: { section: 2, bar: 1 } } })],
+  ['Codex R2: coda sign under a noted Coda section', spec([
+    { id: 'v', label: 'Verse', bars: 4 },
+    { id: 'c', label: 'Coda', bars: 4, note: 'mp until cue' },
+  ], { navigation: { segno: { section: 0, bar: 1 }, toCoda: { section: 0, bar: 4 },
+    jump: { at: { section: 0, bar: 4 }, from: 'segno', until: 'coda' }, coda: { section: 1, bar: 1 } } })],
+  ['×3 + To Coda + Fine + D.S. on one bar, Segno + Coda on bar 1', spec([
+    { id: 'v', label: 'Verse', bars: 4, note: NOTE, repeat: { kind: 'plain', times: 3 } },
+    { id: 'c', label: 'Coda', bars: 4 },
+  ], { navigation: { segno: { section: 0, bar: 1 }, toCoda: { section: 0, bar: 4 }, fine: { section: 0, bar: 4 },
+    jump: { at: { section: 0, bar: 4 }, from: 'segno', until: 'coda' }, coda: { section: 0, bar: 1 } } })],
+  ['ending bracket + Segno on the ending bar', spec([
+    { id: 'c', label: 'Chorus', bars: 4, note: 'half time',
+      repeat: { kind: 'volta', endings: [{ bars: { start: 3, count: 1 }, passes: [1] }, { bars: { start: 4, count: 1 }, passes: [2] }] } },
+    { id: 'o', label: 'Outro', bars: 4 },
+  ], { navigation: { segno: { section: 0, bar: 3 }, jump: { at: { section: 1, bar: 4 }, from: 'segno', until: 'end' } } })],
+  ['descender label over an accented-capital direction, open, worst-case width', spec([
+    { id: 'g', label: 'Gypsy jig', bars: 4, open: true, note: 'ÉÅÇ ' + '@'.repeat(48) },
+    { id: 'p', label: 'Vamp', bars: 2, open: true },
+  ], { navigation: { coda: { section: 0, bar: 1 }, fine: { section: 1, bar: 2 } } })],
+];

@@ -30,6 +30,15 @@ import {
   PAGE_H,
   MARGIN_X,
   NOTE_BASELINE,
+  NOTE_SIZE,
+  LABEL_BASELINE,
+  LABEL_SIZE,
+  DIRECTIVE_BASELINE,
+  DIRECTIVE_SIZE,
+  CODA_CY,
+  CODA_R,
+  CODA_ARM,
+  VOLTA_Y,
   directiveRows,
   directiveDy,
   type DirectiveEdge,
@@ -137,10 +146,10 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
   for (const [i, sys] of layout.systems.entries()) {
     const pg = pages[sys.page - 1];
     if (sys.label) {
-      drawText(pg, fontBold, sys.label, denormX(sys.xStart), denormYTop(sys.labelYTop) - 12, 11);
+      drawText(pg, fontBold, sys.label, denormX(sys.xStart), denormYTop(sys.labelYTop) - LABEL_BASELINE, LABEL_SIZE);
     }
     if (sys.noteLine) {
-      drawText(pg, font, sys.noteLine, denormX(sys.xStart), denormYTop(sys.labelYTop) - NOTE_BASELINE, 9);
+      drawText(pg, font, sys.noteLine, denormX(sys.xStart), denormYTop(sys.labelYTop) - NOTE_BASELINE, NOTE_SIZE);
     }
     const yTopPt = denormYTop(sys.yTop);
     const yBottomPt = denormYTop(sys.yBottom);
@@ -304,8 +313,8 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
     const b = at(nav.coda);
     if (b) {
       const cx = denormX(b.xStart) + 8;
-      const cy = denormYTop(b.yTop) + 12;
-      drawCodaSign(pageOf(b), cx, cy, 5);
+      const cy = denormYTop(b.yTop) + CODA_CY;
+      drawCodaSign(pageOf(b), cx, cy, CODA_R);
       drawDirective(pageOf(b), font, b, 'start', 'Coda', 18, stackDy(b, 'start', 'coda'));
     }
   }
@@ -366,7 +375,7 @@ function drawVoltaBracket(pages: PDFPage[], bars: LaidBar[], font: PDFFont, pass
     const page = pages[group[0].page - 1];
     const x0 = denormX(group[0].xStart);
     const x1 = denormX(group[group.length - 1].xEnd);
-    const y = denormYTop(group[0].yTop) + 10;
+    const y = denormYTop(group[0].yTop) + VOLTA_Y;
     drawLine(page, x0, y, x1, y, 1);        // top of bracket
     if (gi === 0) {
       drawLine(page, x0, y, x0, y - 8, 1);  // left down-tick on the first segment
@@ -397,8 +406,8 @@ export function voltaLabel(passes: number[]): string {
 // ⊕ — coda sign: outline circle with a vertical + horizontal line through it.
 function drawCodaSign(page: PDFPage, cx: number, cy: number, r: number): void {
   page.drawCircle({ x: cx, y: cy, size: r, borderColor: rgb(0, 0, 0), borderWidth: 1 });
-  drawLine(page, cx, cy - r - 2, cx, cy + r + 2, 1);
-  drawLine(page, cx - r - 2, cy, cx + r + 2, cy, 1);
+  drawLine(page, cx, cy - r - CODA_ARM, cx, cy + r + CODA_ARM, 1);
+  drawLine(page, cx - r - CODA_ARM, cy, cx + r + CODA_ARM, cy, 1);
 }
 
 // ♭ / ♯ — chromatic-root accidental prefix, drawn as a vector (Helvetica/WinAnsi
@@ -436,11 +445,11 @@ function drawDiamond(page: PDFPage, cx: number, cy: number, half: number): void 
 // the band at the bar's start or end edge. `dx` nudges past an adjacent glyph;
 // `dy` lifts the row so co-located directives stack instead of overprinting.
 function drawDirective(page: PDFPage, font: PDFFont, bar: LaidBar, edge: 'start' | 'end', text: string, dx = 0, dy = 0): void {
-  const y = denormYTop(bar.yTop) + 8 + dy;
+  const y = denormYTop(bar.yTop) + DIRECTIVE_BASELINE + dy;
   const x = edge === 'start'
     ? denormX(bar.xStart) + dx
-    : denormX(bar.xEnd) - font.widthOfTextAtSize(text, 9) - dx;
-  drawText(page, font, text, x, y, 9);
+    : denormX(bar.xEnd) - font.widthOfTextAtSize(text, DIRECTIVE_SIZE) - dx;
+  drawText(page, font, text, x, y, DIRECTIVE_SIZE);
 }
 
 // ── PDF coordinate helpers (normalized 0..1 → PDF points, y flipped) ──────────

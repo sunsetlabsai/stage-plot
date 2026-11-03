@@ -28,15 +28,47 @@ export const MARGIN_BOTTOM = 48;
 export const SYSTEM_LABEL_H = 16;     // section label strip above the bar row of its first system
 export const SYSTEM_BARS_H = 48;      // the bar row height
 export const SYSTEM_GAP = 18;         // vertical gap between systems
-// A noted/open section's first label strip grows by this much. The direction line
-// (9 pt, baseline NOTE_BASELINE below the strip top) sits under the label and
-// ABOVE the directive band the PDF draws over a bar row (one row of Segno/To Coda/
-// Fine/D.S./ending labels at yTop+8..+15, the coda sign up to yTop+17), so a
-// full-width direction never overprints them. 16 + 26 = 42 pt: note descender ends
-// at ~24, the coda sign tops out at 42 − 17 = 25. Each further stacked row on that
-// system adds DIRECTIVE_ROW_DY more (layoutRoadmap, via directiveRows).
-export const NOTE_LINE_H = 26;
-export const NOTE_BASELINE = 22;
+
+// ── Glyph geometry the PDF draws above a bar row (points; roadmap-render reads these) ──
+export const LABEL_BASELINE = 12;     // section label baseline below the label strip top (11 pt bold)
+export const LABEL_SIZE = 11;
+export const NOTE_SIZE = 9;           // the direction line
+export const DIRECTIVE_SIZE = 9;      // Segno / Coda / To Coda / Fine / D.C. / D.S.
+export const DIRECTIVE_BASELINE = 8;  // a directive's row-0 baseline above the bar row
+export const CODA_CY = 12;            // coda sign centre above the bar row
+export const CODA_R = 5;              // its circle radius; the cross arms reach CODA_R + CODA_ARM
+export const CODA_ARM = 2;
+export const VOLTA_Y = 10;            // an ending bracket's top rule above the bar row
+
+// Helvetica's font bounding boxes (AFM FontBBox, per 1000 em): the worst case for
+// ANY glyph, accented capitals and descenders included — so the clearances below
+// hold whatever letters a label or direction uses.
+const HELV_TOP = 0.931;
+const HELV_BOTTOM = 0.225;
+const HELV_BOLD_BOTTOM = 0.228;
+const STROKE = 0.5;                   // half a 1 pt line
+const CLEAR = 1;                      // air between two glyph boxes
+
+// The direction line sits under the label, clear of the label's lowest descender.
+export const NOTE_BASELINE = Math.ceil(LABEL_BASELINE + HELV_BOLD_BOTTOM * LABEL_SIZE + CLEAR + HELV_TOP * NOTE_SIZE); // 24
+
+// How far above the bar row the PDF's directive band reaches on a system whose
+// deepest stack is `depth` rows (directiveRows): the coda sign's arm, an ending
+// bracket, or the top row's text — whichever is highest.
+export function directiveBandTop(depth: number): number {
+  const coda = CODA_CY + CODA_R + CODA_ARM + STROKE;
+  const volta = VOLTA_Y + STROKE;
+  const text = depth > 0 ? DIRECTIVE_BASELINE + (depth - 1) * DIRECTIVE_ROW_DY + HELV_TOP * DIRECTIVE_SIZE : 0;
+  return Math.max(coda, volta, text);
+}
+
+// A noted/open section's first label strip: label, direction line, then the whole
+// directive band below it, so a full-width direction never meets a directive.
+// Charts with no direction keep SYSTEM_LABEL_H exactly.
+export function noteStripH(depth: number): number {
+  const noteBottom = NOTE_BASELINE + HELV_BOTTOM * NOTE_SIZE;
+  return Math.ceil(noteBottom + CLEAR + directiveBandTop(depth));
+}
 export const DEFAULT_BARS_PER_LINE = 4;
 
 export const CONTENT_W = PAGE_W - 2 * MARGIN_X;
@@ -230,12 +262,12 @@ export function layoutRoadmap(spec: RoadmapSpec, opts: LayoutOptions = {}): Road
     for (let line = 0; line < lineCount; line += 1) {
       const isFirstSystemOfSection = line === 0;
       const barsThisLine = Math.min(barsPerLine, section.bars - line * barsPerLine);
-      // A noted/open section's first system grows its label strip by the direction
-      // line, plus one DIRECTIVE_ROW_DY per directive row stacked beyond the first
-      // on that system; every other system keeps today's geometry exactly.
+      // A noted/open section's first system gets the taller strip (noteStripH),
+      // sized by the deepest directive stack on that system; every other system
+      // keeps today's geometry exactly.
       const noteLine = isFirstSystemOfSection ? noteLineText(section) : null;
       const stack = noteLine ? deepestStack(rows, sectionIndex, barInSection, barInSection + barsThisLine - 1) : 0;
-      const labelH = SYSTEM_LABEL_H + (noteLine ? NOTE_LINE_H + Math.max(0, stack - 1) * DIRECTIVE_ROW_DY : 0);
+      const labelH = noteLine ? noteStripH(stack) : SYSTEM_LABEL_H;
 
       // Page break if this system (incl. its label strip) would overrun.
       if (cursorY + labelH + SYSTEM_BARS_H > PAGE_H - MARGIN_BOTTOM) {
