@@ -30,6 +30,10 @@ import {
   PAGE_H,
   MARGIN_X,
   NOTE_BASELINE,
+  directiveRows,
+  directiveDy,
+  type DirectiveEdge,
+  type DirectiveKind,
   layoutRoadmap,
   lineStartNumbers,
   type LaidBar,
@@ -257,15 +261,12 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
 
   // Co-located markers must not overprint. The resolver allows distinct kinds on
   // one bar (e.g. a times>2 repeatEnd and a same-bar D.S. jump, or To Coda + D.S.
-  // across passes), so every label anchored above a bar's start/end edge claims a
-  // row in this shared stack and is lifted clear of the ones already there.
-  const rows = new Map<string, number>();
-  const stackDy = (b: LaidBar, edge: 'start' | 'end'): number => {
-    const key = `${b.page}:${b.id}:${edge}`;
-    const n = rows.get(key) ?? 0;
-    rows.set(key, n + 1);
-    return n * 10;
-  };
+  // across passes), so every label anchored above a bar's start/end edge has a row
+  // in the shared stack (directiveRows, lib/roadmap-layout.ts — the layout reads
+  // the same rows to keep a direction line clear of them).
+  const rows = directiveRows(spec);
+  const stackDy = (b: LaidBar, edge: DirectiveEdge, kind: DirectiveKind): number =>
+    directiveDy(rows, kind, b.sectionIndex, b.barInSection, edge);
 
   spec.sections.forEach((section, si) => {
     const repeat = section.repeat;
@@ -277,7 +278,7 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
     drawRepeatStart(pageOf(first), first);
     if (repeat.kind === 'plain') {
       // The ×N count only prints (and only claims an end-edge row) when times>2.
-      const dy = repeat.times > 2 ? stackDy(last, 'end') : 0;
+      const dy = repeat.times > 2 ? stackDy(last, 'end', 'repeatTimes') : 0;
       drawRepeatEnd(pageOf(last), last, font, repeat.times, dy);
     } else {
       repeat.endings.forEach((ending) => {
@@ -286,13 +287,10 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
           const b = barAt.get(`${si}:${ending.bars.start + k}`);
           if (b) bars.push(b);
         }
-        drawVoltaBracket(pages, bars, font, ending.passes);
         // The volta pass-label sits above the ending's first bar at the start
-        // edge. Claim its start-edge row so any nav directive later landing on
-        // that same bar stacks above it instead of overprinting. The label
-        // always renders first (section pass precedes nav), so it keeps row 0 —
-        // its own position is unchanged.
-        if (bars.length > 0) stackDy(bars[0], 'start');
+        // edge, in row 0 there (section claims precede nav in directiveRows), so
+        // any nav directive landing on that bar stacks above it.
+        drawVoltaBracket(pages, bars, font, ending.passes);
       });
     }
   });
@@ -301,19 +299,19 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
   if (!nav) return;
   const at = (ref: BarRef): LaidBar | undefined => barAt.get(`${ref.section}:${ref.bar}`);
 
-  if (nav.segno) { const b = at(nav.segno); if (b) drawDirective(pageOf(b), font, b, 'start', 'Segno', 0, stackDy(b, 'start')); }
+  if (nav.segno) { const b = at(nav.segno); if (b) drawDirective(pageOf(b), font, b, 'start', 'Segno', 0, stackDy(b, 'start', 'segno')); }
   if (nav.coda) {
     const b = at(nav.coda);
     if (b) {
       const cx = denormX(b.xStart) + 8;
       const cy = denormYTop(b.yTop) + 12;
       drawCodaSign(pageOf(b), cx, cy, 5);
-      drawDirective(pageOf(b), font, b, 'start', 'Coda', 18, stackDy(b, 'start'));
+      drawDirective(pageOf(b), font, b, 'start', 'Coda', 18, stackDy(b, 'start', 'coda'));
     }
   }
-  if (nav.toCoda) { const b = at(nav.toCoda); if (b) drawDirective(pageOf(b), font, b, 'end', 'To Coda', 0, stackDy(b, 'end')); }
-  if (nav.fine) { const b = at(nav.fine); if (b) drawDirective(pageOf(b), font, b, 'end', 'Fine', 0, stackDy(b, 'end')); }
-  if (nav.jump) { const b = at(nav.jump.at); if (b) drawDirective(pageOf(b), font, b, 'end', jumpLabel(nav.jump.from, nav.jump.until), 0, stackDy(b, 'end')); }
+  if (nav.toCoda) { const b = at(nav.toCoda); if (b) drawDirective(pageOf(b), font, b, 'end', 'To Coda', 0, stackDy(b, 'end', 'toCoda')); }
+  if (nav.fine) { const b = at(nav.fine); if (b) drawDirective(pageOf(b), font, b, 'end', 'Fine', 0, stackDy(b, 'end', 'fine')); }
+  if (nav.jump) { const b = at(nav.jump.at); if (b) drawDirective(pageOf(b), font, b, 'end', jumpLabel(nav.jump.from, nav.jump.until), 0, stackDy(b, 'end', 'jump')); }
 }
 
 // "D.C." / "D.S." with an optional al-Fine / al-Coda suffix.

@@ -7,7 +7,9 @@ import { validateRoadmapSpec, unprintableChars, NOTE_MAX, type RoadmapSection, t
 import { mergeRepeatedSections } from '../lib/roadmap-merge';
 import { tallySpec } from '../lib/roadmap-authoring';
 import { renderRoadmap, buildCalibration } from '../lib/roadmap-render';
-import { layoutRoadmap, noteLineText, CONTENT_W, NOTE_LINE_H, SYSTEM_LABEL_H, PAGE_H } from '../lib/roadmap-layout';
+import {
+  layoutRoadmap, noteLineText, directiveRows, CONTENT_W, NOTE_LINE_H, NOTE_BASELINE, SYSTEM_LABEL_H, PAGE_H, DIRECTIVE_ROW_DY,
+} from '../lib/roadmap-layout';
 import { assertSpecCalibrationParity } from '../lib/roadmap-save';
 
 // docs/design-song-form-from-lyrics.md §2.4.3–2.4.5 — performance directions
@@ -260,6 +262,17 @@ describe('layout + render — the direction line', () => {
     ['long', { version: 1, timeSig: { beats: 3, unit: 4 }, renderKey: 'D', sections: Array.from({ length: 14 }, (_, i) => ({
       id: `s${i}`, label: `Section ${i + 1}`, bars: 8, changes: [{ bar: 1, chords: [{ degree: (i % 6) + 1 }] }] })) },
     '2d8885cdab9a73c285fbfd19502a4dfe8ede51910b6801ed92ea8eade82e618e', '558d52db22fd68f1c1fa6ffd28b61ad2bfb7d4229b74f7c538aad1bb43cf4937'],
+    // Stacked directives: ×3 + To Coda + D.S. al Coda on one end edge, Segno on an
+    // ending's start edge (Codex R1, PR #213 — the shared row rule is unchanged).
+    ['stacked', spec([
+      { id: 'a', label: 'Intro', bars: 4 },
+      { id: 'b', label: 'Verse', bars: 4, repeat: { kind: 'plain', times: 3 } },
+      { id: 'c', label: 'Chorus', bars: 6, repeat: { kind: 'volta', endings: [
+        { bars: { start: 5, count: 1 }, passes: [1] }, { bars: { start: 6, count: 1 }, passes: [2] }] } },
+      { id: 'd', label: 'Coda', bars: 4 },
+    ], { navigation: { segno: { section: 2, bar: 5 }, toCoda: { section: 1, bar: 4 },
+      jump: { at: { section: 1, bar: 4 }, from: 'segno', until: 'coda' }, coda: { section: 3, bar: 1 } } }),
+    'f9063e39308a64026fd8b1ce2ac9dc59577521c34f047a872fa064880dffd8dd', '5301802f39fbdc4e0b15e4f80968495186d567ce8de77313e8c80ca2f18b0105'],
   ];
   const sha = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex');
 
@@ -307,6 +320,45 @@ describe('layout + render — the direction line', () => {
     );
     expect(calibration.sections).toEqual(layout.sections);
     expect(assertSpecCalibrationParity(s, calibration).ok).toBe(true);
+  });
+
+  // Codex R1 (PR #213): a 1-bar Tag carrying To Coda and D.S. al Coda stacked the
+  // second label into a fixed-height direction line. The strip now grows by the
+  // deepest stack on the system, from the same rows the renderer lifts by.
+  it('a direction line clears every stacked directive on its system', () => {
+    const NOTE = 'Keep the groove going until keys signal the change';
+    const cases: RoadmapSpec[] = [
+      spec([
+        { id: 'v', label: 'Verse', bars: 4 },
+        { id: 't', label: 'Tag', bars: 1, note: NOTE },
+        { id: 'c', label: 'Coda', bars: 4 },
+      ], { navigation: { segno: { section: 0, bar: 1 }, toCoda: { section: 1, bar: 1 },
+        jump: { at: { section: 1, bar: 1 }, from: 'segno', until: 'coda' }, coda: { section: 2, bar: 1 } } }),
+      spec([
+        { id: 'v', label: 'Verse', bars: 4, note: NOTE, repeat: { kind: 'plain', times: 3 } },
+        { id: 'c', label: 'Coda', bars: 4 },
+      ], { navigation: { segno: { section: 0, bar: 1 }, toCoda: { section: 0, bar: 4 }, fine: { section: 0, bar: 4 },
+        jump: { at: { section: 0, bar: 4 }, from: 'segno', until: 'coda' }, coda: { section: 1, bar: 1 } } }),
+    ];
+    for (const s of cases) {
+      expect(validateRoadmapSpec(s).ok).toBe(true);
+      const layout = layoutRoadmap(s);
+      const rows = directiveRows(s);
+      for (const sys of layout.systems.filter((y) => y.noteLine)) {
+        const labelTop = sys.labelYTop * PAGE_H;
+        const barsTop = sys.yTop * PAGE_H;
+        const noteBottom = labelTop + NOTE_BASELINE + 2.2;                  // Helvetica descender at 9 pt
+        let depth = 0;
+        for (const b of sys.bars) for (const edge of ['start', 'end'] as const) {
+          depth = Math.max(depth, rows.get(`${b.sectionIndex}:${b.barInSection}:${edge}`)?.length ?? 0);
+        }
+        // The highest directive: baseline yTop − 8 − (depth−1)·row, cap height 6.5 pt;
+        // the coda sign reaches yTop − 17.
+        const highest = Math.max(17, 8 + (depth - 1) * DIRECTIVE_ROW_DY + 6.5);
+        expect(depth).toBeGreaterThanOrEqual(2);
+        expect(barsTop - highest).toBeGreaterThan(noteBottom);
+      }
+    }
   });
 
   it('noteLineText: OPEN · note, note, OPEN, or nothing', () => {
