@@ -31,6 +31,30 @@ export interface RoadmapSection {
   bars: number;                                // count (the form math the validator checks)
   changes?: BarChange[];                       // optional NNS changes (sparse; one entry per addressed bar)
   repeat?: SectionRepeat;                      // section-scoped repeat; maps to RoadmapMarkers on render
+  note?: string;                               // performance direction, verbatim ("until keys signal"); own line under the label
+  open?: true;                                 // length is set on stage: `bars` is the length DRAWN (a minimum), not played. Never with `repeat`.
+}
+
+// Longest note the validator accepts. Worst case, not typical: the note line is
+// `OPEN · ` (33 pt) + note at 9 pt Helvetica, and the widest printable glyph is
+// '@' (1015/1000 em), so 33 + 52 × 9.135 ≈ 508 pt fits the 516 pt content width
+// (PAGE_W − 2·MARGIN_X, lib/roadmap-layout.ts) whatever the letters. Measured with
+// pdf-lib's widthOfTextAtSize; pinned by a test. Design:
+// docs/design-song-form-from-lyrics.md §2.4.3.
+export const NOTE_MAX = 52;
+
+// The PDF's Helvetica is WinAnsi-encoded: printable ASCII, Latin-1, and the
+// typographic extras in 0x80–0x9F. Anything else (→, ≥, emoji) makes pdf-lib
+// throw at render, so the validator names it instead.
+const WINANSI_EXTRAS = new Set('€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ');
+export function unprintableChars(text: string): string[] {
+  const bad = new Set<string>();
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if ((c >= 0x20 && c <= 0x7e) || (c >= 0xa0 && c <= 0xff) || WINANSI_EXTRAS.has(ch)) continue;
+    bad.add(ch);
+  }
+  return [...bad];
 }
 
 // A repeat is EITHER a plain |: … :|×times OR a volta repeat (1st/2nd… endings) —
@@ -263,6 +287,27 @@ export function validateRoadmapSpec(input: unknown): SpecValidation {
     // Repeat / endings.
     if (sec.repeat !== undefined) {
       validateRepeat(sec.repeat, name, secBars, errors);
+    }
+
+    // Direction (optional): verbatim text, already trimmed, bounded so it can never clip.
+    if (sec.note !== undefined) {
+      if (typeof sec.note !== 'string' || sec.note.trim() === '' || sec.note !== sec.note.trim()) {
+        errors.push(`${name}: note must be a non-empty, trimmed string`);
+      } else if ([...sec.note].length > NOTE_MAX) {
+        errors.push(`${name}: note must be at most ${NOTE_MAX} characters`);
+      } else if (unprintableChars(sec.note).length > 0) {
+        errors.push(`${name}: note can't print ${unprintableChars(sec.note).join(' ')}`);
+      }
+    }
+
+    // Open (optional): exactly true. "Play N times" and "until the cue" contradict
+    // each other, so an open section can't also repeat.
+    if (sec.open !== undefined) {
+      if (sec.open !== true) {
+        errors.push(`${name}: open must be true when present`);
+      } else if (sec.repeat !== undefined) {
+        errors.push(`${name}: an open section can't also have a repeat`);
+      }
     }
   });
 

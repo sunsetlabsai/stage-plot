@@ -438,7 +438,8 @@ export function tallySpec(spec: RoadmapSpec): string[] {
     const parts = runs.map((r) => (r.bars > 1 ? `${r.txt}×${r.bars}` : r.txt));
     const rep = sec.repeat;
     const suffix = !rep ? '' : rep.kind === 'plain' ? ` ×${rep.times}` : `, ${rep.endings.length} endings`;
-    return `${sec.label}${suffix}: ${sec.bars} bars — ${parts.join(', ')}`;
+    const bars = sec.open ? `${sec.bars}+` : `${sec.bars}`;
+    return `${sec.label}${suffix}: ${bars} bars — ${parts.join(', ')}`;
   });
 }
 

@@ -29,6 +29,20 @@ import {
   PAGE_W,
   PAGE_H,
   MARGIN_X,
+  NOTE_BASELINE,
+  NOTE_SIZE,
+  LABEL_BASELINE,
+  LABEL_SIZE,
+  DIRECTIVE_BASELINE,
+  DIRECTIVE_SIZE,
+  CODA_CY,
+  CODA_R,
+  CODA_ARM,
+  VOLTA_Y,
+  directiveRows,
+  directiveDy,
+  type DirectiveEdge,
+  type DirectiveKind,
   layoutRoadmap,
   lineStartNumbers,
   type LaidBar,
@@ -132,7 +146,10 @@ async function drawRoadmapPdf(spec: RoadmapSpec, layout: RoadmapLayout, opts: Re
   for (const [i, sys] of layout.systems.entries()) {
     const pg = pages[sys.page - 1];
     if (sys.label) {
-      drawText(pg, fontBold, sys.label, denormX(sys.xStart), denormYTop(sys.labelYTop) - 12, 11);
+      drawText(pg, fontBold, sys.label, denormX(sys.xStart), denormYTop(sys.labelYTop) - LABEL_BASELINE, LABEL_SIZE);
+    }
+    if (sys.noteLine) {
+      drawText(pg, font, sys.noteLine, denormX(sys.xStart), denormYTop(sys.labelYTop) - NOTE_BASELINE, NOTE_SIZE);
     }
     const yTopPt = denormYTop(sys.yTop);
     const yBottomPt = denormYTop(sys.yBottom);
@@ -253,15 +270,12 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
 
   // Co-located markers must not overprint. The resolver allows distinct kinds on
   // one bar (e.g. a times>2 repeatEnd and a same-bar D.S. jump, or To Coda + D.S.
-  // across passes), so every label anchored above a bar's start/end edge claims a
-  // row in this shared stack and is lifted clear of the ones already there.
-  const rows = new Map<string, number>();
-  const stackDy = (b: LaidBar, edge: 'start' | 'end'): number => {
-    const key = `${b.page}:${b.id}:${edge}`;
-    const n = rows.get(key) ?? 0;
-    rows.set(key, n + 1);
-    return n * 10;
-  };
+  // across passes), so every label anchored above a bar's start/end edge has a row
+  // in the shared stack (directiveRows, lib/roadmap-layout.ts — the layout reads
+  // the same rows to keep a direction line clear of them).
+  const rows = directiveRows(spec);
+  const stackDy = (b: LaidBar, edge: DirectiveEdge, kind: DirectiveKind): number =>
+    directiveDy(rows, kind, b.sectionIndex, b.barInSection, edge);
 
   spec.sections.forEach((section, si) => {
     const repeat = section.repeat;
@@ -273,7 +287,7 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
     drawRepeatStart(pageOf(first), first);
     if (repeat.kind === 'plain') {
       // The ×N count only prints (and only claims an end-edge row) when times>2.
-      const dy = repeat.times > 2 ? stackDy(last, 'end') : 0;
+      const dy = repeat.times > 2 ? stackDy(last, 'end', 'repeatTimes') : 0;
       drawRepeatEnd(pageOf(last), last, font, repeat.times, dy);
     } else {
       repeat.endings.forEach((ending) => {
@@ -282,13 +296,10 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
           const b = barAt.get(`${si}:${ending.bars.start + k}`);
           if (b) bars.push(b);
         }
-        drawVoltaBracket(pages, bars, font, ending.passes);
         // The volta pass-label sits above the ending's first bar at the start
-        // edge. Claim its start-edge row so any nav directive later landing on
-        // that same bar stacks above it instead of overprinting. The label
-        // always renders first (section pass precedes nav), so it keeps row 0 —
-        // its own position is unchanged.
-        if (bars.length > 0) stackDy(bars[0], 'start');
+        // edge, in row 0 there (section claims precede nav in directiveRows), so
+        // any nav directive landing on that bar stacks above it.
+        drawVoltaBracket(pages, bars, font, ending.passes);
       });
     }
   });
@@ -297,19 +308,19 @@ function drawRoadmapGlyphs(pages: PDFPage[], font: PDFFont, spec: RoadmapSpec, l
   if (!nav) return;
   const at = (ref: BarRef): LaidBar | undefined => barAt.get(`${ref.section}:${ref.bar}`);
 
-  if (nav.segno) { const b = at(nav.segno); if (b) drawDirective(pageOf(b), font, b, 'start', 'Segno', 0, stackDy(b, 'start')); }
+  if (nav.segno) { const b = at(nav.segno); if (b) drawDirective(pageOf(b), font, b, 'start', 'Segno', 0, stackDy(b, 'start', 'segno')); }
   if (nav.coda) {
     const b = at(nav.coda);
     if (b) {
       const cx = denormX(b.xStart) + 8;
-      const cy = denormYTop(b.yTop) + 12;
-      drawCodaSign(pageOf(b), cx, cy, 5);
-      drawDirective(pageOf(b), font, b, 'start', 'Coda', 18, stackDy(b, 'start'));
+      const cy = denormYTop(b.yTop) + CODA_CY;
+      drawCodaSign(pageOf(b), cx, cy, CODA_R);
+      drawDirective(pageOf(b), font, b, 'start', 'Coda', 18, stackDy(b, 'start', 'coda'));
     }
   }
-  if (nav.toCoda) { const b = at(nav.toCoda); if (b) drawDirective(pageOf(b), font, b, 'end', 'To Coda', 0, stackDy(b, 'end')); }
-  if (nav.fine) { const b = at(nav.fine); if (b) drawDirective(pageOf(b), font, b, 'end', 'Fine', 0, stackDy(b, 'end')); }
-  if (nav.jump) { const b = at(nav.jump.at); if (b) drawDirective(pageOf(b), font, b, 'end', jumpLabel(nav.jump.from, nav.jump.until), 0, stackDy(b, 'end')); }
+  if (nav.toCoda) { const b = at(nav.toCoda); if (b) drawDirective(pageOf(b), font, b, 'end', 'To Coda', 0, stackDy(b, 'end', 'toCoda')); }
+  if (nav.fine) { const b = at(nav.fine); if (b) drawDirective(pageOf(b), font, b, 'end', 'Fine', 0, stackDy(b, 'end', 'fine')); }
+  if (nav.jump) { const b = at(nav.jump.at); if (b) drawDirective(pageOf(b), font, b, 'end', jumpLabel(nav.jump.from, nav.jump.until), 0, stackDy(b, 'end', 'jump')); }
 }
 
 // "D.C." / "D.S." with an optional al-Fine / al-Coda suffix.
@@ -364,7 +375,7 @@ function drawVoltaBracket(pages: PDFPage[], bars: LaidBar[], font: PDFFont, pass
     const page = pages[group[0].page - 1];
     const x0 = denormX(group[0].xStart);
     const x1 = denormX(group[group.length - 1].xEnd);
-    const y = denormYTop(group[0].yTop) + 10;
+    const y = denormYTop(group[0].yTop) + VOLTA_Y;
     drawLine(page, x0, y, x1, y, 1);        // top of bracket
     if (gi === 0) {
       drawLine(page, x0, y, x0, y - 8, 1);  // left down-tick on the first segment
@@ -395,8 +406,8 @@ export function voltaLabel(passes: number[]): string {
 // ⊕ — coda sign: outline circle with a vertical + horizontal line through it.
 function drawCodaSign(page: PDFPage, cx: number, cy: number, r: number): void {
   page.drawCircle({ x: cx, y: cy, size: r, borderColor: rgb(0, 0, 0), borderWidth: 1 });
-  drawLine(page, cx, cy - r - 2, cx, cy + r + 2, 1);
-  drawLine(page, cx - r - 2, cy, cx + r + 2, cy, 1);
+  drawLine(page, cx, cy - r - CODA_ARM, cx, cy + r + CODA_ARM, 1);
+  drawLine(page, cx - r - CODA_ARM, cy, cx + r + CODA_ARM, cy, 1);
 }
 
 // ♭ / ♯ — chromatic-root accidental prefix, drawn as a vector (Helvetica/WinAnsi
@@ -434,11 +445,11 @@ function drawDiamond(page: PDFPage, cx: number, cy: number, half: number): void 
 // the band at the bar's start or end edge. `dx` nudges past an adjacent glyph;
 // `dy` lifts the row so co-located directives stack instead of overprinting.
 function drawDirective(page: PDFPage, font: PDFFont, bar: LaidBar, edge: 'start' | 'end', text: string, dx = 0, dy = 0): void {
-  const y = denormYTop(bar.yTop) + 8 + dy;
+  const y = denormYTop(bar.yTop) + DIRECTIVE_BASELINE + dy;
   const x = edge === 'start'
     ? denormX(bar.xStart) + dx
-    : denormX(bar.xEnd) - font.widthOfTextAtSize(text, 9) - dx;
-  drawText(page, font, text, x, y, 9);
+    : denormX(bar.xEnd) - font.widthOfTextAtSize(text, DIRECTIVE_SIZE) - dx;
+  drawText(page, font, text, x, y, DIRECTIVE_SIZE);
 }
 
 // ── PDF coordinate helpers (normalized 0..1 → PDF points, y flipped) ──────────

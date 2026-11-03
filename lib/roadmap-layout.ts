@@ -28,10 +28,115 @@ export const MARGIN_BOTTOM = 48;
 export const SYSTEM_LABEL_H = 16;     // section label strip above the bar row of its first system
 export const SYSTEM_BARS_H = 48;      // the bar row height
 export const SYSTEM_GAP = 18;         // vertical gap between systems
+
+// ── Glyph geometry the PDF draws above a bar row (points; roadmap-render reads these) ──
+export const LABEL_BASELINE = 12;     // section label baseline below the label strip top (11 pt bold)
+export const LABEL_SIZE = 11;
+export const NOTE_SIZE = 9;           // the direction line
+export const DIRECTIVE_SIZE = 9;      // Segno / Coda / To Coda / Fine / D.C. / D.S.
+export const DIRECTIVE_BASELINE = 8;  // a directive's row-0 baseline above the bar row
+export const CODA_CY = 12;            // coda sign centre above the bar row
+export const CODA_R = 5;              // its circle radius; the cross arms reach CODA_R + CODA_ARM
+export const CODA_ARM = 2;
+export const VOLTA_Y = 10;            // an ending bracket's top rule above the bar row
+
+// Helvetica's font bounding boxes (AFM FontBBox, per 1000 em): the worst case for
+// ANY glyph, accented capitals and descenders included — so the clearances below
+// hold whatever letters a label or direction uses.
+const HELV_TOP = 0.931;
+const HELV_BOTTOM = 0.225;
+const HELV_BOLD_BOTTOM = 0.228;
+const STROKE = 0.5;                   // half a 1 pt line
+const CLEAR = 1;                      // air between two glyph boxes
+
+// The direction line sits under the label, clear of the label's lowest descender.
+export const NOTE_BASELINE = Math.ceil(LABEL_BASELINE + HELV_BOLD_BOTTOM * LABEL_SIZE + CLEAR + HELV_TOP * NOTE_SIZE); // 24
+
+// How far above the bar row the PDF's directive band reaches on a system whose
+// deepest stack is `depth` rows (directiveRows): the coda sign's arm, an ending
+// bracket, or the top row's text — whichever is highest.
+export function directiveBandTop(depth: number): number {
+  const coda = CODA_CY + CODA_R + CODA_ARM + STROKE;
+  const volta = VOLTA_Y + STROKE;
+  const text = depth > 0 ? DIRECTIVE_BASELINE + (depth - 1) * DIRECTIVE_ROW_DY + HELV_TOP * DIRECTIVE_SIZE : 0;
+  return Math.max(coda, volta, text);
+}
+
+// A noted/open section's first label strip: label, direction line, then the whole
+// directive band below it, so a full-width direction never meets a directive.
+// Charts with no direction keep SYSTEM_LABEL_H exactly.
+export function noteStripH(depth: number): number {
+  const noteBottom = NOTE_BASELINE + HELV_BOTTOM * NOTE_SIZE;
+  return Math.ceil(noteBottom + CLEAR + directiveBandTop(depth));
+}
 export const DEFAULT_BARS_PER_LINE = 4;
 
 export const CONTENT_W = PAGE_W - 2 * MARGIN_X;
 export const SYSTEM_TOTAL_H = SYSTEM_LABEL_H + SYSTEM_BARS_H;
+
+// ── Directive rows (the one stacking rule; the PDF and the layout both read it) ──
+// The PDF prints text directives above a bar's start or end edge (ending label,
+// Segno, Coda; ×N count, To Coda, Fine, D.C./D.S.). Co-located ones stack in rows
+// DIRECTIVE_ROW_DY apart so they never overprint each other. Row order is the
+// claim order below. The renderer reads its lift from here, and the layout uses
+// the same rows to clear a direction line above the deepest stack — so the two
+// can't disagree about how tall a stack is.
+export const DIRECTIVE_ROW_DY = 10;
+export type DirectiveKind = 'repeatTimes' | 'ending' | 'segno' | 'coda' | 'toCoda' | 'fine' | 'jump';
+export type DirectiveEdge = 'start' | 'end';
+export type DirectiveRows = Map<string, DirectiveKind[]>;
+
+const rowKey = (section: number, bar: number, edge: DirectiveEdge) => `${section}:${bar}:${edge}`;
+
+export function directiveRows(spec: RoadmapSpec): DirectiveRows {
+  const rows: DirectiveRows = new Map();
+  const claim = (section: number, bar: number, edge: DirectiveEdge, kind: DirectiveKind) => {
+    const sec = spec.sections[section];
+    if (!sec || bar < 1 || bar > sec.bars) return; // an unresolvable ref draws nothing
+    const k = rowKey(section, bar, edge);
+    rows.set(k, [...(rows.get(k) ?? []), kind]);
+  };
+  // Section repeats first (the renderer's section pass precedes nav).
+  spec.sections.forEach((sec, si) => {
+    const r = sec.repeat;
+    if (!r) return;
+    if (r.kind === 'plain') {
+      if (r.times > 2) claim(si, sec.bars, 'end', 'repeatTimes'); // ×2 prints no count
+    } else {
+      for (const e of r.endings) if (e.bars.count > 0) claim(si, e.bars.start, 'start', 'ending');
+    }
+  });
+  const nav = spec.navigation;
+  if (nav?.segno) claim(nav.segno.section, nav.segno.bar, 'start', 'segno');
+  if (nav?.coda) claim(nav.coda.section, nav.coda.bar, 'start', 'coda');
+  if (nav?.toCoda) claim(nav.toCoda.section, nav.toCoda.bar, 'end', 'toCoda');
+  if (nav?.fine) claim(nav.fine.section, nav.fine.bar, 'end', 'fine');
+  if (nav?.jump) claim(nav.jump.at.section, nav.jump.at.bar, 'end', 'jump');
+  return rows;
+}
+
+// The lift (points) for one directive: its row × DIRECTIVE_ROW_DY.
+export function directiveDy(rows: DirectiveRows, kind: DirectiveKind, section: number, bar: number, edge: DirectiveEdge): number {
+  const i = (rows.get(rowKey(section, bar, edge)) ?? []).indexOf(kind);
+  return Math.max(0, i) * DIRECTIVE_ROW_DY;
+}
+
+// The deepest stack over bars [from..to] of a section (0 = no directives).
+function deepestStack(rows: DirectiveRows, section: number, from: number, to: number): number {
+  let n = 0;
+  for (let bar = from; bar <= to; bar += 1) {
+    for (const edge of ['start', 'end'] as const) n = Math.max(n, rows.get(rowKey(section, bar, edge))?.length ?? 0);
+  }
+  return n;
+}
+
+// The text of a section's direction line, or null when it has none: `OPEN · until
+// keys signal`, `until keys signal`, or `OPEN`. One source for the PDF and the
+// preview. Fits by NOTE_MAX alone (docs/design-song-form-from-lyrics.md §2.4.4).
+export function noteLineText(section: Pick<RoadmapSection, 'note' | 'open'>): string | null {
+  if (section.open) return section.note ? `OPEN · ${section.note}` : 'OPEN';
+  return section.note ?? null;
+}
 
 // ── Responsive bars/line — the musical set {2,4,8} (design §4.2) ──────────────
 // On-SCREEN preview picks bars/line from a musical set, never an arbitrary "cram
@@ -111,6 +216,7 @@ export interface LaidSystem {
   xEnd: number;          // normalized (tracks the LAST REAL bar — partial lines do NOT stretch)
   labelYTop: number;     // normalized top of the label strip (first system of a section only)
   label: string | null;  // section label on the section's first system; null otherwise
+  noteLine: string | null; // direction line under the label (first system of a noted/open section); null otherwise
   barsThisLine: number;  // grouping decision the preview reads (for partial-line logic)
   bars: LaidBar[];
 }
@@ -145,6 +251,7 @@ export function layoutRoadmap(spec: RoadmapSpec, opts: LayoutOptions = {}): Road
   let page = 1;
   let cursorY = MARGIN_TOP;                         // points from page top
   let absNumber = 1;
+  const rows = directiveRows(spec);
 
   spec.sections.forEach((section, sectionIndex) => {
     const sectionAnchorId = `sec-${sectionIndex}`;
@@ -153,19 +260,26 @@ export function layoutRoadmap(spec: RoadmapSpec, opts: LayoutOptions = {}): Road
     let sectionAnchorEmitted = false;
 
     for (let line = 0; line < lineCount; line += 1) {
+      const isFirstSystemOfSection = line === 0;
+      const barsThisLine = Math.min(barsPerLine, section.bars - line * barsPerLine);
+      // A noted/open section's first system gets the taller strip (noteStripH),
+      // sized by the deepest directive stack on that system; every other system
+      // keeps today's geometry exactly.
+      const noteLine = isFirstSystemOfSection ? noteLineText(section) : null;
+      const stack = noteLine ? deepestStack(rows, sectionIndex, barInSection, barInSection + barsThisLine - 1) : 0;
+      const labelH = noteLine ? noteStripH(stack) : SYSTEM_LABEL_H;
+
       // Page break if this system (incl. its label strip) would overrun.
-      if (cursorY + SYSTEM_TOTAL_H > PAGE_H - MARGIN_BOTTOM) {
+      if (cursorY + labelH + SYSTEM_BARS_H > PAGE_H - MARGIN_BOTTOM) {
         page += 1;
         cursorY = MARGIN_TOP;
       }
 
-      const isFirstSystemOfSection = line === 0;
       const labelTopPt = cursorY;
-      const barsTopPt = cursorY + SYSTEM_LABEL_H;
+      const barsTopPt = cursorY + labelH;
       const barsBottomPt = barsTopPt + SYSTEM_BARS_H;
 
       const systemId = `sys-${sectionIndex}-${line}`;
-      const barsThisLine = Math.min(barsPerLine, section.bars - line * barsPerLine);
       // Bug B fix (design §4.1): cell width is CONSTANT = CONTENT_W / barsPerLine,
       // independent of barsThisLine. A partial last line keeps that width and is
       // left-aligned; it does NOT stretch to fill the content box. (A FULL line is
@@ -207,6 +321,7 @@ export function layoutRoadmap(spec: RoadmapSpec, opts: LayoutOptions = {}): Road
         xEnd: systemRightPt / PAGE_W, // partial lines stop at the last real bar
         labelYTop: labelTopPt / PAGE_H,
         label: isFirstSystemOfSection ? section.label : null,
+        noteLine,
         barsThisLine,
         bars: laidBars,
       });

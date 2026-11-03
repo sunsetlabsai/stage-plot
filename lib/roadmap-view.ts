@@ -13,6 +13,8 @@
 
 import {
   QUALITY_WHITELIST,
+  NOTE_MAX,
+  unprintableChars,
   type RoadmapSpec,
   type RoadmapSection,
   type BarChange,
@@ -45,7 +47,19 @@ export interface ViewSection {
   label: string;
   bars: number;
   repeat?: RoadmapSection['repeat'];
+  note?: string;       // performance direction, verbatim (RoadmapSection.note)
+  open?: true;         // length set on stage; never with `repeat` (RoadmapSection.open)
   chords: ViewBar[];   // length === bars (fitted)
+}
+
+// A section's direction fields, present keys only. Every place that rebuilds a
+// section field by field spreads this, so an edit can't silently drop a direction
+// (docs/design-song-form-from-lyrics.md §2.4.5).
+function directionOf(sec: { note?: string; open?: true }): { note?: string; open?: true } {
+  const out: { note?: string; open?: true } = {};
+  if (sec.note !== undefined) out.note = sec.note;
+  if (sec.open) out.open = true;
+  return out;
 }
 
 export interface ViewModel {
@@ -339,7 +353,7 @@ export function specToView(spec: RoadmapSpec): ViewModel {
           chords[change.bar - 1] = chordHitsToCells(change.chords, beats);
         }
       }
-      return { id: sec.id, label: sec.label, bars: sec.bars, repeat: sec.repeat, chords };
+      return { id: sec.id, label: sec.label, bars: sec.bars, repeat: sec.repeat, ...directionOf(sec), chords };
     }),
   };
 }
@@ -359,6 +373,7 @@ export function viewToSpec(view: ViewModel): RoadmapSpec {
     const out: RoadmapSection = { id: sec.id, label: sec.label, bars: sec.bars };
     if (changes.length > 0) out.changes = changes;
     if (sec.repeat) out.repeat = sec.repeat;
+    Object.assign(out, directionOf(sec));
     return out;
   });
 
@@ -566,6 +581,7 @@ function applyPlan(view: ViewModel, sectionId: string, plan: PlannedBar[]): OpRe
     id: sec.id,
     label: sec.label,
     bars: plan.length,
+    ...directionOf(sec),
     chords: plan.map((b) => b.chords),
   };
   if (repeat) nextSec.repeat = repeat;
@@ -674,9 +690,10 @@ export function setPlainRepeat(view: ViewModel, sectionId: string, times: number
   if (times !== null) {
     if (!Number.isInteger(times) || times < 2) return { ok: false, reason: 'a repeat plays at least twice' };
     if (sec.bars < 2) return { ok: false, reason: "a 1-bar section can't repeat" };
+    if (sec.open) return { ok: false, reason: OPEN_NO_REPEAT };
   }
   const removes = sec.repeat?.kind === 'volta' ? [repeatName(sec.repeat)] : [];
-  const nextSec: ViewSection = { id: sec.id, label: sec.label, bars: sec.bars, chords: sec.chords };
+  const nextSec: ViewSection = { id: sec.id, label: sec.label, bars: sec.bars, ...directionOf(sec), chords: sec.chords };
   if (times !== null) nextSec.repeat = { kind: 'plain', times };
   const next: ViewModel = { ...view, sections: view.sections.map((s) => (s.id === sectionId ? nextSec : s)) };
   return gate(view, { ok: true, view: next, removes });
@@ -703,6 +720,7 @@ export function unrollRepeat(view: ViewModel, sectionId: string): OpResult {
     id: k === 0 ? sec.id : freshId(k + 1),
     label: sec.label,
     bars: sec.bars,
+    ...directionOf(sec),
     chords: sec.chords.slice(),
   }));
   const i = view.sections.findIndex((s) => s.id === sectionId);
@@ -722,6 +740,39 @@ export function unrollRepeat(view: ViewModel, sectionId: string): OpResult {
   return gate(view, { ok: true, view: next, removes: [] });
 }
 
+// ── Directions (docs/design-song-form-from-lyrics.md §2.4) ───────────────────
+
+const OPEN_NO_REPEAT = "an open section plays until the cue, so it can't also repeat — turn Open off first";
+
+// Set or clear a section's direction. Trimmed; blank clears. Over NOTE_MAX is
+// refused, never truncated (the validator's bound, so a saved note can't clip).
+export function setNote(view: ViewModel, sectionId: string, note: string): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  const text = note.trim();
+  if ([...text].length > NOTE_MAX) return { ok: false, reason: `a direction is at most ${NOTE_MAX} characters` };
+  const bad = unprintableChars(text);
+  if (bad.length > 0) return { ok: false, reason: `the chart can't print ${bad.join(' ')} — use plain text` };
+  const nextSec: ViewSection = { ...sec };
+  if (text) nextSec.note = text;
+  else delete nextSec.note;
+  const next: ViewModel = { ...view, sections: view.sections.map((s) => (s.id === sectionId ? nextSec : s)) };
+  return { ok: true, view: next, removes: [] };
+}
+
+// Mark a section open (played until the cue) or not. Refused while it has a
+// repeat or endings, matching the validator. No bar moves, so no reference moves.
+export function setOpen(view: ViewModel, sectionId: string, open: boolean): OpResult {
+  const sec = findSection(view, sectionId);
+  if (!sec) return { ok: false, reason: 'that section no longer exists' };
+  if (open && sec.repeat) return { ok: false, reason: "a repeating section can't be open — remove its repeat first" };
+  const nextSec: ViewSection = { ...sec };
+  if (open) nextSec.open = true;
+  else delete nextSec.open;
+  const next: ViewModel = { ...view, sections: view.sections.map((s) => (s.id === sectionId ? nextSec : s)) };
+  return { ok: true, view: next, removes: [] };
+}
+
 // ── 1st / 2nd endings (§5.2) ─────────────────────────────────────────────────
 
 // "Make the last N bars the 1st ending": appends N new bars as the 2nd ending,
@@ -735,6 +786,7 @@ export function addEndings(view: ViewModel, sectionId: string, lastN: number): O
   const sec = findSection(view, sectionId);
   if (!sec) return { ok: false, reason: 'that section no longer exists' };
   if (sec.repeat?.kind === 'volta') return { ok: false, reason: `${sec.label} already has endings — remove them first` };
+  if (sec.open) return { ok: false, reason: OPEN_NO_REPEAT };
   if (!Number.isInteger(lastN) || lastN < 1 || lastN >= sec.bars) {
     return { ok: false, reason: 'the 1st ending needs at least one bar before it and one bar in it' };
   }
@@ -744,6 +796,7 @@ export function addEndings(view: ViewModel, sectionId: string, lastN: number): O
     id: sec.id,
     label: sec.label,
     bars: sec.bars + lastN,
+    ...directionOf(sec),
     chords: [...sec.chords, ...copied],
     repeat: {
       kind: 'volta',

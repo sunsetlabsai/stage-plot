@@ -34,9 +34,14 @@ function stableStringify(value: unknown): string {
 
 // Exact equality of the folded section content — no fuzzy match. The fold emits
 // changes by a per-section inheritance-diff, so the same section written twice
-// produces identical `changes` arrays.
+// produces identical `changes` arrays. An open section never merges (a merge makes a
+// repeat, and open + repeat is invalid), and directions must match: a merge keeps
+// only the first section's note (docs/design-song-form-from-lyrics.md §2.4.5).
 function sameContent(a: RoadmapSection, b: RoadmapSection): boolean {
   return (
+    !a.open &&
+    !b.open &&
+    (a.note ?? '') === (b.note ?? '') &&
     a.bars === b.bars &&
     baseLabel(a.label).toLowerCase() === baseLabel(b.label).toLowerCase() &&
     stableStringify(a.changes ?? []) === stableStringify(b.changes ?? [])
